@@ -2,6 +2,9 @@
 //!
 //! No auth is needed: gamescope's Xwayland accepts local connections from the same user.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -20,6 +23,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 use super::{FocusControl, GamescopeEvent, GamescopeState, baselayer_for};
+use crate::osk;
 use crate::procs;
 use crate::steam::windows::{self, HelperType, WindowInfo};
 
@@ -34,6 +38,9 @@ x11rb::atom_manager! {
         STEAM_GAME,
         STEAM_OVERLAY,
         STEAM_BIGPICTURE,
+        GAMESCOPE_EXTERNAL_OVERLAY,
+        _NET_WM_WINDOW_OPACITY,
+        HINTEROS_OSK_VISIBLE,
         UTF8_STRING,
         _NET_WM_PID,
         _NET_WM_NAME,
@@ -171,19 +178,27 @@ impl FocusControl for GamescopeFocus {
     fn focus_app(&mut self, app_id: u32) -> Result<()> {
         self.set_focus(Some(app_id))
     }
+
+    fn set_osk_visible(&mut self, visible: bool) -> Result<()> {
+        debug!(visible, "{}", osk::VISIBLE_ATOM);
+        self.with(|c| c.set_cardinals(c.atoms.HINTEROS_OSK_VISIBLE, &[u32::from(visible)]))
+    }
 }
 
 /// What the watcher does besides reporting focus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct WatchOptions {
     /// Tag Steam's own windows with `STEAM_GAME = 769` (see [`crate::steam::windows`]).
     pub tag_steam_windows: bool,
+    /// The on-screen keyboard process the daemon started (0: none), to find its windows.
+    pub osk_pid: Arc<AtomicU32>,
 }
 
 impl Default for WatchOptions {
     fn default() -> Self {
         Self {
             tag_steam_windows: true,
+            osk_pid: Arc::default(),
         }
     }
 }
@@ -201,7 +216,7 @@ pub fn spawn_watcher(
         .spawn(move || {
             let mut warned = false;
             while !events.is_closed() {
-                match watch_once(&dpy, opts, &events) {
+                match watch_once(&dpy, &opts, &events) {
                     Ok(()) => return,
                     Err(e) if !warned => {
                         warn!(display = %dpy, "gamescope focus unavailable, retrying: {e:#}");
@@ -333,8 +348,8 @@ impl Conn {
     }
 
     /// Read every top-level window, tag Steam's (if `tag`), and return Steam's windows (all of
-    /// them) and the ones that want attention.
-    fn scan_steam(&self, tag: bool, xres: bool) -> Result<(Vec<Window>, Vec<SteamWindow>)> {
+    /// them), the ones that want attention, and the on-screen keyboard's.
+    fn scan(&self, tag: bool, xres: bool, osk_pid: u32) -> Result<Scan> {
         let tree = self.conn.query_tree(self.root)?.reply()?;
         let mut infos = Vec::new();
         for w in tree.children {
@@ -359,7 +374,24 @@ impl Conn {
             .filter(|i| i.is_steam())
             .map(|i| i.window)
             .collect();
-        Ok((steam, windows::attention_candidates(&infos)))
+        let osk = infos
+            .iter()
+            .filter(|i| i.input_output && osk::is_osk_window(i, osk_pid))
+            .map(|i| i.window)
+            .collect();
+        Ok(Scan {
+            steam,
+            attention: windows::attention_candidates(&infos),
+            osk,
+        })
+    }
+
+    /// The on-screen keyboard visibility the shell asked for.
+    fn osk_wanted(&self) -> Result<bool> {
+        Ok(self
+            .cardinals(self.atoms.HINTEROS_OSK_VISIBLE)?
+            .first()
+            .is_some_and(|&v| v != 0))
     }
 
     /// Whether a property change on a (non-root) window can change what we know about it.
@@ -379,10 +411,61 @@ impl Conn {
     }
 }
 
+/// What one scan of the top-level windows found.
+struct Scan {
+    steam: Vec<Window>,
+    attention: Vec<SteamWindow>,
+    osk: Vec<Window>,
+}
+
+/// Keeps the on-screen keyboard's windows external overlays with the wanted opacity.
+#[derive(Default)]
+struct OskWindows {
+    visible: bool,
+    /// What each known OSK window was set to.
+    applied: HashMap<Window, bool>,
+}
+
+impl OskWindows {
+    fn apply(&mut self, c: &Conn, windows: &[Window]) -> Result<()> {
+        self.applied.retain(|w, _| windows.contains(w));
+        let overlay = c.atoms.GAMESCOPE_EXTERNAL_OVERLAY;
+        let opacity = c.atoms._NET_WM_WINDOW_OPACITY;
+        let value = if self.visible {
+            osk::OPAQUE
+        } else {
+            osk::TRANSPARENT
+        };
+        for &w in windows {
+            if self.applied.get(&w) == Some(&self.visible) {
+                continue;
+            }
+            debug!(
+                window = w,
+                visible = self.visible,
+                "on-screen keyboard window"
+            );
+            // Errors for a window that just went away arrive as events and are ignored.
+            c.conn
+                .change_property32(PropMode::REPLACE, w, overlay, AtomEnum::CARDINAL, &[1])?;
+            c.conn.change_property32(
+                PropMode::REPLACE,
+                w,
+                opacity,
+                AtomEnum::CARDINAL,
+                &[value],
+            )?;
+            self.applied.insert(w, self.visible);
+        }
+        c.conn.flush()?;
+        Ok(())
+    }
+}
+
 /// One connection's worth of watching. `Ok` means the receiver is gone.
 fn watch_once(
     dpy: &str,
-    opts: WatchOptions,
+    opts: &WatchOptions,
     events: &mpsc::UnboundedSender<GamescopeEvent>,
 ) -> Result<()> {
     let c = Conn::open(dpy)?;
@@ -405,11 +488,19 @@ fn watch_once(
     if !send(GamescopeEvent::Connected) || !send(GamescopeEvent::State(c.state()?)) {
         return Ok(());
     }
-    let (mut steam, attention) = c.scan_steam(opts.tag_steam_windows, xres)?;
-    if !send(GamescopeEvent::SteamWindows(attention.clone())) {
+    let osk_pid = || opts.osk_pid.load(Ordering::SeqCst);
+    let scan = c.scan(opts.tag_steam_windows, xres, osk_pid())?;
+    let mut osk = OskWindows {
+        visible: c.osk_wanted()?,
+        ..OskWindows::default()
+    };
+    osk.apply(&c, &scan.osk)?;
+    let mut osk_windows = scan.osk;
+    let mut steam = scan.steam;
+    if !send(GamescopeEvent::SteamWindows(scan.attention.clone())) {
         return Ok(());
     }
-    let mut last_attention = attention;
+    let mut last_attention = scan.attention;
     let focus_atoms = [
         c.atoms.GAMESCOPE_FOCUSED_APP,
         c.atoms.GAMESCOPE_FOCUSABLE_APPS,
@@ -432,10 +523,12 @@ fn watch_once(
         }
         let mut focus_changed = false;
         let mut rescan = false;
+        let mut osk_changed = false;
         for event in batch {
             match event {
                 Event::PropertyNotify(ev) if ev.window == c.root => {
                     focus_changed |= focus_atoms.contains(&ev.atom);
+                    osk_changed |= ev.atom == c.atoms.HINTEROS_OSK_VISIBLE;
                 }
                 Event::PropertyNotify(ev) => rescan |= c.is_window_atom(ev.atom),
                 Event::CreateNotify(ev) if ev.parent == c.root => {
@@ -464,18 +557,30 @@ fn watch_once(
                 last = Some(state);
             }
         }
+        if osk_changed {
+            match c.osk_wanted() {
+                Ok(v) => osk.visible = v,
+                Err(e) => break Err(e),
+            }
+        }
         if rescan {
-            let (now_steam, attention) = match c.scan_steam(opts.tag_steam_windows, xres) {
+            let scan = match c.scan(opts.tag_steam_windows, xres, osk_pid()) {
                 Ok(r) => r,
                 Err(e) => break Err(e),
             };
-            steam = now_steam;
-            if attention != last_attention {
-                if !send(GamescopeEvent::SteamWindows(attention.clone())) {
+            steam = scan.steam;
+            osk_windows = scan.osk;
+            if scan.attention != last_attention {
+                if !send(GamescopeEvent::SteamWindows(scan.attention.clone())) {
                     return Ok(());
                 }
-                last_attention = attention;
+                last_attention = scan.attention;
             }
+        }
+        if (rescan || osk_changed)
+            && let Err(e) = osk.apply(&c, &osk_windows)
+        {
+            break Err(e);
         }
     };
     finish(events, result)

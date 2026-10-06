@@ -676,3 +676,80 @@ async fn steam_entry_opens_big_picture() {
     let e = call(&mut c, "steam.focus", json!({})).await.unwrap_err();
     assert_eq!(e["code"], ErrorCode::SteamNoWindows.code());
 }
+
+#[tokio::test]
+async fn osk_and_keys_without_a_keyboard() {
+    let d = Daemon::start();
+    let mut c = d.client().await;
+    call(&mut c, "subscribe", json!({ "events": ["osk_visibility"] }))
+        .await
+        .unwrap();
+    // No virtual keyboard (--no-uinput) and no gamescope input method.
+    for (method, params) in [
+        ("keys.type", json!({ "text": "hello" })),
+        ("keys.key", json!({ "key": "f5" })),
+        ("keys.action", json!({ "action": "enter" })),
+    ] {
+        let e = call(&mut c, method, params).await.unwrap_err();
+        assert_eq!(e["code"], ErrorCode::KeyboardUnavailable.code(), "{method}");
+    }
+    let e = call(&mut c, "keys.key", json!({ "key": "nope" }))
+        .await
+        .unwrap_err();
+    assert_eq!(e["code"], ErrorCode::InvalidParams.code());
+
+    // The on-screen keyboard state works without gamescope (nothing to show it on).
+    assert_eq!(
+        call(&mut c, "osk.show", json!({})).await.unwrap(),
+        json!({ "visible": true })
+    );
+    assert_eq!(
+        next_event(&mut c).await,
+        ("osk_visibility".into(), json!({ "visible": true }))
+    );
+    assert_eq!(
+        call(&mut c, "osk.hide", json!({})).await.unwrap(),
+        json!({ "visible": false })
+    );
+    assert_eq!(
+        next_event(&mut c).await,
+        ("osk_visibility".into(), json!({ "visible": false }))
+    );
+
+    // Disabled in the config: osk_unavailable.
+    let d = Daemon::start_with(|dir| {
+        let config = dir.join("session.toml");
+        std::fs::write(&config, "[osk]\nenable = false\n").unwrap();
+        vec!["--config".into(), config.into()]
+    });
+    let mut c = d.client().await;
+    let e = call(&mut c, "osk.show", json!({})).await.unwrap_err();
+    assert_eq!(e["code"], ErrorCode::OskUnavailable.code());
+}
+
+#[tokio::test]
+async fn keys_go_to_the_fake_keyboard() {
+    let d = Daemon::start_with(|dir| vec!["--fake-keyboard".into(), dir.join("keys.log").into()]);
+    let log = d.dir.path().join("keys.log");
+    let mut c = d.client().await;
+    let r = call(&mut c, "keys.type", json!({ "text": "a:" }))
+        .await
+        .unwrap();
+    assert_eq!(r, json!({ "untypeable": [] }));
+    call(
+        &mut c,
+        "keys.key",
+        json!({ "key": "l", "modifiers": ["ctrl"] }),
+    )
+    .await
+    .unwrap();
+    call(&mut c, "keys.action", json!({ "action": "backspace" }))
+        .await
+        .unwrap();
+    let expected = "down 30\nup 30\ndown 42\ndown 39\nup 39\nup 42\n\
+                    down 29\ndown 38\nup 38\nup 29\ndown 14\nup 14\n";
+    eventually("the key events", async || {
+        (std::fs::read_to_string(&log).ok()? == expected).then_some(())
+    })
+    .await;
+}

@@ -14,8 +14,8 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::Broadcast;
 use crate::shell::{METHODS, Msg};
+use crate::{Audience, Broadcast};
 
 pub const NAME: &str = "hinteros-session";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -73,7 +73,7 @@ pub async fn handle(
                 }
             }
             event = events.recv() => match event {
-                Ok((name, params)) if subscriptions.contains(&name) => {
+                Ok((name, params, audience)) if subscriptions.contains(&name) && for_us(audience, &conn) => {
                     write_message(&mut w, &jsonrpc::notification(name.wire_name(), params)).await?;
                 }
                 Ok(_) => {}
@@ -83,6 +83,18 @@ pub async fn handle(
         }
     }
     Ok(())
+}
+
+/// Whether an event for `audience` goes to this connection.
+fn for_us(audience: Audience, conn: &Connection) -> bool {
+    let osk = conn
+        .negotiated()
+        .is_some_and(|(_, client)| client.name == session::OSK_CLIENT_NAME);
+    match audience {
+        Audience::All => true,
+        Audience::Osk => osk,
+        Audience::Launcher => !osk,
+    }
 }
 
 async fn dispatch(

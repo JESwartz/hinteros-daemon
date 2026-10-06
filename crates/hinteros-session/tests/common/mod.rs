@@ -27,7 +27,7 @@ impl Daemon {
     }
 
     /// Start with extra arguments, computed from the temp dir. gamescope and InputPlumber
-    /// integration are off unless the arguments turn them on, and no user config or Steam
+    /// integration and the virtual keyboard are off unless the arguments turn them on, and no user config or Steam
     /// library is read (HOME is the temp dir).
     pub fn start_with(args: impl FnOnce(&Path) -> Vec<std::ffi::OsString>) -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -37,7 +37,8 @@ impl Daemon {
         let child = Command::new(env!("CARGO_BIN_EXE_hinteros-session"))
             .arg("--socket")
             .arg(&socket)
-            .args(["--no-gamescope", "--no-inputplumber"])
+            // No real virtual keyboard: it would type into the desktop running the tests.
+            .args(["--no-gamescope", "--no-inputplumber", "--no-uinput"])
             .args(extra)
             .env("XDG_CONFIG_HOME", dir.path())
             // No real Steam library (games.list) unless the arguments point at one.
@@ -65,11 +66,16 @@ impl Daemon {
 
     /// Connect and complete the handshake.
     pub async fn client(&self) -> Client {
+        self.client_named("test").await
+    }
+
+    /// Connect and complete the handshake as client `name` (`hinteros-osk`: the on-screen keyboard).
+    pub async fn client_named(&self, name: &str) -> Client {
         let mut c = self.connect().await;
         let schema = ApiSchema::session();
         let params = json!({
             "api_version": session::VERSION,
-            "client": { "name": "test", "version": "0" },
+            "client": { "name": name, "version": "0" },
         });
         schema.check_params("hello", &params).unwrap();
         let result = c.call_raw("hello", params).await.unwrap();

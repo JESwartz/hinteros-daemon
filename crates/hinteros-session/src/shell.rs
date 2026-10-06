@@ -15,6 +15,13 @@
 //!   `apps.launch`, or brought forward with `steam.focus` when one of its windows wants
 //!   attention (`steam_attention`); when its windows close, focus goes back to whoever had it.
 //! - `apps.close`: SIGTERM now, SIGKILL after the close timeout, then stop tracking.
+//! - An app with the keyboard input profile: InputPlumber stays in `All` while it has focus and
+//!   `ui_*` events become key presses through its keymap (with repeat) instead of `input_nav`.
+//!   Without a virtual keyboard it falls back to the gamepad (`Pass`).
+//! - The on-screen keyboard (`osk.show`, or Guide held + the summon button): shown as an
+//!   overlay over whatever has focus; while it is visible InputPlumber is in `All` and
+//!   `input_nav` goes only to the OSK client. Home and focus changes hide it. With a summon
+//!   chord configured, Home happens when Guide is *released* without the chord button.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -26,9 +33,11 @@ use hinteros_api::session::{
     AppsCloseResult, AppsFocus, AppsFocusParams, AppsFocusResult, AppsLaunch, AppsLaunchParams,
     AppsLaunchResult, AppsList, AppsListResult, AppsRunning, AppsRunningResult, EventName,
     ExitReason, FocusChangedParams, GamesList, GamesListResult, HomePressedParams, InputNavParams,
-    LaunchRequest, NavAction, NavPhase, RunningApp, STEAM_CLIENT_APP_ID,
-    STEAM_CLIENT_GAMESCOPE_APP_ID, STEAM_RUNGAMEID, SteamAttentionParams, SteamAttentionQuery,
-    SteamFocus, SteamFocusResult, SteamWindow,
+    KEYS_TYPE_MAX_CHARS, KeysAction, KeysActionParams, KeysActionResult, KeysKey, KeysKeyParams,
+    KeysKeyResult, KeysType, KeysTypeParams, KeysTypeResult, LaunchRequest, NavAction, NavPhase,
+    OskHide, OskShow, OskState, RunningApp, STEAM_CLIENT_APP_ID, STEAM_CLIENT_GAMESCOPE_APP_ID,
+    STEAM_RUNGAMEID, SteamAttentionParams, SteamAttentionQuery, SteamFocus, SteamFocusResult,
+    SteamWindow,
 };
 use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde::Serialize;
@@ -36,13 +45,14 @@ use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::Broadcast;
 use crate::apps::{ChildExit, Spawner};
 use crate::config::{AppConfig, Config};
 use crate::focus::{FocusControl, GamescopeEvent, GamescopeState, baselayer_for};
 use crate::input::{InputControl, Intent, InterceptMode, RawInput, Repeat, translate};
+use crate::keys::{KeyCombo, KeyInjector, KeyOp, Keymap, plan_action, plan_text};
 use crate::procs::{ProcessControl, Sig};
 use crate::steam::library;
+use crate::{Audience, Broadcast};
 
 /// A request from a connection, with the channel for its result.
 pub type Reply = oneshot::Sender<Result<Value, ErrorObject>>;
@@ -73,7 +83,28 @@ pub const METHODS: &[&str] = &[
     GamesList::NAME,
     SteamAttentionQuery::NAME,
     SteamFocus::NAME,
+    OskShow::NAME,
+    OskHide::NAME,
+    KeysType::NAME,
+    KeysKey::NAME,
+    KeysAction::NAME,
 ];
+
+/// A Guide press older than this no longer starts a chord (its release may have been lost).
+const GUIDE_HOLD_MAX: Duration = Duration::from_secs(10);
+
+/// Where controller navigation goes right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// `input_nav` to the launcher.
+    Launcher,
+    /// `input_nav` to the on-screen keyboard client.
+    Osk,
+    /// Key presses into the focused app (keyboard input profile).
+    Keys,
+    /// Nowhere: the focused app has the pad (InputPlumber `Pass`).
+    App,
+}
 
 /// Settings the shell needs, taken from [`Config`].
 #[derive(Debug, Clone)]
@@ -91,6 +122,9 @@ pub struct ShellConfig {
     pub repeat_delay: Duration,
     pub repeat_interval: Duration,
     pub apps: Vec<AppConfig>,
+    pub osk_enabled: bool,
+    /// The button that, pressed while Guide is held, shows/hides the on-screen keyboard.
+    pub osk_summon: Option<NavAction>,
 }
 
 impl From<&Config> for ShellConfig {
@@ -106,6 +140,8 @@ impl From<&Config> for ShellConfig {
             repeat_delay: c.input.repeat_delay(),
             repeat_interval: c.input.repeat_interval(),
             apps: c.apps.clone(),
+            osk_enabled: c.osk.enable,
+            osk_summon: c.osk.summon_button().ok().flatten(),
         }
     }
 }
@@ -129,6 +165,8 @@ struct Running {
     /// Tracked by its windows: since when they are gone (exit after the debounce).
     gone_since: Option<Instant>,
     closing: Option<Closing>,
+    /// The keyboard input profile's keymap (`None`: gamepad).
+    keymap: Option<Keymap>,
 }
 
 /// Whether an app's lifetime is its windows (Steam games and Steam itself), rather than a
@@ -152,6 +190,7 @@ pub struct Shell {
     cfg: ShellConfig,
     focus: Box<dyn FocusControl>,
     input: Box<dyn InputControl>,
+    keys: Box<dyn KeyInjector>,
     spawner: Box<dyn Spawner>,
     procs: Box<dyn ProcessControl>,
     events: broadcast::Sender<Broadcast>,
@@ -173,6 +212,13 @@ pub struct Shell {
     attention: Vec<SteamWindow>,
     /// Who gets focus back when Steam, focused through steam.focus, closes its windows.
     steam_return: Option<String>,
+    osk_visible: bool,
+    /// Guide is held: since when, and whether it was used for a chord.
+    guide: Option<(Instant, bool)>,
+    /// Navigation buttons currently held (as far as we can see them).
+    held: BTreeSet<NavAction>,
+    /// Releases to drop (buttons used in a chord).
+    swallow: BTreeSet<NavAction>,
 }
 
 impl Shell {
@@ -180,6 +226,7 @@ impl Shell {
         cfg: ShellConfig,
         focus: Box<dyn FocusControl>,
         input: Box<dyn InputControl>,
+        keys: Box<dyn KeyInjector>,
         spawner: Box<dyn Spawner>,
         procs: Box<dyn ProcessControl>,
         events: broadcast::Sender<Broadcast>,
@@ -189,6 +236,7 @@ impl Shell {
             cfg,
             focus,
             input,
+            keys,
             spawner,
             procs,
             events,
@@ -203,12 +251,24 @@ impl Shell {
             seen_windows: BTreeSet::new(),
             attention: Vec::new(),
             steam_return: None,
+            osk_visible: false,
+            guide: None,
+            held: BTreeSet::new(),
+            swallow: BTreeSet::new(),
         }
     }
 
-    /// Apply the initial focus (the launcher). Call once at start.
+    /// Apply the initial focus (the launcher) and hide the on-screen keyboard. Call once at
+    /// start.
     pub fn start(&mut self) {
         self.apply_focus();
+        if let Err(e) = self.focus.set_osk_visible(false) {
+            debug!("hiding the on-screen keyboard: {e:#}");
+        }
+    }
+
+    pub fn osk_visible(&self) -> bool {
+        self.osk_visible
     }
 
     pub fn focused(&self) -> Option<&str> {
@@ -278,14 +338,44 @@ impl Shell {
                 decode_params::<SteamFocus>(params)?;
                 encode_result::<SteamFocus>(self.steam_focus(now)?)
             }
+            OskShow::NAME => {
+                decode_params::<OskShow>(params)?;
+                self.show_osk()?;
+                encode_result::<OskShow>(OskState {
+                    visible: self.osk_visible,
+                })
+            }
+            OskHide::NAME => {
+                decode_params::<OskHide>(params)?;
+                self.hide_osk();
+                encode_result::<OskHide>(OskState {
+                    visible: self.osk_visible,
+                })
+            }
+            KeysType::NAME => {
+                let p = decode_params::<KeysType>(params)?;
+                encode_result::<KeysType>(self.keys_type(p)?)
+            }
+            KeysKey::NAME => {
+                let p = decode_params::<KeysKey>(params)?;
+                encode_result::<KeysKey>(self.keys_key(p)?)
+            }
+            KeysAction::NAME => {
+                let p = decode_params::<KeysAction>(params)?;
+                encode_result::<KeysAction>(self.keys_action(p)?)
+            }
             _ => Err(hinteros_api::server::method_not_found(method)),
         }
     }
 
     fn emit<T: Serialize>(&self, name: EventName, params: T) {
+        self.emit_to(name, params, Audience::All);
+    }
+
+    fn emit_to<T: Serialize>(&self, name: EventName, params: T, audience: Audience) {
         match serde_json::to_value(params) {
             // No receivers is fine: nobody is connected.
-            Ok(v) => drop(self.events.send((name, v))),
+            Ok(v) => drop(self.events.send((name, v, audience))),
             Err(e) => warn!("encoding {name:?}: {e}"),
         }
     }
@@ -350,6 +440,18 @@ impl Shell {
         let request = p
             .request()
             .map_err(|e| ErrorObject::new(ErrorCode::InvalidParams, e))?;
+        let keymap = match &request {
+            LaunchRequest::Id(id) => self
+                .cfg
+                .apps
+                .iter()
+                .find(|a| &a.id == id)
+                .and_then(|a| a.keymap().ok().flatten()),
+            _ => None,
+        };
+        if keymap.is_some() && !self.keys.caps().keys {
+            warn!("no virtual keyboard: this app gets the gamepad instead of key presses");
+        }
         // Resolve to (key, name, what to run).
         let (key, name, target) = match request {
             LaunchRequest::Id(id) if id == STEAM_CLIENT_APP_ID => {
@@ -474,13 +576,13 @@ impl Shell {
             }
         };
         info!(app = %info.id, gamescope_app_id = info.gamescope_app_id, "launched");
-        self.track(info.clone(), now);
+        self.track(info.clone(), keymap, now);
         self.set_focus(Some(key));
         Ok(AppsLaunchResult { app: info })
     }
 
     /// Start tracking a running app and announce it.
-    fn track(&mut self, info: RunningApp, now: Instant) {
+    fn track(&mut self, info: RunningApp, keymap: Option<Keymap>, now: Instant) {
         self.apps.insert(
             info.id.clone(),
             Running {
@@ -490,6 +592,7 @@ impl Shell {
                 seen_focused: false,
                 gone_since: None,
                 closing: None,
+                keymap,
             },
         );
         self.emit(EventName::AppStarted, AppStartedParams { app: info });
@@ -627,7 +730,7 @@ impl Shell {
             ));
         }
         if !self.apps.contains_key(STEAM_CLIENT_APP_ID) {
-            self.track(steam_client_app(), now);
+            self.track(steam_client_app(), None, now);
         }
         let previous = self.focused.clone();
         if previous.as_deref() != Some(STEAM_CLIENT_APP_ID) {
@@ -643,8 +746,13 @@ impl Shell {
     /// announce it if it changed.
     fn set_focus(&mut self, target: Option<String>) {
         self.repeat.clear();
+        self.held.clear();
         self.focus_lost_at = None;
         let changed = self.focused != target;
+        if changed && self.osk_visible {
+            // The mode is applied with the new focus below.
+            self.set_osk(false, false);
+        }
         self.focused = target;
         self.apply_focus();
         if self.focused.as_deref() == Some(STEAM_CLIENT_APP_ID) {
@@ -685,10 +793,129 @@ impl Shell {
         if let Err(e) = result {
             warn!("setting gamescope focus: {e:#}");
         }
-        self.input.set_mode(match target {
-            Some(_) => InterceptMode::Pass,
-            None => InterceptMode::All,
-        });
+        self.input.set_mode(self.intercept_mode());
+    }
+
+    fn focused_app(&self) -> Option<&Running> {
+        self.focused.as_ref().and_then(|id| self.apps.get(id))
+    }
+
+    fn route(&self) -> Route {
+        if self.osk_visible {
+            return Route::Osk;
+        }
+        match self.focused_app() {
+            None => Route::Launcher,
+            Some(app) if app.keymap.is_some() && self.keys.caps().keys => Route::Keys,
+            Some(_) => Route::App,
+        }
+    }
+
+    /// The InputPlumber mode for the current focus and on-screen keyboard.
+    fn intercept_mode(&self) -> InterceptMode {
+        match self.route() {
+            Route::App => InterceptMode::Pass,
+            Route::Launcher | Route::Osk | Route::Keys => InterceptMode::All,
+        }
+    }
+
+    /// `osk.show`.
+    fn show_osk(&mut self) -> Result<(), ErrorObject> {
+        if !self.cfg.osk_enabled {
+            return Err(ErrorObject::new(
+                ErrorCode::OskUnavailable,
+                "the on-screen keyboard is disabled ([osk] enable = false)",
+            ));
+        }
+        if !self.osk_visible {
+            self.set_osk(true, true);
+        }
+        Ok(())
+    }
+
+    /// `osk.hide`.
+    fn hide_osk(&mut self) {
+        if self.osk_visible {
+            self.set_osk(false, true);
+        }
+    }
+
+    fn toggle_osk(&mut self) {
+        if self.osk_visible {
+            self.hide_osk();
+        } else if let Err(e) = self.show_osk() {
+            info!("{}", e.message);
+        }
+    }
+
+    /// Show or hide the on-screen keyboard; with `apply_mode`, switch InputPlumber to match.
+    fn set_osk(&mut self, visible: bool, apply_mode: bool) {
+        info!(visible, "on-screen keyboard");
+        self.osk_visible = visible;
+        self.repeat.clear();
+        self.held.clear();
+        if let Err(e) = self.focus.set_osk_visible(visible) {
+            warn!("showing/hiding the on-screen keyboard: {e:#}");
+        }
+        if apply_mode {
+            self.input.set_mode(self.intercept_mode());
+        }
+        self.emit(EventName::OskVisibility, OskState { visible });
+    }
+
+    fn keys_type(&mut self, p: KeysTypeParams) -> Result<KeysTypeResult, ErrorObject> {
+        let n = p.text.chars().count();
+        if n == 0 || n > KEYS_TYPE_MAX_CHARS {
+            return Err(ErrorObject::new(
+                ErrorCode::InvalidParams,
+                format!("text must have 1 to {KEYS_TYPE_MAX_CHARS} characters"),
+            ));
+        }
+        let caps = self.keys.caps();
+        if !caps.any() {
+            return Err(ErrorObject::new(
+                ErrorCode::KeyboardUnavailable,
+                "no virtual keyboard (/dev/uinput) and no gamescope input method",
+            ));
+        }
+        let (ops, untypeable) = plan_text(&p.text, caps);
+        if !untypeable.is_empty() {
+            info!(?untypeable, "cannot type some characters");
+        }
+        self.keys.send(ops);
+        Ok(KeysTypeResult { untypeable })
+    }
+
+    fn keys_key(&mut self, p: KeysKeyParams) -> Result<KeysKeyResult, ErrorObject> {
+        if !self.keys.caps().keys {
+            return Err(ErrorObject::new(
+                ErrorCode::KeyboardUnavailable,
+                "no virtual keyboard (/dev/uinput)",
+            ));
+        }
+        let mut modifiers = p.modifiers;
+        let mut seen = BTreeSet::new();
+        modifiers.retain(|m| seen.insert(*m));
+        self.keys.send(vec![KeyOp::tap(&KeyCombo {
+            key: p.key,
+            modifiers,
+        })]);
+        Ok(KeysKeyResult {})
+    }
+
+    fn keys_action(&mut self, p: KeysActionParams) -> Result<KeysActionResult, ErrorObject> {
+        let op = plan_action(p.action, self.keys.caps()).ok_or_else(|| {
+            let name = serde_json::to_value(p.action).unwrap_or_default();
+            ErrorObject::new(
+                ErrorCode::KeyboardUnavailable,
+                format!(
+                    "no virtual keyboard (/dev/uinput) for '{}'",
+                    name.as_str().unwrap_or_default()
+                ),
+            )
+        })?;
+        self.keys.send(vec![op]);
+        Ok(KeysActionResult {})
     }
 
     /// New list of Steam's windows from the gamescope watcher.
@@ -722,8 +949,38 @@ impl Shell {
 
     fn home(&mut self) {
         info!("Home");
+        if self.osk_visible {
+            // The launcher's mode is applied by set_focus.
+            self.set_osk(false, false);
+        }
         self.emit(EventName::HomePressed, HomePressedParams {});
         self.set_focus(None);
+    }
+
+    /// Guide pressed or released. Without a summon chord, Home on press. With one, Home on
+    /// release unless the summon button was pressed while Guide was held (then the on-screen
+    /// keyboard toggles instead). In `Pass` mode InputPlumber only sends us Guide, and switches
+    /// to `All` by itself on the press, so the chord button pressed *after* Guide reaches us.
+    fn guide(&mut self, pressed: bool, now: Instant) {
+        let summon = self.cfg.osk_summon.filter(|_| self.cfg.osk_enabled);
+        let Some(summon) = summon else {
+            if pressed {
+                self.home();
+            }
+            return;
+        };
+        if pressed {
+            // The button already held (visible to us in `All` mode) also makes a chord.
+            let chord = self.held.contains(&summon);
+            if chord {
+                self.toggle_osk();
+            }
+            self.guide = Some((now, chord));
+        } else if let Some((_, chord)) = self.guide.take()
+            && !chord
+        {
+            self.home();
+        }
     }
 
     fn input(&mut self, input: RawInput, now: Instant) {
@@ -731,29 +988,84 @@ impl Shell {
             debug!(event = %input.event, "unmapped input");
             return;
         };
-        match intent {
-            Intent::Home => {
-                if input.pressed() {
-                    self.home();
-                }
+        let pressed = input.pressed();
+        let action = match intent {
+            Intent::Home => return self.guide(pressed, now),
+            Intent::Nav(action) => action,
+        };
+        if pressed {
+            let guide_held = self
+                .guide
+                .is_some_and(|(since, _)| now.duration_since(since) < GUIDE_HOLD_MAX);
+            if guide_held && self.cfg.osk_summon == Some(action) && self.cfg.osk_enabled {
+                self.guide = self.guide.map(|(since, _)| (since, true));
+                self.swallow.insert(action);
+                self.toggle_osk();
+                return;
             }
-            // Only the launcher gets navigation (an app gets the pad itself, in Pass mode).
-            Intent::Nav(_) if self.focused.is_some() => {}
-            Intent::Nav(action) => {
-                let phase = if input.pressed() {
-                    self.repeat.press(action, &input.source, now);
+            self.held.insert(action);
+        } else {
+            self.held.remove(&action);
+            if self.swallow.remove(&action) {
+                return;
+            }
+        }
+        let route = self.route();
+        // The keyboard button in a keyboard-profile app summons the on-screen keyboard.
+        if action == NavAction::Keyboard && route == Route::Keys {
+            if pressed {
+                self.toggle_osk();
+            }
+            return;
+        }
+        if route == Route::App {
+            // The app gets the pad itself (Pass mode); only stray events land here.
+            return;
+        }
+        if pressed {
+            self.repeat.press(action, &input.source, now);
+        } else {
+            self.repeat.release(action, &input.source);
+        }
+        match route {
+            Route::Keys if pressed => self.send_mapped(action),
+            Route::Keys | Route::App => {}
+            Route::Launcher | Route::Osk => {
+                let phase = if pressed {
                     NavPhase::Press
                 } else {
-                    self.repeat.release(action, &input.source);
                     NavPhase::Release
                 };
-                self.nav(action, phase);
+                self.nav(action, phase, route);
             }
         }
     }
 
-    fn nav(&self, action: NavAction, phase: NavPhase) {
-        self.emit(EventName::InputNav, InputNavParams { action, phase });
+    /// `input_nav` to the launcher or the on-screen keyboard.
+    fn nav(&self, action: NavAction, phase: NavPhase, route: Route) {
+        let audience = if route == Route::Osk {
+            Audience::Osk
+        } else {
+            Audience::Launcher
+        };
+        self.emit_to(
+            EventName::InputNav,
+            InputNavParams { action, phase },
+            audience,
+        );
+    }
+
+    /// The key the focused keyboard-profile app maps `action` to, if any.
+    fn send_mapped(&mut self, action: NavAction) {
+        let combo = self
+            .focused_app()
+            .and_then(|a| a.keymap.as_ref())
+            .and_then(|m| m.get(&action))
+            .cloned();
+        if let Some(combo) = combo {
+            debug!(?action, key = %combo, "key");
+            self.keys.send(vec![KeyOp::tap(&combo)]);
+        }
     }
 
     fn child_exit(&mut self, exit: ChildExit) {
@@ -817,6 +1129,11 @@ impl Shell {
             GamescopeEvent::Connected => {
                 info!("gamescope connected; applying focus");
                 self.apply_focus();
+                if self.osk_visible
+                    && let Err(e) = self.focus.set_osk_visible(true)
+                {
+                    warn!("showing the on-screen keyboard: {e:#}");
+                }
             }
             GamescopeEvent::Disconnected => {
                 self.gamescope = None;
@@ -905,10 +1222,10 @@ impl Shell {
 
     pub fn tick(&mut self, now: Instant) {
         if let Some(action) = self.repeat.tick(now) {
-            if self.focused.is_none() {
-                self.nav(action, NavPhase::Repeat);
-            } else {
-                self.repeat.clear();
+            match self.route() {
+                route @ (Route::Launcher | Route::Osk) => self.nav(action, NavPhase::Repeat, route),
+                Route::Keys => self.send_mapped(action),
+                Route::App => self.repeat.clear(),
             }
         }
 
@@ -1009,6 +1326,8 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::config::InputProfile;
+    use crate::keys::KeyCaps;
 
     /// Everything the shell did to the outside world, in order.
     #[derive(Debug, Clone, PartialEq)]
@@ -1022,6 +1341,8 @@ mod tests {
             app_id: Option<u32>,
         },
         Signal(u32, Sig),
+        Osk(bool),
+        Keys(Vec<KeyOp>),
     }
 
     #[derive(Clone, Default)]
@@ -1051,6 +1372,23 @@ mod tests {
         fn focus_app(&mut self, app_id: u32) -> anyhow::Result<()> {
             self.0.push(Call::FocusApp(app_id));
             Ok(())
+        }
+        fn set_osk_visible(&mut self, visible: bool) -> anyhow::Result<()> {
+            self.0.push(Call::Osk(visible));
+            Ok(())
+        }
+    }
+
+    struct MockKeys {
+        log: Log,
+        caps: KeyCaps,
+    }
+    impl KeyInjector for MockKeys {
+        fn caps(&self) -> KeyCaps {
+            self.caps
+        }
+        fn send(&mut self, ops: Vec<KeyOp>) {
+            self.log.push(Call::Keys(ops));
         }
     }
 
@@ -1131,12 +1469,35 @@ mod tests {
         now: Instant,
     }
 
+    fn app_config(id: &str, command: Option<&str>, steam_app_id: Option<u32>) -> AppConfig {
+        AppConfig {
+            id: id.into(),
+            name: id.to_uppercase(),
+            kind: AppKind::Native,
+            icon: None,
+            command: command.map(|c| vec![c.into()]),
+            steam_app_id,
+            input: InputProfile::Gamepad,
+            back_key: None,
+            keymap: BTreeMap::new(),
+        }
+    }
+
+    const ALL_KEYS: KeyCaps = KeyCaps {
+        keys: true,
+        ime: true,
+    };
+
     impl T {
         fn new() -> Self {
             Self::with(|_| {})
         }
 
         fn with(f: impl FnOnce(&mut ShellConfig)) -> Self {
+            Self::with_keys(ALL_KEYS, f)
+        }
+
+        fn with_keys(caps: KeyCaps, f: impl FnOnce(&mut ShellConfig)) -> Self {
             let mut cfg = ShellConfig {
                 launcher_app_id: L,
                 steam_path: "/fake/steam".into(),
@@ -1151,22 +1512,22 @@ mod tests {
                 repeat_interval: MS(100),
                 apps: vec![
                     AppConfig {
-                        id: "jellyfin".into(),
                         name: "Jellyfin".into(),
-                        kind: AppKind::Native,
-                        icon: None,
-                        command: Some(vec!["jellyfin-desktop".into()]),
-                        steam_app_id: None,
+                        ..app_config("jellyfin", Some("jellyfin-desktop"), None)
                     },
                     AppConfig {
-                        id: "portal".into(),
                         name: "Portal".into(),
-                        kind: AppKind::Native,
-                        icon: None,
-                        command: None,
-                        steam_app_id: Some(400),
+                        ..app_config("portal", None, Some(400))
+                    },
+                    AppConfig {
+                        input: InputProfile::Keyboard,
+                        back_key: Some("backspace".into()),
+                        keymap: BTreeMap::from([("context".into(), "f".into())]),
+                        ..app_config("youtube", Some("firefox"), None)
                     },
                 ],
+                osk_enabled: true,
+                osk_summon: None,
             };
             f(&mut cfg);
             let log = Log::default();
@@ -1176,6 +1537,10 @@ mod tests {
                 cfg,
                 Box::new(MockFocus(log.clone())),
                 Box::new(MockInput(log.clone())),
+                Box::new(MockKeys {
+                    log: log.clone(),
+                    caps,
+                }),
                 Box::new(MockSpawner {
                     log: log.clone(),
                     next_pid: 100,
@@ -1190,7 +1555,11 @@ mod tests {
             shell.start();
             assert_eq!(
                 log.take(),
-                [Call::FocusLauncher, Call::Mode(InterceptMode::All)]
+                [
+                    Call::FocusLauncher,
+                    Call::Mode(InterceptMode::All),
+                    Call::Osk(false)
+                ]
             );
             Self {
                 shell,
@@ -1202,6 +1571,13 @@ mod tests {
         }
 
         fn events(&mut self) -> Vec<(EventName, Value)> {
+            self.events_to()
+                .into_iter()
+                .map(|(n, p, _)| (n, p))
+                .collect()
+        }
+
+        fn events_to(&mut self) -> Vec<Broadcast> {
             let mut v = vec![];
             while let Ok(e) = self.events.try_recv() {
                 v.push(e);
@@ -2023,5 +2399,379 @@ mod tests {
             t.events(),
             [ev(EventName::SteamAttention, json!({"windows": []}))]
         );
+    }
+    fn tap(key: &str) -> KeyOp {
+        KeyOp::tap(&key.parse().unwrap())
+    }
+
+    fn keys(ops: &[&str]) -> Call {
+        Call::Keys(ops.iter().map(|k| tap(k)).collect())
+    }
+
+    #[test]
+    fn keyboard_profile_turns_the_pad_into_keys() {
+        let mut t = T::new();
+        let app = t.launch(json!({"id": "youtube"}));
+        // InputPlumber stays in All: the daemon translates.
+        assert_eq!(
+            t.log.take()[1..],
+            [
+                Call::FocusApp(app.gamescope_app_id),
+                Call::Mode(InterceptMode::All)
+            ]
+        );
+        t.events();
+
+        t.input("ui_down", 1.0);
+        t.advance(MS(450)); // repeat at 400
+        t.input("ui_down", 0.0);
+        t.input("ui_accept", 1.0);
+        t.input("ui_accept", 0.0);
+        t.input("ui_back", 1.0);
+        t.input("ui_back", 0.0);
+        t.input("ui_context", 1.0); // mapped in [apps.keymap]
+        t.input("ui_action", 1.0); // not mapped
+        assert_eq!(
+            t.log.take(),
+            [
+                keys(&["down"]),
+                keys(&["down"]),
+                keys(&["enter"]),
+                keys(&["backspace"]),
+                keys(&["f"]),
+            ]
+        );
+        assert!(t.events().is_empty(), "no input_nav for the app");
+
+        // Guide is still Home; the launcher gets input_nav again.
+        t.input("ui_guide", 1.0);
+        assert_eq!(t.shell.focused(), None);
+        t.events();
+        t.input("ui_down", 1.0);
+        assert_eq!(
+            t.events_to(),
+            [(
+                EventName::InputNav,
+                json!({"action": "down", "phase": "press"}),
+                Audience::Launcher
+            )]
+        );
+        assert!(!t.log.take().iter().any(|c| matches!(c, Call::Keys(_))));
+    }
+
+    #[test]
+    fn keyboard_profile_without_uinput_falls_back_to_the_gamepad() {
+        let ime_only = KeyCaps {
+            keys: false,
+            ime: true,
+        };
+        let mut t = T::with_keys(ime_only, |_| {});
+        t.launch(json!({"id": "youtube"}));
+        assert_eq!(t.log.take().last(), Some(&Call::Mode(InterceptMode::Pass)));
+        t.input("ui_down", 1.0);
+        assert!(t.log.take().is_empty());
+    }
+
+    #[test]
+    fn osk_show_hide_routes_nav_and_restores_the_mode() {
+        let mut t = T::new();
+        t.launch(json!({"id": "jellyfin"}));
+        t.events();
+        t.log.take();
+
+        let r = t.call("osk.show", json!({})).unwrap();
+        assert_eq!(r, json!({"visible": true}));
+        assert!(t.shell.osk_visible());
+        assert_eq!(
+            t.log.take(),
+            [Call::Osk(true), Call::Mode(InterceptMode::All)]
+        );
+        assert_eq!(
+            t.events(),
+            [ev(EventName::OskVisibility, json!({"visible": true}))]
+        );
+        // Again: nothing changes.
+        t.call("osk.show", json!({})).unwrap();
+        assert!(t.log.take().is_empty() && t.events().is_empty());
+
+        // Navigation goes to the OSK client only, with repeat.
+        t.input("ui_right", 1.0);
+        t.advance(MS(400));
+        t.input("ui_right", 0.0);
+        let to_osk = |action: &str, phase: &str| {
+            (
+                EventName::InputNav,
+                json!({"action": action, "phase": phase}),
+                Audience::Osk,
+            )
+        };
+        assert_eq!(
+            t.events_to(),
+            [
+                to_osk("right", "press"),
+                to_osk("right", "repeat"),
+                to_osk("right", "release")
+            ]
+        );
+
+        // Hidden: the gamepad app gets the pad again.
+        assert_eq!(
+            t.call("osk.hide", json!({})).unwrap(),
+            json!({"visible": false})
+        );
+        assert_eq!(
+            t.log.take(),
+            [Call::Osk(false), Call::Mode(InterceptMode::Pass)]
+        );
+        assert_eq!(
+            t.events(),
+            [ev(EventName::OskVisibility, json!({"visible": false}))]
+        );
+        t.call("osk.hide", json!({})).unwrap();
+        assert!(t.events().is_empty());
+        t.input("ui_right", 1.0);
+        assert!(t.events().is_empty());
+    }
+
+    #[test]
+    fn home_and_focus_changes_hide_the_osk() {
+        let mut t = T::new();
+        t.launch(json!({"id": "jellyfin"}));
+        t.call("osk.show", json!({})).unwrap();
+        t.events();
+        t.log.take();
+        t.input("ui_guide", 1.0);
+        assert_eq!(
+            t.events(),
+            [
+                ev(EventName::OskVisibility, json!({"visible": false})),
+                ev(EventName::HomePressed, json!({})),
+                ev(EventName::FocusChanged, json!({"app": null})),
+            ]
+        );
+        assert_eq!(
+            t.log.take(),
+            [
+                Call::Osk(false),
+                Call::FocusLauncher,
+                Call::Mode(InterceptMode::All)
+            ]
+        );
+
+        // Shown over the launcher, then an app is launched.
+        t.call("osk.show", json!({})).unwrap();
+        t.launch(json!({"command": ["game"]}));
+        assert!(!t.shell.osk_visible());
+        assert!(
+            t.events()
+                .contains(&ev(EventName::OskVisibility, json!({"visible": false})))
+        );
+        // gamescope restarts: the visibility is re-sent only while shown.
+        t.call("osk.show", json!({})).unwrap();
+        t.log.take();
+        t.shell
+            .handle(Msg::Gamescope(GamescopeEvent::Connected), t.now);
+        assert_eq!(
+            t.log.take(),
+            [
+                Call::FocusApp(L + 2),
+                Call::Mode(InterceptMode::All),
+                Call::Osk(true)
+            ]
+        );
+    }
+
+    #[test]
+    fn osk_disabled() {
+        let mut t = T::with(|c| {
+            c.osk_enabled = false;
+            c.osk_summon = Some(NavAction::Context);
+        });
+        assert_eq!(
+            t.call("osk.show", json!({})).unwrap_err().code,
+            ErrorCode::OskUnavailable.code()
+        );
+        assert_eq!(
+            t.call("osk.hide", json!({})).unwrap(),
+            json!({"visible": false})
+        );
+        // No chord either: Guide is Home on press.
+        t.input("ui_guide", 1.0);
+        assert_eq!(t.events()[0], ev(EventName::HomePressed, json!({})));
+    }
+
+    #[test]
+    fn guide_chord_summons_the_osk_in_a_game() {
+        let mut t = T::with(|c| c.osk_summon = Some(NavAction::Context));
+        t.launch(json!({"id": "portal"}));
+        t.events();
+        t.log.take();
+
+        // Pass mode: Guide arrives (InputPlumber flips to All itself), then Y while held.
+        t.input("ui_guide", 1.0);
+        assert!(t.events().is_empty(), "Home waits for the release");
+        t.input("ui_context", 1.0);
+        assert!(t.shell.osk_visible());
+        t.input("ui_context", 0.0);
+        t.input("ui_guide", 0.0);
+        assert_eq!(
+            t.events(),
+            [ev(EventName::OskVisibility, json!({"visible": true}))]
+        );
+        assert_eq!(t.shell.focused(), Some("portal"));
+        assert_eq!(
+            t.log.take(),
+            [Call::Osk(true), Call::Mode(InterceptMode::All)]
+        );
+
+        // The same chord hides it and gives the game the pad back.
+        t.input("ui_guide", 1.0);
+        t.input("ui_context", 1.0);
+        t.input("ui_guide", 0.0);
+        t.input("ui_context", 0.0);
+        assert!(!t.shell.osk_visible());
+        assert_eq!(
+            t.log.take(),
+            [Call::Osk(false), Call::Mode(InterceptMode::Pass)]
+        );
+        assert_eq!(
+            t.events(),
+            [ev(EventName::OskVisibility, json!({"visible": false}))]
+        );
+
+        // Guide alone: Home on release.
+        t.input("ui_guide", 1.0);
+        assert_eq!(t.shell.focused(), Some("portal"));
+        t.input("ui_guide", 0.0);
+        assert_eq!(t.shell.focused(), None);
+        assert_eq!(t.events()[0], ev(EventName::HomePressed, json!({})));
+    }
+
+    #[test]
+    fn guide_chord_from_the_launcher() {
+        let mut t = T::with(|c| c.osk_summon = Some(NavAction::Context));
+        // Y held first (seen in All mode), then Guide: also a chord.
+        t.input("ui_context", 1.0);
+        t.input("ui_guide", 1.0);
+        assert!(t.shell.osk_visible());
+        t.input("ui_guide", 0.0);
+        t.input("ui_context", 0.0);
+        let events = t.events_to();
+        assert_eq!(
+            events[0].2,
+            Audience::Launcher,
+            "Y press went to the launcher"
+        );
+        assert_eq!(
+            (events[1].0, events[1].1.clone()),
+            (EventName::OskVisibility, json!({"visible": true}))
+        );
+        // Its release goes to whoever has navigation now (the OSK), no Home.
+        assert_eq!(
+            events[2],
+            (
+                EventName::InputNav,
+                json!({"action": "context", "phase": "release"}),
+                Audience::Osk
+            )
+        );
+        assert_eq!(events.len(), 3);
+
+        // A stale Guide press (its release lost) no longer starts a chord.
+        let mut t = T::with(|c| c.osk_summon = Some(NavAction::Context));
+        t.input("ui_guide", 1.0);
+        t.advance(Duration::from_secs(11));
+        t.input("ui_context", 1.0);
+        assert!(!t.shell.osk_visible());
+    }
+
+    #[test]
+    fn keyboard_button_toggles_the_osk_in_a_keyboard_app() {
+        let mut t = T::new();
+        t.launch(json!({"id": "youtube"}));
+        t.input("ui_osk", 1.0);
+        t.input("ui_osk", 0.0);
+        assert!(t.shell.osk_visible());
+        // While visible the OSK gets everything, including the keyboard button.
+        t.events();
+        t.input("ui_osk", 1.0);
+        assert_eq!(
+            t.events_to(),
+            [(
+                EventName::InputNav,
+                json!({"action": "keyboard", "phase": "press"}),
+                Audience::Osk
+            )]
+        );
+    }
+
+    #[test]
+    fn keys_methods() {
+        let mut t = T::new();
+        let r = t.call("keys.type", json!({"text": "Hi!é\u{1}"})).unwrap();
+        assert_eq!(r, json!({"untypeable": ["\u{1}"]}));
+        assert_eq!(
+            t.log.take(),
+            [Call::Keys(vec![
+                tap("shift+h"),
+                tap("i"),
+                tap("shift+1"),
+                KeyOp::Ime("é".into()),
+            ])]
+        );
+        t.call(
+            "keys.key",
+            json!({"key": "l", "modifiers": ["ctrl", "ctrl"]}),
+        )
+        .unwrap();
+        t.call("keys.action", json!({"action": "backspace"}))
+            .unwrap();
+        assert_eq!(t.log.take(), [keys(&["ctrl+l"]), keys(&["backspace"])]);
+        let code = |r: Result<Value, ErrorObject>| r.unwrap_err().code;
+        assert_eq!(
+            code(t.call("keys.type", json!({"text": ""}))),
+            ErrorCode::InvalidParams.code()
+        );
+        assert_eq!(
+            code(t.call("keys.key", json!({"key": "hyper"}))),
+            ErrorCode::InvalidParams.code()
+        );
+
+        // Input method only: text and some actions work, keys.key does not.
+        let mut t = T::with_keys(
+            KeyCaps {
+                keys: false,
+                ime: true,
+            },
+            |_| {},
+        );
+        assert_eq!(
+            t.call("keys.type", json!({"text": "ab"})).unwrap(),
+            json!({"untypeable": []})
+        );
+        t.call("keys.action", json!({"action": "enter"})).unwrap();
+        assert_eq!(
+            code(t.call("keys.action", json!({"action": "tab"}))),
+            ErrorCode::KeyboardUnavailable.code()
+        );
+        assert_eq!(
+            code(t.call("keys.key", json!({"key": "f5"}))),
+            ErrorCode::KeyboardUnavailable.code()
+        );
+
+        // Nothing at all.
+        let mut t = T::with_keys(KeyCaps::default(), |_| {});
+        for (method, params) in [
+            ("keys.type", json!({"text": "a"})),
+            ("keys.key", json!({"key": "a"})),
+            ("keys.action", json!({"action": "enter"})),
+        ] {
+            assert_eq!(
+                code(t.call(method, params)),
+                ErrorCode::KeyboardUnavailable.code(),
+                "{method}"
+            );
+        }
+        assert!(t.log.take().is_empty());
     }
 }

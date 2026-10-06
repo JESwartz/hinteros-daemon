@@ -31,10 +31,31 @@
 //! repeat_delay_ms = 400
 //! repeat_interval_ms = 100
 //!
+//! [keys]
+//! uinput = true                # virtual keyboard (needs /dev/uinput, the 'uinput' group)
+//! gamescope_ime = true         # gamescope's input method for characters not on a US keyboard
+//! key_delay_ms = 12
+//! ime_delay_ms = 80
+//!
+//! [osk]
+//! enable = true
+//! command = ["hinteros-osk"]   # started (and restarted) by the daemon if it is on PATH
+//! summon = "guide+context"     # hold Guide and press Y; or "none"
+//!
 //! [[apps]]                     # apps.list entries; launchable with apps.launch {id}
 //! id = "jellyfin"
 //! name = "Jellyfin"
 //! command = ["jellyfin-desktop"]
+//!
+//! [[apps]]
+//! id = "youtube"
+//! name = "YouTube"
+//! kind = "web"
+//! command = ["firefox", "--kiosk", "https://www.youtube.com/tv"]
+//! input = "keyboard"           # controller -> key presses (default "gamepad": the pad itself)
+//! back_key = "escape"          # what B sends [default: escape]
+//! [apps.keymap]                # more (or other) actions -> keys
+//! context = "f"
 //!
 //! [[apps]]
 //! id = "portal-2"
@@ -42,14 +63,16 @@
 //! steam_app_id = 620
 //! ```
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
-use hinteros_api::session::{AppKind, STEAM_CLIENT_APP_ID};
+use hinteros_api::session::{AppKind, Key, NavAction, STEAM_CLIENT_APP_ID};
 use serde::Deserialize;
+
+use crate::keys::{KeyCombo, Keymap, default_keymap};
 
 /// Default gamescope app id of the launcher. Steam app ids are far below this, and Steam's
 /// non-Steam shortcuts use random ids with the top bit set, so collisions are unlikely.
@@ -106,6 +129,18 @@ pub struct Cli {
     /// D-Bus address to find InputPlumber on [default: the system bus]
     #[arg(long, env = "HINTEROS_INPUTPLUMBER_BUS")]
     pub inputplumber_bus: Option<String>,
+
+    /// Don't create the virtual keyboard (dev desktops: it would type into your session)
+    #[arg(long)]
+    pub no_uinput: bool,
+
+    /// Instead of a virtual keyboard, append the key events to this file (tests)
+    #[arg(long, env = "HINTEROS_FAKE_KEYBOARD", hide = true)]
+    pub fake_keyboard: Option<PathBuf>,
+
+    /// Start (and restart) the on-screen keyboard: program and arguments, split on spaces
+    #[arg(long)]
+    pub osk_command: Option<String>,
 }
 
 fn flag(on: bool, off: bool) -> Option<bool> {
@@ -125,6 +160,8 @@ pub struct Config {
     pub inputplumber: InputPlumberConfig,
     pub input: InputConfig,
     pub close: CloseConfig,
+    pub keys: KeysConfig,
+    pub osk: OskConfig,
     pub apps: Vec<AppConfig>,
 }
 
@@ -239,6 +276,92 @@ impl Default for CloseConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct KeysConfig {
+    /// Create the virtual keyboard (uinput).
+    pub uinput: bool,
+    /// Use gamescope's input method for characters the US keyboard does not have.
+    pub gamescope_ime: bool,
+    pub key_delay_ms: u64,
+    pub ime_delay_ms: u64,
+    /// Append key events to this file instead of creating a device (tests; `--fake-keyboard`).
+    #[serde(skip)]
+    pub fake: Option<PathBuf>,
+}
+
+impl Default for KeysConfig {
+    fn default() -> Self {
+        Self {
+            uinput: true,
+            gamescope_ime: true,
+            key_delay_ms: 12,
+            ime_delay_ms: 80,
+            fake: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OskConfig {
+    pub enable: bool,
+    /// The on-screen keyboard client; started if it can be found.
+    pub command: Vec<String>,
+    /// Controller chord that shows/hides it: `guide+<action>` (hold Guide, press the button) or
+    /// `none`.
+    pub summon: String,
+}
+
+impl Default for OskConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            command: vec!["hinteros-osk".into()],
+            summon: "guide+context".into(),
+        }
+    }
+}
+
+impl OskConfig {
+    /// The button pressed with Guide to summon the keyboard (`None`: no chord).
+    pub fn summon_button(&self) -> Result<Option<NavAction>> {
+        let s = self.summon.trim().to_ascii_lowercase();
+        if s == "none" || s.is_empty() {
+            return Ok(None);
+        }
+        let button = s.strip_prefix("guide+").with_context(|| {
+            format!(
+                "osk.summon '{}' must be 'guide+<button>' or 'none'",
+                self.summon
+            )
+        })?;
+        let action =
+            nav_action(button).with_context(|| format!("osk.summon: unknown button '{button}'"))?;
+        ensure!(
+            !action.is_direction(),
+            "osk.summon: use a button, not a direction"
+        );
+        Ok(Some(action))
+    }
+}
+
+/// Parse a [`NavAction`] by its API name (`accept`, `page_left`, ...).
+pub fn nav_action(name: &str) -> Option<NavAction> {
+    serde_json::from_value(serde_json::Value::String(name.into())).ok()
+}
+
+/// How an app takes controller input.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputProfile {
+    /// The pad itself (InputPlumber PASS; Steam Input applies).
+    #[default]
+    Gamepad,
+    /// Controller actions become key presses on the virtual keyboard (TV web apps).
+    Keyboard,
+}
+
 impl InputConfig {
     pub fn repeat_delay(&self) -> Duration {
         Duration::from_millis(self.repeat_delay_ms)
@@ -259,10 +382,41 @@ pub struct AppConfig {
     pub icon: Option<String>,
     pub command: Option<Vec<String>>,
     pub steam_app_id: Option<u32>,
+    #[serde(default)]
+    pub input: InputProfile,
+    /// What `back` sends in keyboard mode [default: escape].
+    pub back_key: Option<String>,
+    /// Controller action -> key (`"ctrl+l"`, `"none"` to unmap), on top of the defaults.
+    #[serde(default)]
+    pub keymap: BTreeMap<String, String>,
 }
 
 fn native() -> AppKind {
     AppKind::Native
+}
+
+impl AppConfig {
+    /// The keymap for the keyboard profile (`None` for gamepad apps).
+    pub fn keymap(&self) -> Result<Option<Keymap>> {
+        if self.input != InputProfile::Keyboard {
+            return Ok(None);
+        }
+        let back = match &self.back_key {
+            Some(k) => k.parse::<KeyCombo>().map_err(anyhow::Error::msg)?,
+            None => Key::Escape.into(),
+        };
+        let mut map = default_keymap(back);
+        for (action, key) in &self.keymap {
+            let action = nav_action(action)
+                .with_context(|| format!("unknown controller action '{action}'"))?;
+            if key.trim().eq_ignore_ascii_case("none") {
+                map.remove(&action);
+            } else {
+                map.insert(action, key.parse::<KeyCombo>().map_err(anyhow::Error::msg)?);
+            }
+        }
+        Ok(Some(map))
+    }
 }
 
 /// Whether `id` is a valid app id (`^[a-z0-9][a-z0-9._-]*$`).
@@ -328,6 +482,15 @@ impl Config {
         if let Some(bus) = &cli.inputplumber_bus {
             self.inputplumber.bus = Some(bus.clone());
         }
+        if cli.no_uinput {
+            self.keys.uinput = false;
+        }
+        if let Some(path) = &cli.fake_keyboard {
+            self.keys.fake = Some(path.clone());
+        }
+        if let Some(cmd) = &cli.osk_command {
+            self.osk.command = cmd.split_whitespace().map(String::from).collect();
+        }
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -339,6 +502,7 @@ impl Config {
         if let Some(cmd) = &self.launcher.command {
             ensure!(!cmd.is_empty(), "launcher.command is empty");
         }
+        self.osk.summon_button()?;
         let mut seen = BTreeSet::new();
         for app in &self.apps {
             ensure!(valid_app_id(&app.id), "invalid app id '{}'", app.id);
@@ -356,6 +520,19 @@ impl Config {
                     app.id
                 ),
             }
+            ensure!(
+                app.steam_app_id.is_none() || app.input == InputProfile::Gamepad,
+                "app '{}': Steam games always use the gamepad input profile",
+                app.id
+            );
+            if app.input == InputProfile::Gamepad {
+                ensure!(
+                    app.back_key.is_none() && app.keymap.is_empty(),
+                    "app '{}': back_key and keymap need input = \"keyboard\"",
+                    app.id
+                );
+            }
+            app.keymap().with_context(|| format!("app '{}'", app.id))?;
         }
         Ok(())
     }
@@ -369,14 +546,9 @@ impl Config {
             .unwrap_or_else(|| ":0".into())
     }
 
-    /// Environment for apps the daemon starts, so they land in gamescope. Empty when gamescope
-    /// integration is off (apps inherit the daemon's environment).
-    pub fn child_env(&self) -> Vec<(String, String)> {
-        if !self.gamescope.enable {
-            return Vec::new();
-        }
-        let wayland = self
-            .gamescope
+    /// gamescope's Wayland display (a socket name in `$XDG_RUNTIME_DIR`, or a path).
+    pub fn wayland_display(&self) -> String {
+        self.gamescope
             .wayland_display
             .clone()
             .or_else(|| {
@@ -384,7 +556,16 @@ impl Config {
                     .ok()
                     .filter(|d| !d.is_empty())
             })
-            .unwrap_or_else(|| "gamescope-0".into());
+            .unwrap_or_else(|| "gamescope-0".into())
+    }
+
+    /// Environment for apps the daemon starts, so they land in gamescope. Empty when gamescope
+    /// integration is off (apps inherit the daemon's environment).
+    pub fn child_env(&self) -> Vec<(String, String)> {
+        if !self.gamescope.enable {
+            return Vec::new();
+        }
+        let wayland = self.wayland_display();
         vec![
             ("DISPLAY".into(), self.gamescope_display()),
             ("WAYLAND_DISPLAY".into(), wayland.clone()),
@@ -522,5 +703,99 @@ mod tests {
     fn app_ids() {
         assert!(valid_app_id("steam-570") && valid_app_id("cmd-1") && valid_app_id("a.b_c"));
         assert!(!valid_app_id("") && !valid_app_id("-a") && !valid_app_id("A"));
+    }
+    #[test]
+    fn keyboard_profiles_and_keymaps() {
+        let c = Config::parse(
+            r#"
+            [[apps]]
+            id = "youtube"
+            name = "YouTube"
+            kind = "web"
+            command = ["firefox", "--kiosk", "https://www.youtube.com/tv"]
+            input = "keyboard"
+            back_key = "backspace"
+            [apps.keymap]
+            context = "ctrl+l"
+            accept = "space"
+            right = "none"
+            [[apps]]
+            id = "jellyfin"
+            name = "Jellyfin"
+            command = ["jellyfin-desktop"]
+            "#,
+        )
+        .unwrap();
+        let map = c.apps[0].keymap().unwrap().unwrap();
+        assert_eq!(map[&NavAction::Back], Key::Backspace.into());
+        assert_eq!(map[&NavAction::Accept], Key::Space.into());
+        assert_eq!(map[&NavAction::Context], "ctrl+l".parse().unwrap());
+        assert_eq!(map[&NavAction::Up], Key::Up.into());
+        assert!(!map.contains_key(&NavAction::Right));
+        assert_eq!(c.apps[1].input, InputProfile::Gamepad);
+        assert_eq!(c.apps[1].keymap().unwrap(), None);
+
+        // Defaults: Escape for back.
+        let c = Config::parse(
+            "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"a\"]\ninput = \"keyboard\"\n",
+        )
+        .unwrap();
+        let map = c.apps[0].keymap().unwrap().unwrap();
+        assert_eq!(map[&NavAction::Back], Key::Escape.into());
+        assert_eq!(map.len(), 6);
+    }
+
+    #[test]
+    fn rejects_bad_keyboard_config() {
+        let app = "[[apps]]\nid = \"a\"\nname = \"A\"\n";
+        for bad in [
+            "command = [\"a\"]\ninput = \"mouse\"",
+            "command = [\"a\"]\ninput = \"keyboard\"\nback_key = \"hyper+x\"",
+            "command = [\"a\"]\ninput = \"keyboard\"\n[apps.keymap]\njump = \"space\"",
+            "command = [\"a\"]\ninput = \"keyboard\"\n[apps.keymap]\naccept = \"nope\"",
+            "command = [\"a\"]\nback_key = \"escape\"",
+            "steam_app_id = 620\ninput = \"keyboard\"",
+        ] {
+            let text = format!("{app}{bad}\n");
+            assert!(Config::parse(&text).is_err(), "accepted: {text}");
+        }
+    }
+
+    #[test]
+    fn osk_and_keys_sections() {
+        let c = Config::default();
+        assert!(c.osk.enable && c.keys.uinput && c.keys.gamescope_ime);
+        assert_eq!(c.osk.command, ["hinteros-osk"]);
+        assert_eq!(c.osk.summon_button().unwrap(), Some(NavAction::Context));
+        let c = Config::parse(
+            "[osk]\nenable = false\ncommand = [\"my-osk\", \"--x\"]\nsummon = \"none\"\n[keys]\nuinput = false\nkey_delay_ms = 5\n",
+        )
+        .unwrap();
+        assert!(!c.osk.enable && !c.keys.uinput);
+        assert_eq!(c.keys.key_delay_ms, 5);
+        assert_eq!(c.osk.summon_button().unwrap(), None);
+        let c = Config::parse("[osk]\nsummon = \"Guide+Secondary\"\n").unwrap();
+        assert_eq!(c.osk.summon_button().unwrap(), Some(NavAction::Secondary));
+        for bad in [
+            "[osk]\nsummon = \"context\"",
+            "[osk]\nsummon = \"guide+jump\"",
+            "[osk]\nsummon = \"guide+up\"",
+            "[keys]\nfake = \"/tmp/x\"",
+        ] {
+            assert!(Config::parse(bad).is_err(), "accepted: {bad}");
+        }
+        let mut c = Config::default();
+        let cli = Cli::parse_from([
+            "hinteros-session",
+            "--no-uinput",
+            "--fake-keyboard",
+            "/tmp/keys.log",
+            "--osk-command",
+            "osk --flag",
+        ]);
+        c.apply(&cli);
+        assert!(!c.keys.uinput);
+        assert_eq!(c.keys.fake, Some(PathBuf::from("/tmp/keys.log")));
+        assert_eq!(c.osk.command, ["osk", "--flag"]);
     }
 }

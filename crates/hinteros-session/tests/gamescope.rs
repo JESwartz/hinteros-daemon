@@ -505,3 +505,98 @@ async fn closing_a_steam_game_ends_its_process_tree() {
         )
     );
 }
+
+#[tokio::test]
+async fn on_screen_keyboard_is_an_overlay_shown_by_opacity() {
+    let Some(gs) = FakeGamescope::start() else {
+        return;
+    };
+    // A stand-in OSK program: records that it was started, and with which socket.
+    let tmp = tempfile::tempdir().unwrap();
+    let started = tmp.path().join("osk-started");
+    let osk_program = tmp.path().join("hinteros-osk");
+    script(
+        &osk_program,
+        &format!("echo \"$HINTEROS_SESSION_SOCKET\" > {}", started.display()),
+    );
+    let d = start_daemon(
+        &gs,
+        &format!("[osk]\ncommand = [\"{}\"]\n", osk_program.display()),
+    );
+    gs.baselayer_becomes(&[LAUNCHER]).await;
+    let socket = eventually("the OSK program to start", async || {
+        std::fs::read_to_string(&started).ok()
+    })
+    .await;
+    assert_eq!(socket.trim(), d.socket.to_str().unwrap());
+
+    // Its window becomes an external overlay, hidden (opacity 0); other windows are untouched.
+    let osk = gs.window(&TestWindow {
+        class: Some("hinteros-osk"),
+        title: "HinterOS keyboard",
+        ..Default::default()
+    });
+    let app = gs.window(&TestWindow {
+        class: Some("firefox"),
+        title: "YouTube",
+        ..Default::default()
+    });
+    let state = |w| {
+        (
+            gs.get_on(w, "GAMESCOPE_EXTERNAL_OVERLAY"),
+            gs.get_on(w, "_NET_WM_WINDOW_OPACITY"),
+        )
+    };
+    let hidden = (vec![1], vec![0]);
+    let shown = (vec![1], vec![0xffff_ffff]);
+    eventually("the OSK window to be tagged", async || {
+        (state(osk) == hidden).then_some(())
+    })
+    .await;
+
+    let mut c = d.client().await;
+    call(&mut c, "subscribe", json!({ "events": ["osk_visibility"] }))
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&mut c, "osk.show", json!({})).await.unwrap(),
+        json!({ "visible": true })
+    );
+    assert_eq!(
+        next_event(&mut c).await,
+        ("osk_visibility".into(), json!({ "visible": true }))
+    );
+    eventually("the OSK window to be shown", async || {
+        (state(osk) == shown).then_some(())
+    })
+    .await;
+    assert_eq!(gs.get("HINTEROS_OSK_VISIBLE"), [1]);
+    // Showing never changes gamescope focus.
+    assert_eq!(gs.get("GAMESCOPECTRL_BASELAYER_APPID"), [LAUNCHER]);
+
+    // The OSK restarts while shown: its new window is shown at once.
+    gs.destroy(osk);
+    let osk = gs.window(&TestWindow {
+        class: Some("Hinteros-osk"),
+        title: "HinterOS keyboard",
+        ..Default::default()
+    });
+    eventually("the new OSK window to be shown", async || {
+        (state(osk) == shown).then_some(())
+    })
+    .await;
+
+    assert_eq!(
+        call(&mut c, "osk.hide", json!({})).await.unwrap(),
+        json!({ "visible": false })
+    );
+    assert_eq!(
+        next_event(&mut c).await,
+        ("osk_visibility".into(), json!({ "visible": false }))
+    );
+    eventually("the OSK window to be hidden", async || {
+        (state(osk) == hidden).then_some(())
+    })
+    .await;
+    assert_eq!(state(app), (vec![], vec![]));
+}

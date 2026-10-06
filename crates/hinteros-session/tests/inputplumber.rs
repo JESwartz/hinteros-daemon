@@ -256,8 +256,10 @@ async fn inputplumber_modes_nav_and_home() {
     ready(&fake, 0, 1).await;
     fake.press("ui_accept", 1.0).await;
 
-    // Guide: home_pressed, the launcher gets focus, mode ALL again.
+    // Guide: home_pressed (on release: Guide is also the on-screen keyboard chord), the
+    // launcher gets focus, mode ALL again.
     fake.press("ui_guide", 1.0).await;
+    fake.press("ui_guide", 0.0).await;
     assert_eq!(next_event(&mut c).await.0, "home_pressed");
     assert_eq!(
         next_event(&mut c).await,
@@ -277,4 +279,188 @@ async fn inputplumber_modes_nav_and_home() {
     ready(&fake, 1, 2).await;
     fake.press("ui_left", 1.0).await;
     assert_eq!(nav(&mut c).await, ("left".into(), "press".into()));
+}
+
+/// The key events written by `--fake-keyboard`, as `(code, down)`.
+fn key_log(path: &std::path::Path) -> Vec<(u16, bool)> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| {
+            let (what, code) = l.split_once(' ').unwrap();
+            (code.parse().unwrap(), what == "down")
+        })
+        .collect()
+}
+
+/// Taps of `codes`, as the fake keyboard logs them.
+fn taps(codes: &[u16]) -> Vec<(u16, bool)> {
+    codes
+        .iter()
+        .flat_map(|&c| [(c, true), (c, false)])
+        .collect()
+}
+
+#[tokio::test]
+async fn keyboard_profile_and_on_screen_keyboard() {
+    let Some(bus) = Bus::start() else { return };
+    let address = bus.address.clone();
+    let keys_file = std::sync::Arc::new(std::sync::Mutex::new(std::path::PathBuf::new()));
+    let kf = keys_file.clone();
+    let d = Daemon::start_with(|dir| {
+        let config = dir.join("session.toml");
+        std::fs::write(
+            &config,
+            r#"
+[keys]
+key_delay_ms = 0
+[[apps]]
+id = "youtube"
+name = "YouTube"
+kind = "web"
+command = ["sleep", "30"]
+input = "keyboard"
+[apps.keymap]
+context = "ctrl+l"
+"#,
+        )
+        .unwrap();
+        let log = dir.join("keys.log");
+        *kf.lock().unwrap() = log.clone();
+        vec![
+            "--config".into(),
+            config.into(),
+            "--inputplumber".into(),
+            "--inputplumber-bus".into(),
+            address.into(),
+            "--fake-keyboard".into(),
+            log.into(),
+        ]
+    });
+    let keys_file = keys_file.lock().unwrap().clone();
+    let fake = Fake::start(&bus.address).await;
+    ready(&fake, 0, 2).await;
+
+    let mut launcher = d.client().await;
+    let mut osk = d.client_named("hinteros-osk").await;
+    for c in [&mut launcher, &mut osk] {
+        call(
+            c,
+            "subscribe",
+            json!({ "events": ["input_nav", "osk_visibility", "home_pressed", "focus_changed"] }),
+        )
+        .await
+        .unwrap();
+    }
+
+    // The launcher has navigation; the OSK client gets none while it is hidden.
+    fake.press("ui_accept", 1.0).await;
+    assert_eq!(nav(&mut launcher).await, ("accept".into(), "press".into()));
+
+    // A keyboard-profile app: InputPlumber stays in ALL, the pad becomes keys.
+    call(&mut launcher, "apps.launch", json!({ "id": "youtube" }))
+        .await
+        .unwrap();
+    assert_eq!(
+        event_named(&mut launcher, "focus_changed").await,
+        json!({ "app": "youtube" })
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(fake.mode(0), 2);
+    for (event, value) in [
+        ("ui_accept", 0.0),
+        ("ui_down", 1.0),
+        ("ui_down", 0.0),
+        ("ui_accept", 1.0),
+        ("ui_accept", 0.0),
+        ("ui_back", 1.0),
+        ("ui_back", 0.0),
+        ("ui_context", 1.0),
+        ("ui_context", 0.0),
+    ] {
+        fake.press(event, value).await;
+    }
+    let mut expected = taps(&[108, 28, 1]);
+    expected.extend([(29, true), (38, true), (38, false), (29, false)]);
+    eventually("the keys", async || {
+        (key_log(&keys_file) == expected).then_some(())
+    })
+    .await;
+
+    // keys.type from a client goes to the same keyboard.
+    let r = call(&mut osk, "keys.type", json!({ "text": "Hé" }))
+        .await
+        .unwrap();
+    assert_eq!(r, json!({ "untypeable": ["é"] }));
+    expected.extend([(42, true), (35, true), (35, false), (42, false)]);
+    eventually("the typed text", async || {
+        (key_log(&keys_file) == expected).then_some(())
+    })
+    .await;
+
+    // The on-screen keyboard: input_nav to the OSK client only.
+    assert_eq!(
+        call(&mut osk, "osk.show", json!({})).await.unwrap(),
+        json!({ "visible": true })
+    );
+    for c in [&mut launcher, &mut osk] {
+        assert_eq!(
+            event_named(c, "osk_visibility").await,
+            json!({ "visible": true })
+        );
+    }
+    fake.press("ui_right", 1.0).await;
+    fake.press("ui_right", 0.0).await;
+    assert_eq!(nav(&mut osk).await, ("right".into(), "press".into()));
+    loop {
+        match nav(&mut osk).await {
+            (a, p) if a == "right" && p == "repeat" => {}
+            other => {
+                assert_eq!(other, ("right".into(), "release".into()));
+                break;
+            }
+        }
+    }
+    // No key went to the app meanwhile.
+    assert_eq!(key_log(&keys_file), expected);
+
+    // Hidden again: keys for the app, nothing for the OSK.
+    call(&mut osk, "osk.hide", json!({})).await.unwrap();
+    assert_eq!(
+        event_named(&mut osk, "osk_visibility").await,
+        json!({ "visible": false })
+    );
+    fake.press("ui_up", 1.0).await;
+    fake.press("ui_up", 0.0).await;
+    expected.extend(taps(&[103]));
+    eventually("the up key", async || {
+        (key_log(&keys_file) == expected).then_some(())
+    })
+    .await;
+
+    // Guide + Y summons it from the controller; Guide alone is Home (on release).
+    fake.press("ui_guide", 1.0).await;
+    fake.press("ui_context", 1.0).await;
+    fake.press("ui_context", 0.0).await;
+    fake.press("ui_guide", 0.0).await;
+    assert_eq!(
+        event_named(&mut osk, "osk_visibility").await,
+        json!({ "visible": true })
+    );
+    fake.press("ui_guide", 1.0).await;
+    fake.press("ui_guide", 0.0).await;
+    assert_eq!(
+        event_named(&mut osk, "osk_visibility").await,
+        json!({ "visible": false })
+    );
+    assert_eq!(next_event(&mut osk).await.0, "home_pressed");
+    assert_eq!(event_named(&mut launcher, "home_pressed").await, json!({}));
+    assert_eq!(
+        next_event(&mut launcher).await,
+        ("focus_changed".into(), json!({ "app": null }))
+    );
+    // Navigation is the launcher's again.
+    fake.press("ui_left", 1.0).await;
+    assert_eq!(nav(&mut launcher).await, ("left".into(), "press".into()));
+    assert_eq!(key_log(&keys_file), expected);
 }

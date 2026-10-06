@@ -48,6 +48,8 @@ pub trait FocusControl: Send {
     fn focus_launcher(&mut self) -> anyhow::Result<()>;
     /// Show the windows of `app_id` as soon as it has one; the launcher until then.
     fn focus_app(&mut self, app_id: u32) -> anyhow::Result<()>;
+    /// Show or hide the on-screen keyboard's overlay window (see [`crate::osk`]).
+    fn set_osk_visible(&mut self, visible: bool) -> anyhow::Result<()>;
 }
 
 /// The `GAMESCOPECTRL_BASELAYER_APPID` list that shows `target` (`None`: the launcher), with the
@@ -73,6 +75,9 @@ impl FocusControl for NoFocus {
         Ok(())
     }
     fn focus_app(&mut self, _app_id: u32) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn set_osk_visible(&mut self, _visible: bool) -> anyhow::Result<()> {
         Ok(())
     }
 }

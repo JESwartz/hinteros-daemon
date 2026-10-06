@@ -121,10 +121,13 @@
             inherit (rust) cargoArtifacts;
             cargoTestExtraArgs = "--workspace";
             # Stand-ins for gamescope's Xwayland (Xvfb) and the system bus (a private
-            # dbus-daemon) in the session daemon's tests; required here, optional elsewhere.
+            # dbus-daemon, also for the system service's fake logind/polkit/systemd), plus git
+            # and ssh-keygen for update verification; required here, optional elsewhere.
             nativeCheckInputs = [
               pkgs.xvfb
               pkgs.dbus
+              pkgs.git
+              pkgs.openssh
             ];
             HINTEROS_REQUIRE_TEST_TOOLS = "1";
           }

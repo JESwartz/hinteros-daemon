@@ -58,6 +58,9 @@ pub struct Service {
 }
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
+    // Before binding: a client may signal us as soon as the socket accepts.
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
     // 0660: only root and the socket's group (set by the unit) can connect at all.
     let listener = server::bind_unix(&args.socket, 0o660, 0o755)
         .with_context(|| format!("binding {}", args.socket.display()))?;
@@ -81,8 +84,6 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     }
     tokio::spawn(monitor(svc.clone()));
 
-    let mut term = signal(SignalKind::terminate())?;
-    let mut int = signal(SignalKind::interrupt())?;
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {

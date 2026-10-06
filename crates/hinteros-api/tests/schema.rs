@@ -12,7 +12,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hinteros_api::conformance::ApiSchema;
-use hinteros_api::session::{AppKind, AppSource, EventName, ExitReason, NavAction, NavPhase};
+use hinteros_api::session::{
+    AppKind, AppSource, EventName, ExitReason, InstallState, NavAction, NavPhase,
+};
 use hinteros_api::{ApiInfo, ApiVersion, ErrorCode, session, system};
 use serde_json::Value;
 
@@ -228,6 +230,10 @@ fn enums_match() {
     );
     assert_eq!(schema_enum(&schema, "NavAction"), rust_enum(NavAction::ALL));
     assert_eq!(schema_enum(&schema, "NavPhase"), rust_enum(NavPhase::ALL));
+    assert_eq!(
+        schema_enum(&schema, "InstallState"),
+        rust_enum(InstallState::ALL)
+    );
     for e in EventName::ALL {
         assert_eq!(rust_enum(&[*e]).pop_first().unwrap(), e.wire_name());
     }
@@ -271,6 +277,26 @@ fn schema_rejects_what_it_should() {
         ),
         ("/events/app_exited/params", r#"{"id":"x"}"#),
         ("/events/focus_changed/params", r#"{}"#),
+        ("/methods/apps.close/params", r#"{}"#),
+        ("/methods/apps.close/params", r#"{"id":null}"#),
+        ("/events/steam_attention/params", r#"{}"#),
+        (
+            "/events/steam_attention/params",
+            r#"{"windows":[{"window":0,"title":"x"}]}"#,
+        ),
+        (
+            "/methods/games.list/result",
+            r#"{"games":[{"appid":1,"name":"x","install_state":"installed","size_bytes":0,"last_played":null}]}"#,
+        ),
+        (
+            "/methods/games.list/result",
+            r#"{"games":[{"appid":1,"name":"x","install_state":"gone","size_bytes":0,"last_played":null,"artwork":{"portrait":null,"header":null,"hero":null,"logo":null,"icon":null}}]}"#,
+        ),
+        (
+            "/methods/games.list/result",
+            r#"{"games":[{"appid":1,"name":"x","install_state":"installed","size_bytes":0,"last_played":null,"artwork":{"portrait":null}}]}"#,
+        ),
+        ("/methods/games.list/params", r#"{"x":1}"#),
     ];
     for (pointer, instance) in bad {
         let v: Value = serde_json::from_str(instance).unwrap();
@@ -344,4 +370,27 @@ fn nullable_fields_are_required_in_rust_too() {
     assert!(serde_json::from_str::<FocusChangedParams>("{}").is_err());
     let back = serde_json::to_value(FocusChangedParams { app: None }).unwrap();
     assert_eq!(back, serde_json::json!({"app": null}));
+}
+
+#[test]
+fn game_nullables_are_required_in_rust_too() {
+    use hinteros_api::session::{Game, GameArtwork};
+    let artwork = r#"{"portrait":null,"header":null,"hero":null,"logo":null,"icon":null}"#;
+    assert!(serde_json::from_str::<GameArtwork>(r#"{"portrait":null}"#).is_err());
+    assert_eq!(
+        serde_json::from_str::<GameArtwork>(artwork).unwrap(),
+        GameArtwork::default()
+    );
+    let game = |last: &str| {
+        format!(
+            r#"{{"appid":1,"name":"x","install_state":"installed","size_bytes":0,{last}"artwork":{artwork}}}"#
+        )
+    };
+    assert!(serde_json::from_str::<Game>(&game("")).is_err());
+    let g = serde_json::from_str::<Game>(&game(r#""last_played":null,"#)).unwrap();
+    assert_eq!(g.last_played, None);
+    assert_eq!(
+        serde_json::to_value(&g).unwrap()["last_played"],
+        Value::Null
+    );
 }

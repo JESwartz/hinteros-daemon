@@ -17,6 +17,7 @@ pub enum ErrorCode {
     AlreadyHandshaken,
     AppNotFound,
     AppLaunchFailed,
+    SteamNoWindows,
 }
 
 impl ErrorCode {
@@ -31,6 +32,7 @@ impl ErrorCode {
         Self::AlreadyHandshaken,
         Self::AppNotFound,
         Self::AppLaunchFailed,
+        Self::SteamNoWindows,
     ];
 
     /// The JSON-RPC and protocol errors, which every API declares.
@@ -57,6 +59,7 @@ impl ErrorCode {
             Self::AlreadyHandshaken => 1003,
             Self::AppNotFound => 2001,
             Self::AppLaunchFailed => 2002,
+            Self::SteamNoWindows => 2003,
         }
     }
 
@@ -73,6 +76,7 @@ impl ErrorCode {
             Self::AlreadyHandshaken => "already_handshaken",
             Self::AppNotFound => "app_not_found",
             Self::AppLaunchFailed => "app_launch_failed",
+            Self::SteamNoWindows => "steam_no_windows",
         }
     }
 

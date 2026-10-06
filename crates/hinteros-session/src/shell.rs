@@ -485,14 +485,14 @@ impl Shell {
             AppSource::Command => {}
             // The steam command only hands the URL to the running client. Without gamescope
             // there is no way to see the game, so its end stands in for the game's.
-            AppSource::Steam if !self.cfg.gamescope => {
+            AppSource::Steam | AppSource::SteamClient if !self.cfg.gamescope => {
                 let reason = match exit.code {
                     Some(0) => ExitReason::Exited,
                     _ => ExitReason::Crashed,
                 };
                 self.exited(&exit.key, reason, exit.code);
             }
-            AppSource::Steam => match exit.code {
+            AppSource::Steam | AppSource::SteamClient => match exit.code {
                 Some(0) => debug!(app = %exit.key, "steam command done"),
                 code => warn!(app = %exit.key, ?code, "steam command failed"),
             },

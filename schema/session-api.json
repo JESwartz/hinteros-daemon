@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.2",
+  "version": "0.3",
   "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). See hinteros-docs/design/api.md for the protocol rules.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -37,16 +37,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.2", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
-          "result": { "api_version": "0.2", "server": { "name": "hinteros-session", "version": "0.1.0" } }
+          "params": { "api_version": "0.3", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
+          "result": { "api_version": "0.3", "server": { "name": "hinteros-session", "version": "0.1.0" } }
         },
         {
           "name": "major mismatch",
           "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 1.0, server 0.2",
-            "data": { "client_api_version": "1.0", "server_api_version": "0.2" }
+            "message": "API version mismatch: client 1.0, server 0.3",
+            "data": { "client_api_version": "1.0", "server_api_version": "0.3" }
           }
         }
       ]
@@ -123,7 +123,8 @@
       ]
     },
     "apps.list": {
-      "summary": "Apps the launcher can show and launch: the apps from the daemon's config, or a fixed stub list when none are configured.",
+      "summary": "Apps the launcher can show and launch: the built-in 'steam' entry (Steam's Big Picture mode, since 0.3), then the apps from the daemon's config, or a fixed stub list when none are configured.",
+      "description": "Installed Steam games are listed by games.list, not here.",
       "since": "0.1",
       "params": {
         "type": "object",
@@ -153,9 +154,107 @@
         }
       ]
     },
+    "games.list": {
+      "summary": "Installed Steam games of the session user, read from Steam's library on disk.",
+      "description": "Read from the Steam directory (~/.local/share/Steam, else ~/.steam/steam; configurable): every library in steamapps/libraryfolders.vdf and its steamapps/appmanifest_<appid>.acf files. Steam tools (Proton, Steam Linux Runtime, Steamworks Common Redistributables, ...) are left out. Empty when Steam is not installed. Sorted by name. Launch a game with apps.launch {url: 'steam://rungameid/<appid>'}. games_changed says when to query again.",
+      "since": "0.3",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": ["games"],
+        "additionalProperties": false,
+        "properties": {
+          "games": { "type": "array", "items": { "$ref": "#/$defs/Game" } }
+        }
+      },
+      "errors": [],
+      "examples": [
+        {
+          "name": "two games",
+          "params": {},
+          "result": {
+            "games": [
+              {
+                "appid": 620,
+                "name": "Portal 2",
+                "install_state": "installed",
+                "size_bytes": 12976394567,
+                "last_played": 1786300589,
+                "artwork": {
+                  "portrait": "/home/tv/.local/share/Steam/appcache/librarycache/620/library_600x900.jpg",
+                  "header": "/home/tv/.local/share/Steam/appcache/librarycache/620/header.jpg",
+                  "hero": "/home/tv/.local/share/Steam/appcache/librarycache/620/library_hero.jpg",
+                  "logo": "/home/tv/.local/share/Steam/appcache/librarycache/620/logo.png",
+                  "icon": "/home/tv/.local/share/Steam/appcache/librarycache/620/2e478fc6874d06ae5baf0d147f6f21203291aa02.jpg"
+                }
+              },
+              {
+                "appid": 1000001,
+                "name": "Example Game",
+                "install_state": "updating",
+                "size_bytes": 831365954,
+                "last_played": null,
+                "artwork": { "portrait": null, "header": "/home/tv/.local/share/Steam/appcache/librarycache/1000001_header.jpg", "hero": null, "logo": null, "icon": null }
+              }
+            ]
+          }
+        },
+        { "name": "no Steam", "params": {}, "result": { "games": [] } }
+      ]
+    },
+    "steam.attention": {
+      "summary": "Steam's own windows that appeared while something else had focus and still wait to be seen (Steam Guard, update prompts, cloud-save conflicts, sign-in, ...).",
+      "description": "The same list steam_attention sends. A window stops needing attention when it closes or once Steam has had focus while it was open (steam.focus, apps.launch/apps.focus 'steam'). Always empty without gamescope.",
+      "since": "0.3",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": ["windows"],
+        "additionalProperties": false,
+        "properties": {
+          "windows": { "type": "array", "items": { "$ref": "#/$defs/SteamWindow" } }
+        }
+      },
+      "errors": [],
+      "examples": [
+        { "name": "Steam Guard", "params": {}, "result": { "windows": [{ "window": 6291459, "title": "Steam Guard", "pid": 2412 }] } },
+        { "name": "nothing", "params": {}, "result": { "windows": [] } }
+      ]
+    },
+    "steam.focus": {
+      "summary": "Bring Steam's own windows to the front (e.g. after steam_attention). Controller input goes to Steam.",
+      "description": "Steam then runs as the app 'steam' (source 'steam_client'; app_started if it was not running) and has focus; its pending windows no longer need attention. When Steam's windows close, focus returns to the app that had it before (or the launcher). Home brings the launcher back as usual.",
+      "since": "0.3",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": ["app"],
+        "additionalProperties": false,
+        "properties": {
+          "app": { "$ref": "#/$defs/RunningApp" }
+        }
+      },
+      "errors": ["steam_no_windows"],
+      "examples": [
+        { "name": "dialog shown", "params": {}, "result": { "app": { "id": "steam", "name": "Steam", "source": "steam_client", "gamescope_app_id": 769 } } },
+        { "name": "nothing to show", "params": {}, "error": { "code": 2003, "message": "Steam has no windows to show" } }
+      ]
+    },
     "apps.launch": {
       "summary": "Start an app and give it focus. Returns once it is spawned, before it shows a window.",
-      "description": "Exactly one of: 'id' (an app from apps.list), 'command' (argv, run as the session user), or 'url' (a Steam game, handed to the running Steam client). If the app is already running it is focused instead and the result describes the running instance. Its windows are shown as soon as they appear; until then the launcher stays visible. Progress is reported through app_started, focus_changed and app_exited.",
+      "description": "Exactly one of: 'id' (an app from apps.list), 'command' (argv, run as the session user), or 'url' (a Steam game, handed to the running Steam client; use it for games.list entries). If the app is already running it is focused instead and the result describes the running instance. Its windows are shown as soon as they appear; until then the launcher stays visible. Progress is reported through app_started, focus_changed and app_exited. The built-in id 'steam' opens Steam's Big Picture mode (steam://open/bigpicture, or 'steam -gamepadui' when Steam is not running) and shows Steam's own windows; it runs as the app 'steam' with source 'steam_client'. A Steam game's name comes from its Steam library manifest when it is installed.",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -196,6 +295,16 @@
           "name": "command",
           "params": { "command": ["firefox", "--kiosk", "https://www.youtube.com/tv"], "name": "YouTube" },
           "result": { "app": { "id": "cmd-1", "name": "YouTube", "source": "command", "gamescope_app_id": 4100000001, "pid": 4242 } }
+        },
+        {
+          "name": "installed steam game",
+          "params": { "url": "steam://rungameid/620" },
+          "result": { "app": { "id": "steam-620", "name": "Portal 2", "source": "steam", "gamescope_app_id": 620 } }
+        },
+        {
+          "name": "steam big picture",
+          "params": { "id": "steam" },
+          "result": { "app": { "id": "steam", "name": "Steam", "source": "steam_client", "gamescope_app_id": 769 } }
         },
         {
           "name": "configured app",
@@ -267,6 +376,30 @@
         { "name": "launcher", "params": { "id": null }, "result": {} },
         { "name": "not running", "params": { "id": "cmd-7" }, "error": { "code": 2001, "message": "no running app with id 'cmd-7'" } }
       ]
+    },
+    "apps.close": {
+      "summary": "Ask a running app to quit; force it after a timeout. Returns at once, app_exited (reason 'closed') follows.",
+      "description": "A 'command' app gets SIGTERM (through its reaper, to its process group), and after the close timeout (default 5 s) everything still running under its reaper gets SIGKILL. A Steam game: every process under Steam's reaper for that app id gets SIGTERM, then SIGKILL after the timeout; Steam itself keeps running. A Steam game that has no processes yet (still being prepared by Steam) just stops being tracked. Steam ('steam_client'): Big Picture is asked to close (steam://close/bigpicture); Steam keeps running in the background. Closing an app that is already closing does nothing. If the app had focus, the launcher gets it back when it exits.",
+      "since": "0.3",
+      "params": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/AppId" }
+        }
+      },
+      "result": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": ["app_not_found"],
+      "examples": [
+        { "name": "command app", "params": { "id": "cmd-1" }, "result": {} },
+        { "name": "steam game", "params": { "id": "steam-620" }, "result": {} },
+        { "name": "not running", "params": { "id": "cmd-7" }, "error": { "code": 2001, "message": "no running app with id 'cmd-7'" } }
+      ]
     }
   },
   "events": {
@@ -313,7 +446,9 @@
       "examples": [
         { "name": "quit", "params": { "id": "cmd-1", "reason": "exited", "exit_code": 0 } },
         { "name": "crash", "params": { "id": "cmd-2", "reason": "crashed", "exit_code": 139 } },
-        { "name": "steam game closed", "params": { "id": "steam-1000001", "reason": "exited" } }
+        { "name": "steam game quit", "params": { "id": "steam-1000001", "reason": "exited" } },
+        { "name": "closed by apps.close", "params": { "id": "cmd-3", "reason": "closed", "exit_code": 143 } },
+        { "name": "steam game closed by apps.close", "params": { "id": "steam-620", "reason": "closed" } }
       ]
     },
     "focus_changed": {
@@ -350,6 +485,34 @@
         { "name": "held", "params": { "action": "right", "phase": "repeat" } },
         { "name": "A released", "params": { "action": "accept", "phase": "release" } }
       ]
+    },
+    "games_changed": {
+      "summary": "The Steam library changed (a game was installed, removed or updated, or its artwork arrived). Call games.list again.",
+      "description": "Debounced; sent only when the games.list result actually changed. Found by watching Steam's library directories (inotify), with a periodic rescan as a fallback.",
+      "since": "0.3",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "examples": [{ "name": "changed", "params": {} }]
+    },
+    "steam_attention": {
+      "summary": "The list of Steam windows waiting to be seen changed (see steam.attention). An empty list means nothing needs attention any more.",
+      "description": "Sent when one of Steam's own windows (Steam Guard, an update prompt, a cloud-save conflict, sign-in, ...) appears while the launcher or another app has focus, and again when such windows close or are seen. The launcher can offer 'Steam needs your attention' with an action that calls steam.focus.",
+      "since": "0.3",
+      "params": {
+        "type": "object",
+        "required": ["windows"],
+        "additionalProperties": false,
+        "properties": {
+          "windows": { "type": "array", "items": { "$ref": "#/$defs/SteamWindow" } }
+        }
+      },
+      "examples": [
+        { "name": "Steam Guard", "params": { "windows": [{ "window": 6291459, "title": "Steam Guard", "pid": 2412 }] } },
+        { "name": "cleared", "params": { "windows": [] } }
+      ]
     }
   },
   "errors": {
@@ -375,8 +538,9 @@
       }
     },
     "already_handshaken": { "code": 1003, "since": "0.1", "summary": "'hello' was called twice on one connection." },
-    "app_not_found": { "code": 2001, "since": "0.2", "summary": "No such app (apps.launch: not in apps.list; apps.focus: not running)." },
-    "app_launch_failed": { "code": 2002, "since": "0.2", "summary": "The app could not be started (spawn failed, or it has nothing to launch)." }
+    "app_not_found": { "code": 2001, "since": "0.2", "summary": "No such app (apps.launch: not in apps.list; apps.focus, apps.close: not running)." },
+    "app_launch_failed": { "code": 2002, "since": "0.2", "summary": "The app could not be started (spawn failed, or it has nothing to launch)." },
+    "steam_no_windows": { "code": 2003, "since": "0.3", "summary": "steam.focus: Steam has no windows that could be shown (not running, or no gamescope)." }
   },
   "$defs": {
     "ApiVersion": {
@@ -396,10 +560,10 @@
     },
     "EventName": {
       "type": "string",
-      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav"]
+      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "steam_attention"]
     },
     "AppId": {
-      "description": "App identifier: an apps.list id, or for running apps started by command or Steam URL 'cmd-<n>' / 'steam-<appid>'.",
+      "description": "App identifier: an apps.list id, or for running apps started by command or Steam URL 'cmd-<n>' / 'steam-<appid>'. 'steam' is Steam itself (Big Picture and its other windows).",
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9._-]*$"
     },
@@ -408,9 +572,9 @@
       "oneOf": [{ "$ref": "#/$defs/AppId" }, { "type": "null" }]
     },
     "AppSource": {
-      "description": "How a running app was started. Clients must treat unknown values like 'command'.",
+      "description": "How a running app was started: 'command' (an argv under the daemon's reaper), 'steam' (a Steam game), 'steam_client' (Steam's own windows: Big Picture, dialogs). Clients must treat unknown values like 'command'.",
       "type": "string",
-      "enum": ["command", "steam"]
+      "enum": ["command", "steam", "steam_client"]
     },
     "RunningApp": {
       "type": "object",
@@ -420,14 +584,14 @@
         "id": { "$ref": "#/$defs/AppId" },
         "name": { "description": "Display name.", "type": "string", "minLength": 1 },
         "source": { "$ref": "#/$defs/AppSource" },
-        "gamescope_app_id": { "description": "The app id gamescope knows its windows by (the Steam app id for Steam games). For diagnostics.", "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "gamescope_app_id": { "description": "The app id gamescope knows its windows by (the Steam app id for Steam games, 769 for Steam itself). For diagnostics.", "type": "integer", "minimum": 1, "maximum": 4294967295 },
         "pid": { "description": "Process the daemon started for it, if it tracks one.", "type": "integer", "minimum": 1 }
       }
     },
     "ExitReason": {
-      "description": "Why an app ended: 'exited' normally (status 0, or a Steam game's windows closed), 'crashed' (non-zero status or killed), 'launch_timeout' (a Steam game never showed a window). Clients must treat unknown values like 'exited'.",
+      "description": "Why an app ended: 'exited' normally (status 0, or a Steam game's windows closed), 'crashed' (non-zero status or killed), 'launch_timeout' (a Steam game never showed a window), 'closed' (ended after apps.close, however it ended). Clients must treat unknown values like 'exited'.",
       "type": "string",
-      "enum": ["exited", "crashed", "launch_timeout"]
+      "enum": ["exited", "crashed", "launch_timeout", "closed"]
     },
     "NavAction": {
       "description": "Navigation intent. Gamepad mapping: d-pad and left stick = directions, A/Cross = accept, B/Circle = back, Y/Triangle = context, X/Square = secondary, Start = menu, Select/View = view, L1/R1 = page_left/page_right, L2/R2 = trigger_left/trigger_right, Quick Access = quick, keyboard button = keyboard.",
@@ -452,6 +616,53 @@
         "name": { "description": "Display name.", "type": "string", "minLength": 1 },
         "kind": { "$ref": "#/$defs/AppKind" },
         "icon": { "description": "Absolute path to an icon file, if any.", "type": "string" }
+      }
+    },
+    "InstallState": {
+      "description": "A game's install state, from its manifest's StateFlags: 'installed' (ready), 'update_required' (installed; Steam updates it before it starts, launching works), 'updating' (installed; an update is downloading or being applied), 'installing' (not fully installed yet: first download in progress or paused), 'uninstalling'. Clients must treat unknown values like 'updating' (installed, but maybe not launchable right now).",
+      "type": "string",
+      "enum": ["installed", "update_required", "updating", "installing", "uninstalling"]
+    },
+    "ArtworkPath": {
+      "description": "Absolute path of an image file in Steam's library cache (readable by the session user), or null if Steam has not cached it.",
+      "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+    },
+    "GameArtwork": {
+      "description": "Steam's library artwork: 'portrait' (2:3 capsule, 300x450 or 600x900), 'header' (460x215), 'hero' (wide background, e.g. 1920x620), 'logo' (transparent PNG to draw over the hero), 'icon' (small square, e.g. 32x32).",
+      "type": "object",
+      "required": ["portrait", "header", "hero", "logo", "icon"],
+      "additionalProperties": false,
+      "properties": {
+        "portrait": { "$ref": "#/$defs/ArtworkPath" },
+        "header": { "$ref": "#/$defs/ArtworkPath" },
+        "hero": { "$ref": "#/$defs/ArtworkPath" },
+        "logo": { "$ref": "#/$defs/ArtworkPath" },
+        "icon": { "$ref": "#/$defs/ArtworkPath" }
+      }
+    },
+    "Game": {
+      "description": "An installed Steam game.",
+      "type": "object",
+      "required": ["appid", "name", "install_state", "size_bytes", "last_played", "artwork"],
+      "additionalProperties": false,
+      "properties": {
+        "appid": { "description": "Steam app id. Launch with apps.launch {url: 'steam://rungameid/<appid>'}; it then runs as 'steam-<appid>'.", "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "name": { "description": "Display name from the manifest.", "type": "string", "minLength": 1 },
+        "install_state": { "$ref": "#/$defs/InstallState" },
+        "size_bytes": { "description": "Size on disk (0 if unknown).", "type": "integer", "minimum": 0 },
+        "last_played": { "description": "When it was last played (Unix time, seconds), or null if never or unknown.", "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "artwork": { "$ref": "#/$defs/GameArtwork" }
+      }
+    },
+    "SteamWindow": {
+      "description": "One of Steam's own top-level windows on gamescope's Xwayland.",
+      "type": "object",
+      "required": ["window", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "window": { "description": "X window id (diagnostics; stable while the window exists).", "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "title": { "description": "Window title as Steam set it (may be empty).", "type": "string" },
+        "pid": { "description": "Process that owns the window (steam or steamwebhelper), if known.", "type": "integer", "minimum": 1 }
       }
     }
   }

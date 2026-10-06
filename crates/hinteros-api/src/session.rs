@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 2);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 3);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -23,6 +23,8 @@ pub enum EventName {
     AppExited,
     FocusChanged,
     InputNav,
+    GamesChanged,
+    SteamAttention,
 }
 
 impl EventName {
@@ -32,6 +34,8 @@ impl EventName {
         EventName::AppExited,
         EventName::FocusChanged,
         EventName::InputNav,
+        EventName::GamesChanged,
+        EventName::SteamAttention,
     ];
 
     /// The event's wire name (its JSON-RPC notification method).
@@ -42,6 +46,8 @@ impl EventName {
             EventName::AppExited => AppExited::NAME,
             EventName::FocusChanged => FocusChanged::NAME,
             EventName::InputNav => InputNav::NAME,
+            EventName::GamesChanged => GamesChanged::NAME,
+            EventName::SteamAttention => SteamAttention::NAME,
         }
     }
 }
@@ -168,10 +174,11 @@ impl AppsLaunchParams {
 pub enum AppSource {
     Command,
     Steam,
+    SteamClient,
 }
 
 impl AppSource {
-    pub const ALL: &[AppSource] = &[AppSource::Command, AppSource::Steam];
+    pub const ALL: &[AppSource] = &[AppSource::Command, AppSource::Steam, AppSource::SteamClient];
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +255,7 @@ pub enum ExitReason {
     Exited,
     Crashed,
     LaunchTimeout,
+    Closed,
 }
 
 impl ExitReason {
@@ -255,6 +263,7 @@ impl ExitReason {
         ExitReason::Exited,
         ExitReason::Crashed,
         ExitReason::LaunchTimeout,
+        ExitReason::Closed,
     ];
 }
 
@@ -359,6 +368,147 @@ impl Event for InputNav {
     type Params = InputNavParams;
 }
 
+/// Id of the built-in app for Steam itself (Big Picture and Steam's other windows).
+pub const STEAM_CLIENT_APP_ID: &str = "steam";
+
+/// gamescope's app id for Steam's own windows (`window_is_steam`: `STEAM_BIGPICTURE` or app id
+/// 769). The daemon tags Steam's windows with it.
+pub const STEAM_CLIENT_GAMESCOPE_APP_ID: u32 = 769;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsCloseParams {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsCloseResult {}
+
+pub struct AppsClose;
+impl Method for AppsClose {
+    const NAME: &'static str = "apps.close";
+    type Params = AppsCloseParams;
+    type Result = AppsCloseResult;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GamesListParams {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallState {
+    Installed,
+    UpdateRequired,
+    Updating,
+    Installing,
+    Uninstalling,
+}
+
+impl InstallState {
+    pub const ALL: &[InstallState] = &[
+        InstallState::Installed,
+        InstallState::UpdateRequired,
+        InstallState::Updating,
+        InstallState::Installing,
+        InstallState::Uninstalling,
+    ];
+}
+
+/// Paths of a game's library artwork; `None` (JSON `null`) when Steam has not cached it. All
+/// fields are required on the wire.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameArtwork {
+    #[serde(deserialize_with = "nullable")]
+    pub portrait: Option<String>,
+    #[serde(deserialize_with = "nullable")]
+    pub header: Option<String>,
+    #[serde(deserialize_with = "nullable")]
+    pub hero: Option<String>,
+    #[serde(deserialize_with = "nullable")]
+    pub logo: Option<String>,
+    #[serde(deserialize_with = "nullable")]
+    pub icon: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Game {
+    pub appid: u32,
+    pub name: String,
+    pub install_state: InstallState,
+    pub size_bytes: u64,
+    /// Unix time in seconds; `None` (JSON `null`) if never played or unknown. Required on the wire.
+    #[serde(deserialize_with = "nullable_u64")]
+    pub last_played: Option<u64>,
+    pub artwork: GameArtwork,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GamesListResult {
+    pub games: Vec<Game>,
+}
+
+pub struct GamesList;
+impl Method for GamesList {
+    const NAME: &'static str = "games.list";
+    type Params = GamesListParams;
+    type Result = GamesListResult;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GamesChangedParams {}
+
+pub struct GamesChanged;
+impl Event for GamesChanged {
+    const NAME: &'static str = "games_changed";
+    type Params = GamesChangedParams;
+}
+
+/// One of Steam's own windows.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SteamWindow {
+    pub window: u32,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteamAttentionParams {
+    pub windows: Vec<SteamWindow>,
+}
+
+/// The `steam_attention` event.
+pub struct SteamAttention;
+impl Event for SteamAttention {
+    const NAME: &'static str = "steam_attention";
+    type Params = SteamAttentionParams;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteamAttentionQueryParams {}
+
+/// The `steam.attention` method (same payload as the event).
+pub struct SteamAttentionQuery;
+impl Method for SteamAttentionQuery {
+    const NAME: &'static str = "steam.attention";
+    type Params = SteamAttentionQueryParams;
+    type Result = SteamAttentionParams;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteamFocusParams {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteamFocusResult {
+    pub app: RunningApp,
+}
+
+pub struct SteamFocus;
+impl Method for SteamFocus {
+    const NAME: &'static str = "steam.focus";
+    type Params = SteamFocusParams;
+    type Result = SteamFocusResult;
+}
+
 pub static API: ApiInfo = ApiInfo {
     api: "session",
     version: VERSION,
@@ -371,6 +521,10 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<AppsLaunch>(),
         MethodInfo::of::<AppsRunning>(),
         MethodInfo::of::<AppsFocus>(),
+        MethodInfo::of::<AppsClose>(),
+        MethodInfo::of::<GamesList>(),
+        MethodInfo::of::<SteamAttentionQuery>(),
+        MethodInfo::of::<SteamFocus>(),
     ],
     events: &[
         EventInfo::of::<HomePressed>(),
@@ -378,6 +532,8 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<AppExited>(),
         EventInfo::of::<FocusChanged>(),
         EventInfo::of::<InputNav>(),
+        EventInfo::of::<GamesChanged>(),
+        EventInfo::of::<SteamAttention>(),
     ],
     errors: ErrorCode::ALL,
 };
@@ -386,4 +542,8 @@ pub static API: ApiInfo = ApiInfo {
 /// field being absent.)
 fn nullable<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     Option::<String>::deserialize(d)
+}
+
+fn nullable_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    Option::<u64>::deserialize(d)
 }

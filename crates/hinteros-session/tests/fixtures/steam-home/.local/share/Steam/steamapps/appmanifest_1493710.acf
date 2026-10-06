@@ -1,0 +1,40 @@
+"AppState"
+{
+	"appid"		"1493710"
+	"Universe"		"1"
+	"name"		"Proton Experimental"
+	"StateFlags"		"4"
+	"installdir"		"Proton - Experimental"
+	"LastUpdated"		"1788166757"
+	"LastPlayed"		"0"
+	"SizeOnDisk"		"1536847620"
+	"StagingSize"		"0"
+	"buildid"		"24893155"
+	"LastOwner"		"76561190000000000"
+	"DownloadType"		"1"
+	"UpdateResult"		"0"
+	"BytesToDownload"		"0"
+	"BytesDownloaded"		"0"
+	"BytesToStage"		"0"
+	"BytesStaged"		"0"
+	"TargetBuildID"		"24893155"
+	"AutoUpdateBehavior"		"0"
+	"AllowOtherDownloadsWhileRunning"		"0"
+	"ScheduledAutoUpdate"		"0"
+	"InstalledDepots"
+	{
+		"1493711"
+		{
+			"manifest"		"4206021387845829879"
+			"size"		"1536847620"
+		}
+	}
+	"UserConfig"
+	{
+		"language"		"english"
+	}
+	"MountedConfig"
+	{
+		"language"		"english"
+	}
+}

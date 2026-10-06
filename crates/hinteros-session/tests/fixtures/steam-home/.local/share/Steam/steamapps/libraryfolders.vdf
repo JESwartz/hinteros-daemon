@@ -1,0 +1,35 @@
+"libraryfolders"
+{
+	"0"
+	{
+		"path"		"/home/tv/.local/share/Steam"
+		"label"		""
+		"contentid"		"6409048248388315076"
+		"totalsize"		"0"
+		"update_clean_bytes_tally"		"3866131651"
+		"time_last_update_verified"		"1790035198"
+		"apps"
+		{
+			"620"		"12976394567"
+			"1145360"		"15730212540"
+			"228980"		"187578160"
+			"1493710"		"1536847620"
+			"1628350"		"803970096"
+		}
+	}
+	"1"
+	{
+		"path"		"../../../SteamLibrary"
+		"label"		"Games SSD"
+		"contentid"		"1832471950383810270"
+		"totalsize"		"1000203091968"
+		"update_clean_bytes_tally"		"0"
+		"time_last_update_verified"		"0"
+		"apps"
+		{
+			"570"		"0"
+			"1086940"		"150323855360"
+			"2805730"		"1100000000"
+		}
+	}
+}

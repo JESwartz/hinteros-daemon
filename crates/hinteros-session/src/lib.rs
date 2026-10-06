@@ -12,6 +12,7 @@ pub mod input;
 pub mod reaper;
 pub mod server;
 pub mod shell;
+pub mod steam;
 
 /// An event as broadcast to every connection: name plus encoded params.
 pub type Broadcast = (hinteros_api::session::EventName, serde_json::Value);

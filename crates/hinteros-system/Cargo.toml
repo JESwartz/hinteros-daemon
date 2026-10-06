@@ -1,6 +1,6 @@
 [package]
 name = "hinteros-system"
-description = "HinterOS privileged system service: applies state.json, rebuilds, updates, rollback, power"
+description = "HinterOS privileged system service: settings, rebuilds, updates, rollback"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,16 +8,25 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 clap.workspace = true
 hinteros-api.workspace = true
+nix.workspace = true
+rustix.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zbus.workspace = true
 
 [dev-dependencies]
 hinteros-api = { workspace = true, features = ["conformance"] }
+proptest.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true

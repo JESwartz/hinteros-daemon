@@ -13,10 +13,12 @@ use hinteros_api::server as api_server;
 use hinteros_api::session;
 use hinteros_session::apps::{ProcessSpawner, which};
 use hinteros_session::config::{Cli, Config};
-use hinteros_session::focus::gamescope::{GamescopeFocus, spawn_watcher};
+use hinteros_session::focus::gamescope::{GamescopeFocus, WatchOptions, spawn_watcher};
 use hinteros_session::focus::{FocusControl, NoFocus};
 use hinteros_session::input::{InputControl, InterceptMode, NoInput, inputplumber};
+use hinteros_session::procs::Procs;
 use hinteros_session::shell::{Msg, Shell, ShellConfig};
+use hinteros_session::steam;
 use hinteros_session::{Broadcast, reaper, server, shell};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{broadcast, mpsc};
@@ -79,7 +81,10 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
         info!(display = %dpy, launcher_app_id = config.launcher.app_id, "gamescope focus control on");
         let (tx, rx) = mpsc::unbounded_channel();
         forward(rx, shell_tx.clone(), Msg::Gamescope);
-        spawn_watcher(dpy.clone(), Duration::from_secs(1), tx);
+        let opts = WatchOptions {
+            tag_steam_windows: config.steam.tag_windows,
+        };
+        spawn_watcher(dpy.clone(), Duration::from_secs(1), opts, tx);
         Box::new(GamescopeFocus::new(dpy, config.launcher.app_id))
     } else {
         info!("gamescope focus control off");
@@ -104,9 +109,22 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
         focus,
         input,
         Box::new(spawner),
+        Box::new(Procs),
         events.clone(),
     );
     tokio::spawn(shell::run(shell, shell_rx));
+
+    let library_events = events.clone();
+    steam::watch::spawn(
+        config.steam.dir.clone(),
+        Duration::from_millis(config.steam.library_debounce_ms),
+        Duration::from_secs(config.steam.library_poll_s),
+        move |_| {
+            let params = serde_json::json!({});
+            let _ = library_events.send((session::EventName::GamesChanged, params));
+            true
+        },
+    );
 
     if let Some(argv) = config.launcher.command.clone() {
         tokio::spawn(supervise_launcher(

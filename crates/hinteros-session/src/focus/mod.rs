@@ -31,6 +31,9 @@ pub enum GamescopeEvent {
     Connected,
     /// One of the focus properties changed.
     State(GamescopeState),
+    /// The Steam windows that want attention changed (see [`crate::steam::windows`]): every
+    /// mapped Steam dialog or main window, in stacking order.
+    SteamWindows(Vec<hinteros_api::session::SteamWindow>),
     /// Lost the connection; the watcher keeps retrying.
     Disconnected,
 }

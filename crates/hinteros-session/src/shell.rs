@@ -11,17 +11,24 @@
 //! - Home (Guide, or SIGUSR1): `home_pressed`, then the launcher gets focus. Apps keep running.
 //! - If the focused app's windows go away for longer than the debounce (it closed its window,
 //!   or a Steam game quit), the launcher gets focus.
+//! - Steam itself is the app `steam` (gamescope app id 769): opened as Big Picture through
+//!   `apps.launch`, or brought forward with `steam.focus` when one of its windows wants
+//!   attention (`steam_attention`); when its windows close, focus goes back to whoever had it.
+//! - `apps.close`: SIGTERM now, SIGKILL after the close timeout, then stop tracking.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use hinteros_api::server::{decode_params, encode_result};
 use hinteros_api::session::{
-    App, AppExitedParams, AppKind, AppSource, AppStartedParams, AppsFocus, AppsFocusParams,
-    AppsFocusResult, AppsLaunch, AppsLaunchParams, AppsLaunchResult, AppsList, AppsListResult,
-    AppsRunning, AppsRunningResult, EventName, ExitReason, FocusChangedParams, HomePressedParams,
-    InputNavParams, LaunchRequest, NavAction, NavPhase, RunningApp, STEAM_RUNGAMEID,
+    App, AppExitedParams, AppKind, AppSource, AppStartedParams, AppsClose, AppsCloseParams,
+    AppsCloseResult, AppsFocus, AppsFocusParams, AppsFocusResult, AppsLaunch, AppsLaunchParams,
+    AppsLaunchResult, AppsList, AppsListResult, AppsRunning, AppsRunningResult, EventName,
+    ExitReason, FocusChangedParams, GamesList, GamesListResult, HomePressedParams, InputNavParams,
+    LaunchRequest, NavAction, NavPhase, RunningApp, STEAM_CLIENT_APP_ID,
+    STEAM_CLIENT_GAMESCOPE_APP_ID, STEAM_RUNGAMEID, SteamAttentionParams, SteamAttentionQuery,
+    SteamFocus, SteamFocusResult, SteamWindow,
 };
 use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde::Serialize;
@@ -31,17 +38,19 @@ use tracing::{debug, info, warn};
 
 use crate::Broadcast;
 use crate::apps::{ChildExit, Spawner};
-use crate::config::{AppConfig, Config, STEAM_BIG_PICTURE_APP_ID};
+use crate::config::{AppConfig, Config};
 use crate::focus::{FocusControl, GamescopeEvent, GamescopeState, baselayer_for};
 use crate::input::{InputControl, Intent, InterceptMode, RawInput, Repeat, translate};
+use crate::procs::{ProcessControl, Sig};
+use crate::steam::library;
 
-/// An `apps.*` request from a connection, with the channel for its result.
+/// A request from a connection, with the channel for its result.
 pub type Reply = oneshot::Sender<Result<Value, ErrorObject>>;
 
 /// Everything that drives the shell.
 #[derive(Debug)]
 pub enum Msg {
-    /// An `apps.*` method call: method name and raw params.
+    /// A method call the shell answers ([`METHODS`]): method name and raw params.
     Request {
         method: String,
         params: Option<Value>,
@@ -60,6 +69,10 @@ pub const METHODS: &[&str] = &[
     AppsLaunch::NAME,
     AppsRunning::NAME,
     AppsFocus::NAME,
+    AppsClose::NAME,
+    GamesList::NAME,
+    SteamAttentionQuery::NAME,
+    SteamFocus::NAME,
 ];
 
 /// Settings the shell needs, taken from [`Config`].
@@ -67,10 +80,14 @@ pub const METHODS: &[&str] = &[
 pub struct ShellConfig {
     pub launcher_app_id: u32,
     pub steam_path: PathBuf,
+    /// The configured Steam directory (`None`: found under `$HOME`).
+    pub steam_dir: Option<PathBuf>,
     /// Whether gamescope reports state (decides how Steam games are tracked).
     pub gamescope: bool,
     pub steam_launch_timeout: Duration,
     pub focus_loss_debounce: Duration,
+    /// How long `apps.close` waits before it kills.
+    pub close_timeout: Duration,
     pub repeat_delay: Duration,
     pub repeat_interval: Duration,
     pub apps: Vec<AppConfig>,
@@ -81,14 +98,24 @@ impl From<&Config> for ShellConfig {
         Self {
             launcher_app_id: c.launcher.app_id,
             steam_path: c.steam.path.clone(),
+            steam_dir: c.steam.dir.clone(),
             gamescope: c.gamescope.enable,
             steam_launch_timeout: Duration::from_secs(c.steam.launch_timeout_s),
             focus_loss_debounce: Duration::from_millis(c.gamescope.focus_loss_debounce_ms),
+            close_timeout: Duration::from_millis(c.close.timeout_ms),
             repeat_delay: c.input.repeat_delay(),
             repeat_interval: c.input.repeat_interval(),
             apps: c.apps.clone(),
         }
     }
+}
+
+/// An `apps.close` in progress.
+#[derive(Debug, Clone, Copy)]
+struct Closing {
+    /// SIGKILL was sent (or, for Steam, we stopped waiting).
+    killed: bool,
+    deadline: Instant,
 }
 
 #[derive(Debug)]
@@ -99,8 +126,26 @@ struct Running {
     seen_focusable: bool,
     /// gamescope reported it as GAMESCOPE_FOCUSED_APP.
     seen_focused: bool,
-    /// Steam game: since when its windows are gone (exit after the debounce).
+    /// Tracked by its windows: since when they are gone (exit after the debounce).
     gone_since: Option<Instant>,
+    closing: Option<Closing>,
+}
+
+/// Whether an app's lifetime is its windows (Steam games and Steam itself), rather than a
+/// process we started.
+fn tracked_by_windows(source: AppSource) -> bool {
+    matches!(source, AppSource::Steam | AppSource::SteamClient)
+}
+
+/// The running-app entry for Steam itself.
+fn steam_client_app() -> RunningApp {
+    RunningApp {
+        id: STEAM_CLIENT_APP_ID.into(),
+        name: "Steam".into(),
+        source: AppSource::SteamClient,
+        gamescope_app_id: STEAM_CLIENT_GAMESCOPE_APP_ID,
+        pid: None,
+    }
 }
 
 pub struct Shell {
@@ -108,6 +153,7 @@ pub struct Shell {
     focus: Box<dyn FocusControl>,
     input: Box<dyn InputControl>,
     spawner: Box<dyn Spawner>,
+    procs: Box<dyn ProcessControl>,
     events: broadcast::Sender<Broadcast>,
     apps: BTreeMap<String, Running>,
     /// `None`: the launcher.
@@ -119,6 +165,14 @@ pub struct Shell {
     /// The last few focus orders we wrote; gamescope state can lag behind our writes.
     written: std::collections::VecDeque<Vec<u32>>,
     next_command: u64,
+    /// Steam's mapped dialogs and main windows (from the gamescope watcher).
+    steam_windows: Vec<SteamWindow>,
+    /// Steam windows the user has seen (Steam had focus while they were open).
+    seen_windows: BTreeSet<u32>,
+    /// What steam_attention last said.
+    attention: Vec<SteamWindow>,
+    /// Who gets focus back when Steam, focused through steam.focus, closes its windows.
+    steam_return: Option<String>,
 }
 
 impl Shell {
@@ -127,6 +181,7 @@ impl Shell {
         focus: Box<dyn FocusControl>,
         input: Box<dyn InputControl>,
         spawner: Box<dyn Spawner>,
+        procs: Box<dyn ProcessControl>,
         events: broadcast::Sender<Broadcast>,
     ) -> Self {
         let repeat = Repeat::new(cfg.repeat_delay, cfg.repeat_interval);
@@ -135,6 +190,7 @@ impl Shell {
             focus,
             input,
             spawner,
+            procs,
             events,
             apps: BTreeMap::new(),
             focused: None,
@@ -143,6 +199,10 @@ impl Shell {
             focus_lost_at: None,
             written: std::collections::VecDeque::new(),
             next_command: 1,
+            steam_windows: Vec::new(),
+            seen_windows: BTreeSet::new(),
+            attention: Vec::new(),
+            steam_return: None,
         }
     }
 
@@ -195,6 +255,29 @@ impl Shell {
                 let p = decode_params::<AppsFocus>(params)?;
                 encode_result::<AppsFocus>(self.focus_request(p)?)
             }
+            AppsClose::NAME => {
+                let p = decode_params::<AppsClose>(params)?;
+                encode_result::<AppsClose>(self.close(p, now)?)
+            }
+            GamesList::NAME => {
+                decode_params::<GamesList>(params)?;
+                encode_result::<GamesList>(GamesListResult {
+                    games: self
+                        .steam_dir()
+                        .map(|dir| library::scan(&dir))
+                        .unwrap_or_default(),
+                })
+            }
+            SteamAttentionQuery::NAME => {
+                decode_params::<SteamAttentionQuery>(params)?;
+                encode_result::<SteamAttentionQuery>(SteamAttentionParams {
+                    windows: self.attention.clone(),
+                })
+            }
+            SteamFocus::NAME => {
+                decode_params::<SteamFocus>(params)?;
+                encode_result::<SteamFocus>(self.steam_focus(now)?)
+            }
             _ => Err(hinteros_api::server::method_not_found(method)),
         }
     }
@@ -207,21 +290,30 @@ impl Shell {
         }
     }
 
+    fn steam_dir(&self) -> Option<PathBuf> {
+        library::default_steam_dir(self.cfg.steam_dir.as_deref())
+    }
+
     fn list(&self) -> AppsListResult {
+        let steam = App {
+            id: STEAM_CLIENT_APP_ID.into(),
+            name: "Steam".into(),
+            kind: AppKind::Native,
+            icon: None,
+        };
         if self.cfg.apps.is_empty() {
-            return stub_apps();
+            let mut list = stub_apps();
+            list.apps.insert(0, steam);
+            return list;
         }
         AppsListResult {
-            apps: self
-                .cfg
-                .apps
-                .iter()
-                .map(|a| App {
+            apps: std::iter::once(steam)
+                .chain(self.cfg.apps.iter().map(|a| App {
                     id: a.id.clone(),
                     name: a.name.clone(),
                     kind: a.kind,
                     icon: a.icon.clone(),
-                })
+                }))
                 .collect(),
         }
     }
@@ -233,14 +325,18 @@ impl Shell {
         }
     }
 
+    fn not_running(id: &str) -> ErrorObject {
+        ErrorObject::new(
+            ErrorCode::AppNotFound,
+            format!("no running app with id '{id}'"),
+        )
+    }
+
     fn focus_request(&mut self, p: AppsFocusParams) -> Result<AppsFocusResult, ErrorObject> {
         if let Some(id) = &p.id
             && !self.apps.contains_key(id)
         {
-            return Err(ErrorObject::new(
-                ErrorCode::AppNotFound,
-                format!("no running app with id '{id}'"),
-            ));
+            return Err(Self::not_running(id));
         }
         self.set_focus(p.id);
         Ok(AppsFocusResult {})
@@ -256,6 +352,9 @@ impl Shell {
             .map_err(|e| ErrorObject::new(ErrorCode::InvalidParams, e))?;
         // Resolve to (key, name, what to run).
         let (key, name, target) = match request {
+            LaunchRequest::Id(id) if id == STEAM_CLIENT_APP_ID => {
+                (id, "Steam".to_string(), Target::SteamClient)
+            }
             LaunchRequest::Id(id) => {
                 let app = self.cfg.apps.iter().find(|a| a.id == id).ok_or_else(|| {
                     let stub =
@@ -286,11 +385,14 @@ impl Shell {
                 });
                 (key, name, Target::Command(argv))
             }
-            LaunchRequest::Steam(id) => (
-                format!("steam-{id}"),
-                format!("Steam game {id}"),
-                Target::Steam(id),
-            ),
+            LaunchRequest::Steam(id) => {
+                let name = self
+                    .steam_dir()
+                    .and_then(|dir| library::find_manifest(&dir, id))
+                    .map(|m| m.name)
+                    .unwrap_or_else(|| format!("Steam game {id}"));
+                (format!("steam-{id}"), name, Target::Steam(id))
+            }
         };
         // A Steam game started by id and by URL is the same game.
         let existing = match target {
@@ -299,7 +401,9 @@ impl Shell {
                 .values()
                 .find(|r| r.info.source == AppSource::Steam && r.info.gamescope_app_id == steam)
                 .map(|r| r.info.id.clone()),
-            Target::Command(_) => self.apps.contains_key(&key).then(|| key.clone()),
+            Target::Command(_) | Target::SteamClient => {
+                self.apps.contains_key(&key).then(|| key.clone())
+            }
         };
         if let Some(id) = existing {
             info!(app = %id, "already running; focusing it");
@@ -315,6 +419,7 @@ impl Shell {
                 format!("cannot start {what}: {e}"),
             )
         };
+        let steam_path = self.cfg.steam_path.to_string_lossy().into_owned();
         let info = match target {
             Target::Command(argv) => {
                 let gamescope_app_id = self.allocate_app_id();
@@ -334,7 +439,6 @@ impl Shell {
                 }
             }
             Target::Steam(steam) => {
-                let steam_path = self.cfg.steam_path.to_string_lossy().into_owned();
                 let argv = vec![
                     steam_path.clone(),
                     "-silent".into(),
@@ -353,31 +457,49 @@ impl Shell {
                     pid: None,
                 }
             }
+            Target::SteamClient => {
+                // A running client opens Big Picture for the URL; otherwise start Steam
+                // straight into it. Never under a reaper (games must get Steam's app ids).
+                let arg = if self.procs.steam_running() {
+                    "steam://open/bigpicture"
+                } else {
+                    "-gamepadui"
+                };
+                self.spawner
+                    .spawn(&key, &[steam_path.clone(), arg.into()], None)
+                    .map_err(|e| failed(e, &steam_path))?;
+                // Opened from the launcher: closing it goes back there.
+                self.steam_return = None;
+                steam_client_app()
+            }
         };
         info!(app = %info.id, gamescope_app_id = info.gamescope_app_id, "launched");
+        self.track(info.clone(), now);
+        self.set_focus(Some(key));
+        Ok(AppsLaunchResult { app: info })
+    }
+
+    /// Start tracking a running app and announce it.
+    fn track(&mut self, info: RunningApp, now: Instant) {
         self.apps.insert(
-            key.clone(),
+            info.id.clone(),
             Running {
                 info: info.clone(),
                 started: now,
                 seen_focusable: false,
                 seen_focused: false,
                 gone_since: None,
+                closing: None,
             },
         );
-        self.emit(
-            EventName::AppStarted,
-            AppStartedParams { app: info.clone() },
-        );
-        self.set_focus(Some(key));
-        Ok(AppsLaunchResult { app: info })
+        self.emit(EventName::AppStarted, AppStartedParams { app: info });
     }
 
     /// A gamescope app id for a command app: above the launcher's, skipping ids in use.
     fn allocate_app_id(&self) -> u32 {
         let in_use = |id: u32| {
             id == 0
-                || id == STEAM_BIG_PICTURE_APP_ID
+                || id == STEAM_CLIENT_GAMESCOPE_APP_ID
                 || id == self.cfg.launcher_app_id
                 || self.apps.values().any(|r| r.info.gamescope_app_id == id)
         };
@@ -390,6 +512,133 @@ impl Shell {
         }
     }
 
+    /// `apps.close`: ask the app to quit now, force it at the deadline (see [`Shell::tick`]).
+    fn close(&mut self, p: AppsCloseParams, now: Instant) -> Result<AppsCloseResult, ErrorObject> {
+        let Some(app) = self.apps.get(&p.id) else {
+            return Err(Self::not_running(&p.id));
+        };
+        if app.closing.is_some() {
+            return Ok(AppsCloseResult {});
+        }
+        let id = p.id;
+        let info = app.info.clone();
+        info!(app = %id, "closing");
+        match info.source {
+            AppSource::Command => {
+                let Some(pid) = info.pid else {
+                    self.exited(&id, ExitReason::Closed, None);
+                    return Ok(AppsCloseResult {});
+                };
+                // The reaper forwards it to the app's process group.
+                self.procs.signal(pid, Sig::Term);
+            }
+            AppSource::Steam => {
+                let procs = self.steam_game_processes(info.gamescope_app_id);
+                if procs.is_empty() {
+                    info!(app = %id, "no game processes (yet); no longer tracking it");
+                    self.exited(&id, ExitReason::Closed, None);
+                    return Ok(AppsCloseResult {});
+                }
+                for pid in procs {
+                    self.procs.signal(pid, Sig::Term);
+                }
+            }
+            AppSource::SteamClient => {
+                let steam_path = self.cfg.steam_path.to_string_lossy().into_owned();
+                let argv = [steam_path, "steam://close/bigpicture".into()];
+                if let Err(e) = self.spawner.spawn("steam-close", &argv, None) {
+                    warn!("cannot ask Steam to close Big Picture: {e}");
+                }
+                if !self.cfg.gamescope {
+                    // Nothing to watch: consider it closed.
+                    self.exited(&id, ExitReason::Closed, None);
+                    return Ok(AppsCloseResult {});
+                }
+            }
+        }
+        if let Some(app) = self.apps.get_mut(&id) {
+            app.closing = Some(Closing {
+                killed: false,
+                deadline: now + self.cfg.close_timeout,
+            });
+        }
+        Ok(AppsCloseResult {})
+    }
+
+    /// Every process under Steam's reaper(s) for a game.
+    fn steam_game_processes(&mut self, app_id: u32) -> Vec<u32> {
+        let reapers = self.procs.steam_reapers(app_id);
+        reapers
+            .into_iter()
+            .flat_map(|r| self.procs.descendants(r))
+            .collect()
+    }
+
+    /// The close deadline passed: SIGKILL what is left; the second time, stop tracking it.
+    fn force_close(&mut self, id: &str, now: Instant) {
+        let Some(app) = self.apps.get(id) else { return };
+        let info = app.info.clone();
+        if app.closing.is_some_and(|c| c.killed) {
+            warn!(
+                app = id,
+                "still not gone after SIGKILL; no longer tracking it"
+            );
+            self.exited(id, ExitReason::Closed, None);
+            return;
+        }
+        match info.source {
+            AppSource::Command => {
+                if let Some(pid) = info.pid {
+                    let tree = self.procs.descendants(pid);
+                    info!(app = id, processes = tree.len(), "did not quit; killing");
+                    for p in tree {
+                        self.procs.signal(p, Sig::Kill);
+                    }
+                }
+            }
+            AppSource::Steam => {
+                let tree = self.steam_game_processes(info.gamescope_app_id);
+                info!(app = id, processes = tree.len(), "did not quit; killing");
+                for p in tree {
+                    self.procs.signal(p, Sig::Kill);
+                }
+            }
+            AppSource::SteamClient => {
+                // Never kill Steam itself.
+                info!(app = id, "Big Picture did not close; no longer tracking it");
+                self.exited(id, ExitReason::Closed, None);
+                return;
+            }
+        }
+        if let Some(app) = self.apps.get_mut(id) {
+            app.closing = Some(Closing {
+                killed: true,
+                deadline: now + self.cfg.close_timeout,
+            });
+        }
+    }
+
+    /// `steam.focus`: show Steam's windows, with Steam tracked as the app `steam`.
+    fn steam_focus(&mut self, now: Instant) -> Result<SteamFocusResult, ErrorObject> {
+        if self.steam_windows.is_empty() {
+            return Err(ErrorObject::new(
+                ErrorCode::SteamNoWindows,
+                "Steam has no windows to show",
+            ));
+        }
+        if !self.apps.contains_key(STEAM_CLIENT_APP_ID) {
+            self.track(steam_client_app(), now);
+        }
+        let previous = self.focused.clone();
+        if previous.as_deref() != Some(STEAM_CLIENT_APP_ID) {
+            self.set_focus(Some(STEAM_CLIENT_APP_ID.into()));
+            self.steam_return = previous;
+        }
+        Ok(SteamFocusResult {
+            app: self.apps[STEAM_CLIENT_APP_ID].info.clone(),
+        })
+    }
+
     /// Give focus to `target` (`None`: the launcher): tell gamescope and InputPlumber, and
     /// announce it if it changed.
     fn set_focus(&mut self, target: Option<String>) {
@@ -398,6 +647,13 @@ impl Shell {
         let changed = self.focused != target;
         self.focused = target;
         self.apply_focus();
+        if self.focused.as_deref() == Some(STEAM_CLIENT_APP_ID) {
+            // The user now sees Steam's windows.
+            self.seen_windows
+                .extend(self.steam_windows.iter().map(|w| w.window));
+        } else {
+            self.steam_return = None;
+        }
         if changed {
             info!(app = ?self.focused, "focus");
             self.emit(
@@ -407,6 +663,7 @@ impl Shell {
                 },
             );
         }
+        self.update_attention();
     }
 
     /// (Re)apply the current focus to gamescope and InputPlumber.
@@ -432,6 +689,35 @@ impl Shell {
             Some(_) => InterceptMode::Pass,
             None => InterceptMode::All,
         });
+    }
+
+    /// New list of Steam's windows from the gamescope watcher.
+    fn steam_windows(&mut self, windows: Vec<SteamWindow>) {
+        self.seen_windows
+            .retain(|w| windows.iter().any(|s| s.window == *w));
+        if self.focused.as_deref() == Some(STEAM_CLIENT_APP_ID) {
+            self.seen_windows.extend(windows.iter().map(|w| w.window));
+        }
+        self.steam_windows = windows;
+        self.update_attention();
+    }
+
+    /// Send steam_attention if the list of unseen Steam windows changed.
+    fn update_attention(&mut self) {
+        let attention: Vec<SteamWindow> = self
+            .steam_windows
+            .iter()
+            .filter(|w| !self.seen_windows.contains(&w.window))
+            .cloned()
+            .collect();
+        if attention != self.attention {
+            info!(windows = ?attention, "Steam attention");
+            self.attention = attention.clone();
+            self.emit(
+                EventName::SteamAttention,
+                SteamAttentionParams { windows: attention },
+            );
+        }
     }
 
     fn home(&mut self) {
@@ -474,22 +760,18 @@ impl Shell {
         let Some(app) = self.apps.get(&exit.key) else {
             return;
         };
+        let reason = match exit.code {
+            Some(0) => ExitReason::Exited,
+            _ => ExitReason::Crashed,
+        };
         match app.info.source {
             AppSource::Command if app.info.pid == Some(exit.pid) => {
-                let reason = match exit.code {
-                    Some(0) => ExitReason::Exited,
-                    _ => ExitReason::Crashed,
-                };
                 self.exited(&exit.key, reason, exit.code);
             }
             AppSource::Command => {}
             // The steam command only hands the URL to the running client. Without gamescope
             // there is no way to see the game, so its end stands in for the game's.
             AppSource::Steam | AppSource::SteamClient if !self.cfg.gamescope => {
-                let reason = match exit.code {
-                    Some(0) => ExitReason::Exited,
-                    _ => ExitReason::Crashed,
-                };
                 self.exited(&exit.key, reason, exit.code);
             }
             AppSource::Steam | AppSource::SteamClient => match exit.code {
@@ -499,10 +781,16 @@ impl Shell {
         }
     }
 
+    /// An app ended (`closed` instead of `reason` if apps.close asked it to).
     fn exited(&mut self, id: &str, reason: ExitReason, exit_code: Option<i32>) {
-        if self.apps.remove(id).is_none() {
+        let Some(app) = self.apps.remove(id) else {
             return;
-        }
+        };
+        let reason = if app.closing.is_some() {
+            ExitReason::Closed
+        } else {
+            reason
+        };
         info!(app = id, ?reason, ?exit_code, "exited");
         self.emit(
             EventName::AppExited,
@@ -513,7 +801,14 @@ impl Shell {
             },
         );
         if self.focused.as_deref() == Some(id) {
-            self.set_focus(None);
+            let back = if id == STEAM_CLIENT_APP_ID {
+                self.steam_return
+                    .take()
+                    .filter(|r| self.apps.contains_key(r))
+            } else {
+                None
+            };
+            self.set_focus(back);
         }
     }
 
@@ -526,6 +821,7 @@ impl Shell {
             GamescopeEvent::Disconnected => {
                 self.gamescope = None;
                 self.focus_lost_at = None;
+                self.steam_windows(Vec::new());
             }
             GamescopeEvent::State(state) => {
                 if !state.baselayer_apps.is_empty() && !self.written.contains(&state.baselayer_apps)
@@ -539,6 +835,7 @@ impl Shell {
                 self.gamescope = Some(state);
                 self.observe(now);
             }
+            GamescopeEvent::SteamWindows(windows) => self.steam_windows(windows),
         }
     }
 
@@ -552,9 +849,9 @@ impl Shell {
             let is_focused = state.focused_app == Some(gs);
             app.seen_focusable |= listed;
             app.seen_focused |= is_focused;
-            if app.info.source == AppSource::Steam {
-                // A Steam game is gone when the Xwayland windows it had are gone. (A native
-                // Wayland game is never listed; the focus-loss rule below covers it.)
+            if tracked_by_windows(app.info.source) {
+                // Gone when the Xwayland windows it had are gone. (A native Wayland game is
+                // never listed; the focus-loss rule below covers it.)
                 let gone = app.seen_focusable && !listed && !is_focused;
                 app.gone_since = match (gone, app.gone_since) {
                     (true, None) => Some(now),
@@ -573,26 +870,34 @@ impl Shell {
         }
     }
 
+    /// Whether a window-tracked app that never showed a window has run out of time.
+    fn launch_deadline(&self, app: &Running) -> Option<Instant> {
+        let timeout = self.cfg.steam_launch_timeout;
+        (tracked_by_windows(app.info.source)
+            && self.cfg.gamescope
+            && !timeout.is_zero()
+            && !app.seen_focusable
+            && !app.seen_focused)
+            .then(|| app.started + timeout)
+    }
+
     /// When [`Shell::tick`] has something to do next.
     pub fn deadline(&self) -> Option<Instant> {
         let debounce = self.cfg.focus_loss_debounce;
-        let steam_timeout = self.cfg.steam_launch_timeout;
-        let watch_steam = self.cfg.gamescope && !steam_timeout.is_zero();
         self.apps
             .values()
-            .filter_map(|app| {
-                if let Some(since) = app.gone_since {
-                    Some(since + debounce)
-                } else if app.info.source == AppSource::Steam
-                    && watch_steam
-                    && !app.seen_focusable
-                    && !app.seen_focused
-                {
-                    Some(app.started + steam_timeout)
-                } else {
-                    None
-                }
+            .flat_map(|app| {
+                [
+                    app.gone_since.map(|since| since + debounce),
+                    if app.gone_since.is_none() {
+                        self.launch_deadline(app)
+                    } else {
+                        None
+                    },
+                    app.closing.map(|c| c.deadline),
+                ]
             })
+            .flatten()
             .chain(self.repeat.deadline())
             .chain(self.focus_lost_at)
             .min()
@@ -608,36 +913,37 @@ impl Shell {
         }
 
         let debounce = self.cfg.focus_loss_debounce;
-        let steam_timeout = self.cfg.steam_launch_timeout;
-        let watch_steam = self.cfg.gamescope && !steam_timeout.is_zero();
         let mut ended = Vec::new();
+        let mut force = Vec::new();
         for (id, app) in &self.apps {
             if app.gone_since.is_some_and(|since| now >= since + debounce) {
                 ended.push((id.clone(), ExitReason::Exited));
-            } else if app.info.source == AppSource::Steam
-                && watch_steam
-                && !app.seen_focusable
-                && !app.seen_focused
-                && now >= app.started + steam_timeout
+            } else if app.gone_since.is_none()
+                && self.launch_deadline(app).is_some_and(|at| now >= at)
             {
                 ended.push((id.clone(), ExitReason::LaunchTimeout));
+            } else if app.closing.is_some_and(|c| now >= c.deadline) {
+                force.push(id.clone());
             }
         }
         for (id, reason) in ended {
             self.exited(&id, reason, None);
         }
+        for id in force {
+            self.force_close(&id, now);
+        }
 
         if self.focus_lost_at.is_some_and(|at| now >= at) {
             self.focus_lost_at = None;
             if let Some(id) = self.focused.clone() {
-                let native_steam = self
+                let native = self
                     .apps
                     .get(&id)
-                    .is_some_and(|a| a.info.source == AppSource::Steam && !a.seen_focusable);
-                if native_steam {
+                    .is_some_and(|a| tracked_by_windows(a.info.source) && !a.seen_focusable);
+                if native {
                     // Seen only as focused, never as an Xwayland window: losing focus while
                     // first in line means it has no window any more.
-                    info!(app = %id, "Steam game's window is gone");
+                    info!(app = %id, "window is gone");
                     self.exited(&id, ExitReason::Exited, None);
                 } else {
                     info!(app = %id, "focused app has no window any more; back to the launcher");
@@ -651,9 +957,11 @@ impl Shell {
 enum Target {
     Command(Vec<String>),
     Steam(u32),
+    SteamClient,
 }
 
-/// What `apps.list` returns when no apps are configured (M0 stand-in).
+/// What `apps.list` returns after the built-in Steam entry when no apps are configured (M0
+/// stand-in).
 pub fn stub_apps() -> AppsListResult {
     let app = |id: &str, name: &str, kind| App {
         id: id.into(),
@@ -663,7 +971,6 @@ pub fn stub_apps() -> AppsListResult {
     };
     AppsListResult {
         apps: vec![
-            app("steam", "Steam", AppKind::Native),
             app("jellyfin", "Jellyfin", AppKind::Native),
             app("youtube", "YouTube", AppKind::Web),
             app("crunchyroll", "Crunchyroll", AppKind::Web),
@@ -714,6 +1021,7 @@ mod tests {
             argv: Vec<String>,
             app_id: Option<u32>,
         },
+        Signal(u32, Sig),
     }
 
     #[derive(Clone, Default)]
@@ -778,12 +1086,47 @@ mod tests {
         }
     }
 
+    /// Fake process table: reaper pid -> descendants, Steam reapers by app id, Steam running.
+    #[derive(Clone, Default)]
+    struct ProcTable {
+        trees: BTreeMap<u32, Vec<u32>>,
+        steam_reapers: BTreeMap<u32, Vec<u32>>,
+        steam_running: bool,
+    }
+
+    struct MockProcs {
+        log: Log,
+        table: Arc<Mutex<ProcTable>>,
+    }
+    impl ProcessControl for MockProcs {
+        fn signal(&mut self, pid: u32, sig: Sig) {
+            self.log.push(Call::Signal(pid, sig));
+        }
+        fn descendants(&mut self, pid: u32) -> Vec<u32> {
+            self.table
+                .lock()
+                .unwrap()
+                .trees
+                .get(&pid)
+                .cloned()
+                .unwrap_or_default()
+        }
+        fn steam_reapers(&mut self, app_id: u32) -> Vec<u32> {
+            let t = self.table.lock().unwrap();
+            t.steam_reapers.get(&app_id).cloned().unwrap_or_default()
+        }
+        fn steam_running(&mut self) -> bool {
+            self.table.lock().unwrap().steam_running
+        }
+    }
+
     const L: u32 = 4000;
     const MS: fn(u64) -> Duration = Duration::from_millis;
 
     struct T {
         shell: Shell,
         log: Log,
+        procs: Arc<Mutex<ProcTable>>,
         events: broadcast::Receiver<Broadcast>,
         now: Instant,
     }
@@ -797,9 +1140,13 @@ mod tests {
             let mut cfg = ShellConfig {
                 launcher_app_id: L,
                 steam_path: "/fake/steam".into(),
+                steam_dir: Some(
+                    crate::steam::library::tests::fixture_home().join(".local/share/Steam"),
+                ),
                 gamescope: true,
                 steam_launch_timeout: Duration::from_secs(60),
                 focus_loss_debounce: MS(1000),
+                close_timeout: MS(5000),
                 repeat_delay: MS(400),
                 repeat_interval: MS(100),
                 apps: vec![
@@ -823,6 +1170,7 @@ mod tests {
             };
             f(&mut cfg);
             let log = Log::default();
+            let procs = Arc::new(Mutex::new(ProcTable::default()));
             let (tx, events) = broadcast::channel(256);
             let mut shell = Shell::new(
                 cfg,
@@ -832,6 +1180,10 @@ mod tests {
                     log: log.clone(),
                     next_pid: 100,
                     fail: false,
+                }),
+                Box::new(MockProcs {
+                    log: log.clone(),
+                    table: procs.clone(),
                 }),
                 tx,
             );
@@ -843,6 +1195,7 @@ mod tests {
             Self {
                 shell,
                 log,
+                procs,
                 events,
                 now: Instant::now(),
             }
@@ -1274,11 +1627,12 @@ mod tests {
         // Stub entries (no apps configured) can't be launched.
         let mut t = T::with(|c| c.apps.clear());
         assert_eq!(
-            code(t.call("apps.launch", json!({"id": "steam"}))),
+            code(t.call("apps.launch", json!({"id": "jellyfin"}))),
             ErrorCode::AppLaunchFailed.code()
         );
         let list = t.call("apps.list", json!({})).unwrap();
         assert_eq!(list["apps"][0]["id"], "steam");
+        assert_eq!(list["apps"][1]["id"], "jellyfin");
     }
 
     #[test]
@@ -1299,5 +1653,375 @@ mod tests {
         let mut t = T::with(|c| c.launcher_app_id = u32::MAX);
         assert_eq!(t.launch(json!({"command": ["a"]})).gamescope_app_id, 1);
         assert_eq!(t.launch(json!({"command": ["b"]})).gamescope_app_id, 2);
+    }
+
+    fn exit(t: &mut T, key: &str, pid: u32, code: i32) {
+        t.shell.handle(
+            Msg::ChildExit(ChildExit {
+                key: key.into(),
+                pid,
+                code: Some(code),
+            }),
+            t.now,
+        );
+    }
+
+    fn steam_windows(t: &mut T, windows: &[(u32, &str)]) {
+        let windows = windows
+            .iter()
+            .map(|&(window, title)| SteamWindow {
+                window,
+                title: title.into(),
+                pid: Some(77),
+            })
+            .collect();
+        t.shell
+            .handle(Msg::Gamescope(GamescopeEvent::SteamWindows(windows)), t.now);
+    }
+
+    #[test]
+    fn close_command_app_term_then_kill() {
+        let mut t = T::new();
+        let app = t.launch(json!({"command": ["stubborn"]}));
+        let reaper = app.pid.unwrap();
+        t.procs
+            .lock()
+            .unwrap()
+            .trees
+            .insert(reaper, vec![reaper + 1, reaper + 2]);
+        t.events();
+        t.log.take();
+
+        assert_eq!(
+            t.call("apps.close", json!({"id": "cmd-1"})).unwrap(),
+            json!({})
+        );
+        assert_eq!(t.log.take(), [Call::Signal(reaper, Sig::Term)]);
+        // Closing again does nothing.
+        t.call("apps.close", json!({"id": "cmd-1"})).unwrap();
+        t.advance(MS(4999));
+        assert!(t.log.take().is_empty());
+        t.advance(MS(1));
+        assert_eq!(
+            t.log.take(),
+            [
+                Call::Signal(reaper + 1, Sig::Kill),
+                Call::Signal(reaper + 2, Sig::Kill)
+            ]
+        );
+        // The reaper exits once its tree is gone: closed, with the status.
+        exit(&mut t, "cmd-1", reaper, 137);
+        assert_eq!(
+            t.events(),
+            [
+                ev(
+                    EventName::AppExited,
+                    json!({"id": "cmd-1", "reason": "closed", "exit_code": 137})
+                ),
+                ev(EventName::FocusChanged, json!({"app": null})),
+            ]
+        );
+        assert_eq!(t.shell.deadline(), None);
+        assert_eq!(
+            t.call("apps.close", json!({"id": "cmd-1"}))
+                .unwrap_err()
+                .code,
+            ErrorCode::AppNotFound.code()
+        );
+    }
+
+    #[test]
+    fn close_command_app_that_quits_politely() {
+        let mut t = T::new();
+        let app = t.launch(json!({"command": ["polite"]}));
+        t.call("apps.close", json!({"id": "cmd-1"})).unwrap();
+        exit(&mut t, "cmd-1", app.pid.unwrap(), 0);
+        t.log.take();
+        t.advance(Duration::from_secs(60));
+        assert!(t.log.take().is_empty(), "no kill after it exited");
+        assert_eq!(
+            t.events()[2],
+            ev(
+                EventName::AppExited,
+                json!({"id": "cmd-1", "reason": "closed", "exit_code": 0})
+            )
+        );
+    }
+
+    #[test]
+    fn close_steam_game_kills_its_tree_not_steam() {
+        let mut t = T::new();
+        t.launch(json!({"url": "steam://rungameid/620"}));
+        t.gamescope(Some(620), &[620]);
+        {
+            let mut procs = t.procs.lock().unwrap();
+            procs.steam_reapers.insert(620, vec![500]);
+            procs.trees.insert(500, vec![501, 502]);
+        }
+        t.events();
+        t.log.take();
+        t.call("apps.close", json!({"id": "steam-620"})).unwrap();
+        assert_eq!(
+            t.log.take(),
+            [Call::Signal(501, Sig::Term), Call::Signal(502, Sig::Term)]
+        );
+        t.advance(MS(5000));
+        assert_eq!(
+            t.log.take(),
+            [Call::Signal(501, Sig::Kill), Call::Signal(502, Sig::Kill)]
+        );
+        // Its window goes: closed.
+        t.gamescope(Some(L), &[]);
+        t.advance(MS(1000));
+        assert_eq!(
+            t.events(),
+            [
+                ev(
+                    EventName::AppExited,
+                    json!({"id": "steam-620", "reason": "closed"})
+                ),
+                ev(EventName::FocusChanged, json!({"app": null})),
+            ]
+        );
+
+        // A game Steam has not started yet: nothing to kill, just stop tracking it.
+        t.launch(json!({"url": "steam://rungameid/570"}));
+        t.events();
+        t.log.take();
+        t.call("apps.close", json!({"id": "steam-570"})).unwrap();
+        assert!(!t.log.take().iter().any(|c| matches!(c, Call::Signal(..))));
+        assert_eq!(
+            t.events()[0],
+            ev(
+                EventName::AppExited,
+                json!({"id": "steam-570", "reason": "closed"})
+            )
+        );
+    }
+
+    #[test]
+    fn close_gives_up_after_kill() {
+        let mut t = T::new();
+        t.launch(json!({"url": "steam://rungameid/620"}));
+        t.gamescope(Some(620), &[620]);
+        t.procs.lock().unwrap().steam_reapers.insert(620, vec![500]);
+        t.events();
+        t.call("apps.close", json!({"id": "steam-620"})).unwrap();
+        t.advance(MS(10_000));
+        assert_eq!(
+            t.events()[0],
+            ev(
+                EventName::AppExited,
+                json!({"id": "steam-620", "reason": "closed"})
+            )
+        );
+    }
+
+    #[test]
+    fn games_list_and_names_from_the_library() {
+        let mut t = T::new();
+        let games = t.call("games.list", json!({})).unwrap();
+        let ids: Vec<&Value> = games["games"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| &g["appid"])
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                &json!(1_086_940),
+                &json!(570),
+                &json!(1_145_360),
+                &json!(620)
+            ]
+        );
+        assert_eq!(
+            t.launch(json!({"url": "steam://rungameid/620"})).name,
+            "Portal 2"
+        );
+        assert_eq!(
+            t.launch(json!({"url": "steam://rungameid/9"})).name,
+            "Steam game 9"
+        );
+
+        let mut t = T::with(|c| c.steam_dir = Some("/nonexistent".into()));
+        assert_eq!(
+            t.call("games.list", json!({})).unwrap(),
+            json!({"games": []})
+        );
+    }
+
+    #[test]
+    fn steam_big_picture_entry() {
+        let mut t = T::new();
+        assert_eq!(
+            t.call("apps.list", json!({})).unwrap()["apps"][0],
+            json!({"id": "steam", "name": "Steam", "kind": "native"})
+        );
+        // Steam not running: start it straight into Big Picture.
+        let app = t.launch(json!({"id": "steam"}));
+        assert_eq!(app, steam_client_app());
+        assert_eq!(
+            t.log.take(),
+            [
+                Call::Spawn {
+                    key: "steam".into(),
+                    argv: vec!["/fake/steam".into(), "-gamepadui".into()],
+                    app_id: None,
+                },
+                Call::FocusApp(769),
+                Call::Mode(InterceptMode::Pass),
+            ]
+        );
+        // Big Picture's window appears (tagged 769 by the watcher): seen, no attention.
+        t.gamescope(Some(769), &[769]);
+        steam_windows(&mut t, &[(10, "Steam Big Picture Mode")]);
+        // Home: Steam stays in the background; its window does not ask for attention.
+        t.input("ui_guide", 1.0);
+        assert_eq!(t.shell.focused(), None);
+        t.gamescope(Some(L), &[769]);
+        t.events();
+        assert_eq!(
+            t.call("steam.attention", json!({})).unwrap(),
+            json!({"windows": []})
+        );
+        // Closing Big Picture asks Steam, never kills it; its window goes: closed.
+        t.log.take();
+        t.call("apps.close", json!({"id": "steam"})).unwrap();
+        assert_eq!(
+            t.log.take(),
+            [Call::Spawn {
+                key: "steam-close".into(),
+                argv: vec!["/fake/steam".into(), "steam://close/bigpicture".into()],
+                app_id: None,
+            }]
+        );
+        t.gamescope(Some(L), &[]);
+        steam_windows(&mut t, &[]);
+        t.advance(MS(10_000));
+        assert!(!t.log.take().iter().any(|c| matches!(c, Call::Signal(..))));
+        assert_eq!(
+            t.events(),
+            [ev(
+                EventName::AppExited,
+                json!({"id": "steam", "reason": "closed"})
+            )]
+        );
+
+        // Steam running: the URL goes to the running client.
+        t.procs.lock().unwrap().steam_running = true;
+        t.launch(json!({"id": "steam"}));
+        assert_eq!(
+            t.log.take()[0],
+            Call::Spawn {
+                key: "steam".into(),
+                argv: vec!["/fake/steam".into(), "steam://open/bigpicture".into()],
+                app_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn steam_popup_while_in_a_game() {
+        let mut t = T::new();
+        assert_eq!(
+            t.call("steam.focus", json!({})).unwrap_err().code,
+            ErrorCode::SteamNoWindows.code()
+        );
+        t.launch(json!({"url": "steam://rungameid/620"}));
+        t.gamescope(Some(620), &[620]);
+        t.events();
+        t.log.take();
+
+        // A Steam Guard window appears while the game has focus.
+        steam_windows(&mut t, &[(42, "Steam Guard")]);
+        let guard = json!({"window": 42, "title": "Steam Guard", "pid": 77});
+        assert_eq!(
+            t.events(),
+            [ev(EventName::SteamAttention, json!({"windows": [guard]}))]
+        );
+        assert_eq!(
+            t.call("steam.attention", json!({})).unwrap(),
+            json!({"windows": [guard]})
+        );
+        // Same list again: no event.
+        steam_windows(&mut t, &[(42, "Steam Guard")]);
+        assert!(t.events().is_empty());
+
+        // The launcher brings it forward: Steam is an app now, with focus and the pad.
+        let r = t.call("steam.focus", json!({})).unwrap();
+        assert_eq!(r, json!({"app": steam_client_app()}));
+        assert_eq!(
+            t.log.take(),
+            [Call::FocusApp(769), Call::Mode(InterceptMode::Pass)]
+        );
+        assert_eq!(
+            t.events(),
+            [
+                ev(EventName::AppStarted, json!({"app": steam_client_app()})),
+                ev(EventName::FocusChanged, json!({"app": "steam"})),
+                ev(EventName::SteamAttention, json!({"windows": []})),
+            ]
+        );
+        t.gamescope(Some(769), &[620, 769]);
+
+        // Dismissed: the window closes, Steam exits, focus goes back to the game.
+        steam_windows(&mut t, &[]);
+        t.gamescope(Some(L), &[620]);
+        t.advance(MS(1000));
+        assert_eq!(
+            t.events(),
+            [
+                ev(
+                    EventName::AppExited,
+                    json!({"id": "steam", "reason": "exited"})
+                ),
+                ev(EventName::FocusChanged, json!({"app": "steam-620"})),
+            ]
+        );
+        assert_eq!(
+            t.log.take(),
+            [Call::FocusApp(620), Call::Mode(InterceptMode::Pass)]
+        );
+    }
+
+    #[test]
+    fn steam_attention_is_cleared_when_seen_or_closed() {
+        let mut t = T::new();
+        steam_windows(&mut t, &[(1, "Steam - Update"), (2, "Cloud Sync Conflict")]);
+        assert_eq!(t.events().len(), 1);
+        // One closes.
+        steam_windows(&mut t, &[(2, "Cloud Sync Conflict")]);
+        assert_eq!(
+            t.events(),
+            [ev(
+                EventName::SteamAttention,
+                json!({"windows": [{"window": 2, "title": "Cloud Sync Conflict", "pid": 77}]})
+            )]
+        );
+        // Seen via steam.focus, then Home: still open, but no longer asking.
+        t.call("steam.focus", json!({})).unwrap();
+        t.input("ui_guide", 1.0);
+        t.events();
+        assert_eq!(
+            t.call("steam.attention", json!({})).unwrap(),
+            json!({"windows": []})
+        );
+        // A new window asks again; gamescope going away clears everything.
+        steam_windows(&mut t, &[(2, "Cloud Sync Conflict"), (3, "Steam Guard")]);
+        assert_eq!(
+            t.events(),
+            [ev(
+                EventName::SteamAttention,
+                json!({"windows": [{"window": 3, "title": "Steam Guard", "pid": 77}]})
+            )]
+        );
+        t.shell
+            .handle(Msg::Gamescope(GamescopeEvent::Disconnected), t.now);
+        assert_eq!(
+            t.events(),
+            [ev(EventName::SteamAttention, json!({"windows": []}))]
+        );
     }
 }

@@ -27,7 +27,8 @@ impl Daemon {
     }
 
     /// Start with extra arguments, computed from the temp dir. gamescope and InputPlumber
-    /// integration are off unless the arguments turn them on, and no user config is read.
+    /// integration are off unless the arguments turn them on, and no user config or Steam
+    /// library is read (HOME is the temp dir).
     pub fn start_with(args: impl FnOnce(&Path) -> Vec<std::ffi::OsString>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let extra = args(dir.path());
@@ -39,6 +40,8 @@ impl Daemon {
             .args(["--no-gamescope", "--no-inputplumber"])
             .args(extra)
             .env("XDG_CONFIG_HOME", dir.path())
+            // No real Steam library (games.list) unless the arguments point at one.
+            .env("HOME", dir.path())
             .env("RUST_LOG", "debug")
             .spawn()
             .expect("start hinteros-session");
@@ -149,4 +152,41 @@ pub fn script(path: &Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The in-tree fake Steam install (a home with `.local/share/Steam` and a second library).
+pub fn steam_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/steam-home")
+}
+
+/// Copy a directory tree.
+pub fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let dest = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &dest);
+        } else {
+            std::fs::copy(entry.path(), dest).unwrap();
+        }
+    }
+}
+
+/// Wait for an event named `name`, skipping others.
+pub async fn event_named(c: &mut Client, name: &str) -> Value {
+    loop {
+        let (n, params) = next_event(c).await;
+        if n == name {
+            return params;
+        }
+    }
+}
+
+/// Whether process `pid` is alive (and not a zombie).
+pub fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+        !s.rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+    })
 }

@@ -359,6 +359,7 @@ async fn configured_apps_and_launch_errors() {
     assert_eq!(
         list,
         json!({ "apps": [
+            { "id": "steam", "name": "Steam", "kind": "native" },
             { "id": "shell", "name": "Shell", "kind": "native" },
             { "id": "broken", "name": "Broken", "kind": "native" },
         ] })
@@ -458,4 +459,220 @@ fn reaper_subcommand() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
+}
+
+#[tokio::test]
+async fn close_apps_politely_then_by_force() {
+    let d = Daemon::start_with(|dir| {
+        let config = dir.join("session.toml");
+        std::fs::write(&config, "[close]\ntimeout_ms = 300\n").unwrap();
+        vec!["--config".into(), config.into()]
+    });
+    let mut c = d.client().await;
+    call(&mut c, "subscribe", json!({ "events": ["app_exited"] }))
+        .await
+        .unwrap();
+
+    // Quits on SIGTERM.
+    call(&mut c, "apps.launch", json!({ "command": ["sleep", "30"] }))
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&mut c, "apps.close", json!({ "id": "cmd-1" })).await,
+        Ok(json!({}))
+    );
+    assert_eq!(
+        next_event(&mut c).await,
+        (
+            "app_exited".into(),
+            json!({ "id": "cmd-1", "reason": "closed", "exit_code": 143 })
+        )
+    );
+
+    // Ignores SIGTERM (and so does its child): killed after the timeout, tree and all.
+    let pids = d.dir.path().join("pids");
+    call(
+        &mut c,
+        "apps.launch",
+        json!({ "command": ["sh", "-c", format!("trap '' TERM; sleep 30 & echo $$ $! > {}; wait; wait", pids.display())] }),
+    )
+    .await
+    .unwrap();
+    let pids: Vec<u32> = eventually("the app to start", async || {
+        let s = std::fs::read_to_string(&pids).ok()?;
+        let v: Vec<u32> = s
+            .split_whitespace()
+            .filter_map(|p| p.parse().ok())
+            .collect();
+        (v.len() == 2).then_some(v)
+    })
+    .await;
+    let started = std::time::Instant::now();
+    call(&mut c, "apps.close", json!({ "id": "cmd-2" }))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_event(&mut c).await,
+        (
+            "app_exited".into(),
+            json!({ "id": "cmd-2", "reason": "closed", "exit_code": 137 })
+        )
+    );
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    for pid in pids {
+        assert!(!alive(pid), "{pid} survived");
+    }
+
+    let e = call(&mut c, "apps.close", json!({ "id": "cmd-2" }))
+        .await
+        .unwrap_err();
+    assert_eq!(e["code"], ErrorCode::AppNotFound.code());
+}
+
+#[tokio::test]
+async fn games_list_reads_the_steam_library() {
+    let d = Daemon::start_with(|_| {
+        vec![
+            "--steam-dir".into(),
+            steam_fixture().join(".local/share/Steam").into(),
+        ]
+    });
+    let mut c = d.client().await;
+    let games = call(&mut c, "games.list", json!({})).await.unwrap();
+    let names: Vec<&str> = games["games"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Baldur's Gate 3", "Dota 2", "Hades", "Portal 2"]);
+    let portal = &games["games"][3];
+    assert_eq!(portal["appid"], 620);
+    assert_eq!(portal["install_state"], "installed");
+    assert_eq!(portal["last_played"], 1_786_300_589);
+    let hero = portal["artwork"]["hero"].as_str().unwrap();
+    assert!(Path::new(hero).is_file(), "{hero}");
+    assert_eq!(games["games"][0]["artwork"]["hero"], Value::Null);
+
+    // A launched game is named from the library.
+    let steam = d.dir.path().join("steam");
+    script(&steam, "exit 0");
+    drop(c);
+    let d2 = Daemon::start_with(|_| {
+        vec![
+            "--steam-dir".into(),
+            steam_fixture().join(".local/share/Steam").into(),
+            "--steam-path".into(),
+            steam.into(),
+        ]
+    });
+    let mut c = d2.client().await;
+    let r = call(
+        &mut c,
+        "apps.launch",
+        json!({ "url": "steam://rungameid/1145360" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r["app"]["name"], "Hades");
+}
+
+#[tokio::test]
+async fn games_changed_when_a_game_is_installed() {
+    let d = Daemon::start_with(|dir| {
+        copy_tree(&steam_fixture(), &dir.join("home"));
+        let config = dir.join("session.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[steam]\ndir = \"{}\"\nlibrary_debounce_ms = 50\nlibrary_poll_s = 0\n",
+                dir.join("home/.local/share/Steam").display()
+            ),
+        )
+        .unwrap();
+        vec!["--config".into(), config.into()]
+    });
+    let mut c = d.client().await;
+    call(&mut c, "subscribe", json!({ "events": ["games_changed"] }))
+        .await
+        .unwrap();
+    let before = call(&mut c, "games.list", json!({})).await.unwrap();
+    // Give the watcher time to take its first snapshot.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Steam finishes installing a game: writes the manifest under a temp name, renames it.
+    let apps = d.dir.path().join("home/.local/share/Steam/steamapps");
+    let tmp = apps.join("appmanifest_400.acf.1.tmp");
+    std::fs::write(
+        &tmp,
+        "\"AppState\"\n{\n\t\"appid\"\t\t\"400\"\n\t\"name\"\t\t\"Portal\"\n\t\"StateFlags\"\t\t\"4\"\n}\n",
+    )
+    .unwrap();
+    std::fs::rename(&tmp, apps.join("appmanifest_400.acf")).unwrap();
+    assert_eq!(
+        next_event(&mut c).await,
+        ("games_changed".into(), json!({}))
+    );
+    let after = call(&mut c, "games.list", json!({})).await.unwrap();
+    assert_eq!(
+        after["games"].as_array().unwrap().len(),
+        before["games"].as_array().unwrap().len() + 1
+    );
+    assert!(
+        after["games"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["name"] == "Portal")
+    );
+}
+
+#[tokio::test]
+async fn steam_entry_opens_big_picture() {
+    let d = Daemon::start_with(|dir| {
+        let steam = dir.join("steam");
+        script(
+            &steam,
+            &format!("echo \"$@\" >> {}/steam.log", dir.display()),
+        );
+        vec!["--steam-path".into(), steam.into()]
+    });
+    let mut c = d.client().await;
+    call(
+        &mut c,
+        "subscribe",
+        json!({ "events": ["app_started", "app_exited", "focus_changed", "steam_attention"] }),
+    )
+    .await
+    .unwrap();
+    let apps = call(&mut c, "apps.list", json!({})).await.unwrap();
+    assert_eq!(apps["apps"][0]["id"], "steam");
+    let r = call(&mut c, "apps.launch", json!({ "id": "steam" }))
+        .await
+        .unwrap();
+    assert_eq!(
+        r,
+        json!({ "app": { "id": "steam", "name": "Steam", "source": "steam_client", "gamescope_app_id": 769 } })
+    );
+    assert_eq!(next_event(&mut c).await.0, "app_started");
+    assert_eq!(
+        next_event(&mut c).await,
+        ("focus_changed".into(), json!({ "app": "steam" }))
+    );
+    // Without gamescope the steam command's end stands in for Big Picture's.
+    assert_eq!(event_named(&mut c, "app_exited").await["id"], "steam");
+    let log = std::fs::read_to_string(d.dir.path().join("steam.log")).unwrap();
+    // "-gamepadui" if no Steam client runs on this machine, else the URL for the running one.
+    assert!(
+        log == "-gamepadui\n" || log == "steam://open/bigpicture\n",
+        "{log:?}"
+    );
+
+    // Nothing to show without gamescope.
+    assert_eq!(
+        call(&mut c, "steam.attention", json!({})).await.unwrap(),
+        json!({ "windows": [] })
+    );
+    let e = call(&mut c, "steam.focus", json!({})).await.unwrap_err();
+    assert_eq!(e["code"], ErrorCode::SteamNoWindows.code());
 }

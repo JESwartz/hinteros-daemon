@@ -6,9 +6,16 @@
 //! command = ["hinteros-launcher"]  # optional: the daemon starts and restarts the launcher
 //!
 //! [steam]
-//! path = "steam"               # binary used for steam://rungameid/<id>
+//! path = "steam"               # binary used for steam:// URLs and Big Picture
+//! dir = "~/.local/share/Steam" # library and artwork [default: found under $HOME]
 //! autostart = false            # run `steam -silent` when the daemon starts
 //! launch_timeout_s = 300       # give up on a game that never shows a window
+//! tag_windows = true           # tag Steam's windows STEAM_GAME=769 so they can be shown
+//! library_poll_s = 60          # library rescan besides inotify (0: off)
+//! library_debounce_ms = 500
+//!
+//! [close]
+//! timeout_ms = 5000            # apps.close: SIGKILL after this
 //!
 //! [gamescope]
 //! enable = true
@@ -41,15 +48,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
-use hinteros_api::session::AppKind;
+use hinteros_api::session::{AppKind, STEAM_CLIENT_APP_ID};
 use serde::Deserialize;
 
 /// Default gamescope app id of the launcher. Steam app ids are far below this, and Steam's
 /// non-Steam shortcuts use random ids with the top bit set, so collisions are unlikely.
 pub const DEFAULT_LAUNCHER_APP_ID: u32 = 4_100_000_000;
 
-/// gamescope treats app id 769 as Steam's Big Picture window.
-pub const STEAM_BIG_PICTURE_APP_ID: u32 = 769;
+/// gamescope's app id for Steam's own windows (Big Picture, dialogs); never used for anything else.
+pub use hinteros_api::session::STEAM_CLIENT_GAMESCOPE_APP_ID as STEAM_BIG_PICTURE_APP_ID;
 
 #[derive(Parser, Debug, Default)]
 #[command(version, about)]
@@ -73,6 +80,10 @@ pub struct Cli {
     /// steam binary used for steam://rungameid/<id> launches
     #[arg(long, env = "HINTEROS_STEAM")]
     pub steam_path: Option<PathBuf>,
+
+    /// Steam's directory, for games.list [default: ~/.local/share/Steam or ~/.steam/steam]
+    #[arg(long, env = "HINTEROS_STEAM_DIR")]
+    pub steam_dir: Option<PathBuf>,
 
     /// Control gamescope focus (needs gamescope's Xwayland)
     #[arg(long, overrides_with = "no_gamescope")]
@@ -113,6 +124,7 @@ pub struct Config {
     pub gamescope: GamescopeConfig,
     pub inputplumber: InputPlumberConfig,
     pub input: InputConfig,
+    pub close: CloseConfig,
     pub apps: Vec<AppConfig>,
 }
 
@@ -136,16 +148,28 @@ impl Default for LauncherConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct SteamConfig {
     pub path: PathBuf,
+    /// Steam's directory (library, artwork). `None`: found under `$HOME`.
+    pub dir: Option<PathBuf>,
     pub autostart: bool,
     pub launch_timeout_s: u64,
+    /// Tag Steam's own windows with `STEAM_GAME = 769` so they can be shown.
+    pub tag_windows: bool,
+    /// Rescan the library this often besides inotify (0: inotify only).
+    pub library_poll_s: u64,
+    /// Wait this long after a library change before rescanning.
+    pub library_debounce_ms: u64,
 }
 
 impl Default for SteamConfig {
     fn default() -> Self {
         Self {
             path: "steam".into(),
+            dir: None,
             autostart: false,
             launch_timeout_s: 300,
+            tag_windows: true,
+            library_poll_s: 60,
+            library_debounce_ms: 500,
         }
     }
 }
@@ -199,6 +223,19 @@ impl Default for InputConfig {
             repeat_delay_ms: 400,
             repeat_interval_ms: 100,
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CloseConfig {
+    /// How long apps.close waits for an app to quit before killing it.
+    pub timeout_ms: u64,
+}
+
+impl Default for CloseConfig {
+    fn default() -> Self {
+        Self { timeout_ms: 5000 }
     }
 }
 
@@ -276,6 +313,9 @@ impl Config {
         if let Some(path) = &cli.steam_path {
             self.steam.path = path.clone();
         }
+        if let Some(dir) = &cli.steam_dir {
+            self.steam.dir = Some(dir.clone());
+        }
         if let Some(on) = flag(cli.gamescope, cli.no_gamescope) {
             self.gamescope.enable = on;
         }
@@ -302,6 +342,10 @@ impl Config {
         let mut seen = BTreeSet::new();
         for app in &self.apps {
             ensure!(valid_app_id(&app.id), "invalid app id '{}'", app.id);
+            ensure!(
+                app.id != STEAM_CLIENT_APP_ID,
+                "app id '{STEAM_CLIENT_APP_ID}' is reserved for the built-in Steam entry"
+            );
             ensure!(seen.insert(&app.id), "duplicate app id '{}'", app.id);
             ensure!(!app.name.is_empty(), "app '{}' has an empty name", app.id);
             match (&app.command, app.steam_app_id) {
@@ -371,7 +415,11 @@ mod tests {
             command = ["hinteros-launcher", "--kiosk"]
             [steam]
             path = "/run/current-system/sw/bin/steam"
+            dir = "/srv/steam"
             autostart = true
+            tag_windows = false
+            [close]
+            timeout_ms = 100
             [gamescope]
             enable = false
             display = ":1"
@@ -393,7 +441,9 @@ mod tests {
         .unwrap();
         assert_eq!(c.launcher.app_id, 42);
         assert_eq!(c.launcher.command.as_ref().unwrap().len(), 2);
-        assert!(c.steam.autostart);
+        assert!(c.steam.autostart && !c.steam.tag_windows);
+        assert_eq!(c.steam.dir, Some(PathBuf::from("/srv/steam")));
+        assert_eq!(c.close.timeout_ms, 100);
         assert_eq!(c.gamescope_display(), ":1");
         assert!(!c.gamescope.enable && !c.inputplumber.enable);
         assert_eq!(c.input.repeat_delay(), Duration::from_millis(300));
@@ -411,6 +461,8 @@ mod tests {
             "[gamescope]\nenabled = true", // typo
             "[[apps]]\nid = \"Bad\"\nname = \"x\"\ncommand = [\"x\"]",
             "[[apps]]\nid = \"a\"\nname = \"x\"",
+            "[[apps]]\nid = \"steam\"\nname = \"x\"\ncommand = [\"x\"]",
+            "[close]\ntimeout = 1",
             "[[apps]]\nid = \"a\"\nname = \"x\"\ncommand = [\"x\"]\nsteam_app_id = 1",
             "[[apps]]\nid = \"a\"\nname = \"x\"\ncommand = [\"x\"]\n[[apps]]\nid = \"a\"\nname = \"y\"\ncommand = [\"y\"]",
         ] {
@@ -431,6 +483,8 @@ mod tests {
             "launcher --flag",
             "--steam-path",
             "/tmp/fake-steam",
+            "--steam-dir",
+            "/tmp/fake-steam-dir",
             "--gamescope-display",
             ":5",
         ]);
@@ -443,6 +497,7 @@ mod tests {
             Some(vec!["launcher".into(), "--flag".into()])
         );
         assert_eq!(c.steam.path, PathBuf::from("/tmp/fake-steam"));
+        assert_eq!(c.steam.dir, Some(PathBuf::from("/tmp/fake-steam-dir")));
         assert_eq!(c.gamescope_display(), ":5");
 
         let cli = Cli::parse_from(["hinteros-session", "--no-gamescope", "--gamescope"]);

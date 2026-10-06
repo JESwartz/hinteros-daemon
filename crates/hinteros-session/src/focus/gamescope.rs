@@ -613,6 +613,9 @@ mod tests {
                 .args([
                     "-displayfd",
                     "1",
+                    // Without it the server resets when its last client disconnects, and drops connections
+                    // made meanwhile (ConnectionReset / UnexpectedEof in whichever test connects next).
+                    "-noreset",
                     "-nolisten",
                     "tcp",
                     "-screen",
@@ -637,6 +640,7 @@ mod tests {
             BufReader::new(child.stdout.take().unwrap())
                 .read_line(&mut line)
                 .unwrap();
+            assert!(!line.is_empty(), "Xvfb exited before it was ready");
             Some(Self {
                 child,
                 display: format!(":{}", line.trim()),

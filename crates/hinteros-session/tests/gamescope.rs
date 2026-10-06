@@ -6,6 +6,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use serde_json::json;
 use x11rb::connection::Connection;
@@ -34,6 +35,9 @@ impl FakeGamescope {
             .args([
                 "-displayfd",
                 "1",
+                // Without it the server resets when its last client disconnects, and drops connections
+                // made meanwhile (ConnectionReset / UnexpectedEof in whichever test connects next).
+                "-noreset",
                 "-nolisten",
                 "tcp",
                 "-screen",
@@ -58,6 +62,7 @@ impl FakeGamescope {
         BufReader::new(xvfb.stdout.take().unwrap())
             .read_line(&mut line)
             .unwrap();
+        assert!(!line.is_empty(), "Xvfb exited before it was ready");
         let display = format!(":{}", line.trim());
         let (conn, screen) = x11rb::connect(Some(&display)).unwrap();
         let root = conn.setup().roots[screen].root;
@@ -402,19 +407,34 @@ async fn steam_popups_are_tagged_announced_and_shown() {
         json!({ "windows": [] })
     );
     gs.baselayer_becomes(&[769, LAUNCHER]).await;
-    gs.set("GAMESCOPE_FOCUSABLE_APPS", &[620, 769]);
-    gs.set("GAMESCOPE_FOCUSED_APP", &[769]);
 
     // The user deals with them; they close and the launcher is back.
     gs.destroy(guard);
     gs.destroy(update);
     gs.destroy(menu);
+    // The daemon reads gamescope's state when a property changes, and changes that follow
+    // each other quickly are read as one. It must have seen Steam listed and focused before
+    // that vanishes, or the app is not known to have shown a window at all. Real gamescope
+    // changes state over time; so does this one, repeating the cycle (rather than
+    // sleeping and hoping) until the daemon has reacted.
+    let cycle = async {
+        loop {
+            gs.set("GAMESCOPE_FOCUSABLE_APPS", &[620, 769]);
+            gs.set("GAMESCOPE_FOCUSED_APP", &[769]);
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            gs.set("GAMESCOPE_FOCUSABLE_APPS", &[620]);
+            gs.set("GAMESCOPE_FOCUSED_APP", &[LAUNCHER]);
+            // Longer than the focus-loss debounce.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    };
+    let exited = tokio::select! {
+        e = event_named(&mut c, "app_exited") => e,
+        () = cycle => unreachable!(),
+    };
     gs.set("GAMESCOPE_FOCUSABLE_APPS", &[620]);
     gs.set("GAMESCOPE_FOCUSED_APP", &[LAUNCHER]);
-    assert_eq!(
-        event_named(&mut c, "app_exited").await,
-        json!({ "id": "steam", "reason": "exited" })
-    );
+    assert_eq!(exited, json!({ "id": "steam", "reason": "exited" }));
     assert_eq!(
         event_named(&mut c, "focus_changed").await,
         json!({ "app": null })

@@ -102,8 +102,8 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
 - **App icons** (`icons/`): HinterOS ships no logos; `apps.list`'s `icon` is a local file found
   on the box at runtime. Per app, first match wins: `icon` (an absolute path or an icon theme
   name), then `desktop_id` (the app's freedesktop `.desktop` file, its `Icon=`, looked up in the
-  icon themes), then for web apps `icon_url` / `site_url`. The built-in `steam` entry uses
-  Steam's own `steam.desktop`. Desktop files and icons are searched in `$XDG_DATA_HOME`,
+  icon themes), then for web apps `icon_url` / `site_url`, then `firefox_profile`. The built-in `steam`
+  entry uses Steam's own `steam.desktop`. Desktop files and icons are searched in `$XDG_DATA_HOME`,
   `$XDG_DATA_DIRS`, `/run/current-system/sw/share`, `/etc/profiles/per-user/$USER/share`,
   `~/.nix-profile/share` and the Flatpak exports; themes searched are the active one (GTK's
   `gtk-icon-theme-name`, or `icons.theme`), what it inherits, and `hicolor`, plus `pixmaps/`.
@@ -116,6 +116,13 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   retries failures (1 min, 10 min, 1 h, then every 6 h), and sends `apps_changed` when an
   icon appears. Offline or failing, the app just has no `icon` (the launcher draws a letter
   tile) or keeps the stale cached one.
+  Some sites refuse non-browser fetches (Crunchyroll answers 403): for those, `firefox_profile`
+  (the app's kiosk profile, `~/` allowed; needs `site_url`) names the profile whose
+  `favicons.sqlite` Firefox filled when it visited the site. The daemon copies that database (and
+  its `-wal`) to a temporary directory, never opening Firefox's own files, takes the largest icon
+  stored for the site, and exports it as `<app-id>.firefox.<ext>` in the icon cache. It is read
+  at startup, when a download fails, and again whenever the app exits (`app_exited`), sending
+  `apps_changed` if the icon changed; a downloaded icon always replaces it.
 - **Reaper** (`reaper.rs`): `hinteros-session reaper SteamLaunch AppId=<id> -- <command>` runs
   a command as a child subreaper named `reaper`, which is how gamescope (Steam mode) learns the
   app id of a process's windows, X11 and native Wayland alike. The daemon starts command apps
@@ -186,6 +193,7 @@ name = "YouTube"
 kind = "web"
 command = ["firefox", "--kiosk", "--new-instance", "https://www.youtube.com/tv"]
 site_url = "https://www.youtube.com/tv"     # icon from the site (or: icon_url = "https://.../icon.png")
+# firefox_profile = "~/.local/share/hinteros/firefox/youtube"  # fallback: the favicon Firefox stored
 input = "keyboard"             # "gamepad" (default) or "keyboard"
 back_key = "escape"            # what B sends [default: escape]; e.g. "backspace", "alt+left"
 

@@ -60,6 +60,7 @@
 //! kind = "web"
 //! command = ["firefox", "--kiosk", "https://www.youtube.com/tv"]
 //! site_url = "https://www.youtube.com/tv"  # icon from the site's manifest/favicon (or icon_url)
+//! # firefox_profile = "~/.local/share/hinteros/firefox/youtube"  # fallback: the favicon Firefox stored
 //! input = "keyboard"           # controller -> key presses (default "gamepad": the pad itself)
 //! back_key = "escape"          # what B sends [default: escape]
 //! [apps.keymap]                # more (or other) actions -> keys
@@ -442,6 +443,9 @@ pub struct AppConfig {
     pub icon_url: Option<String>,
     /// Web apps: an https page whose manifest, apple-touch-icon or favicon is the icon.
     pub site_url: Option<String>,
+    /// Web apps: the app's Firefox profile directory (`~/` allowed). When the site refuses the icon
+    /// download, the favicon Firefox stored there for `site_url` is used. Needs `site_url`.
+    pub firefox_profile: Option<PathBuf>,
     pub command: Option<Vec<String>>,
     pub steam_app_id: Option<u32>,
     #[serde(default)]
@@ -455,6 +459,14 @@ pub struct AppConfig {
 
 fn native() -> AppKind {
     AppKind::Native
+}
+
+/// `~/x` as `$HOME/x`; other paths unchanged.
+pub fn expand_home(path: &Path) -> PathBuf {
+    match (path.strip_prefix("~"), std::env::var_os("HOME")) {
+        (Ok(rest), Some(home)) if !home.is_empty() => Path::new(&home).join(rest),
+        _ => path.to_path_buf(),
+    }
 }
 
 impl AppConfig {
@@ -612,6 +624,11 @@ impl Config {
                     );
                 }
             }
+            ensure!(
+                app.firefox_profile.is_none() || app.site_url.is_some(),
+                "app '{}': firefox_profile needs site_url",
+                app.id
+            );
             if let Some(id) = &app.desktop_id {
                 ensure!(
                     !id.is_empty() && !id.contains('/'),
@@ -904,6 +921,7 @@ mod tests {
         for bad in [
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nicon_url = \"http://x.test/i.png\"",
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\ndesktop_id = \"a/b\"",
+            "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nfirefox_profile = \"/p\"",
         ] {
             assert!(Config::parse(bad).is_err(), "accepted: {bad}");
         }
@@ -914,5 +932,23 @@ mod tests {
             "--no-icon-fetch",
         ]));
         assert!(c.input.dev_gamepad && !c.icons.fetch);
+    }
+
+    #[test]
+    fn firefox_profile_needs_a_site_and_expands_home() {
+        let c = Config::parse(
+            "[[apps]]\nid = \"cr\"\nname = \"CR\"\ncommand = [\"x\"]\nsite_url = \"https://www.crunchyroll.com/\"\n\
+             firefox_profile = \"~/.local/share/hinteros/firefox/cr\"",
+        )
+        .unwrap();
+        let profile = c.apps[0].firefox_profile.as_deref().unwrap();
+        assert_eq!(profile, Path::new("~/.local/share/hinteros/firefox/cr"));
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            assert_eq!(
+                expand_home(profile),
+                Path::new(&home).join(".local/share/hinteros/firefox/cr")
+            );
+        }
+        assert_eq!(expand_home(Path::new("/abs/p")), Path::new("/abs/p"));
     }
 }

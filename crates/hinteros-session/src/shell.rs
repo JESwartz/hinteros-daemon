@@ -48,7 +48,7 @@ use tracing::{debug, info, warn};
 use crate::apps::{ChildExit, Spawner};
 use crate::config::{AppConfig, Config};
 use crate::focus::{FocusControl, GamescopeEvent, GamescopeState, baselayer_for};
-use crate::icons::IconStore;
+use crate::icons::{IconStore, Refresher};
 use crate::input::{InputControl, Intent, InterceptMode, RawInput, Repeat, translate};
 use crate::keys::{KeyCombo, KeyInjector, KeyOp, Keymap, plan_action, plan_text};
 use crate::procs::{ProcessControl, Sig};
@@ -128,6 +128,8 @@ pub struct ShellConfig {
     pub osk_summon: Option<NavAction>,
     /// Resolved app icons (filled in by `icons::start`, possibly later).
     pub icons: IconStore,
+    /// Told when an app exits (re-reads its Firefox favicon).
+    pub icon_refresh: Refresher,
 }
 
 impl From<&Config> for ShellConfig {
@@ -146,6 +148,7 @@ impl From<&Config> for ShellConfig {
             osk_enabled: c.osk.enable,
             osk_summon: c.osk.summon_button().ok().flatten(),
             icons: IconStore::default(),
+            icon_refresh: Refresher::default(),
         }
     }
 }
@@ -1121,6 +1124,7 @@ impl Shell {
             reason
         };
         info!(app = id, ?reason, ?exit_code, "exited");
+        self.cfg.icon_refresh.app_exited(id);
         self.emit(
             EventName::AppExited,
             AppExitedParams {
@@ -1495,6 +1499,7 @@ mod tests {
             desktop_id: None,
             icon_url: None,
             site_url: None,
+            firefox_profile: None,
             command: command.map(|c| vec![c.into()]),
             steam_app_id,
             input: InputProfile::Gamepad,
@@ -1549,6 +1554,7 @@ mod tests {
                 osk_enabled: true,
                 osk_summon: None,
                 icons: IconStore::default(),
+                icon_refresh: Refresher::default(),
             };
             f(&mut cfg);
             let log = Log::default();

@@ -8,12 +8,18 @@
 //!    `$XDG_CACHE_HOME/hinteros/icons/<app-id>.<ext>`, refreshed when older than
 //!    `icons.refresh_days` ([`web`]).
 //!
+//! 4. `firefox_profile` (web apps): the favicon Firefox itself stored in the app's kiosk profile
+//!    when it visited `site_url` ([`firefox`]); for sites that refuse non-browser fetches. It is
+//!    exported to the cache as `<app-id>.firefox.<ext>`, so a downloaded icon always wins, and
+//!    is re-read when the app exits (Firefox has just stored the favicon it saw).
+//!
 //! Local lookups are quick and happen before the daemon starts serving. Downloads happen on
 //! a background thread; each time the resolved set changes the daemon sends `apps_changed`.
 //! Failures (offline, site changed) are logged and the app simply has no icon, or keeps its
 //! stale cached one.
 
 pub mod desktop;
+pub mod firefox;
 pub mod web;
 
 use std::collections::HashMap;
@@ -54,6 +60,8 @@ pub struct IconSpec {
     pub icon: Option<String>,
     pub desktop_id: Option<String>,
     pub web: Option<web::Source>,
+    /// The app's Firefox profile directory and the page it shows.
+    pub firefox: Option<(PathBuf, String)>,
 }
 
 impl IconSpec {
@@ -67,6 +75,11 @@ impl IconSpec {
                 (None, Some(url)) => Some(web::Source::Site(url.clone())),
                 _ => None,
             },
+            firefox: app
+                .firefox_profile
+                .as_deref()
+                .map(crate::config::expand_home)
+                .zip(app.site_url.clone()),
         }
     }
 
@@ -121,17 +134,50 @@ impl Cache {
         })
     }
 
+    /// The icon exported from the app's Firefox profile, if any.
+    pub fn lookup_firefox(&self, id: &str) -> Option<PathBuf> {
+        EXTENSIONS
+            .iter()
+            .map(|ext| self.dir.join(format!("{id}.firefox.{ext}")))
+            .find(|p| p.is_file())
+    }
+
+    /// Cache a downloaded icon (always rewritten: that renews its age). It replaces an
+    /// exported Firefox icon.
     pub fn store(&self, id: &str, image: &web::Image) -> std::io::Result<PathBuf> {
-        fs::create_dir_all(&self.dir)?;
-        let path = self.dir.join(format!("{id}.{}", image.ext));
-        let tmp = self.dir.join(format!(".{id}.tmp"));
-        fs::write(&tmp, &image.bytes)?;
-        fs::rename(&tmp, &path)?;
-        // A different format than before: drop the old file.
-        for ext in EXTENSIONS.iter().filter(|e| **e != image.ext) {
-            let _ = fs::remove_file(self.dir.join(format!("{id}.{ext}")));
-        }
+        let (path, _) = self.write(id, image, true)?;
+        self.remove_others(&format!("{id}.firefox"), None);
         Ok(path)
+    }
+
+    /// Cache an icon exported from Firefox. Whether the file's content changed.
+    pub fn store_firefox(&self, id: &str, image: &web::Image) -> std::io::Result<(PathBuf, bool)> {
+        self.write(&format!("{id}.firefox"), image, false)
+    }
+
+    fn write(
+        &self,
+        stem: &str,
+        image: &web::Image,
+        renew: bool,
+    ) -> std::io::Result<(PathBuf, bool)> {
+        fs::create_dir_all(&self.dir)?;
+        let path = self.dir.join(format!("{stem}.{}", image.ext));
+        let changed = fs::read(&path).map_or(true, |old| old != image.bytes);
+        if changed || renew {
+            let tmp = self.dir.join(format!(".{stem}.tmp"));
+            fs::write(&tmp, &image.bytes)?;
+            fs::rename(&tmp, &path)?;
+        }
+        // A different format than before: drop the old file.
+        self.remove_others(stem, Some(image.ext));
+        Ok((path, changed))
+    }
+
+    fn remove_others(&self, stem: &str, keep: Option<&str>) {
+        for ext in EXTENSIONS.iter().filter(|e| Some(**e) != keep) {
+            let _ = fs::remove_file(self.dir.join(format!("{stem}.{ext}")));
+        }
     }
 }
 
@@ -160,9 +206,91 @@ pub fn resolve_local(
                 None => stale.push(spec.clone()),
             }
         }
+        if icon.is_none() && spec.firefox.is_some() {
+            // No downloaded icon (yet): what Firefox stored for the site, if anything.
+            icon = cache.and_then(|c| {
+                export_firefox(spec, c)
+                    .map(|(path, _)| path)
+                    .or_else(|| c.lookup_firefox(&spec.id))
+            });
+        }
         changed |= store.set(&spec.id, icon);
     }
     (changed, stale)
+}
+
+/// Export the favicon of the app's Firefox profile to the cache. The path and whether the
+/// cached file changed; `None` when there is no profile, database or icon (errors are logged).
+fn export_firefox(spec: &IconSpec, cache: &Cache) -> Option<(PathBuf, bool)> {
+    let (profile, site) = spec.firefox.as_ref()?;
+    let image = match firefox::favicon(profile, site) {
+        Ok(Some(image)) => image,
+        Ok(None) => {
+            debug!(app = %spec.id, profile = %profile.display(), "no Firefox favicon for the site");
+            return None;
+        }
+        Err(e) => {
+            warn!(app = %spec.id, "reading the Firefox favicon: {e:#}");
+            return None;
+        }
+    };
+    match cache.store_firefox(&spec.id, &image) {
+        Ok((path, changed)) => {
+            if changed {
+                info!(app = %spec.id, icon = %path.display(), "icon exported from the Firefox profile");
+            }
+            Some((path, changed))
+        }
+        Err(e) => {
+            warn!(app = %spec.id, "caching the Firefox favicon: {e}");
+            None
+        }
+    }
+}
+
+/// Re-read an app's Firefox favicon (after the app exited, when Firefox has just stored what
+/// it saw). Only when nothing better exists: no explicit/desktop icon, no downloaded one.
+/// Whether the app's icon changed.
+pub fn refresh_firefox(
+    spec: &IconSpec,
+    dirs: &desktop::Dirs,
+    cache: &Cache,
+    store: &IconStore,
+) -> bool {
+    if spec.firefox.is_none() || spec.local(dirs).is_some() || cache.lookup(&spec.id).is_some() {
+        return false;
+    }
+    match export_firefox(spec, cache) {
+        Some((path, content_changed)) => store.set(&spec.id, Some(path)) | content_changed,
+        None => false,
+    }
+}
+
+/// Called when an app exited: refreshes its icon in the background and reports a change.
+#[derive(Clone)]
+pub struct Refresher(Arc<dyn Fn(&str) + Send + Sync>);
+
+impl Refresher {
+    /// Does nothing.
+    pub fn none() -> Self {
+        Self(Arc::new(|_| {}))
+    }
+
+    pub fn app_exited(&self, id: &str) {
+        (self.0)(id);
+    }
+}
+
+impl std::fmt::Debug for Refresher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Refresher")
+    }
+}
+
+impl Default for Refresher {
+    fn default() -> Self {
+        Self::none()
+    }
 }
 
 /// Download the icons of `todo` and update the store. Returns whether the store changed and
@@ -177,7 +305,16 @@ pub fn fetch_pass(
     let mut failed = Vec::new();
     for spec in todo {
         let Some(source) = &spec.web else { continue };
-        match fetcher.fetch_icon(source) {
+        let result = fetcher.fetch_icon(source);
+        if result.is_err()
+            && cache.lookup(&spec.id).is_none()
+            && let Some((path, _)) = export_firefox(spec, cache)
+        {
+            // The site refuses us (or is down), but Firefox has seen it: use its icon. The
+            // download is still retried later.
+            changed |= store.set(&spec.id, Some(path));
+        }
+        match result {
             Ok(image) => match cache.store(&spec.id, &image) {
                 Ok(path) => {
                     info!(app = %spec.id, icon = %path.display(), "web icon cached");
@@ -249,13 +386,13 @@ pub fn spawn_fetcher(
 }
 
 /// Everything the daemon does with icons at startup: resolve locally now, fetch in the
-/// background.
+/// background. The returned [`Refresher`] re-reads Firefox favicons when apps exit.
 pub fn start(
     apps: &[AppConfig],
     cfg: &IconsConfig,
     store: &IconStore,
-    changed: impl Fn() + Send + 'static,
-) {
+    changed: impl Fn() + Send + Sync + 'static,
+) -> Refresher {
     let mut specs = vec![IconSpec::steam()];
     specs.extend(apps.iter().map(IconSpec::from_app));
     let mut dirs = desktop::Dirs::from_env(cfg.theme.as_deref());
@@ -272,6 +409,38 @@ pub fn start(
             max_age: Duration::from_secs(cfg.refresh_days * 86400),
         });
     let (_, todo) = resolve_local(&specs, &dirs, cache.as_ref(), store);
+    let changed = Arc::new(changed);
+    let refresher = match &cache {
+        Some(cache) if specs.iter().any(|s| s.firefox.is_some()) => {
+            let (specs, dirs, cache, store) =
+                (specs.clone(), dirs.clone(), cache.clone(), store.clone());
+            let changed = changed.clone();
+            Refresher(Arc::new(move |id| {
+                let Some(spec) = specs.iter().find(|s| s.id == id && s.firefox.is_some()) else {
+                    return;
+                };
+                let (spec, dirs, cache, store, changed) = (
+                    spec.clone(),
+                    dirs.clone(),
+                    cache.clone(),
+                    store.clone(),
+                    changed.clone(),
+                );
+                // SQLite and file copies: not on the shell's thread.
+                let spawned = std::thread::Builder::new()
+                    .name("icon-refresh".into())
+                    .spawn(move || {
+                        if refresh_firefox(&spec, &dirs, &cache, &store) {
+                            changed();
+                        }
+                    });
+                if let Err(e) = spawned {
+                    warn!("cannot refresh the icon: {e}");
+                }
+            }))
+        }
+        _ => Refresher::none(),
+    };
     match cache {
         Some(cache) if cfg.fetch => {
             if !todo.is_empty() {
@@ -284,7 +453,7 @@ pub fn start(
                 cache,
                 store.clone(),
                 web::Fetcher::default(),
-                changed,
+                move || changed(),
             );
         }
         _ if !todo.is_empty() => {
@@ -292,6 +461,7 @@ pub fn start(
         }
         _ => {}
     }
+    refresher
 }
 
 #[cfg(test)]
@@ -459,5 +629,82 @@ mod tests {
             fs::read(t.path().join("c/ok.png")).unwrap(),
             b"\x89PNG\r\n\x1a\nlogo"
         );
+    }
+
+    #[test]
+    fn firefox_icon_is_the_last_resort_and_refreshes_after_exit() {
+        use firefox::tests::{PNG, profile};
+        let t = tempfile::tempdir().unwrap();
+        let cache = Cache {
+            dir: t.path().join("cache"),
+            max_age: Duration::from_secs(60),
+        };
+        let dirs = desktop::Dirs {
+            data: vec![],
+            icon_roots: vec![],
+            theme: None,
+        };
+        let site = "https://www.crunchyroll.com/";
+        let empty = profile(&[]);
+        let spec = IconSpec {
+            // The site refuses non-browser fetches: nothing can be downloaded.
+            web: Some(web::Source::Site("https://127.0.0.1:1/".into())),
+            firefox: Some((empty.path().to_path_buf(), site.into())),
+            ..spec("crunchy")
+        };
+        let store = IconStore::default();
+
+        // Firefox has not visited the site yet: no icon, the download is wanted.
+        let (changed, stale) =
+            resolve_local(std::slice::from_ref(&spec), &dirs, Some(&cache), &store);
+        assert!(!changed && stale.len() == 1);
+        assert_eq!(store.get("crunchy"), None);
+        assert!(!refresh_firefox(&spec, &dirs, &cache, &store));
+
+        // The app runs, Firefox stores the favicon, the app exits: the icon appears.
+        let visited = profile(&[(site, "https://www.crunchyroll.com/i.png", 180, PNG)]);
+        let spec = IconSpec {
+            firefox: Some((visited.path().to_path_buf(), site.into())),
+            ..spec
+        };
+        assert!(refresh_firefox(&spec, &dirs, &cache, &store));
+        let path = t.path().join("cache/crunchy.firefox.png");
+        assert_eq!(store.get("crunchy"), Some(path.clone()));
+        assert_eq!(fs::read(&path).unwrap(), PNG);
+        // Nothing new the second time.
+        assert!(!refresh_firefox(&spec, &dirs, &cache, &store));
+
+        // A restart finds it again, and a failed download keeps it.
+        let fresh = IconStore::default();
+        let (changed, _) = resolve_local(std::slice::from_ref(&spec), &dirs, Some(&cache), &fresh);
+        assert!(changed);
+        assert_eq!(fresh.get("crunchy"), Some(path.clone()));
+        let fetcher = web::Fetcher::new(true);
+        let (_, failed) = fetch_pass(std::slice::from_ref(&spec), &fetcher, &cache, &fresh);
+        assert_eq!(failed.len(), 1);
+        assert_eq!(fresh.get("crunchy"), Some(path.clone()));
+
+        // A downloaded icon beats it and replaces the exported file.
+        cache.store("crunchy", &png_image()).unwrap();
+        assert!(!path.exists());
+        assert!(!refresh_firefox(&spec, &dirs, &cache, &store));
+        let (changed, _) = resolve_local(std::slice::from_ref(&spec), &dirs, Some(&cache), &store);
+        assert!(changed);
+        assert_eq!(
+            store.get("crunchy"),
+            Some(t.path().join("cache/crunchy.png"))
+        );
+
+        // An explicit icon beats everything, and refreshing leaves it alone.
+        let explicit = t.path().join("mine.png");
+        fs::write(&explicit, "x").unwrap();
+        let spec = IconSpec {
+            icon: Some(explicit.to_string_lossy().into()),
+            ..spec
+        };
+        let other = IconStore::default();
+        resolve_local(std::slice::from_ref(&spec), &dirs, Some(&cache), &other);
+        assert_eq!(other.get("crunchy"), Some(explicit));
+        assert!(!refresh_firefox(&spec, &dirs, &cache, &other));
     }
 }

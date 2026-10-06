@@ -12,10 +12,12 @@ clap.workspace = true
 evdev.workspace = true
 futures-util.workspace = true
 hinteros-api.workspace = true
+rusqlite.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
@@ -30,7 +32,6 @@ zbus.workspace = true
 
 [dev-dependencies]
 hinteros-api = { workspace = true, features = ["conformance"] }
-tempfile.workspace = true
 wayland-server.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 

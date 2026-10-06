@@ -1,0 +1,21 @@
+# Runs `nix flake check` on the self-hosted runner (host executor, shared Nix
+# store, /dev/kvm for VM tests). Only pushes to this repo's own branches
+# trigger it; pull requests from forks never run here (TESTING.md, "Runner
+# security"). Checkout uses plain git so the host needs no Node.js.
+name: check
+
+on:
+  push:
+    branches: ["**"]
+
+jobs:
+  check:
+    runs-on: hinteros-host
+    steps:
+      - name: checkout
+        run: |
+          git init -q .
+          git fetch -q --depth 1 "${{ github.server_url }}/${{ github.repository }}.git" "${{ github.sha }}"
+          git checkout -q FETCH_HEAD
+      - name: nix flake check
+        run: nix flake check -L --keep-going

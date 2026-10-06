@@ -12,7 +12,7 @@ pub const MAX_MESSAGE_BYTES: usize = 1 << 20;
 pub enum ReadError {
     #[error(transparent)]
     Io(#[from] io::Error),
-    #[error("message exceeds {MAX_MESSAGE_BYTES} bytes")]
+    #[error("message exceeds the size limit")]
     TooLong,
     #[error("message is not valid UTF-8")]
     NotUtf8,
@@ -21,13 +21,20 @@ pub enum ReadError {
 pub struct LineReader<R> {
     inner: BufReader<R>,
     buf: Vec<u8>,
+    max: usize,
 }
 
 impl<R: AsyncRead + Unpin> LineReader<R> {
     pub fn new(inner: R) -> Self {
+        Self::with_limit(inner, MAX_MESSAGE_BYTES)
+    }
+
+    /// A reader whose lines may be at most `max` bytes (the system socket uses 64 KiB).
+    pub fn with_limit(inner: R, max: usize) -> Self {
         Self {
             inner: BufReader::new(inner),
             buf: Vec::new(),
+            max,
         }
     }
 
@@ -37,14 +44,14 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
     /// used as a `tokio::select!` branch.
     pub async fn next_line(&mut self) -> Result<Option<String>, ReadError> {
         loop {
-            let limit = (MAX_MESSAGE_BYTES + 2).saturating_sub(self.buf.len()) as u64;
+            let limit = (self.max + 2).saturating_sub(self.buf.len()) as u64;
             let n = (&mut self.inner)
                 .take(limit)
                 .read_until(b'\n', &mut self.buf)
                 .await?;
             let complete = self.buf.last() == Some(&b'\n');
             if !complete && n != 0 {
-                if self.buf.len() > MAX_MESSAGE_BYTES {
+                if self.buf.len() > self.max {
                     return Err(ReadError::TooLong);
                 }
                 continue;
@@ -59,7 +66,7 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
-            if line.len() > MAX_MESSAGE_BYTES {
+            if line.len() > self.max {
                 return Err(ReadError::TooLong);
             }
             if line.iter().all(u8::is_ascii_whitespace) {

@@ -153,6 +153,10 @@
           "description": "The server closes the connection after sending this error.",
           "type": "boolean"
         },
+        "data_optional": {
+          "description": "The error may be sent without data (data, when present, must match the data schema).",
+          "type": "boolean"
+        },
         "data": { "$ref": "#/$defs/payloadSchema" }
       }
     }

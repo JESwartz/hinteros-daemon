@@ -448,3 +448,202 @@ fn game_nullables_are_required_in_rust_too() {
         Value::Null
     );
 }
+
+#[test]
+fn system_enums_match() {
+    use hinteros_api::system::{Base, Channel, EventName, JobKind, JobState, Severity, Stage};
+    let schema = ApiSchema::system();
+    assert_eq!(schema_enum(&schema, "EventName"), rust_enum(EventName::ALL));
+    assert_eq!(schema_enum(&schema, "Channel"), rust_enum(Channel::ALL));
+    assert_eq!(schema_enum(&schema, "Base"), rust_enum(Base::ALL));
+    assert_eq!(schema_enum(&schema, "JobKind"), rust_enum(JobKind::ALL));
+    assert_eq!(schema_enum(&schema, "JobState"), rust_enum(JobState::ALL));
+    assert_eq!(schema_enum(&schema, "Stage"), rust_enum(Stage::ALL));
+    assert_eq!(schema_enum(&schema, "Severity"), rust_enum(Severity::ALL));
+    for e in EventName::ALL {
+        assert_eq!(rust_enum(&[*e]).pop_first().unwrap(), e.wire_name());
+    }
+    for c in Channel::ALL {
+        assert_eq!(rust_enum(&[*c]).pop_first().unwrap(), c.name());
+    }
+    let events: BTreeSet<String> = system::API.events.iter().map(|e| e.name.into()).collect();
+    assert_eq!(events, rust_enum(EventName::ALL));
+}
+
+#[test]
+fn system_schema_rejects_what_it_should() {
+    let schema = ApiSchema::system();
+    let bad = [
+        // Closed params everywhere: a forged uid, a path, a URL.
+        ("/methods/rebuild/params", r#"{"uid":0}"#),
+        (
+            "/methods/ssh.set/params",
+            r#"{"enabled":true,"user":"root"}"#,
+        ),
+        ("/methods/ssh.set/params", r#"{"enabled":"yes"}"#),
+        (
+            "/methods/settings.set/params",
+            r#"{"revision":"x","changes":{}}"#,
+        ),
+        (
+            "/methods/settings.set/params",
+            r#"{"revision":"6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d","changes":{"substituters":["http://evil"]}}"#,
+        ),
+        (
+            "/methods/channel.set/params",
+            r#"{"channel":"https://evil/repo.git"}"#,
+        ),
+        (
+            "/methods/channel.set/params",
+            r#"{"channel":"beta","url":"https://x"}"#,
+        ),
+        ("/methods/base.set/params", r#"{"base":"23.11"}"#),
+        ("/methods/update.apply/params", r#"{"rev":"HEAD"}"#),
+        (
+            "/methods/update.apply/params",
+            r#"{"rev":"../../etc/passwd"}"#,
+        ),
+        ("/methods/rollback/params", r#"{"generation":0}"#),
+        ("/methods/jobs.get/params", r#"{"job_id":"../x"}"#),
+        (
+            "/methods/jobs.cancel/params",
+            r#"{"job_id":"ABCDEF0123456789"}"#,
+        ),
+        (
+            "/events/job_progress/params",
+            r#"{"job_id":"3f9a0c2b7e4d1a65","stage":"x"}"#,
+        ),
+        (
+            "/events/job_progress/params",
+            r#"{"job_id":"3f9a0c2b7e4d1a65","stage":"downloading","percent":101}"#,
+        ),
+    ];
+    for (pointer, instance) in bad {
+        let v: Value = serde_json::from_str(instance).unwrap();
+        assert!(
+            schema.check(pointer, &v).is_err(),
+            "{pointer} accepted {instance}"
+        );
+    }
+    // invalid_params may carry {field, reason} or nothing.
+    schema
+        .check_error(&serde_json::json!({"code": -32602, "message": "m"}))
+        .unwrap();
+    schema
+        .check_error(&serde_json::json!({"code": -32602, "message": "m", "data": {"field": "changes.x", "reason": "unknown_field"}}))
+        .unwrap();
+    assert!(
+        schema
+            .check_error(&serde_json::json!({"code": 3002, "message": "m", "data": {"action": "org.hinteros.system.ssh", "reason": "mood"}}))
+            .is_err()
+    );
+    // system_unavailable is session-side only.
+    assert!(
+        schema
+            .check_error(
+                &serde_json::json!({"code": 3001, "message": "m", "data": {"reason": "down"}})
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn system_rust_params_are_closed() {
+    use hinteros_api::system::{NoParams, SshSetParams, UpdateApplyParams};
+    assert!(serde_json::from_str::<NoParams>(r#"{"uid":0}"#).is_err());
+    assert!(serde_json::from_str::<SshSetParams>(r#"{"enabled":true,"x":1}"#).is_err());
+    assert!(serde_json::from_str::<UpdateApplyParams>(r#"{"rev":"a","path":"/"}"#).is_err());
+    for action in system::POLKIT_ACTIONS {
+        assert!(action.starts_with("org.hinteros.system."));
+    }
+    for m in system::MUTATING {
+        assert!(
+            system::polkit_action(m).is_some(),
+            "{m} has no polkit action"
+        );
+    }
+}
+
+/// Inline every `#/$defs/...` reference, so schemas from two documents can be compared.
+fn resolve(doc: &Value, v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                if k == "$ref" {
+                    let name = val.as_str().unwrap().strip_prefix("#/$defs/").unwrap();
+                    let target = resolve(doc, &doc["$defs"][name]);
+                    for (tk, tv) in target.as_object().cloned().unwrap_or_default() {
+                        out.insert(tk, tv);
+                    }
+                } else {
+                    out.insert(k.clone(), resolve(doc, val));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(a) => Value::Array(a.iter().map(|x| resolve(doc, x)).collect()),
+        other => other.clone(),
+    }
+}
+
+#[test]
+fn relay_matches_the_system_api() {
+    let session = ApiSchema::session();
+    let system = ApiSchema::system();
+    let (s, y) = (session.doc(), system.doc());
+    let relayed: BTreeSet<&str> = session::RELAY.iter().map(|(s, _)| *s).collect();
+    let marked: BTreeSet<&str> = s["methods"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, m)| m["relay"] == true)
+        .map(|(k, _)| k.as_str())
+        .collect();
+    assert_eq!(relayed, marked, "relay table vs schema relay flags");
+    // Every system method except the core ones is relayed.
+    let system_methods: BTreeSet<&str> = y["methods"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .filter(|m| !["hello", "ping", "subscribe", "unsubscribe"].contains(m))
+        .collect();
+    let targets: BTreeSet<&str> = session::RELAY.iter().map(|(_, t)| *t).collect();
+    assert_eq!(system_methods, targets);
+    for (sm, ym) in session::RELAY {
+        for part in ["params", "result"] {
+            assert_eq!(
+                resolve(s, &s["methods"][sm][part]),
+                resolve(y, &y["methods"][ym][part]),
+                "{sm} {part} differs from the system API's {ym}"
+            );
+        }
+        let s_errors: BTreeSet<&str> = s["methods"][sm]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().unwrap())
+            .collect();
+        assert!(s_errors.contains("system_unavailable"), "{sm}");
+        for e in y["methods"][ym]["errors"].as_array().unwrap() {
+            assert!(s_errors.contains(e.as_str().unwrap()), "{sm} lacks {e}");
+        }
+    }
+    for ev in ["job_started", "job_progress", "job_finished"] {
+        assert_eq!(
+            resolve(s, &s["events"][ev]["params"]),
+            resolve(y, &y["events"][ev]["params"]),
+            "event {ev}"
+        );
+    }
+    // Errors are one code space: system errors are forwarded unchanged.
+    for (name, decl) in y["errors"].as_object().unwrap() {
+        assert_eq!(
+            resolve(s, &s["errors"][name]["data"]),
+            resolve(y, &decl["data"]),
+            "error {name} data"
+        );
+        assert_eq!(s["errors"][name]["code"], decl["code"], "error {name}");
+    }
+}

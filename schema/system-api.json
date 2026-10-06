@@ -1,17 +1,17 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.1",
-  "description": "Internal API of the privileged HinterOS system service. Its only client is the session daemon (both ship from this repo at one revision). Callers are identified with SO_PEERCRED and authorized with polkit. See hinteros-docs/design/api.md.",
+  "version": "0.2",
+  "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (no interactive authorization), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
   "transport": {
     "protocol": "jsonrpc-2.0",
     "framing": "ndjson",
     "socket": "/run/hinteros/system.sock",
-    "max_message_bytes": 1048576
+    "max_message_bytes": 65536
   },
   "methods": {
     "hello": {
-      "summary": "Version handshake. Must be the first request on a connection.",
+      "summary": "Version handshake. Must be the first request on a connection, within 5 seconds.",
       "since": "0.1",
       "handshake": true,
       "params": {
@@ -36,8 +36,17 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.1", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "0.2", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "0.2", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+        },
+        {
+          "name": "mismatch",
+          "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
+          "error": {
+            "code": 1002,
+            "message": "API version mismatch: client 0.1, server 0.2",
+            "data": { "client_api_version": "0.1", "server_api_version": "0.2" }
+          }
         }
       ]
     },
@@ -56,14 +65,553 @@
       },
       "errors": [],
       "examples": [{ "name": "with nonce", "params": { "nonce": "1" }, "result": { "nonce": "1" } }]
+    },
+    "subscribe": {
+      "summary": "Start receiving the given events on this connection. Returns the full subscription set.",
+      "since": "0.2",
+      "params": { "$ref": "#/$defs/SubscriptionParams", "type": "object" },
+      "result": { "$ref": "#/$defs/SubscriptionResult", "type": "object" },
+      "errors": [],
+      "examples": [
+        {
+          "name": "job events",
+          "params": { "events": ["job_started", "job_progress", "job_finished"] },
+          "result": { "events": ["job_started", "job_progress", "job_finished"] }
+        }
+      ]
+    },
+    "unsubscribe": {
+      "summary": "Stop receiving the given events on this connection. Returns the remaining subscription set.",
+      "since": "0.2",
+      "params": { "$ref": "#/$defs/SubscriptionParams", "type": "object" },
+      "result": { "$ref": "#/$defs/SubscriptionResult", "type": "object" },
+      "errors": [],
+      "examples": [{ "name": "progress off", "params": { "events": ["job_progress"] }, "result": { "events": ["job_started", "job_finished"] } }]
+    },
+    "system.info": {
+      "summary": "What is running: release, channel, base, locked revision, generation, hostname, dev build, SSH state and host key fingerprints. Read-only.",
+      "since": "0.2",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": {
+        "type": "object",
+        "required": ["version", "channel", "base", "rev", "generation", "hostname", "dev", "ssh"],
+        "additionalProperties": false,
+        "properties": {
+          "version": { "description": "HinterOS release of the running generation, or 'unknown'.", "type": "string", "minLength": 1, "maxLength": 64 },
+          "channel": { "description": "Channel /etc/hinteros follows; null without a locked channel (the dev box).", "oneOf": [{ "$ref": "#/$defs/Channel" }, { "type": "null" }] },
+          "base": { "$ref": "#/$defs/Base" },
+          "rev": { "description": "Locked system repo revision.", "oneOf": [{ "$ref": "#/$defs/Rev" }, { "type": "null" }] },
+          "generation": { "description": "Current system generation.", "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+          "hostname": { "type": "string", "maxLength": 64 },
+          "dev": { "description": "A dev build (hinteros.dev.enable): the launcher shows a DEV badge.", "type": "boolean" },
+          "ssh": {
+            "type": "object",
+            "required": ["enabled", "host_key_fingerprints"],
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "host_key_fingerprints": {
+                "description": "SHA256 fingerprints of the SSH host keys, for checking the first connection.",
+                "type": "array",
+                "maxItems": 8,
+                "items": { "$ref": "#/$defs/Fingerprint" }
+              }
+            }
+          }
+        }
+      },
+      "errors": [],
+      "examples": [
+        {
+          "name": "a box on stable",
+          "params": {},
+          "result": {
+            "version": "0.1.0",
+            "channel": "stable",
+            "base": "unstable",
+            "rev": "0f3c5a9e2b7d4c1a8e6f9b0d2c4e6a8b1d3f5a7c",
+            "generation": 42,
+            "hostname": "hinteros",
+            "dev": false,
+            "ssh": { "enabled": true, "host_key_fingerprints": ["SHA256:2CixtE95MNbZHanQGv6hP2D3qfguu9QZfjca2OaupKI"] }
+          }
+        }
+      ]
+    },
+    "settings.get": {
+      "summary": "The user-settable view of state.json and its revision (a hash of the file). Read-only.",
+      "since": "0.2",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": {
+        "type": "object",
+        "required": ["revision", "settings"],
+        "additionalProperties": false,
+        "properties": {
+          "revision": { "$ref": "#/$defs/Revision" },
+          "settings": {
+            "type": "object",
+            "required": ["base", "ssh"],
+            "additionalProperties": false,
+            "properties": {
+              "base": { "$ref": "#/$defs/Base" },
+              "ssh": {
+                "type": "object",
+                "required": ["enabled"],
+                "additionalProperties": false,
+                "properties": { "enabled": { "description": "sshd runs; login is the admin account with its password.", "type": "boolean" } }
+              }
+            }
+          }
+        }
+      },
+      "errors": [],
+      "examples": [
+        {
+          "name": "defaults",
+          "params": {},
+          "result": {
+            "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
+            "settings": { "base": "unstable", "ssh": { "enabled": false } }
+          }
+        }
+      ]
+    },
+    "settings.set": {
+      "summary": "Change state.json settings (job). Action org.hinteros.system.settings.",
+      "description": "changes is a closed, typed object: each settable state.json field is a property here (bool, enum, bounded integer), never free-form. It has no properties in 0.2 (SSH, base and channel have their own methods), so any field is invalid_params with data {field, reason: unknown_field}, and an empty changes object returns job_id null. revision must equal settings.get's, else state_conflict. The service writes state.json from its own typed state, never the caller's bytes.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["revision", "changes"],
+        "additionalProperties": false,
+        "properties": {
+          "revision": { "$ref": "#/$defs/Revision" },
+          "changes": { "type": "object", "additionalProperties": false, "properties": {} }
+        }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "state_conflict", "job_busy", "insufficient_resources"],
+      "examples": [
+        {
+          "name": "nothing to change",
+          "params": { "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "changes": {} },
+          "result": { "job_id": null }
+        },
+        {
+          "name": "stale revision",
+          "params": { "revision": "0000000000000000000000000000000000000000000000000000000000000000", "changes": {} },
+          "error": { "code": 3007, "message": "state.json changed since settings.get", "data": { "reason": "revision" } }
+        }
+      ]
+    },
+    "ssh.set": {
+      "summary": "Turn SSH (sshd) on or off (job). Action org.hinteros.system.ssh, which needs the admin password (auth_admin).",
+      "description": "Login over SSH is the admin account with its password; the system repo configures sshd. polkit's default for this action is auth_admin, so without an authorization the call gets authentication_required (the launcher will ask for the admin password once a polkit agent exists). Returns job_id null if SSH already is in that state.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["enabled"],
+        "additionalProperties": false,
+        "properties": { "enabled": { "type": "boolean" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources"],
+      "examples": [
+        { "name": "turn on", "params": { "enabled": true }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        {
+          "name": "needs the admin password",
+          "params": { "enabled": true },
+          "error": { "code": 3012, "message": "org.hinteros.system.ssh needs interactive authentication", "data": { "action": "org.hinteros.system.ssh" } }
+        },
+        {
+          "name": "not the active seat user",
+          "params": { "enabled": false },
+          "error": { "code": 3002, "message": "caller does not own the active seat0 session", "data": { "action": "org.hinteros.system.ssh", "reason": "seat" } }
+        }
+      ]
+    },
+    "generations.list": {
+      "summary": "System generations on disk (newest first). Read-only.",
+      "since": "0.2",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": {
+        "type": "object",
+        "required": ["generations"],
+        "additionalProperties": false,
+        "properties": { "generations": { "type": "array", "items": { "$ref": "#/$defs/Generation" } } }
+      },
+      "errors": [],
+      "examples": [
+        {
+          "name": "two generations",
+          "params": {},
+          "result": {
+            "generations": [
+              { "generation": 42, "date": 1791240000, "rev": "0f3c5a9e2b7d4c1a8e6f9b0d2c4e6a8b1d3f5a7c", "current": true, "booted": false },
+              { "generation": 41, "date": 1790000000, "rev": null, "current": false, "booted": true }
+            ]
+          }
+        }
+      ]
+    },
+    "rebuild": {
+      "summary": "Re-apply the current /etc/hinteros (job): repair after a failed switch. Action org.hinteros.system.rebuild.",
+      "since": "0.2",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources"],
+      "examples": [
+        { "name": "started", "params": {}, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        {
+          "name": "another job runs",
+          "params": {},
+          "error": { "code": 3005, "message": "another job is running", "data": { "job_id": "a1b2c3d4e5f60718" } }
+        },
+        {
+          "name": "low memory",
+          "params": {},
+          "error": {
+            "code": 3004,
+            "message": "not enough memory to rebuild",
+            "data": { "kind": "memory", "needed_bytes": 2147483648, "available_bytes": 1073741824 }
+          }
+        },
+        { "name": "too many requests", "params": {}, "error": { "code": 3006, "message": "too many requests", "data": { "retry_after_ms": 4000 } } }
+      ]
+    },
+    "hardware.redetect": {
+      "summary": "Regenerate facter.json with nixos-facter and apply it (job). Action org.hinteros.system.rebuild.",
+      "since": "0.2",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources"],
+      "examples": [{ "name": "started", "params": {}, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
+    },
+    "rollback": {
+      "summary": "Switch to an earlier generation (default: the one before the current), then restore /etc/hinteros from its snapshot (job). Action org.hinteros.system.rollback.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "generation": { "type": "integer", "minimum": 1, "maximum": 4294967295 } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "not_found"],
+      "examples": [
+        { "name": "previous", "params": {}, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "unknown generation", "params": { "generation": 7 }, "error": { "code": 3010, "message": "generation 7 is not on disk" } }
+      ]
+    },
+    "update.check": {
+      "summary": "Look for a newer signed revision of the channel (job), or, within 60 s of the last check, return that result without a job. Action org.hinteros.system.update.check.",
+      "description": "The job lists the channel branch (git ls-remote of the URL from the running generation's channel table), fetches it into a root-owned bare repo, verifies the tip's SSH signature against the allowed signers shipped in the running generation, requires it to descend from the locked revision, and reads the highest Security: <low|medium|high|critical> trailer among the new commits. The job's result is an UpdateCheckResult; failures are job_failed, update_unreachable or update_verification_failed in job_finished.error.",
+      "since": "0.2",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": {
+        "type": "object",
+        "required": ["job_id", "result"],
+        "additionalProperties": false,
+        "properties": {
+          "job_id": { "oneOf": [{ "$ref": "#/$defs/JobId" }, { "type": "null" }] },
+          "result": { "oneOf": [{ "$ref": "#/$defs/UpdateCheckResult" }, { "type": "null" }] }
+        }
+      },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy"],
+      "examples": [
+        { "name": "new check", "params": {}, "result": { "job_id": "3f9a0c2b7e4d1a65", "result": null } },
+        {
+          "name": "cached",
+          "params": {},
+          "result": {
+            "job_id": null,
+            "result": {
+              "channel": "stable",
+              "current_rev": "0f3c5a9e2b7d4c1a8e6f9b0d2c4e6a8b1d3f5a7c",
+              "available": {
+                "rev": "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5",
+                "date": 1791300000,
+                "summary": "Release 0.2.0",
+                "signer": "release@hinteros",
+                "security": "high",
+                "commits": 12
+              },
+              "checked_at": 1791300100
+            }
+          }
+        }
+      ]
+    },
+    "update.apply": {
+      "summary": "Install the revision found by the last update.check (job). Action org.hinteros.system.update.apply.",
+      "description": "rev must equal the last verified check result's available.rev for the current channel and locked revision, else state_conflict. The job re-verifies it, locks the hinteros input to ?rev=<rev> (never re-fetching the branch) and runs the apply flow.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["rev"],
+        "additionalProperties": false,
+        "properties": { "rev": { "$ref": "#/$defs/Rev" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "state_conflict"],
+      "examples": [
+        { "name": "started", "params": { "rev": "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        {
+          "name": "not the checked revision",
+          "params": { "rev": "1111111111111111111111111111111111111111" },
+          "error": { "code": 3007, "message": "rev is not the last verified update", "data": { "reason": "update_rev" } }
+        }
+      ]
+    },
+    "channel.set": {
+      "summary": "Follow another channel (job). Action org.hinteros.system.channel.",
+      "description": "The URL comes from the running generation's channel table, never from params. The target tip must be signed by an allowed signer. Moving from beta to stable, or to a tip that does not descend from the locked revision, needs acknowledge_downgrade: true (else needs_acknowledgement: at once for beta to stable, in job_finished.error for a non-fast-forward tip). Returns job_id null if the channel is already the current one.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["channel"],
+        "additionalProperties": false,
+        "properties": {
+          "channel": { "$ref": "#/$defs/Channel" },
+          "acknowledge_downgrade": { "type": "boolean" }
+        }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "needs_acknowledgement"],
+      "examples": [
+        { "name": "to beta", "params": { "channel": "beta" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "to stable without acknowledgement", "params": { "channel": "stable" }, "error": { "code": 3011, "message": "switching from beta to stable is a downgrade" } }
+      ]
+    },
+    "base.set": {
+      "summary": "Switch the nixpkgs base (job). Action org.hinteros.system.channel. unstable to stable needs acknowledge_downgrade: true.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["base"],
+        "additionalProperties": false,
+        "properties": {
+          "base": { "$ref": "#/$defs/Base" },
+          "acknowledge_downgrade": { "type": "boolean" }
+        }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "needs_acknowledgement"],
+      "examples": [
+        { "name": "to stable, acknowledged", "params": { "base": "stable", "acknowledge_downgrade": true }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "already there", "params": { "base": "unstable" }, "result": { "job_id": null } },
+        { "name": "downgrade", "params": { "base": "stable" }, "error": { "code": 3011, "message": "unstable to stable is a downgrade" } }
+      ]
+    },
+    "jobs.get": {
+      "summary": "One job: running or among the last 10 finished. Read-only.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["job_id"],
+        "additionalProperties": false,
+        "properties": { "job_id": { "$ref": "#/$defs/JobId" } }
+      },
+      "result": {
+        "type": "object",
+        "required": ["job"],
+        "additionalProperties": false,
+        "properties": { "job": { "$ref": "#/$defs/Job" } }
+      },
+      "errors": ["not_found"],
+      "examples": [
+        {
+          "name": "failed rebuild",
+          "params": { "job_id": "3f9a0c2b7e4d1a65" },
+          "result": {
+            "job": {
+              "job_id": "3f9a0c2b7e4d1a65",
+              "kind": "rebuild",
+              "uid": 1000,
+              "state": "failed",
+              "stage": "building",
+              "created_at": 1791300000,
+              "finished_at": 1791300300,
+              "error": { "code": 3003, "message": "the job failed while building", "data": { "stage": "building", "log_hint": "error: builder for '/nix/store/...-foo.drv' failed" } },
+              "result": null,
+              "session_restart_required": false
+            }
+          }
+        },
+        { "name": "unknown", "params": { "job_id": "0000000000000000" }, "error": { "code": 3010, "message": "no such job" } }
+      ]
+    },
+    "jobs.list": {
+      "summary": "The running job, if any, and the last 10 finished jobs, newest first. Read-only.",
+      "since": "0.2",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": {
+        "type": "object",
+        "required": ["jobs"],
+        "additionalProperties": false,
+        "properties": { "jobs": { "type": "array", "maxItems": 11, "items": { "$ref": "#/$defs/Job" } } }
+      },
+      "errors": [],
+      "examples": [
+        {
+          "name": "one running",
+          "params": {},
+          "result": {
+            "jobs": [
+              {
+                "job_id": "3f9a0c2b7e4d1a65",
+                "kind": "update_apply",
+                "uid": 1000,
+                "state": "running",
+                "stage": "downloading",
+                "created_at": 1791300000,
+                "finished_at": null,
+                "error": null,
+                "result": null,
+                "session_restart_required": false
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "jobs.cancel": {
+      "summary": "Cancel a running job before its activation stage; the box stays unchanged. Action org.hinteros.system.jobs.cancel.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["job_id"],
+        "additionalProperties": false,
+        "properties": { "job_id": { "$ref": "#/$defs/JobId" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "not_found", "job_busy"],
+      "examples": [
+        { "name": "cancelling", "params": { "job_id": "3f9a0c2b7e4d1a65" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "already activating", "params": { "job_id": "3f9a0c2b7e4d1a65" }, "error": { "code": 3005, "message": "the job is activating and can no longer be cancelled", "data": { "job_id": "3f9a0c2b7e4d1a65" } } }
+      ]
     }
   },
-  "events": {},
+  "events": {
+    "job_started": {
+      "summary": "A job was started (by any caller).",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["job_id", "kind", "uid"],
+        "additionalProperties": false,
+        "properties": {
+          "job_id": { "$ref": "#/$defs/JobId" },
+          "kind": { "$ref": "#/$defs/JobKind" },
+          "uid": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+        }
+      },
+      "examples": [{ "name": "rebuild", "params": { "job_id": "3f9a0c2b7e4d1a65", "kind": "rebuild", "uid": 1000 } }]
+    },
+    "job_progress": {
+      "summary": "A job reached a stage or made progress (at most 4 per second). percent only where meaningful (downloading).",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["job_id", "stage"],
+        "additionalProperties": false,
+        "properties": {
+          "job_id": { "$ref": "#/$defs/JobId" },
+          "stage": { "$ref": "#/$defs/Stage" },
+          "percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "detail": { "$ref": "#/$defs/ProgressDetail" }
+        }
+      },
+      "examples": [
+        { "name": "stage", "params": { "job_id": "3f9a0c2b7e4d1a65", "stage": "evaluating" } },
+        {
+          "name": "downloading",
+          "params": {
+            "job_id": "3f9a0c2b7e4d1a65",
+            "stage": "downloading",
+            "percent": 40,
+            "detail": { "paths_done": 12, "paths_total": 30, "bytes_done": 41943040, "bytes_total": 104857600 }
+          }
+        }
+      ]
+    },
+    "job_finished": {
+      "summary": "A job ended. session_restart_required: the switch replaced the system service's API or the session daemon, so the launcher should offer a session restart.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["job_id", "kind", "ok", "session_restart_required"],
+        "additionalProperties": false,
+        "properties": {
+          "job_id": { "$ref": "#/$defs/JobId" },
+          "kind": { "$ref": "#/$defs/JobKind" },
+          "ok": { "type": "boolean" },
+          "error": { "$ref": "#/$defs/ErrorObject" },
+          "result": { "$ref": "#/$defs/JobResult" },
+          "session_restart_required": { "type": "boolean" }
+        }
+      },
+      "examples": [
+        {
+          "name": "update applied",
+          "params": {
+            "job_id": "3f9a0c2b7e4d1a65",
+            "kind": "update_apply",
+            "ok": true,
+            "result": { "generation": 43, "rev": "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5" },
+            "session_restart_required": true
+          }
+        },
+        {
+          "name": "unsigned tip",
+          "params": {
+            "job_id": "3f9a0c2b7e4d1a65",
+            "kind": "update_check",
+            "ok": false,
+            "error": { "code": 3009, "message": "the channel tip is not signed", "data": { "reason": "unsigned" } },
+            "session_restart_required": false
+          }
+        },
+        {
+          "name": "unreachable",
+          "params": {
+            "job_id": "3f9a0c2b7e4d1a65",
+            "kind": "update_check",
+            "ok": false,
+            "error": { "code": 3008, "message": "cannot reach the update server", "data": { "host": "justsomeshed.com" } },
+            "session_restart_required": false
+          }
+        },
+        {
+          "name": "cancelled",
+          "params": {
+            "job_id": "3f9a0c2b7e4d1a65",
+            "kind": "rebuild",
+            "ok": false,
+            "error": { "code": 3003, "message": "cancelled", "data": { "stage": "building", "log_hint": "cancelled" } },
+            "session_restart_required": false
+          }
+        }
+      ]
+    }
+  },
   "errors": {
-    "parse_error": { "code": -32700, "summary": "The line is not valid JSON." },
+    "parse_error": { "code": -32700, "summary": "The line is not valid JSON, not UTF-8, or longer than 64 KiB (the last two close the connection)." },
     "invalid_request": { "code": -32600, "summary": "Valid JSON but not a valid JSON-RPC 2.0 request (batches are not supported)." },
     "method_not_found": { "code": -32601, "summary": "Unknown method (or not available in the negotiated version)." },
-    "invalid_params": { "code": -32602, "summary": "Params do not match the method's params schema." },
+    "invalid_params": {
+      "code": -32602,
+      "summary": "Params do not match the method's params schema (unknown fields included), or fail a semantic check. data names the field when known.",
+      "data_optional": true,
+      "data": {
+        "type": "object",
+        "required": ["field", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "field": { "type": "string", "maxLength": 200 },
+          "reason": { "type": "string", "pattern": "^[a-z_]{1,40}$" }
+        }
+      }
+    },
     "internal_error": { "code": -32603, "summary": "Unexpected server-side failure." },
     "handshake_required": { "code": 1001, "since": "0.1", "summary": "A method other than 'hello' was called before the handshake." },
     "version_mismatch": {
@@ -81,7 +629,118 @@
         }
       }
     },
-    "already_handshaken": { "code": 1003, "since": "0.1", "summary": "'hello' was called twice on one connection." }
+    "already_handshaken": { "code": 1003, "since": "0.1", "summary": "'hello' was called twice on one connection." },
+    "permission_denied": {
+      "code": 3002,
+      "since": "0.2",
+      "summary": "Not allowed: the caller does not own seat0's active session (seat), polkit said no (polkit), or the peer cannot be identified safely (peer: no SO_PEERPIDFD, or the process is gone).",
+      "data": {
+        "type": "object",
+        "required": ["action", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "action": { "$ref": "#/$defs/PolkitAction" },
+          "reason": { "enum": ["seat", "polkit", "peer"] }
+        }
+      }
+    },
+    "job_failed": {
+      "code": 3003,
+      "since": "0.2",
+      "summary": "Only in job_finished.error and jobs.get: the job failed (or was cancelled) at stage; log_hint is the last relevant log line.",
+      "data": {
+        "type": "object",
+        "required": ["stage", "log_hint"],
+        "additionalProperties": false,
+        "properties": {
+          "stage": { "$ref": "#/$defs/Stage" },
+          "log_hint": { "type": "string", "maxLength": 1000 }
+        }
+      }
+    },
+    "insufficient_resources": {
+      "code": 3004,
+      "since": "0.2",
+      "summary": "Not enough memory or free disk space for a rebuild.",
+      "data": {
+        "type": "object",
+        "required": ["kind", "needed_bytes", "available_bytes"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "enum": ["memory", "disk"] },
+          "needed_bytes": { "type": "integer", "minimum": 0 },
+          "available_bytes": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "job_busy": {
+      "code": 3005,
+      "since": "0.2",
+      "summary": "Another job runs (only one at a time), or the job is past the point of cancelling.",
+      "data": {
+        "type": "object",
+        "required": ["job_id"],
+        "additionalProperties": false,
+        "properties": { "job_id": { "$ref": "#/$defs/JobId" } }
+      }
+    },
+    "rate_limited": {
+      "code": 3006,
+      "since": "0.2",
+      "summary": "Too many mutating requests from this user (10 per minute, burst 3).",
+      "data": {
+        "type": "object",
+        "required": ["retry_after_ms"],
+        "additionalProperties": false,
+        "properties": { "retry_after_ms": { "type": "integer", "minimum": 0 } }
+      }
+    },
+    "state_conflict": {
+      "code": 3007,
+      "since": "0.2",
+      "summary": "Stale settings revision, or update.apply's rev is not the last verified check result.",
+      "data": {
+        "type": "object",
+        "required": ["reason"],
+        "additionalProperties": false,
+        "properties": { "reason": { "enum": ["revision", "update_rev"] } }
+      }
+    },
+    "update_unreachable": {
+      "code": 3008,
+      "since": "0.2",
+      "summary": "The update server cannot be reached (the 'home lab unreachable' screen).",
+      "data": {
+        "type": "object",
+        "required": ["host"],
+        "additionalProperties": false,
+        "properties": { "host": { "type": "string", "maxLength": 253 } }
+      }
+    },
+    "update_verification_failed": {
+      "code": 3009,
+      "since": "0.2",
+      "summary": "The channel tip is unsigned, signed by an unknown signer, or does not descend from the locked revision.",
+      "data": {
+        "type": "object",
+        "required": ["reason"],
+        "additionalProperties": false,
+        "properties": { "reason": { "enum": ["unsigned", "unknown_signer", "not_fast_forward"] } }
+      }
+    },
+    "not_found": { "code": 3010, "since": "0.2", "summary": "Unknown generation or job." },
+    "needs_acknowledgement": { "code": 3011, "since": "0.2", "summary": "A downgrading channel or base switch without acknowledge_downgrade: true." },
+    "authentication_required": {
+      "code": 3012,
+      "since": "0.2",
+      "summary": "polkit would allow the action only after interactive authentication (auth_admin: the admin password). No agent is involved yet: the call is refused, and the launcher can ask for the password once one exists.",
+      "data": {
+        "type": "object",
+        "required": ["action"],
+        "additionalProperties": false,
+        "properties": { "action": { "$ref": "#/$defs/PolkitAction" } }
+      }
+    }
   },
   "$defs": {
     "ApiVersion": {
@@ -96,6 +755,127 @@
       "properties": {
         "name": { "type": "string", "minLength": 1, "maxLength": 64 },
         "version": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "EventName": { "enum": ["job_started", "job_progress", "job_finished"] },
+    "SubscriptionParams": {
+      "type": "object",
+      "required": ["events"],
+      "additionalProperties": false,
+      "properties": { "events": { "type": "array", "items": { "$ref": "#/$defs/EventName" } } }
+    },
+    "SubscriptionResult": {
+      "type": "object",
+      "required": ["events"],
+      "additionalProperties": false,
+      "properties": { "events": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/EventName" } } }
+    },
+    "JobId": { "description": "Server-issued job id.", "type": "string", "pattern": "^[0-9a-f]{16}$" },
+    "Rev": { "description": "A full git commit id.", "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "Revision": { "description": "SHA-256 of state.json, hex.", "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "Fingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9+/]{43}$" },
+    "PolkitAction": { "type": "string", "pattern": "^org\\.hinteros\\.system\\.[a-z.]+$" },
+    "Channel": { "enum": ["stable", "beta"] },
+    "Base": { "enum": ["stable", "unstable"] },
+    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base"] },
+    "JobState": { "enum": ["running", "succeeded", "failed", "cancelled"] },
+    "Stage": { "enum": ["preparing", "fetching", "verifying", "evaluating", "downloading", "building", "activating", "finishing"] },
+    "Severity": { "enum": ["low", "medium", "high", "critical"] },
+    "JobRef": {
+      "description": "A started job, or null when there was nothing to do.",
+      "type": "object",
+      "required": ["job_id"],
+      "additionalProperties": false,
+      "properties": { "job_id": { "oneOf": [{ "$ref": "#/$defs/JobId" }, { "type": "null" }] } }
+    },
+    "Generation": {
+      "type": "object",
+      "required": ["generation", "date", "rev", "current", "booted"],
+      "additionalProperties": false,
+      "properties": {
+        "generation": { "type": "integer", "minimum": 1 },
+        "date": { "description": "Created (Unix time, seconds).", "type": "integer" },
+        "rev": { "description": "System repo revision in its config snapshot, if any.", "oneOf": [{ "$ref": "#/$defs/Rev" }, { "type": "null" }] },
+        "current": { "type": "boolean" },
+        "booted": { "type": "boolean" }
+      }
+    },
+    "AvailableUpdate": {
+      "type": "object",
+      "required": ["rev", "date", "summary", "signer", "security", "commits"],
+      "additionalProperties": false,
+      "properties": {
+        "rev": { "$ref": "#/$defs/Rev" },
+        "date": { "description": "Commit time (Unix time, seconds).", "type": "integer" },
+        "summary": { "description": "Subject line of rev.", "type": "string", "maxLength": 200 },
+        "signer": { "description": "Allowed-signers principal that signed rev.", "type": "string", "maxLength": 200 },
+        "security": {
+          "description": "Highest Security: trailer severity among the new commits; non-null means the launcher shows the full-screen security notice.",
+          "oneOf": [{ "$ref": "#/$defs/Severity" }, { "type": "null" }]
+        },
+        "commits": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "UpdateCheckResult": {
+      "type": "object",
+      "required": ["channel", "current_rev", "available", "checked_at"],
+      "additionalProperties": false,
+      "properties": {
+        "channel": { "$ref": "#/$defs/Channel" },
+        "current_rev": { "oneOf": [{ "$ref": "#/$defs/Rev" }, { "type": "null" }] },
+        "available": { "oneOf": [{ "$ref": "#/$defs/AvailableUpdate" }, { "type": "null" }] },
+        "checked_at": { "type": "integer" }
+      }
+    },
+    "AppliedResult": {
+      "type": "object",
+      "required": ["generation", "rev"],
+      "additionalProperties": false,
+      "properties": {
+        "generation": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "rev": { "oneOf": [{ "$ref": "#/$defs/Rev" }, { "type": "null" }] }
+      }
+    },
+    "JobResult": {
+      "description": "update_check jobs: an UpdateCheckResult; jobs that change the system: an AppliedResult.",
+      "oneOf": [{ "$ref": "#/$defs/UpdateCheckResult" }, { "$ref": "#/$defs/AppliedResult" }]
+    },
+    "ProgressDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths_done": { "type": "integer", "minimum": 0 },
+        "paths_total": { "type": "integer", "minimum": 0 },
+        "bytes_done": { "type": "integer", "minimum": 0 },
+        "bytes_total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ErrorObject": {
+      "description": "A JSON-RPC error object (codes from this document's errors).",
+      "type": "object",
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "integer" },
+        "message": { "type": "string" },
+        "data": {}
+      }
+    },
+    "Job": {
+      "type": "object",
+      "required": ["job_id", "kind", "uid", "state", "stage", "created_at", "finished_at", "error", "result", "session_restart_required"],
+      "additionalProperties": false,
+      "properties": {
+        "job_id": { "$ref": "#/$defs/JobId" },
+        "kind": { "$ref": "#/$defs/JobKind" },
+        "uid": { "description": "Who started it.", "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "state": { "$ref": "#/$defs/JobState" },
+        "stage": { "description": "Current or last reached stage.", "oneOf": [{ "$ref": "#/$defs/Stage" }, { "type": "null" }] },
+        "created_at": { "type": "integer" },
+        "finished_at": { "oneOf": [{ "type": "integer" }, { "type": "null" }] },
+        "error": { "oneOf": [{ "$ref": "#/$defs/ErrorObject" }, { "type": "null" }] },
+        "result": { "oneOf": [{ "$ref": "#/$defs/JobResult" }, { "type": "null" }] },
+        "session_restart_required": { "type": "boolean" }
       }
     }
   }

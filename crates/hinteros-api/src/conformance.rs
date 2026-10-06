@@ -84,6 +84,7 @@ impl ApiSchema {
         }
         match (decl.get("data"), error.get("data")) {
             (Some(_), Some(data)) => self.check(&format!("/errors/{name}/data"), data),
+            (Some(_), None) if decl["data_optional"] == true => Ok(()),
             (Some(_), None) => Err(format!("error {name} requires data")),
             (None, Some(data)) => Err(format!("error {name} declares no data, got {data}")),
             (None, None) => Ok(()),

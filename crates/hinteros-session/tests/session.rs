@@ -83,7 +83,7 @@ async fn version_mismatch_is_rejected_and_closes() {
     for client_version in [
         ApiVersion::new(1, 0),
         ApiVersion::new(0, 2),
-        ApiVersion::new(0, 6),
+        ApiVersion::new(0, 7),
     ] {
         let mut c = d.connect().await;
         let e = rpc_error(

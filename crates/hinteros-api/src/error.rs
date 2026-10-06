@@ -20,6 +20,18 @@ pub enum ErrorCode {
     SteamNoWindows,
     KeyboardUnavailable,
     OskUnavailable,
+    SystemUnavailable,
+    PermissionDenied,
+    JobFailed,
+    InsufficientResources,
+    JobBusy,
+    RateLimited,
+    StateConflict,
+    UpdateUnreachable,
+    UpdateVerificationFailed,
+    NotFound,
+    NeedsAcknowledgement,
+    AuthenticationRequired,
 }
 
 impl ErrorCode {
@@ -37,6 +49,18 @@ impl ErrorCode {
         Self::SteamNoWindows,
         Self::KeyboardUnavailable,
         Self::OskUnavailable,
+        Self::SystemUnavailable,
+        Self::PermissionDenied,
+        Self::JobFailed,
+        Self::InsufficientResources,
+        Self::JobBusy,
+        Self::RateLimited,
+        Self::StateConflict,
+        Self::UpdateUnreachable,
+        Self::UpdateVerificationFailed,
+        Self::NotFound,
+        Self::NeedsAcknowledgement,
+        Self::AuthenticationRequired,
     ];
 
     /// The JSON-RPC and protocol errors, which every API declares.
@@ -49,6 +73,30 @@ impl ErrorCode {
         Self::HandshakeRequired,
         Self::VersionMismatch,
         Self::AlreadyHandshaken,
+    ];
+
+    /// What the system API declares: the generic errors and the system domain (3xxx), except
+    /// the session-side `system_unavailable`.
+    pub const SYSTEM: &[ErrorCode] = &[
+        Self::ParseError,
+        Self::InvalidRequest,
+        Self::MethodNotFound,
+        Self::InvalidParams,
+        Self::InternalError,
+        Self::HandshakeRequired,
+        Self::VersionMismatch,
+        Self::AlreadyHandshaken,
+        Self::PermissionDenied,
+        Self::JobFailed,
+        Self::InsufficientResources,
+        Self::JobBusy,
+        Self::RateLimited,
+        Self::StateConflict,
+        Self::UpdateUnreachable,
+        Self::UpdateVerificationFailed,
+        Self::NotFound,
+        Self::NeedsAcknowledgement,
+        Self::AuthenticationRequired,
     ];
 
     pub const fn code(self) -> i64 {
@@ -66,6 +114,18 @@ impl ErrorCode {
             Self::SteamNoWindows => 2003,
             Self::KeyboardUnavailable => 2004,
             Self::OskUnavailable => 2005,
+            Self::SystemUnavailable => 3001,
+            Self::PermissionDenied => 3002,
+            Self::JobFailed => 3003,
+            Self::InsufficientResources => 3004,
+            Self::JobBusy => 3005,
+            Self::RateLimited => 3006,
+            Self::StateConflict => 3007,
+            Self::UpdateUnreachable => 3008,
+            Self::UpdateVerificationFailed => 3009,
+            Self::NotFound => 3010,
+            Self::NeedsAcknowledgement => 3011,
+            Self::AuthenticationRequired => 3012,
         }
     }
 
@@ -85,6 +145,18 @@ impl ErrorCode {
             Self::SteamNoWindows => "steam_no_windows",
             Self::KeyboardUnavailable => "keyboard_unavailable",
             Self::OskUnavailable => "osk_unavailable",
+            Self::SystemUnavailable => "system_unavailable",
+            Self::PermissionDenied => "permission_denied",
+            Self::JobFailed => "job_failed",
+            Self::InsufficientResources => "insufficient_resources",
+            Self::JobBusy => "job_busy",
+            Self::RateLimited => "rate_limited",
+            Self::StateConflict => "state_conflict",
+            Self::UpdateUnreachable => "update_unreachable",
+            Self::UpdateVerificationFailed => "update_verification_failed",
+            Self::NotFound => "not_found",
+            Self::NeedsAcknowledgement => "needs_acknowledgement",
+            Self::AuthenticationRequired => "authentication_required",
         }
     }
 
@@ -115,6 +187,23 @@ impl ErrorObject {
             message: message.into(),
             data: None,
         }
+    }
+
+    /// An error with a `data` payload.
+    pub fn with_data(code: ErrorCode, message: impl Into<String>, data: Value) -> Self {
+        Self {
+            data: Some(data),
+            ..Self::new(code, message)
+        }
+    }
+
+    /// `invalid_params` naming the offending field and why (system API and relay).
+    pub fn invalid_field(field: &str, reason: &str, message: impl Into<String>) -> Self {
+        Self::with_data(
+            ErrorCode::InvalidParams,
+            message,
+            serde_json::json!({ "field": field, "reason": reason }),
+        )
     }
 
     pub fn kind(&self) -> Option<ErrorCode> {

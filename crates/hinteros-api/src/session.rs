@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 5);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 6);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -27,6 +27,9 @@ pub enum EventName {
     AppsChanged,
     SteamAttention,
     OskVisibility,
+    JobStarted,
+    JobProgress,
+    JobFinished,
 }
 
 impl EventName {
@@ -40,6 +43,9 @@ impl EventName {
         EventName::AppsChanged,
         EventName::SteamAttention,
         EventName::OskVisibility,
+        EventName::JobStarted,
+        EventName::JobProgress,
+        EventName::JobFinished,
     ];
 
     /// The event's wire name (its JSON-RPC notification method).
@@ -54,6 +60,9 @@ impl EventName {
             EventName::AppsChanged => AppsChanged::NAME,
             EventName::SteamAttention => SteamAttention::NAME,
             EventName::OskVisibility => OskVisibility::NAME,
+            EventName::JobStarted => JobStarted::NAME,
+            EventName::JobProgress => JobProgress::NAME,
+            EventName::JobFinished => JobFinished::NAME,
         }
     }
 }
@@ -763,6 +772,21 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<KeysType>(),
         MethodInfo::of::<KeysKey>(),
         MethodInfo::of::<KeysAction>(),
+        MethodInfo::of::<RelaySystemInfo>(),
+        MethodInfo::of::<RelaySettingsGet>(),
+        MethodInfo::of::<RelaySettingsSet>(),
+        MethodInfo::of::<RelaySshSet>(),
+        MethodInfo::of::<RelayGenerationsList>(),
+        MethodInfo::of::<RelayRebuild>(),
+        MethodInfo::of::<RelayHardwareRedetect>(),
+        MethodInfo::of::<RelayRollback>(),
+        MethodInfo::of::<RelayUpdateCheck>(),
+        MethodInfo::of::<RelayUpdateApply>(),
+        MethodInfo::of::<RelayChannelSet>(),
+        MethodInfo::of::<RelayBaseSet>(),
+        MethodInfo::of::<RelayJobsGet>(),
+        MethodInfo::of::<RelayJobsList>(),
+        MethodInfo::of::<RelayJobsCancel>(),
     ],
     events: &[
         EventInfo::of::<HomePressed>(),
@@ -774,6 +798,9 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<AppsChanged>(),
         EventInfo::of::<SteamAttention>(),
         EventInfo::of::<OskVisibility>(),
+        EventInfo::of::<JobStarted>(),
+        EventInfo::of::<JobProgress>(),
+        EventInfo::of::<JobFinished>(),
     ],
     errors: ErrorCode::ALL,
 };
@@ -786,4 +813,65 @@ fn nullable<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D:
 
 fn nullable_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
     Option::<u64>::deserialize(d)
+}
+
+// ---------------------------------------------------------------------------------------------
+// System relay (0.6): methods forwarded unchanged to the system service, and its job events.
+
+macro_rules! relay {
+    ($($name:ident = $wire:literal => $system:ty;)*) => {
+        $(
+            #[doc = concat!("`", $wire, "`: relayed to the system API's `", stringify!($system), "`.")]
+            pub struct $name;
+            impl Method for $name {
+                const NAME: &'static str = $wire;
+                type Params = <$system as Method>::Params;
+                type Result = <$system as Method>::Result;
+            }
+        )*
+
+        /// Session method name → system method name, for every relayed method.
+        pub const RELAY: &[(&str, &str)] = &[$(($wire, <$system as Method>::NAME)),*];
+    };
+}
+
+relay! {
+    RelaySystemInfo = "system.info" => crate::system::SystemInfo;
+    RelaySettingsGet = "system.settings.get" => crate::system::SettingsGet;
+    RelaySettingsSet = "system.settings.set" => crate::system::SettingsSet;
+    RelaySshSet = "system.ssh.set" => crate::system::SshSet;
+    RelayGenerationsList = "system.generations.list" => crate::system::GenerationsList;
+    RelayRebuild = "system.rebuild" => crate::system::Rebuild;
+    RelayHardwareRedetect = "system.hardware.redetect" => crate::system::HardwareRedetect;
+    RelayRollback = "system.rollback" => crate::system::Rollback;
+    RelayUpdateCheck = "system.update.check" => crate::system::UpdateCheck;
+    RelayUpdateApply = "system.update.apply" => crate::system::UpdateApply;
+    RelayChannelSet = "system.channel.set" => crate::system::ChannelSet;
+    RelayBaseSet = "system.base.set" => crate::system::BaseSet;
+    RelayJobsGet = "system.jobs.get" => crate::system::JobsGet;
+    RelayJobsList = "system.jobs.list" => crate::system::JobsList;
+    RelayJobsCancel = "system.jobs.cancel" => crate::system::JobsCancel;
+}
+
+/// The system method a session method relays to, if it is a relay method.
+pub fn relay_target(method: &str) -> Option<&'static str> {
+    RELAY.iter().find(|(s, _)| *s == method).map(|(_, t)| *t)
+}
+
+pub struct JobStarted;
+impl Event for JobStarted {
+    const NAME: &'static str = "job_started";
+    type Params = crate::system::JobStartedParams;
+}
+
+pub struct JobProgress;
+impl Event for JobProgress {
+    const NAME: &'static str = "job_progress";
+    type Params = crate::system::JobProgressParams;
+}
+
+pub struct JobFinished;
+impl Event for JobFinished {
+    const NAME: &'static str = "job_finished";
+    type Params = crate::system::JobFinishedParams;
 }

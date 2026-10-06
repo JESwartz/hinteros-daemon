@@ -182,6 +182,14 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
         tokio::spawn(osk::supervise(config.osk.command.clone(), osk_env, osk_pid));
     }
 
+    let relay = if config.system.enable {
+        info!(socket = %config.system.socket.display(), "relaying system.* to the system service");
+        hinteros_session::system::Relay::spawn(config.system.socket.clone(), events.clone())
+    } else {
+        info!("system relay off");
+        hinteros_session::system::Relay::disabled()
+    };
+
     let mut usr1 = signal(SignalKind::user_defined1())?;
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
@@ -191,8 +199,9 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
                 Ok((stream, _)) => {
                     let rx = events.subscribe();
                     let shell = shell_tx.clone();
+                    let relay = relay.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = server::handle(stream, rx, shell).await {
+                        if let Err(e) = server::handle(stream, rx, shell, relay).await {
                             debug!("connection ended: {e:#}");
                         }
                     });

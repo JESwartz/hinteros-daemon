@@ -15,6 +15,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::shell::{METHODS, Msg};
+use crate::system::Relay;
 use crate::{Audience, Broadcast};
 
 pub const NAME: &str = "hinteros-session";
@@ -25,6 +26,7 @@ pub async fn handle(
     stream: UnixStream,
     mut events: broadcast::Receiver<Broadcast>,
     shell: mpsc::UnboundedSender<Msg>,
+    relay: Relay,
 ) -> Result<()> {
     // Defence in depth: the socket is 0600 in a 0700 directory, but only our own user may talk to us.
     let cred = stream.peer_cred()?;
@@ -64,7 +66,7 @@ pub async fn handle(
                     Step::Ignore => debug!("ignoring client notification"),
                     Step::Dispatch(req) => {
                         let id = req.id.expect("dispatched requests have an id");
-                        let outcome = dispatch(&req.method, req.params, &mut subscriptions, &shell).await;
+                        let outcome = dispatch(&req.method, req.params, &mut subscriptions, &shell, &relay).await;
                         write_message(&mut w, &jsonrpc::response(&id, outcome)).await?;
                     }
                 }
@@ -102,7 +104,11 @@ async fn dispatch(
     params: Option<Value>,
     subscriptions: &mut BTreeSet<EventName>,
     shell: &mpsc::UnboundedSender<Msg>,
+    relay: &Relay,
 ) -> Result<Value, ErrorObject> {
+    if let Some(target) = session::relay_target(method) {
+        return relay.call(target, params).await;
+    }
     match method {
         Ping::NAME => call::<Ping>(params, server::ping),
         Subscribe::NAME => call::<Subscribe>(params, |p| {

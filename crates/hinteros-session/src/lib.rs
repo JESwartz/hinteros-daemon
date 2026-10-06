@@ -18,6 +18,7 @@ pub mod reaper;
 pub mod server;
 pub mod shell;
 pub mod steam;
+pub mod system;
 
 /// Which connections an event is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -162,6 +162,10 @@ pub struct Cli {
     /// Search only these data directories (colon-separated) for desktop files and icons (tests)
     #[arg(long, env = "HINTEROS_ICON_DIRS", hide = true, value_delimiter = ':')]
     pub icon_dirs: Option<Vec<PathBuf>>,
+
+    /// The system service's socket, for the relayed system.* methods
+    #[arg(long, env = "HINTEROS_SYSTEM_SOCKET")]
+    pub system_socket: Option<PathBuf>,
 }
 
 fn flag(on: bool, off: bool) -> Option<bool> {
@@ -184,7 +188,25 @@ pub struct Config {
     pub close: CloseConfig,
     pub keys: KeysConfig,
     pub osk: OskConfig,
+    pub system: SystemConfig,
     pub apps: Vec<AppConfig>,
+}
+
+/// The relay to the privileged system service (`system.*` methods and job events).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SystemConfig {
+    pub enable: bool,
+    pub socket: PathBuf,
+}
+
+impl Default for SystemConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            socket: PathBuf::from(hinteros_api::system::DEFAULT_SOCKET),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -573,6 +595,9 @@ impl Config {
         }
         if let Some(cmd) = &cli.osk_command {
             self.osk.command = cmd.split_whitespace().map(String::from).collect();
+        }
+        if let Some(socket) = &cli.system_socket {
+            self.system.socket = socket.clone();
         }
     }
 

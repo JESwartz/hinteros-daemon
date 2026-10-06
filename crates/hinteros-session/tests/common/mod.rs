@@ -45,6 +45,8 @@ impl Daemon {
             .env("HOME", dir.path())
             // Icons: only look in the temp dir (the desktop running the tests has real ones).
             .env("HINTEROS_ICON_DIRS", dir.path().join("share"))
+            // Never the real system service: relayed methods see whatever the test puts here.
+            .env("HINTEROS_SYSTEM_SOCKET", dir.path().join("system.sock"))
             .env("RUST_LOG", "debug")
             .spawn()
             .expect("start hinteros-session");

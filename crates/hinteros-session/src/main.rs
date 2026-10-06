@@ -14,10 +14,10 @@ use hinteros_api::common::{Peer, Ping};
 use hinteros_api::jsonrpc;
 use hinteros_api::server::{self, Connection, Step, call, method_not_found};
 use hinteros_api::session::{
-    self, App, AppKind, AppsList, AppsListResult, EventName, HomePressed, HomePressedParams,
-    Subscribe, SubscriptionResult, Unsubscribe,
+    self, App, AppKind, AppsList, AppsListResult, EventName, HomePressedParams, Subscribe,
+    SubscriptionResult, Unsubscribe,
 };
-use hinteros_api::{ErrorCode, ErrorObject, Event, Method};
+use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde_json::Value;
 use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
@@ -143,10 +143,7 @@ async fn handle(stream: UnixStream, mut events: broadcast::Receiver<Broadcast>) 
             }
             event = events.recv() => match event {
                 Ok((name, params)) if subscriptions.contains(&name) => {
-                    let method = match name {
-                        EventName::HomePressed => HomePressed::NAME,
-                    };
-                    write_message(&mut w, &jsonrpc::notification(method, params)).await?;
+                    write_message(&mut w, &jsonrpc::notification(name.wire_name(), params)).await?;
                 }
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(n)) => warn!("client lagging, dropped {n} events"),

@@ -15,10 +15,26 @@ pub enum ErrorCode {
     HandshakeRequired,
     VersionMismatch,
     AlreadyHandshaken,
+    AppNotFound,
+    AppLaunchFailed,
 }
 
 impl ErrorCode {
     pub const ALL: &[ErrorCode] = &[
+        Self::ParseError,
+        Self::InvalidRequest,
+        Self::MethodNotFound,
+        Self::InvalidParams,
+        Self::InternalError,
+        Self::HandshakeRequired,
+        Self::VersionMismatch,
+        Self::AlreadyHandshaken,
+        Self::AppNotFound,
+        Self::AppLaunchFailed,
+    ];
+
+    /// The JSON-RPC and protocol errors, which every API declares.
+    pub const GENERIC: &[ErrorCode] = &[
         Self::ParseError,
         Self::InvalidRequest,
         Self::MethodNotFound,
@@ -39,6 +55,8 @@ impl ErrorCode {
             Self::HandshakeRequired => 1001,
             Self::VersionMismatch => 1002,
             Self::AlreadyHandshaken => 1003,
+            Self::AppNotFound => 2001,
+            Self::AppLaunchFailed => 2002,
         }
     }
 
@@ -53,6 +71,8 @@ impl ErrorCode {
             Self::HandshakeRequired => "handshake_required",
             Self::VersionMismatch => "version_mismatch",
             Self::AlreadyHandshaken => "already_handshaken",
+            Self::AppNotFound => "app_not_found",
+            Self::AppLaunchFailed => "app_launch_failed",
         }
     }
 

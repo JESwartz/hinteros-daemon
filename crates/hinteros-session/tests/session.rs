@@ -158,7 +158,11 @@ async fn handshake_ping_apps_and_home_event() {
 #[tokio::test]
 async fn version_mismatch_is_rejected_and_closes() {
     let d = Daemon::start();
-    for client_version in [ApiVersion::new(1, 0), ApiVersion::new(0, 2)] {
+    for client_version in [
+        ApiVersion::new(1, 0),
+        ApiVersion::new(0, 1),
+        ApiVersion::new(0, 3),
+    ] {
         let mut c = d.connect().await;
         let e = rpc_error(
             c.hello(client_version, Peer::new("test", "0"))

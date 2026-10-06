@@ -16,5 +16,5 @@ pub static API: ApiInfo = ApiInfo {
     version: VERSION,
     methods: &[MethodInfo::of::<Hello>(), MethodInfo::of::<Ping>()],
     events: &[],
-    errors: ErrorCode::ALL,
+    errors: ErrorCode::GENERIC,
 };

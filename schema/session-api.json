@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.1",
+  "version": "0.2",
   "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). See hinteros-docs/design/api.md for the protocol rules.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -37,16 +37,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.1", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
-          "result": { "api_version": "0.1", "server": { "name": "hinteros-session", "version": "0.1.0" } }
+          "params": { "api_version": "0.2", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
+          "result": { "api_version": "0.2", "server": { "name": "hinteros-session", "version": "0.1.0" } }
         },
         {
           "name": "major mismatch",
           "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 1.0, server 0.1",
-            "data": { "client_api_version": "1.0", "server_api_version": "0.1" }
+            "message": "API version mismatch: client 1.0, server 0.2",
+            "data": { "client_api_version": "1.0", "server_api_version": "0.2" }
           }
         }
       ]
@@ -123,7 +123,7 @@
       ]
     },
     "apps.list": {
-      "summary": "Apps the launcher can show and launch. M0 returns a fixed stub list.",
+      "summary": "Apps the launcher can show and launch: the apps from the daemon's config, or a fixed stub list when none are configured.",
       "since": "0.1",
       "params": {
         "type": "object",
@@ -152,12 +152,127 @@
           }
         }
       ]
+    },
+    "apps.launch": {
+      "summary": "Start an app and give it focus. Returns once it is spawned, before it shows a window.",
+      "description": "Exactly one of: 'id' (an app from apps.list), 'command' (argv, run as the session user), or 'url' (a Steam game, handed to the running Steam client). If the app is already running it is focused instead and the result describes the running instance. Its windows are shown as soon as they appear; until then the launcher stays visible. Progress is reported through app_started, focus_changed and app_exited.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/AppId" },
+          "command": {
+            "description": "Program and arguments. The program is looked up in the daemon's PATH.",
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "minItems": 1
+          },
+          "url": {
+            "description": "A Steam game, launched through the configured steam binary.",
+            "type": "string",
+            "pattern": "^steam://rungameid/[1-9][0-9]{0,9}$"
+          },
+          "name": { "description": "Display name for a 'command' launch (default: the program's file name).", "type": "string", "minLength": 1 }
+        },
+        "oneOf": [{ "required": ["id"] }, { "required": ["command"] }, { "required": ["url"] }]
+      },
+      "result": {
+        "type": "object",
+        "required": ["app"],
+        "additionalProperties": false,
+        "properties": {
+          "app": { "$ref": "#/$defs/RunningApp" }
+        }
+      },
+      "errors": ["app_not_found", "app_launch_failed"],
+      "examples": [
+        {
+          "name": "steam game",
+          "params": { "url": "steam://rungameid/1000001" },
+          "result": { "app": { "id": "steam-1000001", "name": "Steam game 1000001", "source": "steam", "gamescope_app_id": 1000001 } }
+        },
+        {
+          "name": "command",
+          "params": { "command": ["firefox", "--kiosk", "https://www.youtube.com/tv"], "name": "YouTube" },
+          "result": { "app": { "id": "cmd-1", "name": "YouTube", "source": "command", "gamescope_app_id": 4100000001, "pid": 4242 } }
+        },
+        {
+          "name": "configured app",
+          "params": { "id": "jellyfin" },
+          "result": { "app": { "id": "jellyfin", "name": "Jellyfin", "source": "command", "gamescope_app_id": 4100000002, "pid": 4243 } }
+        },
+        {
+          "name": "unknown app",
+          "params": { "id": "nope" },
+          "error": { "code": 2001, "message": "no app with id 'nope'" }
+        },
+        {
+          "name": "spawn failed",
+          "params": { "command": ["does-not-exist"] },
+          "error": { "code": 2002, "message": "cannot start does-not-exist: No such file or directory (os error 2)" }
+        }
+      ]
+    },
+    "apps.running": {
+      "summary": "Apps started through apps.launch that are still running, and which one has focus.",
+      "description": "Re-query this after reconnecting: app_started, app_exited and focus_changed are not replayed.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": ["apps", "focused"],
+        "additionalProperties": false,
+        "properties": {
+          "apps": { "type": "array", "items": { "$ref": "#/$defs/RunningApp" } },
+          "focused": { "$ref": "#/$defs/FocusTarget" }
+        }
+      },
+      "errors": [],
+      "examples": [
+        {
+          "name": "one game in the background",
+          "params": {},
+          "result": {
+            "apps": [{ "id": "steam-1000001", "name": "Steam game 1000001", "source": "steam", "gamescope_app_id": 1000001 }],
+            "focused": null
+          }
+        }
+      ]
+    },
+    "apps.focus": {
+      "summary": "Bring a running app, or the launcher (null), to the front.",
+      "description": "Focusing the launcher does not stop the app that had focus. Controller input goes to whatever has focus; while the launcher has focus it arrives as input_nav events.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/FocusTarget" }
+        }
+      },
+      "result": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": ["app_not_found"],
+      "examples": [
+        { "name": "app", "params": { "id": "steam-1000001" }, "result": {} },
+        { "name": "launcher", "params": { "id": null }, "result": {} },
+        { "name": "not running", "params": { "id": "cmd-7" }, "error": { "code": 2001, "message": "no running app with id 'cmd-7'" } }
+      ]
     }
   },
   "events": {
     "home_pressed": {
       "summary": "The global Home button was pressed. The launcher brings itself to the front.",
-      "description": "Sent to subscribers whichever app has focus. The daemon also handles focus itself (M2); this event lets the launcher reset to its Home screen.",
+      "description": "Sent to subscribers whichever app has focus. The daemon brings the launcher to the front itself (and sends focus_changed if focus moved); this event lets the launcher reset to its Home screen.",
       "since": "0.1",
       "params": {
         "type": "object",
@@ -165,6 +280,76 @@
         "properties": {}
       },
       "examples": [{ "name": "pressed", "params": {} }]
+    },
+    "app_started": {
+      "summary": "An app was started through apps.launch.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["app"],
+        "additionalProperties": false,
+        "properties": {
+          "app": { "$ref": "#/$defs/RunningApp" }
+        }
+      },
+      "examples": [
+        { "name": "steam game", "params": { "app": { "id": "steam-1000001", "name": "Steam game 1000001", "source": "steam", "gamescope_app_id": 1000001 } } }
+      ]
+    },
+    "app_exited": {
+      "summary": "A running app ended. If it had focus, the launcher is back in front (see focus_changed).",
+      "description": "A 'command' app has exited when its process and everything it started have exited. A Steam game has exited when its windows are gone.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["id", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/AppId" },
+          "reason": { "$ref": "#/$defs/ExitReason" },
+          "exit_code": { "description": "Exit status of the app's main process, if known (128 + signal number if it was killed).", "type": "integer" }
+        }
+      },
+      "examples": [
+        { "name": "quit", "params": { "id": "cmd-1", "reason": "exited", "exit_code": 0 } },
+        { "name": "crash", "params": { "id": "cmd-2", "reason": "crashed", "exit_code": 139 } },
+        { "name": "steam game closed", "params": { "id": "steam-1000001", "reason": "exited" } }
+      ]
+    },
+    "focus_changed": {
+      "summary": "Another app, or the launcher (null), now has focus.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["app"],
+        "additionalProperties": false,
+        "properties": {
+          "app": { "$ref": "#/$defs/FocusTarget" }
+        }
+      },
+      "examples": [
+        { "name": "game", "params": { "app": "steam-1000001" } },
+        { "name": "launcher", "params": { "app": null } }
+      ]
+    },
+    "input_nav": {
+      "summary": "A controller navigation intent, sent only while the launcher has focus.",
+      "description": "Directions repeat while held (phase 'repeat', key repeat done by the daemon); other actions only press and release. The launcher should map arrow keys, Enter and Escape to the same intents so it works without a controller. Clients must ignore unknown actions.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["action", "phase"],
+        "additionalProperties": false,
+        "properties": {
+          "action": { "$ref": "#/$defs/NavAction" },
+          "phase": { "$ref": "#/$defs/NavPhase" }
+        }
+      },
+      "examples": [
+        { "name": "d-pad right", "params": { "action": "right", "phase": "press" } },
+        { "name": "held", "params": { "action": "right", "phase": "repeat" } },
+        { "name": "A released", "params": { "action": "accept", "phase": "release" } }
+      ]
     }
   },
   "errors": {
@@ -189,7 +374,9 @@
         }
       }
     },
-    "already_handshaken": { "code": 1003, "since": "0.1", "summary": "'hello' was called twice on one connection." }
+    "already_handshaken": { "code": 1003, "since": "0.1", "summary": "'hello' was called twice on one connection." },
+    "app_not_found": { "code": 2001, "since": "0.2", "summary": "No such app (apps.launch: not in apps.list; apps.focus: not running)." },
+    "app_launch_failed": { "code": 2002, "since": "0.2", "summary": "The app could not be started (spawn failed, or it has nothing to launch)." }
   },
   "$defs": {
     "ApiVersion": {
@@ -209,7 +396,47 @@
     },
     "EventName": {
       "type": "string",
-      "enum": ["home_pressed"]
+      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav"]
+    },
+    "AppId": {
+      "description": "App identifier: an apps.list id, or for running apps started by command or Steam URL 'cmd-<n>' / 'steam-<appid>'.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "FocusTarget": {
+      "description": "A running app's id, or null for the launcher.",
+      "oneOf": [{ "$ref": "#/$defs/AppId" }, { "type": "null" }]
+    },
+    "AppSource": {
+      "description": "How a running app was started. Clients must treat unknown values like 'command'.",
+      "type": "string",
+      "enum": ["command", "steam"]
+    },
+    "RunningApp": {
+      "type": "object",
+      "required": ["id", "name", "source", "gamescope_app_id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/AppId" },
+        "name": { "description": "Display name.", "type": "string", "minLength": 1 },
+        "source": { "$ref": "#/$defs/AppSource" },
+        "gamescope_app_id": { "description": "The app id gamescope knows its windows by (the Steam app id for Steam games). For diagnostics.", "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "pid": { "description": "Process the daemon started for it, if it tracks one.", "type": "integer", "minimum": 1 }
+      }
+    },
+    "ExitReason": {
+      "description": "Why an app ended: 'exited' normally (status 0, or a Steam game's windows closed), 'crashed' (non-zero status or killed), 'launch_timeout' (a Steam game never showed a window). Clients must treat unknown values like 'exited'.",
+      "type": "string",
+      "enum": ["exited", "crashed", "launch_timeout"]
+    },
+    "NavAction": {
+      "description": "Navigation intent. Gamepad mapping: d-pad and left stick = directions, A/Cross = accept, B/Circle = back, Y/Triangle = context, X/Square = secondary, Start = menu, Select/View = view, L1/R1 = page_left/page_right, L2/R2 = trigger_left/trigger_right, Quick Access = quick, keyboard button = keyboard.",
+      "type": "string",
+      "enum": ["up", "down", "left", "right", "accept", "back", "context", "secondary", "menu", "view", "page_left", "page_right", "trigger_left", "trigger_right", "quick", "keyboard"]
+    },
+    "NavPhase": {
+      "type": "string",
+      "enum": ["press", "repeat", "release"]
     },
     "AppKind": {
       "description": "How the app is launched. Clients must treat unknown values like 'native'.",
@@ -221,7 +448,7 @@
       "required": ["id", "name", "kind"],
       "additionalProperties": false,
       "properties": {
-        "id": { "description": "Stable identifier, used by apps.launch (M2).", "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+        "id": { "description": "Stable identifier, used by apps.launch.", "$ref": "#/$defs/AppId" },
         "name": { "description": "Display name.", "type": "string", "minLength": 1 },
         "kind": { "$ref": "#/$defs/AppKind" },
         "icon": { "description": "Absolute path to an icon file, if any.", "type": "string" }

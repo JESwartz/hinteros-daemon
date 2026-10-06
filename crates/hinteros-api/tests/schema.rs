@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hinteros_api::conformance::ApiSchema;
-use hinteros_api::session::{AppKind, EventName};
+use hinteros_api::session::{AppKind, AppSource, EventName, ExitReason, NavAction, NavPhase};
 use hinteros_api::{ApiInfo, ApiVersion, ErrorCode, session, system};
 use serde_json::Value;
 
@@ -157,7 +157,11 @@ fn method_examples_conform_and_round_trip() {
                         .unwrap_or_else(|e| panic!("{label}: {e}"));
                     let code = error["code"].as_i64().unwrap();
                     let generic = ErrorCode::from_code(code).is_some_and(|c| {
-                        !matches!(c, ErrorCode::VersionMismatch | ErrorCode::AlreadyHandshaken)
+                        ErrorCode::GENERIC.contains(&c)
+                            && !matches!(
+                                c,
+                                ErrorCode::VersionMismatch | ErrorCode::AlreadyHandshaken
+                            )
                     });
                     assert!(
                         generic || allowed_errors.contains(&code),
@@ -217,6 +221,16 @@ fn enums_match() {
     let schema = ApiSchema::session();
     assert_eq!(schema_enum(&schema, "EventName"), rust_enum(EventName::ALL));
     assert_eq!(schema_enum(&schema, "AppKind"), rust_enum(AppKind::ALL));
+    assert_eq!(schema_enum(&schema, "AppSource"), rust_enum(AppSource::ALL));
+    assert_eq!(
+        schema_enum(&schema, "ExitReason"),
+        rust_enum(ExitReason::ALL)
+    );
+    assert_eq!(schema_enum(&schema, "NavAction"), rust_enum(NavAction::ALL));
+    assert_eq!(schema_enum(&schema, "NavPhase"), rust_enum(NavPhase::ALL));
+    for e in EventName::ALL {
+        assert_eq!(rust_enum(&[*e]).pop_first().unwrap(), e.wire_name());
+    }
     // Every event is subscribable and vice versa.
     let events: BTreeSet<String> = session::API.events.iter().map(|e| e.name.into()).collect();
     assert_eq!(events, rust_enum(EventName::ALL));
@@ -238,6 +252,25 @@ fn schema_rejects_what_it_should() {
             r#"{"apps":[{"id":"Bad Id","name":"x","kind":"native"}]}"#,
         ),
         ("/methods/subscribe/params", r#"{"events":["nope"]}"#),
+        // apps.launch: exactly one target, well-formed.
+        ("/methods/apps.launch/params", r#"{}"#),
+        (
+            "/methods/apps.launch/params",
+            r#"{"id":"a","url":"steam://rungameid/1"}"#,
+        ),
+        ("/methods/apps.launch/params", r#"{"command":[]}"#),
+        (
+            "/methods/apps.launch/params",
+            r#"{"url":"steam://rungameid/0"}"#,
+        ),
+        ("/methods/apps.launch/params", r#"{"url":"http://x"}"#),
+        ("/methods/apps.focus/params", r#"{}"#),
+        (
+            "/events/input_nav/params",
+            r#"{"action":"jump","phase":"press"}"#,
+        ),
+        ("/events/app_exited/params", r#"{"id":"x"}"#),
+        ("/events/focus_changed/params", r#"{}"#),
     ];
     for (pointer, instance) in bad {
         let v: Value = serde_json::from_str(instance).unwrap();
@@ -256,4 +289,59 @@ fn schema_rejects_what_it_should() {
             .check_error(&serde_json::json!({"code": 7, "message": "m"}))
             .is_err()
     );
+}
+
+#[test]
+fn launch_params_validation() {
+    use hinteros_api::session::{AppsLaunchParams, LaunchRequest};
+    let parse = |v: Value| {
+        serde_json::from_value::<AppsLaunchParams>(v)
+            .unwrap()
+            .request()
+    };
+    assert_eq!(
+        parse(serde_json::json!({"url": "steam://rungameid/570"})),
+        Ok(LaunchRequest::Steam(570))
+    );
+    assert_eq!(
+        parse(serde_json::json!({"id": "jellyfin"})),
+        Ok(LaunchRequest::Id("jellyfin".into()))
+    );
+    assert!(matches!(
+        parse(serde_json::json!({"command": ["sh", "-c", "true"], "name": "Shell"})),
+        Ok(LaunchRequest::Command { argv, name: Some(n) }) if argv.len() == 3 && n == "Shell"
+    ));
+    for bad in [
+        serde_json::json!({}),
+        serde_json::json!({"command": []}),
+        serde_json::json!({"id": "a", "command": ["x"]}),
+        serde_json::json!({"url": "steam://rungameid/0"}),
+        serde_json::json!({"url": "steam://rungameid/99999999999"}),
+        serde_json::json!({"url": "steam://store/570"}),
+    ] {
+        assert!(parse(bad.clone()).is_err(), "{bad} accepted");
+    }
+    // Every schema example agrees with the Rust check.
+    let schema = ApiSchema::session();
+    for ex in schema.doc()["methods"]["apps.launch"]["examples"]
+        .as_array()
+        .unwrap()
+    {
+        assert!(parse(ex["params"].clone()).is_ok(), "{}", ex["name"]);
+    }
+}
+
+#[test]
+fn nullable_fields_are_required_in_rust_too() {
+    use hinteros_api::session::{AppsFocusParams, FocusChangedParams};
+    assert!(serde_json::from_str::<AppsFocusParams>("{}").is_err());
+    assert_eq!(
+        serde_json::from_str::<AppsFocusParams>(r#"{"id":null}"#)
+            .unwrap()
+            .id,
+        None
+    );
+    assert!(serde_json::from_str::<FocusChangedParams>("{}").is_err());
+    let back = serde_json::to_value(FocusChangedParams { app: None }).unwrap();
+    assert_eq!(back, serde_json::json!({"app": null}));
 }

@@ -10,4 +10,4 @@ The Rust system services behind the launcher, built as two binaries:
 This repo owns the versioned socket API schema that the launcher (and future clients such as
 a phone web admin UI) are generated from.
 
-Part of HinterOS (see the `hinteros` and `hinteros-docs` repos). Licensed under GPL-3.0-only, see [LICENSE](LICENSE).
+Part of [HinterOS](https://justsomeshed.com/JSwartz/HinterOS/hinteros). Licensed under GPL-3.0-only, see [LICENSE](LICENSE).

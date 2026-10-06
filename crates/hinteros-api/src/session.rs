@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 4);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 5);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -24,6 +24,7 @@ pub enum EventName {
     FocusChanged,
     InputNav,
     GamesChanged,
+    AppsChanged,
     SteamAttention,
     OskVisibility,
 }
@@ -36,6 +37,7 @@ impl EventName {
         EventName::FocusChanged,
         EventName::InputNav,
         EventName::GamesChanged,
+        EventName::AppsChanged,
         EventName::SteamAttention,
         EventName::OskVisibility,
     ];
@@ -49,6 +51,7 @@ impl EventName {
             EventName::FocusChanged => FocusChanged::NAME,
             EventName::InputNav => InputNav::NAME,
             EventName::GamesChanged => GamesChanged::NAME,
+            EventName::AppsChanged => AppsChanged::NAME,
             EventName::SteamAttention => SteamAttention::NAME,
             EventName::OskVisibility => OskVisibility::NAME,
         }
@@ -465,6 +468,15 @@ impl Event for GamesChanged {
     type Params = GamesChangedParams;
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsChangedParams {}
+
+pub struct AppsChanged;
+impl Event for AppsChanged {
+    const NAME: &'static str = "apps_changed";
+    type Params = AppsChangedParams;
+}
+
 /// One of Steam's own windows.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SteamWindow {
@@ -759,6 +771,7 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<FocusChanged>(),
         EventInfo::of::<InputNav>(),
         EventInfo::of::<GamesChanged>(),
+        EventInfo::of::<AppsChanged>(),
         EventInfo::of::<SteamAttention>(),
         EventInfo::of::<OskVisibility>(),
     ],

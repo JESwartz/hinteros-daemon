@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.4",
+  "version": "0.5",
   "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). See hinteros-docs/design/api.md for the protocol rules.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -616,6 +616,17 @@
       },
       "examples": [{ "name": "changed", "params": {} }]
     },
+    "apps_changed": {
+      "summary": "An app's resolved icon became available or changed (for example a web app's icon finished downloading). Call apps.list again.",
+      "description": "Sent only when the apps.list result actually changed. The daemon resolves icons at runtime from the box (desktop files and icon themes) or fetches and caches them (web apps), never from files it ships; fetching happens in the background after startup, so apps.list may first return apps without an icon.",
+      "since": "0.5",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "examples": [{ "name": "changed", "params": {} }]
+    },
     "steam_attention": {
       "summary": "The list of Steam windows waiting to be seen changed (see steam.attention). An empty list means nothing needs attention any more.",
       "description": "Sent when one of Steam's own windows (Steam Guard, an update prompt, a cloud-save conflict, sign-in, ...) appears while the launcher or another app has focus, and again when such windows close or are seen. The launcher can offer 'Steam needs your attention' with an action that calls steam.focus.",
@@ -697,7 +708,7 @@
     },
     "EventName": {
       "type": "string",
-      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "steam_attention", "osk_visibility"]
+      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_visibility"]
     },
     "AppId": {
       "description": "App identifier: an apps.list id, or for running apps started by command or Steam URL 'cmd-<n>' / 'steam-<appid>'. 'steam' is Steam itself (Big Picture and its other windows).",
@@ -752,7 +763,7 @@
         "id": { "description": "Stable identifier, used by apps.launch.", "$ref": "#/$defs/AppId" },
         "name": { "description": "Display name.", "type": "string", "minLength": 1 },
         "kind": { "$ref": "#/$defs/AppKind" },
-        "icon": { "description": "Absolute path to an icon file, if any.", "type": "string" }
+        "icon": { "description": "Absolute path to a local icon image file (PNG, SVG, ICO, JPEG, WebP), if any. Resolved by the daemon at runtime: an explicit path from the config, else the icon the app's .desktop file names, found in the installed icon themes, else (web apps) a cached download of the site's own icon. It may appear later (see apps_changed) or change. Absent: draw a placeholder, e.g. the first letter of the name.", "type": "string" }
       }
     },
     "InstallState": {

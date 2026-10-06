@@ -17,7 +17,7 @@ use hinteros_session::apps::{ProcessSpawner, which};
 use hinteros_session::config::{Cli, Config};
 use hinteros_session::focus::gamescope::{GamescopeFocus, WatchOptions, spawn_watcher};
 use hinteros_session::focus::{FocusControl, NoFocus};
-use hinteros_session::input::{InputControl, InterceptMode, NoInput, inputplumber};
+use hinteros_session::input::{InputControl, InterceptMode, NoInput, devpad, inputplumber};
 use hinteros_session::keys::ime::GamescopeIme;
 use hinteros_session::keys::uinput::UinputKeyboard;
 use hinteros_session::keys::worker::{
@@ -100,6 +100,19 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
         info!("gamescope focus control off");
         Box::new(NoFocus)
     };
+
+    if config.input.dev_gamepad {
+        if config.inputplumber.enable {
+            warn!(
+                "input.dev_gamepad is ignored while InputPlumber is enabled (it manages the \
+                 pads); use --no-inputplumber on a desktop"
+            );
+        } else {
+            let (tx, rx) = mpsc::unbounded_channel();
+            forward(rx, shell_tx.clone(), Msg::Input);
+            devpad::spawn(tx);
+        }
+    }
 
     let input: Box<dyn InputControl> = if config.inputplumber.enable {
         let (tx, rx) = mpsc::unbounded_channel();

@@ -8,6 +8,7 @@
 //! [`InputControl`] is the seam ([`inputplumber`] is the real thing); [`translate`] and
 //! [`Repeat`] turn `ui_*` events into `home_pressed` and `input_nav`.
 
+pub mod devpad;
 pub mod inputplumber;
 
 use std::time::{Duration, Instant};

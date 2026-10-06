@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.6",
+  "version": "0.7",
   "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). See hinteros-docs/design/api.md for the protocol rules.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -37,16 +37,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.6", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
-          "result": { "api_version": "0.6", "server": { "name": "hinteros-session", "version": "0.1.0" } }
+          "params": { "api_version": "0.7", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
+          "result": { "api_version": "0.7", "server": { "name": "hinteros-session", "version": "0.1.0" } }
         },
         {
           "name": "major mismatch",
           "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 1.0, server 0.6",
-            "data": { "client_api_version": "1.0", "server_api_version": "0.6" }
+            "message": "API version mismatch: client 1.0, server 0.7",
+            "data": { "client_api_version": "1.0", "server_api_version": "0.7" }
           }
         }
       ]
@@ -1457,6 +1457,343 @@
         }
       ],
       "relay": true
+    },
+    "network.status": {
+      "summary": "Wired and Wi-Fi state, the SSID joined and the IP address.",
+      "description": "Runtime settings (NetworkManager over D-Bus, as the session user). The same object comes with every network_changed event.",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "$ref": "#/$defs/NetworkStatus" },
+      "errors": ["unavailable", "not_authorized"],
+      "examples": [
+        { "name": "on Wi-Fi", "params": {}, "result": { "wifi_available": true, "wifi_enabled": true, "ethernet": false, "wifi_ssid": "Home", "wifi_signal": 72, "address": "192.168.1.20", "connectivity": "full" } },
+        { "name": "cable only", "params": {}, "result": { "wifi_available": false, "wifi_enabled": false, "ethernet": true, "address": "10.0.0.5", "connectivity": "full" } },
+        { "name": "no NetworkManager", "params": {}, "error": { "code": 4001, "message": "NetworkManager is not running", "data": { "service": "networkmanager", "reason": "org.freedesktop.NetworkManager has no owner on the system bus" } } }
+      ]
+    },
+    "wifi.scan": {
+      "summary": "Ask for a fresh scan and return the networks it finds.",
+      "description": "Returns when the scan has finished (at most a few seconds); NetworkManager refuses scans right after another one, in which case the current list comes back. wifi_list_changed follows.",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "$ref": "#/$defs/WifiList" },
+      "errors": ["unavailable", "not_authorized", "device_failed"],
+      "examples": [
+        { "name": "two networks", "params": {}, "result": { "networks": [
+          { "ssid": "Home", "signal": 72, "security": "wpa", "known": true, "connected": true },
+          { "ssid": "Neighbour", "signal": 31, "security": "wpa3", "known": false, "connected": false }
+        ] } },
+        { "name": "Wi-Fi off", "params": {}, "error": { "code": 4002, "message": "Wi-Fi is turned off", "data": { "reason": "wifi_disabled" } } }
+      ]
+    },
+    "wifi.list": {
+      "summary": "The networks NetworkManager knows now, strongest first (no scan).",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "$ref": "#/$defs/WifiList" },
+      "errors": ["unavailable"],
+      "examples": [
+        { "name": "empty", "params": {}, "result": { "networks": [] } }
+      ]
+    },
+    "wifi.connect": {
+      "summary": "Join a network, creating a system-wide connection for it.",
+      "description": "The password is needed unless the network is open or already known; it is stored in NetworkManager's system connection (readable by the session user, as accepted in the threat model) and is never logged by the daemon. Returns when the connection is up (or has failed, at most about 45 s). A failed new connection is removed again. 802.1X (enterprise) networks are refused with invalid_params.",
+      "since": "0.7",
+      "params": {
+        "type": "object",
+        "required": ["ssid"],
+        "additionalProperties": false,
+        "properties": {
+          "ssid": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "password": { "description": "8 to 63 characters (WPA), or 64 hex digits (the raw key).", "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      },
+      "result": { "type": "object", "$ref": "#/$defs/NetworkStatus" },
+      "errors": ["unavailable", "not_authorized", "not_found", "wrong_password", "device_failed"],
+      "examples": [
+        { "name": "new network", "params": { "ssid": "Home", "password": "correct horse" }, "result": { "wifi_available": true, "wifi_enabled": true, "ethernet": false, "wifi_ssid": "Home", "wifi_signal": 72, "address": "192.168.1.20", "connectivity": "full" } },
+        { "name": "wrong password", "params": { "ssid": "Home", "password": "nope nope" }, "error": { "code": 4003, "message": "the password for Home was not accepted" } },
+        { "name": "out of range", "params": { "ssid": "Gone" }, "error": { "code": 3010, "message": "no network named Gone in range" } },
+        { "name": "password missing", "params": { "ssid": "Home" }, "error": { "code": -32602, "message": "Home needs a password", "data": { "field": "password", "reason": "required" } } }
+      ]
+    },
+    "wifi.disconnect": {
+      "summary": "Leave the current Wi-Fi network (it will not rejoin until connected again).",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "$ref": "#/$defs/NetworkStatus" },
+      "errors": ["unavailable", "not_authorized", "device_failed"],
+      "examples": [
+        { "name": "left", "params": {}, "result": { "wifi_available": true, "wifi_enabled": true, "ethernet": false, "connectivity": "none" } }
+      ]
+    },
+    "wifi.forget": {
+      "summary": "Delete the stored connections of a network.",
+      "description": "Disconnects if it is the network in use. Forgetting a network that is not stored is not an error.",
+      "since": "0.7",
+      "params": { "type": "object", "required": ["ssid"], "additionalProperties": false, "properties": { "ssid": { "type": "string", "minLength": 1, "maxLength": 32 } } },
+      "result": { "type": "object", "additionalProperties": false, "properties": {} },
+      "errors": ["unavailable", "not_authorized"],
+      "examples": [
+        { "name": "forgotten", "params": { "ssid": "Home" }, "result": {} }
+      ]
+    },
+    "wifi.enable": {
+      "summary": "Switch Wi-Fi on or off.",
+      "since": "0.7",
+      "params": { "type": "object", "required": ["enabled"], "additionalProperties": false, "properties": { "enabled": { "type": "boolean" } } },
+      "result": { "type": "object", "$ref": "#/$defs/NetworkStatus" },
+      "errors": ["unavailable", "not_authorized"],
+      "examples": [
+        { "name": "off", "params": { "enabled": false }, "result": { "wifi_available": true, "wifi_enabled": false, "ethernet": true, "address": "10.0.0.5", "connectivity": "full" } }
+      ]
+    },
+    "bluetooth.status": {
+      "summary": "Whether there is an adapter, whether it is on and whether it is scanning.",
+      "description": "Runtime settings (BlueZ over D-Bus, as the session user).",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "$ref": "#/$defs/BtStatus" },
+      "errors": ["unavailable", "not_authorized"],
+      "examples": [
+        { "name": "idle", "params": {}, "result": { "available": true, "powered": true, "scanning": false } },
+        { "name": "no BlueZ", "params": {}, "error": { "code": 4001, "message": "BlueZ is not running", "data": { "service": "bluez", "reason": "org.bluez has no owner on the system bus" } } }
+      ]
+    },
+    "bluetooth.scan": {
+      "summary": "Start or stop looking for devices.",
+      "description": "Discovery stops by itself after timeout_s (default 30, at most 300). Found devices arrive as bluetooth_changed. While scanning (and while a bluetooth.pair is running) the daemon's pairing agent answers pairing requests; at other times it refuses them.",
+      "since": "0.7",
+      "params": {
+        "type": "object",
+        "required": ["enabled"],
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "timeout_s": { "type": "integer", "minimum": 1, "maximum": 300 }
+        }
+      },
+      "result": { "type": "object", "$ref": "#/$defs/BtStatus" },
+      "errors": ["unavailable", "not_authorized", "device_failed"],
+      "examples": [
+        { "name": "start", "params": { "enabled": true, "timeout_s": 20 }, "result": { "available": true, "powered": true, "scanning": true } },
+        { "name": "no adapter", "params": { "enabled": true }, "error": { "code": 4002, "message": "there is no Bluetooth adapter", "data": { "reason": "no_adapter" } } }
+      ]
+    },
+    "bluetooth.devices": {
+      "summary": "Known and discovered devices: paired ones first, then by name.",
+      "description": "Devices BlueZ has seen but that never reported a name are left out.",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "required": ["devices"], "additionalProperties": false, "properties": { "devices": { "type": "array", "items": { "$ref": "#/$defs/BtDevice" } } } },
+      "errors": ["unavailable"],
+      "examples": [
+        { "name": "a pad and a headset", "params": {}, "result": { "devices": [
+          { "address": "AA:BB:CC:DD:EE:01", "name": "Xbox Wireless Controller", "kind": "gamepad", "paired": true, "connected": true, "trusted": true, "battery": 80 },
+          { "address": "AA:BB:CC:DD:EE:02", "name": "Headphones", "kind": "headset", "paired": false, "connected": false, "trusted": false, "rssi": -60 }
+        ] } }
+      ]
+    },
+    "bluetooth.pair": {
+      "summary": "Pair with a device, trust it so that it reconnects by itself, and connect.",
+      "description": "The daemon registers a BlueZ agent (DisplayYesNo): devices without input or output (controllers, most headsets) pair without a prompt. If the device asks for a numeric comparison the daemon sends bluetooth_confirm {mode: confirm} and waits up to 30 s for bluetooth.confirm; devices that show a passkey to be typed on them get bluetooth_confirm {mode: display}. Legacy PIN requests are answered with 0000. Gives up after 45 s. Pairing an already paired device just trusts and connects it. Returns the device.",
+      "since": "0.7",
+      "params": { "type": "object", "required": ["address"], "additionalProperties": false, "properties": { "address": { "$ref": "#/$defs/BtAddress" } } },
+      "result": { "type": "object", "$ref": "#/$defs/BtDevice" },
+      "errors": ["unavailable", "not_authorized", "not_found", "device_failed"],
+      "examples": [
+        { "name": "paired", "params": { "address": "AA:BB:CC:DD:EE:01" }, "result": { "address": "AA:BB:CC:DD:EE:01", "name": "Xbox Wireless Controller", "kind": "gamepad", "paired": true, "connected": true, "trusted": true } },
+        { "name": "rejected", "params": { "address": "AA:BB:CC:DD:EE:02" }, "error": { "code": 4002, "message": "pairing was rejected", "data": { "reason": "rejected" } } },
+        { "name": "not in range", "params": { "address": "AA:BB:CC:DD:EE:09" }, "error": { "code": 3010, "message": "no Bluetooth device AA:BB:CC:DD:EE:09" } }
+      ]
+    },
+    "bluetooth.confirm": {
+      "summary": "Answer a bluetooth_confirm request (numeric comparison).",
+      "since": "0.7",
+      "params": { "type": "object", "required": ["address", "accept"], "additionalProperties": false, "properties": { "address": { "$ref": "#/$defs/BtAddress" }, "accept": { "type": "boolean" } } },
+      "result": { "type": "object", "additionalProperties": false, "properties": {} },
+      "errors": ["not_found"],
+      "examples": [
+        { "name": "accepted", "params": { "address": "AA:BB:CC:DD:EE:03", "accept": true }, "result": {} },
+        { "name": "nothing to confirm", "params": { "address": "AA:BB:CC:DD:EE:03", "accept": true }, "error": { "code": 3010, "message": "no pairing of AA:BB:CC:DD:EE:03 waits for confirmation" } }
+      ]
+    },
+    "bluetooth.connect": {
+      "summary": "Connect a paired device.",
+      "since": "0.7",
+      "params": { "type": "object", "required": ["address"], "additionalProperties": false, "properties": { "address": { "$ref": "#/$defs/BtAddress" } } },
+      "result": { "type": "object", "$ref": "#/$defs/BtDevice" },
+      "errors": ["unavailable", "not_authorized", "not_found", "device_failed"],
+      "examples": [
+        { "name": "connected", "params": { "address": "AA:BB:CC:DD:EE:01" }, "result": { "address": "AA:BB:CC:DD:EE:01", "name": "Xbox Wireless Controller", "kind": "gamepad", "paired": true, "connected": true, "trusted": true } }
+      ]
+    },
+    "bluetooth.disconnect": {
+      "summary": "Disconnect a device (it stays paired).",
+      "since": "0.7",
+      "params": { "type": "object", "required": ["address"], "additionalProperties": false, "properties": { "address": { "$ref": "#/$defs/BtAddress" } } },
+      "result": { "type": "object", "$ref": "#/$defs/BtDevice" },
+      "errors": ["unavailable", "not_authorized", "not_found", "device_failed"],
+      "examples": [
+        { "name": "disconnected", "params": { "address": "AA:BB:CC:DD:EE:01" }, "result": { "address": "AA:BB:CC:DD:EE:01", "name": "Xbox Wireless Controller", "kind": "gamepad", "paired": true, "connected": false, "trusted": true } }
+      ]
+    },
+    "bluetooth.forget": {
+      "summary": "Unpair a device and remove it.",
+      "since": "0.7",
+      "params": { "type": "object", "required": ["address"], "additionalProperties": false, "properties": { "address": { "$ref": "#/$defs/BtAddress" } } },
+      "result": { "type": "object", "additionalProperties": false, "properties": {} },
+      "errors": ["unavailable", "not_authorized", "not_found", "device_failed"],
+      "examples": [
+        { "name": "removed", "params": { "address": "AA:BB:CC:DD:EE:01" }, "result": {} }
+      ]
+    },
+    "audio.outputs": {
+      "summary": "Audio outputs, which one is the default, and its volume and mute state.",
+      "description": "Runtime settings through PipeWire's PulseAudio interface (pactl). Every audio.* method returns this same state. An output is a sink; its id is the sink's name, stable across restarts.",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "$ref": "#/$defs/AudioState" },
+      "errors": ["unavailable"],
+      "examples": [
+        { "name": "HDMI default", "params": {}, "result": { "outputs": [
+          { "id": "alsa_output.pci-0000_01_00.1.hdmi-stereo", "name": "HDMI / DisplayPort", "kind": "hdmi", "default": true },
+          { "id": "bluez_output.AA_BB_CC_DD_EE_02.1", "name": "Headphones", "kind": "bluetooth", "default": false }
+        ], "volume": 60, "muted": false } },
+        { "name": "no PipeWire", "params": {}, "error": { "code": 4001, "message": "pactl cannot reach PipeWire", "data": { "service": "audio", "reason": "Connection refused" } } }
+      ]
+    },
+    "audio.set_output": {
+      "summary": "Make an output the default: sound goes there.",
+      "since": "0.7",
+      "params": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 256 } } },
+      "result": { "type": "object", "$ref": "#/$defs/AudioState" },
+      "errors": ["unavailable", "not_found", "device_failed"],
+      "examples": [
+        { "name": "to the headphones", "params": { "id": "bluez_output.AA_BB_CC_DD_EE_02.1" }, "result": { "outputs": [
+          { "id": "alsa_output.pci-0000_01_00.1.hdmi-stereo", "name": "HDMI / DisplayPort", "kind": "hdmi", "default": false },
+          { "id": "bluez_output.AA_BB_CC_DD_EE_02.1", "name": "Headphones", "kind": "bluetooth", "default": true }
+        ], "volume": 40, "muted": false } },
+        { "name": "unknown output", "params": { "id": "nope" }, "error": { "code": 3010, "message": "no audio output nope" } }
+      ]
+    },
+    "audio.volume": {
+      "summary": "Set the default output's volume (0 to 100 percent, never above), or just report it.",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": { "percent": { "type": "integer", "minimum": 0, "maximum": 100 } } },
+      "result": { "type": "object", "$ref": "#/$defs/AudioState" },
+      "errors": ["unavailable", "device_failed"],
+      "examples": [
+        { "name": "set", "params": { "percent": 35 }, "result": { "outputs": [ { "id": "alsa_output.pci-0000_01_00.1.hdmi-stereo", "name": "HDMI / DisplayPort", "kind": "hdmi", "default": true } ], "volume": 35, "muted": false } },
+        { "name": "just report", "params": {}, "result": { "outputs": [ { "id": "alsa_output.pci-0000_01_00.1.hdmi-stereo", "name": "HDMI / DisplayPort", "kind": "hdmi", "default": true } ], "volume": 35, "muted": false } }
+      ]
+    },
+    "audio.mute": {
+      "summary": "Mute or unmute the default output.",
+      "since": "0.7",
+      "params": { "type": "object", "required": ["muted"], "additionalProperties": false, "properties": { "muted": { "type": "boolean" } } },
+      "result": { "type": "object", "$ref": "#/$defs/AudioState" },
+      "errors": ["unavailable", "device_failed"],
+      "examples": [
+        { "name": "muted", "params": { "muted": true }, "result": { "outputs": [ { "id": "alsa_output.pci-0000_01_00.1.hdmi-stereo", "name": "HDMI / DisplayPort", "kind": "hdmi", "default": true } ], "volume": 35, "muted": true } }
+      ]
+    },
+    "display.modes": {
+      "summary": "The display's modes (resolution and refresh rate), and the one in use.",
+      "description": "Under gamescope. The list is gamescope's own (the .modes file next to GAMESCOPE_PATCHED_EDID_FILE); the current mode comes from its Xwayland root window. can_set says whether display.set_mode can work (gamescope's mode save file is configured and the display is external). See the README for how modes are changed at runtime.",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "$ref": "#/$defs/DisplayModes" },
+      "errors": ["unavailable"],
+      "examples": [
+        { "name": "a TV", "params": {}, "result": { "modes": [
+          { "width": 3840, "height": 2160, "refresh": 60, "current": true, "preferred": true },
+          { "width": 1920, "height": 1080, "refresh": 60, "current": false, "preferred": false }
+        ], "display": "Sony TV", "can_set": true } },
+        { "name": "not under gamescope", "params": {}, "error": { "code": 4001, "message": "gamescope's Xwayland is not reachable", "data": { "service": "display", "reason": "no gamescope on :0" } } }
+      ]
+    },
+    "display.set_mode": {
+      "summary": "Change the display's resolution and refresh rate, until reverted or kept.",
+      "description": "The mode must be in display.modes. gamescope has no runtime mode request, so the daemon records the mode in gamescope's mode save file (GAMESCOPE_MODE_SAVE_FILE, keyed by the display's name) and nudges gamescope to pick the display's mode again (GAMESCOPE_DISPLAY_MODE_NUDGE). That also makes it the mode used at the next start. Returns once gamescope runs the new mode (about a second); if it does not switch, the old mode is restored and device_failed {reason: not_applied} is returned. The previous mode is remembered for display.revert. A launcher's keep-or-revert dialog calls display.keep when the user keeps it and display.revert when the time runs out.",
+      "since": "0.7",
+      "params": { "type": "object", "$ref": "#/$defs/Mode" },
+      "result": { "type": "object", "required": ["previous", "current"], "additionalProperties": false, "properties": { "previous": { "$ref": "#/$defs/Mode" }, "current": { "$ref": "#/$defs/Mode" } } },
+      "errors": ["unavailable", "not_found", "device_failed"],
+      "examples": [
+        { "name": "to 1080p", "params": { "width": 1920, "height": 1080, "refresh": 60 }, "result": { "previous": { "width": 3840, "height": 2160, "refresh": 60 }, "current": { "width": 1920, "height": 1080, "refresh": 60 } } },
+        { "name": "no such mode", "params": { "width": 1000, "height": 700, "refresh": 60 }, "error": { "code": 3010, "message": "the display has no 1000x700@60 mode" } },
+        { "name": "gamescope ignored it", "params": { "width": 1280, "height": 720, "refresh": 60 }, "error": { "code": 4002, "message": "gamescope did not switch to 1280x720@60 (is it started with -W/-H/-r?)", "data": { "reason": "not_applied" } } }
+      ]
+    },
+    "display.keep": {
+      "summary": "Accept the mode set by display.set_mode: there is nothing to revert to any more.",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "additionalProperties": false, "properties": {} },
+      "errors": [],
+      "examples": [
+        { "name": "kept", "params": {}, "result": {} }
+      ]
+    },
+    "display.revert": {
+      "summary": "Go back to the mode from before the last display.set_mode (unless kept).",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "required": ["current"], "additionalProperties": false, "properties": { "current": { "$ref": "#/$defs/Mode" } } },
+      "errors": ["unavailable", "device_failed"],
+      "examples": [
+        { "name": "reverted", "params": {}, "result": { "current": { "width": 3840, "height": 2160, "refresh": 60 } } },
+        { "name": "nothing to revert", "params": {}, "error": { "code": 4002, "message": "no display change to revert", "data": { "reason": "nothing_to_revert" } } }
+      ]
+    },
+    "power.capabilities": {
+      "summary": "What logind says about suspend, reboot and power off for this user.",
+      "description": "Power goes from the session daemon straight to logind (system-api.md, Power), authorised by the polkit rules for the active local session user.",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "$ref": "#/$defs/PowerCapabilities" },
+      "errors": ["unavailable"],
+      "examples": [
+        { "name": "all allowed", "params": {}, "result": { "suspend": "yes", "reboot": "yes", "poweroff": "yes" } },
+        { "name": "no logind", "params": {}, "error": { "code": 4001, "message": "logind is not running", "data": { "service": "logind", "reason": "org.freedesktop.login1 has no owner on the system bus" } } }
+      ]
+    },
+    "power.suspend": {
+      "summary": "Suspend the machine.",
+      "description": "Returns once logind accepted the request. A system job (update, rebuild) holds a block inhibitor while it switches over: logind then refuses and the error is power_inhibited with its own text.",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "additionalProperties": false, "properties": {} },
+      "errors": ["unavailable", "not_authorized", "power_inhibited", "device_failed"],
+      "examples": [
+        { "name": "accepted", "params": {}, "result": {} },
+        { "name": "an update is switching over", "params": {}, "error": { "code": 4005, "message": "Operation inhibited by \"hinteros-system\" (PID 812), reason is \"switching to a new system\".", "data": { "who": "hinteros-system", "why": "switching to a new system" } } }
+      ]
+    },
+    "power.reboot": {
+      "summary": "Restart the machine.",
+      "description": "Same rules as power.suspend.",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "additionalProperties": false, "properties": {} },
+      "errors": ["unavailable", "not_authorized", "power_inhibited", "device_failed"],
+      "examples": [
+        { "name": "accepted", "params": {}, "result": {} }
+      ]
+    },
+    "power.poweroff": {
+      "summary": "Shut the machine down.",
+      "description": "Same rules as power.suspend.",
+      "since": "0.7",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "additionalProperties": false, "properties": {} },
+      "errors": ["unavailable", "not_authorized", "power_inhibited", "device_failed"],
+      "examples": [
+        { "name": "accepted", "params": {}, "result": {} },
+        { "name": "not allowed", "params": {}, "error": { "code": 4004, "message": "logind refused: Access denied" } }
+      ]
     }
 
   },
@@ -1783,7 +2120,53 @@
           }
         }
       ]
+    },
+    "network_changed": {
+      "summary": "The network status changed (cable, Wi-Fi joined or lost, address, Wi-Fi switched).",
+      "description": "Params are what network.status returns. Debounced.",
+      "since": "0.7",
+      "params": { "type": "object", "$ref": "#/$defs/NetworkStatus" },
+      "examples": [
+        { "name": "joined", "params": { "wifi_available": true, "wifi_enabled": true, "ethernet": false, "wifi_ssid": "Home", "wifi_signal": 72, "address": "192.168.1.20", "connectivity": "full" } }
+      ]
+    },
+    "wifi_list_changed": {
+      "summary": "The list of Wi-Fi networks in range changed (a scan finished, a network came or went, saved networks changed).",
+      "description": "Params are what wifi.list returns. Signal changes below 5 points do not count; debounced.",
+      "since": "0.7",
+      "params": { "type": "object", "$ref": "#/$defs/WifiList" },
+      "examples": [
+        { "name": "one network", "params": { "networks": [ { "ssid": "Home", "signal": 72, "security": "wpa", "known": true, "connected": true } ] } }
+      ]
+    },
+    "bluetooth_changed": {
+      "summary": "The adapter's state or a device changed (found, paired, connected, battery, gone).",
+      "description": "status is what bluetooth.status returns, devices what bluetooth.devices returns. Debounced.",
+      "since": "0.7",
+      "params": { "type": "object", "required": ["status", "devices"], "additionalProperties": false, "properties": { "status": { "$ref": "#/$defs/BtStatus" }, "devices": { "type": "array", "items": { "$ref": "#/$defs/BtDevice" } } } },
+      "examples": [
+        { "name": "pad connected", "params": { "status": { "available": true, "powered": true, "scanning": false }, "devices": [ { "address": "AA:BB:CC:DD:EE:01", "name": "Xbox Wireless Controller", "kind": "gamepad", "paired": true, "connected": true, "trusted": true, "battery": 80 } ] } }
+      ]
+    },
+    "bluetooth_confirm": {
+      "summary": "A device being paired wants the user to compare or read a passkey.",
+      "description": "mode confirm: show the passkey and answer with bluetooth.confirm {address, accept}; the daemon rejects after 30 s. mode display: show the passkey so the user can type it on the device; no answer.",
+      "since": "0.7",
+      "params": { "type": "object", "required": ["address", "name", "passkey", "mode"], "additionalProperties": false, "properties": { "address": { "$ref": "#/$defs/BtAddress" }, "name": { "type": "string", "maxLength": 256 }, "passkey": { "type": "string", "pattern": "^[0-9]{6}$" }, "mode": { "enum": ["confirm", "display"] } } },
+      "examples": [
+        { "name": "compare", "params": { "address": "AA:BB:CC:DD:EE:03", "name": "Phone", "passkey": "012345", "mode": "confirm" } }
+      ]
+    },
+    "audio_changed": {
+      "summary": "The outputs, the default output, the volume or the mute state changed.",
+      "description": "Params are what audio.outputs returns. Debounced.",
+      "since": "0.7",
+      "params": { "type": "object", "$ref": "#/$defs/AudioState" },
+      "examples": [
+        { "name": "volume", "params": { "outputs": [ { "id": "alsa_output.pci-0000_01_00.1.hdmi-stereo", "name": "HDMI / DisplayPort", "kind": "hdmi", "default": true } ], "volume": 45, "muted": false } }
+      ]
     }
+
 
   },
   "errors": {
@@ -1989,7 +2372,7 @@
     "not_found": {
       "code": 3010,
       "since": "0.6",
-      "summary": "Unknown generation or job."
+      "summary": "Unknown generation or job; for runtime settings: a Wi-Fi network not in range, a Bluetooth device, an audio output or a display mode that does not exist, or a bluetooth.confirm with nothing waiting."
     },
     "needs_acknowledgement": {
       "code": 3011,
@@ -2032,7 +2415,47 @@
           }
         }
       }
+    },
+    "unavailable": {
+      "code": 4001,
+      "since": "0.7",
+      "summary": "A runtime-settings method needs a service that is not there (not installed, not running, no permission to reach it, or no such hardware).",
+      "data": {
+        "type": "object",
+        "required": ["service", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "service": { "enum": ["networkmanager", "bluez", "audio", "display", "logind"] },
+          "reason": { "type": "string", "maxLength": 300 }
+        }
+      }
+    },
+    "device_failed": {
+      "code": 4002,
+      "since": "0.7",
+      "summary": "The service accepted the request but the operation failed (a connection or pairing attempt, a mode change). The message says why in words; reason is for code.",
+      "data_optional": true,
+      "data": {
+        "type": "object",
+        "required": ["reason"],
+        "additionalProperties": false,
+        "properties": { "reason": { "type": "string", "pattern": "^[a-z_]{1,40}$" } }
+      }
+    },
+    "wrong_password": { "code": 4003, "since": "0.7", "summary": "wifi.connect: the network refused the password." },
+    "not_authorized": { "code": 4004, "since": "0.7", "summary": "The service's polkit policy refused the session user (not the active local session, or the system's polkit rules are missing)." },
+    "power_inhibited": {
+      "code": 4005,
+      "since": "0.7",
+      "summary": "logind refused suspend, reboot or power off because an inhibitor lock blocks it (a system job is switching over). The message is logind's.",
+      "data_optional": true,
+      "data": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "who": { "type": "string", "maxLength": 300 }, "why": { "type": "string", "maxLength": 300 } }
+      }
     }
+
 
   },
   "$defs": {
@@ -2053,7 +2476,7 @@
     },
     "EventName": {
       "type": "string",
-      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_visibility", "job_started", "job_progress", "job_finished"]
+      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_visibility", "job_started", "job_progress", "job_finished", "network_changed", "wifi_list_changed", "bluetooth_changed", "bluetooth_confirm", "audio_changed"]
     },
     "AppId": {
       "description": "App identifier: an apps.list id, or for running apps started by command or Steam URL 'cmd-<n>' / 'steam-<appid>'. 'steam' is Steam itself (Big Picture and its other windows).",
@@ -2559,7 +2982,135 @@
           "type": "boolean"
         }
       }
+    },
+    "BtAddress": { "description": "A Bluetooth address, upper case.", "type": "string", "pattern": "^([0-9A-F]{2}:){5}[0-9A-F]{2}$" },
+    "Connectivity": { "type": "string", "enum": ["unknown", "none", "portal", "limited", "full"] },
+    "NetworkStatus": {
+      "type": "object",
+      "required": ["wifi_available", "wifi_enabled", "ethernet", "connectivity"],
+      "additionalProperties": false,
+      "properties": {
+        "wifi_available": { "description": "There is a Wi-Fi device.", "type": "boolean" },
+        "wifi_enabled": { "description": "Wi-Fi is switched on.", "type": "boolean" },
+        "ethernet": { "description": "An Ethernet device is connected.", "type": "boolean" },
+        "wifi_ssid": { "description": "The network Wi-Fi is connected to (absent when not connected).", "type": "string" },
+        "wifi_signal": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "address": { "description": "The primary connection's IPv4 address.", "type": "string" },
+        "connectivity": { "$ref": "#/$defs/Connectivity" }
+      }
+    },
+    "WifiSecurity": { "description": "wpa is WPA or WPA2 with a passphrase, wpa3 is SAE only, enterprise (802.1X) cannot be joined with a password alone.", "type": "string", "enum": ["open", "wep", "wpa", "wpa3", "enterprise"] },
+    "WifiNetwork": {
+      "type": "object",
+      "required": ["ssid", "signal", "security", "known", "connected"],
+      "additionalProperties": false,
+      "properties": {
+        "ssid": { "type": "string", "minLength": 1 },
+        "signal": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "security": { "$ref": "#/$defs/WifiSecurity" },
+        "known": { "description": "A connection for it is stored (no password needed).", "type": "boolean" },
+        "connected": { "type": "boolean" }
+      }
+    },
+    "WifiList": {
+      "type": "object",
+      "required": ["networks"],
+      "additionalProperties": false,
+      "properties": { "networks": { "description": "Strongest first.", "type": "array", "items": { "$ref": "#/$defs/WifiNetwork" } } }
+    },
+    "BtKind": { "type": "string", "enum": ["gamepad", "headset", "speaker", "keyboard", "mouse", "phone", "computer", "other"] },
+    "BtDevice": {
+      "type": "object",
+      "required": ["address", "name", "kind", "paired", "connected", "trusted"],
+      "additionalProperties": false,
+      "properties": {
+        "address": { "$ref": "#/$defs/BtAddress" },
+        "name": { "type": "string" },
+        "kind": { "$ref": "#/$defs/BtKind" },
+        "paired": { "type": "boolean" },
+        "connected": { "type": "boolean" },
+        "trusted": { "type": "boolean" },
+        "battery": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "rssi": { "description": "dBm, while in range.", "type": "integer" }
+      }
+    },
+    "BtStatus": {
+      "type": "object",
+      "required": ["available", "powered", "scanning"],
+      "additionalProperties": false,
+      "properties": {
+        "available": { "description": "There is a Bluetooth adapter.", "type": "boolean" },
+        "powered": { "type": "boolean" },
+        "scanning": { "type": "boolean" }
+      }
+    },
+    "AudioKind": { "type": "string", "enum": ["hdmi", "analog", "usb", "bluetooth", "other"] },
+    "AudioOutput": {
+      "type": "object",
+      "required": ["id", "name", "kind", "default"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "description": "The sink's name.", "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "kind": { "$ref": "#/$defs/AudioKind" },
+        "default": { "type": "boolean" }
+      }
+    },
+    "AudioState": {
+      "type": "object",
+      "required": ["outputs", "volume", "muted"],
+      "additionalProperties": false,
+      "properties": {
+        "outputs": { "type": "array", "items": { "$ref": "#/$defs/AudioOutput" } },
+        "volume": { "description": "The default output's volume, percent.", "type": "integer", "minimum": 0, "maximum": 100 },
+        "muted": { "type": "boolean" }
+      }
+    },
+    "Mode": {
+      "description": "A display mode: pixels, and refresh rate in whole Hz (59.94 Hz is 60).",
+      "type": "object",
+      "required": ["width", "height", "refresh"],
+      "additionalProperties": false,
+      "properties": {
+        "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "refresh": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      }
+    },
+    "DisplayModeInfo": {
+      "type": "object",
+      "required": ["width", "height", "refresh", "current", "preferred"],
+      "additionalProperties": false,
+      "properties": {
+        "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "refresh": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "current": { "type": "boolean" },
+        "preferred": { "description": "The display's own first choice.", "type": "boolean" }
+      }
+    },
+    "DisplayModes": {
+      "type": "object",
+      "required": ["modes", "can_set"],
+      "additionalProperties": false,
+      "properties": {
+        "modes": { "type": "array", "items": { "$ref": "#/$defs/DisplayModeInfo" } },
+        "display": { "description": "Make and model of the display, if known.", "type": "string" },
+        "can_set": { "description": "display.set_mode can work.", "type": "boolean" }
+      }
+    },
+    "PowerCapability": { "description": "logind's answer: challenge needs authentication nobody can give on this box.", "type": "string", "enum": ["yes", "no", "challenge", "na"] },
+    "PowerCapabilities": {
+      "type": "object",
+      "required": ["suspend", "reboot", "poweroff"],
+      "additionalProperties": false,
+      "properties": {
+        "suspend": { "$ref": "#/$defs/PowerCapability" },
+        "reboot": { "$ref": "#/$defs/PowerCapability" },
+        "poweroff": { "$ref": "#/$defs/PowerCapability" }
+      }
     }
+
 
   }
 }

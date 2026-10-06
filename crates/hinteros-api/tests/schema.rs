@@ -647,3 +647,165 @@ fn relay_matches_the_system_api() {
         assert_eq!(s["errors"][name]["code"], decl["code"], "error {name}");
     }
 }
+
+#[test]
+fn runtime_enums_match() {
+    use hinteros_api::session::{
+        AudioKind, BtConfirmMode, BtKind, Connectivity, PowerCapability, Service, WifiSecurity,
+    };
+    let schema = ApiSchema::session();
+    assert_eq!(
+        schema_enum(&schema, "Connectivity"),
+        rust_enum(Connectivity::ALL)
+    );
+    assert_eq!(
+        schema_enum(&schema, "WifiSecurity"),
+        rust_enum(WifiSecurity::ALL)
+    );
+    assert_eq!(schema_enum(&schema, "BtKind"), rust_enum(BtKind::ALL));
+    assert_eq!(schema_enum(&schema, "AudioKind"), rust_enum(AudioKind::ALL));
+    assert_eq!(
+        schema_enum(&schema, "PowerCapability"),
+        rust_enum(PowerCapability::ALL)
+    );
+    let confirm: Vec<String> = schema.doc()["events"]["bluetooth_confirm"]["params"]["properties"]
+        ["mode"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        confirm.into_iter().collect::<BTreeSet<_>>(),
+        rust_enum(BtConfirmMode::ALL)
+    );
+    let services: Vec<String> =
+        schema.doc()["errors"]["unavailable"]["data"]["properties"]["service"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+    assert_eq!(
+        services.into_iter().collect::<BTreeSet<_>>(),
+        rust_enum(Service::ALL)
+    );
+    for s in Service::ALL {
+        assert_eq!(rust_enum(&[*s]).pop_first().unwrap(), s.name());
+    }
+    // Every runtime method is dispatchable and in the API, and nothing else is.
+    let methods: BTreeSet<&str> = session::METHODS.iter().copied().collect();
+    for m in &methods {
+        assert!(session::API.methods.iter().any(|i| i.name == *m), "{m}");
+    }
+    for (prefix, n) in [
+        ("network.", 1),
+        ("wifi.", 6),
+        ("bluetooth.", 8),
+        ("audio.", 4),
+        ("display.", 4),
+        ("power.", 4),
+    ] {
+        assert_eq!(
+            methods.iter().filter(|m| m.starts_with(prefix)).count(),
+            n,
+            "{prefix}"
+        );
+    }
+}
+
+#[test]
+fn runtime_schema_rejects_what_it_should() {
+    let schema = ApiSchema::session();
+    let bad = [
+        ("/methods/wifi.connect/params", r#"{}"#),
+        ("/methods/wifi.connect/params", r#"{"ssid":""}"#),
+        (
+            "/methods/wifi.connect/params",
+            r#"{"ssid":"a","password":"x","hidden":true}"#,
+        ),
+        ("/methods/wifi.enable/params", r#"{"enabled":"on"}"#),
+        (
+            "/methods/bluetooth.pair/params",
+            r#"{"address":"aa:bb:cc:dd:ee:ff"}"#,
+        ),
+        ("/methods/bluetooth.pair/params", r#"{"address":"AA:BB"}"#),
+        (
+            "/methods/bluetooth.confirm/params",
+            r#"{"address":"AA:BB:CC:DD:EE:FF"}"#,
+        ),
+        (
+            "/methods/bluetooth.scan/params",
+            r#"{"enabled":true,"timeout_s":0}"#,
+        ),
+        ("/methods/audio.volume/params", r#"{"percent":101}"#),
+        ("/methods/audio.volume/params", r#"{"percent":-1}"#),
+        ("/methods/audio.mute/params", r#"{}"#),
+        ("/methods/display.set_mode/params", r#"{"width":1920}"#),
+        (
+            "/methods/display.set_mode/params",
+            r#"{"width":0,"height":1080,"refresh":60}"#,
+        ),
+        ("/methods/power.reboot/params", r#"{"force":true}"#),
+        (
+            "/events/bluetooth_confirm/params",
+            r#"{"address":"AA:BB:CC:DD:EE:FF","name":"x","passkey":"12345","mode":"confirm"}"#,
+        ),
+        (
+            "/methods/network.status/result",
+            r#"{"wifi_available":true,"wifi_enabled":true,"ethernet":false,"connectivity":"great"}"#,
+        ),
+    ];
+    for (pointer, instance) in bad {
+        let v: Value = serde_json::from_str(instance).unwrap();
+        assert!(
+            schema.check(pointer, &v).is_err(),
+            "{pointer} accepted {instance}"
+        );
+    }
+    for code in [4001, 4002, 4003, 4004, 4005] {
+        assert!(
+            schema
+                .check_error(&serde_json::json!({"code": code, "message": "m", "data": {"x": 1}}))
+                .is_err(),
+            "{code} accepts stray data"
+        );
+    }
+    schema
+        .check_error(&serde_json::json!({"code": 4001, "message": "m", "data": {"service": "bluez", "reason": "r"}}))
+        .unwrap();
+    assert!(
+        schema
+            .check_error(&serde_json::json!({"code": 4001, "message": "m"}))
+            .is_err()
+    );
+}
+
+#[test]
+fn wifi_password_is_not_in_debug_output() {
+    use hinteros_api::session::WifiConnectParams;
+    let p = WifiConnectParams {
+        ssid: "Home".into(),
+        password: Some("hunter2hunter2".into()),
+    };
+    let shown = format!("{p:?}");
+    assert!(
+        shown.contains("Home") && !shown.contains("hunter2"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn bluetooth_addresses() {
+    use hinteros_api::session::valid_bt_address;
+    assert!(valid_bt_address("AA:BB:CC:DD:EE:0F"));
+    for bad in [
+        "aa:bb:cc:dd:ee:0f",
+        "AA:BB:CC:DD:EE",
+        "AA-BB-CC-DD-EE-0F",
+        "AA:BB:CC:DD:EE:GG",
+        "",
+    ] {
+        assert!(!valid_bt_address(bad), "{bad}");
+    }
+}

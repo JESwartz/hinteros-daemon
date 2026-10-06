@@ -32,6 +32,11 @@ pub enum ErrorCode {
     NotFound,
     NeedsAcknowledgement,
     AuthenticationRequired,
+    Unavailable,
+    DeviceFailed,
+    WrongPassword,
+    NotAuthorized,
+    PowerInhibited,
 }
 
 impl ErrorCode {
@@ -61,6 +66,11 @@ impl ErrorCode {
         Self::NotFound,
         Self::NeedsAcknowledgement,
         Self::AuthenticationRequired,
+        Self::Unavailable,
+        Self::DeviceFailed,
+        Self::WrongPassword,
+        Self::NotAuthorized,
+        Self::PowerInhibited,
     ];
 
     /// The JSON-RPC and protocol errors, which every API declares.
@@ -126,6 +136,11 @@ impl ErrorCode {
             Self::NotFound => 3010,
             Self::NeedsAcknowledgement => 3011,
             Self::AuthenticationRequired => 3012,
+            Self::Unavailable => 4001,
+            Self::DeviceFailed => 4002,
+            Self::WrongPassword => 4003,
+            Self::NotAuthorized => 4004,
+            Self::PowerInhibited => 4005,
         }
     }
 
@@ -157,6 +172,11 @@ impl ErrorCode {
             Self::NotFound => "not_found",
             Self::NeedsAcknowledgement => "needs_acknowledgement",
             Self::AuthenticationRequired => "authentication_required",
+            Self::Unavailable => "unavailable",
+            Self::DeviceFailed => "device_failed",
+            Self::WrongPassword => "wrong_password",
+            Self::NotAuthorized => "not_authorized",
+            Self::PowerInhibited => "power_inhibited",
         }
     }
 

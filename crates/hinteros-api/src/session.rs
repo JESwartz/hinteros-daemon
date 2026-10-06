@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 6);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 7);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -14,6 +14,9 @@ pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
 pub const SOCKET_IN_RUNTIME_DIR: &str = "hinteros/session.sock";
 
 pub use crate::common::{HelloParams, HelloResult, Peer, PingParams, PingResult};
+
+// Runtime settings (0.7).
+pub use crate::runtime::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +33,11 @@ pub enum EventName {
     JobStarted,
     JobProgress,
     JobFinished,
+    NetworkChanged,
+    WifiListChanged,
+    BluetoothChanged,
+    BluetoothConfirm,
+    AudioChanged,
 }
 
 impl EventName {
@@ -46,6 +54,11 @@ impl EventName {
         EventName::JobStarted,
         EventName::JobProgress,
         EventName::JobFinished,
+        EventName::NetworkChanged,
+        EventName::WifiListChanged,
+        EventName::BluetoothChanged,
+        EventName::BluetoothConfirm,
+        EventName::AudioChanged,
     ];
 
     /// The event's wire name (its JSON-RPC notification method).
@@ -63,6 +76,11 @@ impl EventName {
             EventName::JobStarted => JobStarted::NAME,
             EventName::JobProgress => JobProgress::NAME,
             EventName::JobFinished => JobFinished::NAME,
+            EventName::NetworkChanged => NetworkChanged::NAME,
+            EventName::WifiListChanged => WifiListChanged::NAME,
+            EventName::BluetoothChanged => BluetoothChanged::NAME,
+            EventName::BluetoothConfirm => BluetoothConfirmEvent::NAME,
+            EventName::AudioChanged => AudioChanged::NAME,
         }
     }
 }
@@ -787,6 +805,33 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<RelayJobsGet>(),
         MethodInfo::of::<RelayJobsList>(),
         MethodInfo::of::<RelayJobsCancel>(),
+        MethodInfo::of::<NetworkStatusMethod>(),
+        MethodInfo::of::<WifiScan>(),
+        MethodInfo::of::<WifiListMethod>(),
+        MethodInfo::of::<WifiConnect>(),
+        MethodInfo::of::<WifiDisconnect>(),
+        MethodInfo::of::<WifiForget>(),
+        MethodInfo::of::<WifiEnable>(),
+        MethodInfo::of::<BluetoothStatus>(),
+        MethodInfo::of::<BluetoothScan>(),
+        MethodInfo::of::<BluetoothDevices>(),
+        MethodInfo::of::<BluetoothPair>(),
+        MethodInfo::of::<BluetoothConfirm>(),
+        MethodInfo::of::<BluetoothConnect>(),
+        MethodInfo::of::<BluetoothDisconnect>(),
+        MethodInfo::of::<BluetoothForget>(),
+        MethodInfo::of::<AudioOutputs>(),
+        MethodInfo::of::<AudioSetOutput>(),
+        MethodInfo::of::<AudioVolume>(),
+        MethodInfo::of::<AudioMute>(),
+        MethodInfo::of::<DisplayModesMethod>(),
+        MethodInfo::of::<DisplaySetMode>(),
+        MethodInfo::of::<DisplayKeep>(),
+        MethodInfo::of::<DisplayRevert>(),
+        MethodInfo::of::<PowerCapabilitiesMethod>(),
+        MethodInfo::of::<PowerSuspend>(),
+        MethodInfo::of::<PowerReboot>(),
+        MethodInfo::of::<PowerPoweroff>(),
     ],
     events: &[
         EventInfo::of::<HomePressed>(),
@@ -801,6 +846,11 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<JobStarted>(),
         EventInfo::of::<JobProgress>(),
         EventInfo::of::<JobFinished>(),
+        EventInfo::of::<NetworkChanged>(),
+        EventInfo::of::<WifiListChanged>(),
+        EventInfo::of::<BluetoothChanged>(),
+        EventInfo::of::<BluetoothConfirmEvent>(),
+        EventInfo::of::<AudioChanged>(),
     ],
     errors: ErrorCode::ALL,
 };

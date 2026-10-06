@@ -2,8 +2,6 @@
 //! real one, see hinteros-docs/spikes/04-input-layer.md) on a private dbus-daemon. Skipped when
 //! `dbus-daemon` is not on PATH, unless HINTEROS_REQUIRE_TEST_TOOLS is set.
 
-use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -22,68 +20,6 @@ const TARGET: &str = "/org/shadowblip/InputPlumber/devices/target/dbus0";
 
 fn device(n: u32) -> String {
     format!("{ROOT}/CompositeDevice{n}")
-}
-
-struct Bus {
-    child: Child,
-    address: String,
-    _dir: tempfile::TempDir,
-}
-
-impl Bus {
-    fn start() -> Option<Self> {
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("bus.conf");
-        std::fs::write(
-            &config,
-            format!(
-                r#"<busconfig>
-  <type>session</type>
-  <listen>unix:path={}/bus</listen>
-  <auth>EXTERNAL</auth>
-  <policy context="default">
-    <allow send_destination="*" eavesdrop="true"/>
-    <allow eavesdrop="true"/>
-    <allow own="*"/>
-  </policy>
-</busconfig>"#,
-                dir.path().display()
-            ),
-        )
-        .unwrap();
-        let mut child = match Command::new("dbus-daemon")
-            .arg(format!("--config-file={}", config.display()))
-            .args(["--nofork", "--print-address"])
-            .stdout(Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(e) => {
-                assert!(
-                    std::env::var_os("HINTEROS_REQUIRE_TEST_TOOLS").is_none(),
-                    "dbus-daemon: {e}"
-                );
-                eprintln!("dbus-daemon not found, skipping");
-                return None;
-            }
-        };
-        let mut address = String::new();
-        BufReader::new(child.stdout.take().unwrap())
-            .read_line(&mut address)
-            .unwrap();
-        Some(Self {
-            child,
-            address: address.trim().into(),
-            _dir: dir,
-        })
-    }
-}
-
-impl Drop for Bus {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
 struct Manager(Arc<AtomicBool>);

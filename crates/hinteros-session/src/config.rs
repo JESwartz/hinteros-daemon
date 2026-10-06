@@ -166,6 +166,18 @@ pub struct Cli {
     /// The system service's socket, for the relayed system.* methods
     #[arg(long, env = "HINTEROS_SYSTEM_SOCKET")]
     pub system_socket: Option<PathBuf>,
+
+    /// Don't serve runtime settings (Wi-Fi, Bluetooth, audio, display, power)
+    #[arg(long)]
+    pub no_runtime: bool,
+
+    /// D-Bus address of the bus NetworkManager, BlueZ and logind are on [default: the system bus]
+    #[arg(long, env = "HINTEROS_RUNTIME_BUS")]
+    pub runtime_bus: Option<String>,
+
+    /// The pactl binary used for audio
+    #[arg(long, env = "HINTEROS_PACTL")]
+    pub pactl: Option<PathBuf>,
 }
 
 fn flag(on: bool, off: bool) -> Option<bool> {
@@ -189,7 +201,93 @@ pub struct Config {
     pub keys: KeysConfig,
     pub osk: OskConfig,
     pub system: SystemConfig,
+    pub runtime: RuntimeConfig,
+    pub audio: AudioConfig,
+    pub display: DisplayConfig,
+    pub bluetooth: BluetoothConfig,
     pub apps: Vec<AppConfig>,
+}
+
+/// Runtime settings: Wi-Fi (NetworkManager), Bluetooth (BlueZ), power (logind), all over D-Bus.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RuntimeConfig {
+    /// Serve the runtime settings methods (`network.*`, `wifi.*`, `bluetooth.*`, `audio.*`,
+    /// `display.*`, `power.*`). Off: they answer `unavailable`.
+    pub enable: bool,
+    /// D-Bus address of the bus those services are on [default: the system bus].
+    pub bus: Option<String>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            bus: None,
+        }
+    }
+}
+
+/// Audio, through PipeWire's PulseAudio interface with `pactl`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioConfig {
+    /// The `pactl` binary.
+    pub pactl: PathBuf,
+    /// How often changes made elsewhere are looked for (only while a client is connected).
+    pub poll_ms: u64,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            pactl: "pactl".into(),
+            poll_ms: 2000,
+        }
+    }
+}
+
+/// The display's modes, as far as gamescope shares them (see `runtime::display`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DisplayConfig {
+    /// gamescope's mode save file (its `GAMESCOPE_MODE_SAVE_FILE`) [default: that variable].
+    pub save_file: Option<PathBuf>,
+    /// The mode list gamescope writes: `<GAMESCOPE_PATCHED_EDID_FILE>.modes` [default: from
+    /// that variable].
+    pub modes_file: Option<PathBuf>,
+    /// How long `display.set_mode` waits for gamescope to switch before it gives up and puts
+    /// the old mode back.
+    pub apply_timeout_ms: u64,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            save_file: None,
+            modes_file: None,
+            apply_timeout_ms: 6000,
+        }
+    }
+}
+
+/// Bluetooth pairing.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BluetoothConfig {
+    /// `bluetooth.pair` gives up after this long.
+    pub pair_timeout_s: u64,
+    /// A numeric comparison is rejected if `bluetooth.confirm` does not answer in this time.
+    pub confirm_timeout_s: u64,
+}
+
+impl Default for BluetoothConfig {
+    fn default() -> Self {
+        Self {
+            pair_timeout_s: 45,
+            confirm_timeout_s: 30,
+        }
+    }
 }
 
 /// The relay to the privileged system service (`system.*` methods and job events).
@@ -598,6 +696,15 @@ impl Config {
         }
         if let Some(socket) = &cli.system_socket {
             self.system.socket = socket.clone();
+        }
+        if cli.no_runtime {
+            self.runtime.enable = false;
+        }
+        if let Some(bus) = &cli.runtime_bus {
+            self.runtime.bus = Some(bus.clone());
+        }
+        if let Some(pactl) = &cli.pactl {
+            self.audio.pactl = pactl.clone();
         }
     }
 

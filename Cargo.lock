@@ -656,6 +656,7 @@ name = "hinteros-session"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bitflags",
  "clap",
  "evdev",
  "futures-util",

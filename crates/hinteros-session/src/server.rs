@@ -14,6 +14,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use crate::runtime::Runtime;
 use crate::shell::{METHODS, Msg};
 use crate::system::Relay;
 use crate::{Audience, Broadcast};
@@ -27,6 +28,7 @@ pub async fn handle(
     mut events: broadcast::Receiver<Broadcast>,
     shell: mpsc::UnboundedSender<Msg>,
     relay: Relay,
+    runtime: Runtime,
 ) -> Result<()> {
     // Defence in depth: the socket is 0600 in a 0700 directory, but only our own user may talk to us.
     let cred = stream.peer_cred()?;
@@ -66,7 +68,14 @@ pub async fn handle(
                     Step::Ignore => debug!("ignoring client notification"),
                     Step::Dispatch(req) => {
                         let id = req.id.expect("dispatched requests have an id");
-                        let outcome = dispatch(&req.method, req.params, &mut subscriptions, &shell, &relay).await;
+                        let outcome = dispatch(
+                            &req.method,
+                            req.params,
+                            &mut subscriptions,
+                            &shell,
+                            &relay,
+                            &runtime,
+                        ).await;
                         write_message(&mut w, &jsonrpc::response(&id, outcome)).await?;
                     }
                 }
@@ -105,7 +114,11 @@ async fn dispatch(
     subscriptions: &mut BTreeSet<EventName>,
     shell: &mpsc::UnboundedSender<Msg>,
     relay: &Relay,
+    runtime: &Runtime,
 ) -> Result<Value, ErrorObject> {
+    if Runtime::handles(method) {
+        return runtime.call(method, params).await;
+    }
     if let Some(target) = session::relay_target(method) {
         return relay.call(target, params).await;
     }

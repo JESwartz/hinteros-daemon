@@ -23,6 +23,7 @@ macro_rules! method {
 
 /// Params of methods that take none.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NoParams {}
 
 /// Result of methods that return nothing.
@@ -144,6 +145,7 @@ pub struct WifiList {
 
 /// `wifi.connect` params. The password is never logged: `Debug` hides it.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WifiConnectParams {
     pub ssid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,11 +162,13 @@ impl fmt::Debug for WifiConnectParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WifiForgetParams {
     pub ssid: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WifiEnableParams {
     pub enabled: bool,
 }
@@ -249,6 +253,7 @@ pub struct BtDevices {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BtScanParams {
     pub enabled: bool,
     /// Stop scanning by itself after this many seconds [default 30].
@@ -261,11 +266,13 @@ pub const BT_SCAN_TIMEOUT_DEFAULT_S: u32 = 30;
 pub const BT_SCAN_TIMEOUT_MAX_S: u32 = 300;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BtAddressParams {
     pub address: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BtConfirmParams {
     pub address: String,
     pub accept: bool,
@@ -376,11 +383,13 @@ pub struct AudioState {
 pub const VOLUME_MAX: u8 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AudioSetOutputParams {
     pub id: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AudioVolumeParams {
     /// The new volume; absent: just report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -388,6 +397,7 @@ pub struct AudioVolumeParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AudioMuteParams {
     pub muted: bool,
 }
@@ -408,6 +418,7 @@ impl Event for AudioChanged {
 /// A display mode as set: size in pixels and refresh rate in Hz (whole numbers: gamescope's
 /// mode list is in Hz, 59.94 Hz shows as 60).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Mode {
     pub width: u32,
     pub height: u32,

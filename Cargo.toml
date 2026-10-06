@@ -12,6 +12,7 @@ repository = "https://justsomeshed.com/JSwartz/HinterOS/hinteros-daemon"
 hinteros-api = { path = "crates/hinteros-api" }
 anyhow = "1"
 base64 = "0.22"
+bitflags = "2"
 clap = { version = "4", features = ["derive", "env"] }
 evdev = "0.13"
 futures-util = "0.3"

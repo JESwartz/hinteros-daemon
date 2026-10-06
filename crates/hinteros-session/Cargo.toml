@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bitflags.workspace = true
 clap.workspace = true
 evdev.workspace = true
 futures-util.workspace = true

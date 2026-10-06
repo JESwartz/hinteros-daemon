@@ -30,8 +30,17 @@ impl Daemon {
     /// integration and the virtual keyboard are off unless the arguments turn them on, and no user config or Steam
     /// library is read (HOME is the temp dir).
     pub fn start_with(args: impl FnOnce(&Path) -> Vec<std::ffi::OsString>) -> Self {
+        Self::start_env(args, |_| Vec::new())
+    }
+
+    /// Like [`start_with`], and with extra environment variables (computed from the temp dir).
+    pub fn start_env(
+        args: impl FnOnce(&Path) -> Vec<std::ffi::OsString>,
+        env: impl FnOnce(&Path) -> Vec<(String, std::ffi::OsString)>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let extra = args(dir.path());
+        let extra_env = env(dir.path());
         // A nested directory also exercises creating the socket's parent.
         let socket = dir.path().join("hinteros/session.sock");
         let child = Command::new(env!("CARGO_BIN_EXE_hinteros-session"))
@@ -47,7 +56,18 @@ impl Daemon {
             .env("HINTEROS_ICON_DIRS", dir.path().join("share"))
             // Never the real system service: relayed methods see whatever the test puts here.
             .env("HINTEROS_SYSTEM_SOCKET", dir.path().join("system.sock"))
+            // Runtime settings never reach this desktop's NetworkManager, BlueZ, logind or
+            // PipeWire: no bus, no pactl, no gamescope files unless the test provides them.
+            .env(
+                "HINTEROS_RUNTIME_BUS",
+                format!("unix:path={}/no-bus", dir.path().display()),
+            )
+            .env("HINTEROS_PACTL", dir.path().join("no-pactl"))
+            .env_remove("GAMESCOPE_PATCHED_EDID_FILE")
+            .env_remove("GAMESCOPE_MODE_SAVE_FILE")
+            .envs(extra_env)
             .env("RUST_LOG", "debug")
+            .stderr(std::fs::File::create(dir.path().join("daemon.log")).unwrap())
             .spawn()
             .expect("start hinteros-session");
         let daemon = Self { child, socket, dir };
@@ -57,6 +77,11 @@ impl Daemon {
             std::thread::sleep(Duration::from_millis(20));
         }
         daemon
+    }
+
+    /// Everything the daemon has logged so far (it runs with RUST_LOG=debug).
+    pub fn log(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join("daemon.log")).unwrap_or_default()
     }
 
     pub fn signal(&self, sig: Signal) {
@@ -92,6 +117,9 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("--- daemon log ---\n{}", self.log());
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -199,4 +227,77 @@ pub fn alive(pid: u32) -> bool {
         !s.rsplit_once(')')
             .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
     })
+}
+
+/// A private `dbus-daemon` the fake services (NetworkManager, BlueZ, logind, InputPlumber, ...)
+/// and the daemon under test meet on. Never the system or session bus.
+pub struct Bus {
+    child: std::process::Child,
+    pub address: String,
+    _dir: tempfile::TempDir,
+}
+
+impl Bus {
+    /// `None` (skip the test) when `dbus-daemon` is not on PATH, unless
+    /// `HINTEROS_REQUIRE_TEST_TOOLS` is set.
+    pub fn start() -> Option<Self> {
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("bus.conf");
+        std::fs::write(
+            &config,
+            format!(
+                r#"<busconfig>
+  <type>session</type>
+  <listen>unix:path={}/bus</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>"#,
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+        let mut child = match Command::new("dbus-daemon")
+            .arg(format!("--config-file={}", config.display()))
+            .args(["--nofork", "--print-address"])
+            .stdout(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                assert!(
+                    std::env::var_os("HINTEROS_REQUIRE_TEST_TOOLS").is_none(),
+                    "dbus-daemon: {e}"
+                );
+                eprintln!("dbus-daemon not found, skipping");
+                return None;
+            }
+        };
+        let mut address = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        Some(Self {
+            child,
+            address: address.trim().into(),
+            _dir: dir,
+        })
+    }
+}
+
+impl Drop for Bus {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The daemon's arguments for runtime settings on `bus`.
+pub fn runtime_bus(bus: &Bus) -> Vec<std::ffi::OsString> {
+    vec!["--runtime-bus".into(), bus.address.clone().into()]
 }

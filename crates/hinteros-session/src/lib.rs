@@ -15,6 +15,7 @@ pub mod keys;
 pub mod osk;
 pub mod procs;
 pub mod reaper;
+pub mod runtime;
 pub mod server;
 pub mod shell;
 pub mod steam;

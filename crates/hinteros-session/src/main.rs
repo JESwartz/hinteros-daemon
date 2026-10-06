@@ -194,6 +194,8 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
         hinteros_session::system::Relay::disabled()
     };
 
+    let runtime = hinteros_session::runtime::Runtime::spawn(&config, events.clone());
+
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -201,8 +203,9 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
                     let rx = events.subscribe();
                     let shell = shell_tx.clone();
                     let relay = relay.clone();
+                    let runtime = runtime.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = server::handle(stream, rx, shell, relay).await {
+                        if let Err(e) = server::handle(stream, rx, shell, relay, runtime).await {
                             debug!("connection ended: {e:#}");
                         }
                     });

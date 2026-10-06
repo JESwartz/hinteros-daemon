@@ -138,6 +138,11 @@ pub fn call<M: Method>(
     params: Option<Value>,
     f: impl FnOnce(M::Params) -> Result<M::Result, ErrorObject>,
 ) -> Result<Value, ErrorObject> {
+    encode_result::<M>(f(decode_params::<M>(params)?)?)
+}
+
+/// Decode a method's params (absent means `{}`).
+pub fn decode_params<M: Method>(params: Option<Value>) -> Result<M::Params, ErrorObject> {
     let params = match params {
         None => Value::Object(Map::new()),
         Some(v @ Value::Object(_)) => v,
@@ -148,9 +153,12 @@ pub fn call<M: Method>(
             ));
         }
     };
-    let params = serde_json::from_value(params)
-        .map_err(|e| ErrorObject::new(ErrorCode::InvalidParams, format!("invalid params: {e}")))?;
-    let result = f(params)?;
+    serde_json::from_value(params)
+        .map_err(|e| ErrorObject::new(ErrorCode::InvalidParams, format!("invalid params: {e}")))
+}
+
+/// Encode a method's result.
+pub fn encode_result<M: Method>(result: M::Result) -> Result<Value, ErrorObject> {
     serde_json::to_value(result)
         .map_err(|e| ErrorObject::new(ErrorCode::InternalError, format!("encoding result: {e}")))
 }

@@ -1,0 +1,471 @@
+//! Configuration: a TOML file (all keys optional) plus command-line overrides.
+//!
+//! ```toml
+//! [launcher]
+//! app_id = 4100000000          # gamescope app id of the launcher's windows
+//! command = ["hinteros-launcher"]  # optional: the daemon starts and restarts the launcher
+//!
+//! [steam]
+//! path = "steam"               # binary used for steam://rungameid/<id>
+//! autostart = false            # run `steam -silent` when the daemon starts
+//! launch_timeout_s = 300       # give up on a game that never shows a window
+//!
+//! [gamescope]
+//! enable = true
+//! display = ":0"               # gamescope's Xwayland [default: $DISPLAY, else :0]
+//! wayland_display = "gamescope-0"  # passed to launched apps [default: $WAYLAND_DISPLAY, else gamescope-0]
+//! focus_loss_debounce_ms = 1500
+//!
+//! [inputplumber]
+//! enable = true
+//! bus = "unix:path=/run/dbus/system_bus_socket"  # default: the system bus
+//!
+//! [input]
+//! repeat_delay_ms = 400
+//! repeat_interval_ms = 100
+//!
+//! [[apps]]                     # apps.list entries; launchable with apps.launch {id}
+//! id = "jellyfin"
+//! name = "Jellyfin"
+//! command = ["jellyfin-desktop"]
+//!
+//! [[apps]]
+//! id = "portal-2"
+//! name = "Portal 2"
+//! steam_app_id = 620
+//! ```
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail, ensure};
+use clap::Parser;
+use hinteros_api::session::AppKind;
+use serde::Deserialize;
+
+/// Default gamescope app id of the launcher. Steam app ids are far below this, and Steam's
+/// non-Steam shortcuts use random ids with the top bit set, so collisions are unlikely.
+pub const DEFAULT_LAUNCHER_APP_ID: u32 = 4_100_000_000;
+
+/// gamescope treats app id 769 as Steam's Big Picture window.
+pub const STEAM_BIG_PICTURE_APP_ID: u32 = 769;
+
+#[derive(Parser, Debug, Default)]
+#[command(version, about)]
+pub struct Cli {
+    /// Socket to listen on [default: $XDG_RUNTIME_DIR/hinteros/session.sock]
+    #[arg(long, env = "HINTEROS_SESSION_SOCKET")]
+    pub socket: Option<PathBuf>,
+
+    /// Config file [default: $XDG_CONFIG_HOME/hinteros/session.toml, if it exists]
+    #[arg(long, env = "HINTEROS_SESSION_CONFIG")]
+    pub config: Option<PathBuf>,
+
+    /// gamescope app id of the launcher's windows
+    #[arg(long)]
+    pub launcher_app_id: Option<u32>,
+
+    /// Start (and restart) the launcher from the daemon: program and arguments, split on spaces
+    #[arg(long)]
+    pub launcher_command: Option<String>,
+
+    /// steam binary used for steam://rungameid/<id> launches
+    #[arg(long, env = "HINTEROS_STEAM")]
+    pub steam_path: Option<PathBuf>,
+
+    /// Control gamescope focus (needs gamescope's Xwayland)
+    #[arg(long, overrides_with = "no_gamescope")]
+    pub gamescope: bool,
+    /// Don't control gamescope focus (dev desktops)
+    #[arg(long)]
+    pub no_gamescope: bool,
+
+    /// gamescope's Xwayland display
+    #[arg(long, env = "HINTEROS_GAMESCOPE_DISPLAY")]
+    pub gamescope_display: Option<String>,
+
+    /// Take controller input from InputPlumber
+    #[arg(long, overrides_with = "no_inputplumber")]
+    pub inputplumber: bool,
+    /// Don't use InputPlumber (dev desktops)
+    #[arg(long)]
+    pub no_inputplumber: bool,
+
+    /// D-Bus address to find InputPlumber on [default: the system bus]
+    #[arg(long, env = "HINTEROS_INPUTPLUMBER_BUS")]
+    pub inputplumber_bus: Option<String>,
+}
+
+fn flag(on: bool, off: bool) -> Option<bool> {
+    match (on, off) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Config {
+    pub launcher: LauncherConfig,
+    pub steam: SteamConfig,
+    pub gamescope: GamescopeConfig,
+    pub inputplumber: InputPlumberConfig,
+    pub input: InputConfig,
+    pub apps: Vec<AppConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LauncherConfig {
+    pub app_id: u32,
+    pub command: Option<Vec<String>>,
+}
+
+impl Default for LauncherConfig {
+    fn default() -> Self {
+        Self {
+            app_id: DEFAULT_LAUNCHER_APP_ID,
+            command: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SteamConfig {
+    pub path: PathBuf,
+    pub autostart: bool,
+    pub launch_timeout_s: u64,
+}
+
+impl Default for SteamConfig {
+    fn default() -> Self {
+        Self {
+            path: "steam".into(),
+            autostart: false,
+            launch_timeout_s: 300,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GamescopeConfig {
+    pub enable: bool,
+    pub display: Option<String>,
+    pub wayland_display: Option<String>,
+    pub focus_loss_debounce_ms: u64,
+}
+
+impl Default for GamescopeConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            display: None,
+            wayland_display: None,
+            focus_loss_debounce_ms: 1500,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InputPlumberConfig {
+    pub enable: bool,
+    pub bus: Option<String>,
+}
+
+impl Default for InputPlumberConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            bus: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InputConfig {
+    pub repeat_delay_ms: u64,
+    pub repeat_interval_ms: u64,
+}
+
+impl Default for InputConfig {
+    fn default() -> Self {
+        Self {
+            repeat_delay_ms: 400,
+            repeat_interval_ms: 100,
+        }
+    }
+}
+
+impl InputConfig {
+    pub fn repeat_delay(&self) -> Duration {
+        Duration::from_millis(self.repeat_delay_ms)
+    }
+    pub fn repeat_interval(&self) -> Duration {
+        Duration::from_millis(self.repeat_interval_ms)
+    }
+}
+
+/// An `apps.list` entry. Exactly one of `command` and `steam_app_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppConfig {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "native")]
+    pub kind: AppKind,
+    pub icon: Option<String>,
+    pub command: Option<Vec<String>>,
+    pub steam_app_id: Option<u32>,
+}
+
+fn native() -> AppKind {
+    AppKind::Native
+}
+
+/// Whether `id` is a valid app id (`^[a-z0-9][a-z0-9._-]*$`).
+pub fn valid_app_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
+}
+
+impl Config {
+    pub fn parse(text: &str) -> Result<Self> {
+        let config: Config = toml::from_str(text)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Load the file named on the command line, or the default one if it exists, then apply
+    /// the command-line overrides.
+    pub fn load(cli: &Cli) -> Result<Self> {
+        let path = cli.config.clone().or_else(|| {
+            let base = std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config")))?;
+            Some(base.join("hinteros/session.toml")).filter(|p| p.exists())
+        });
+        let mut config = match &path {
+            Some(path) => {
+                let text = std::fs::read_to_string(path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                Self::parse(&text).with_context(|| format!("in {}", path.display()))?
+            }
+            None => Self::default(),
+        };
+        config.apply(cli);
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn apply(&mut self, cli: &Cli) {
+        if let Some(id) = cli.launcher_app_id {
+            self.launcher.app_id = id;
+        }
+        if let Some(cmd) = &cli.launcher_command {
+            self.launcher.command = Some(cmd.split_whitespace().map(String::from).collect());
+        }
+        if let Some(path) = &cli.steam_path {
+            self.steam.path = path.clone();
+        }
+        if let Some(on) = flag(cli.gamescope, cli.no_gamescope) {
+            self.gamescope.enable = on;
+        }
+        if let Some(display) = &cli.gamescope_display {
+            self.gamescope.display = Some(display.clone());
+        }
+        if let Some(on) = flag(cli.inputplumber, cli.no_inputplumber) {
+            self.inputplumber.enable = on;
+        }
+        if let Some(bus) = &cli.inputplumber_bus {
+            self.inputplumber.bus = Some(bus.clone());
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let id = self.launcher.app_id;
+        ensure!(
+            id != 0 && id != STEAM_BIG_PICTURE_APP_ID,
+            "launcher.app_id must not be 0 or {STEAM_BIG_PICTURE_APP_ID}"
+        );
+        if let Some(cmd) = &self.launcher.command {
+            ensure!(!cmd.is_empty(), "launcher.command is empty");
+        }
+        let mut seen = BTreeSet::new();
+        for app in &self.apps {
+            ensure!(valid_app_id(&app.id), "invalid app id '{}'", app.id);
+            ensure!(seen.insert(&app.id), "duplicate app id '{}'", app.id);
+            ensure!(!app.name.is_empty(), "app '{}' has an empty name", app.id);
+            match (&app.command, app.steam_app_id) {
+                (Some(cmd), None) if !cmd.is_empty() => {}
+                (None, Some(steam)) if steam != 0 => {}
+                _ => bail!(
+                    "app '{}' needs exactly one of a non-empty 'command' or a 'steam_app_id'",
+                    app.id
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    /// The Xwayland display gamescope serves X11 clients on.
+    pub fn gamescope_display(&self) -> String {
+        self.gamescope
+            .display
+            .clone()
+            .or_else(|| std::env::var("DISPLAY").ok().filter(|d| !d.is_empty()))
+            .unwrap_or_else(|| ":0".into())
+    }
+
+    /// Environment for apps the daemon starts, so they land in gamescope. Empty when gamescope
+    /// integration is off (apps inherit the daemon's environment).
+    pub fn child_env(&self) -> Vec<(String, String)> {
+        if !self.gamescope.enable {
+            return Vec::new();
+        }
+        let wayland = self
+            .gamescope
+            .wayland_display
+            .clone()
+            .or_else(|| {
+                std::env::var("WAYLAND_DISPLAY")
+                    .ok()
+                    .filter(|d| !d.is_empty())
+            })
+            .unwrap_or_else(|| "gamescope-0".into());
+        vec![
+            ("DISPLAY".into(), self.gamescope_display()),
+            ("WAYLAND_DISPLAY".into(), wayland.clone()),
+            ("GAMESCOPE_WAYLAND_DISPLAY".into(), wayland),
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_without_a_file() {
+        let c = Config::parse("").unwrap();
+        assert_eq!(c.launcher.app_id, DEFAULT_LAUNCHER_APP_ID);
+        assert_eq!(c.steam.path, PathBuf::from("steam"));
+        assert!(c.gamescope.enable && c.inputplumber.enable);
+        assert!(c.apps.is_empty());
+    }
+
+    #[test]
+    fn full_file() {
+        let c = Config::parse(
+            r#"
+            [launcher]
+            app_id = 42
+            command = ["hinteros-launcher", "--kiosk"]
+            [steam]
+            path = "/run/current-system/sw/bin/steam"
+            autostart = true
+            [gamescope]
+            enable = false
+            display = ":1"
+            [inputplumber]
+            enable = false
+            [input]
+            repeat_delay_ms = 300
+            [[apps]]
+            id = "jellyfin"
+            name = "Jellyfin"
+            command = ["jellyfin-desktop"]
+            [[apps]]
+            id = "portal-2"
+            name = "Portal 2"
+            kind = "native"
+            steam_app_id = 620
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.launcher.app_id, 42);
+        assert_eq!(c.launcher.command.as_ref().unwrap().len(), 2);
+        assert!(c.steam.autostart);
+        assert_eq!(c.gamescope_display(), ":1");
+        assert!(!c.gamescope.enable && !c.inputplumber.enable);
+        assert_eq!(c.input.repeat_delay(), Duration::from_millis(300));
+        assert_eq!(c.input.repeat_interval(), Duration::from_millis(100));
+        assert_eq!(c.apps[1].steam_app_id, Some(620));
+        assert!(c.child_env().is_empty(), "no gamescope, inherit env");
+    }
+
+    #[test]
+    fn rejects_bad_files() {
+        for bad in [
+            "[launcher]\napp_id = 0",
+            "[launcher]\napp_id = 769",
+            "[launcher]\ncommand = []",
+            "[gamescope]\nenabled = true", // typo
+            "[[apps]]\nid = \"Bad\"\nname = \"x\"\ncommand = [\"x\"]",
+            "[[apps]]\nid = \"a\"\nname = \"x\"",
+            "[[apps]]\nid = \"a\"\nname = \"x\"\ncommand = [\"x\"]\nsteam_app_id = 1",
+            "[[apps]]\nid = \"a\"\nname = \"x\"\ncommand = [\"x\"]\n[[apps]]\nid = \"a\"\nname = \"y\"\ncommand = [\"y\"]",
+        ] {
+            assert!(Config::parse(bad).is_err(), "accepted: {bad}");
+        }
+    }
+
+    #[test]
+    fn cli_overrides_file() {
+        let mut c = Config::parse("[gamescope]\nenable = true\n").unwrap();
+        let cli = Cli::parse_from([
+            "hinteros-session",
+            "--no-gamescope",
+            "--no-inputplumber",
+            "--launcher-app-id",
+            "7",
+            "--launcher-command",
+            "launcher --flag",
+            "--steam-path",
+            "/tmp/fake-steam",
+            "--gamescope-display",
+            ":5",
+        ]);
+        c.apply(&cli);
+        c.validate().unwrap();
+        assert!(!c.gamescope.enable && !c.inputplumber.enable);
+        assert_eq!(c.launcher.app_id, 7);
+        assert_eq!(
+            c.launcher.command,
+            Some(vec!["launcher".into(), "--flag".into()])
+        );
+        assert_eq!(c.steam.path, PathBuf::from("/tmp/fake-steam"));
+        assert_eq!(c.gamescope_display(), ":5");
+
+        let cli = Cli::parse_from(["hinteros-session", "--no-gamescope", "--gamescope"]);
+        c.apply(&cli);
+        assert!(
+            c.gamescope.enable,
+            "the last of --gamescope/--no-gamescope wins"
+        );
+    }
+
+    #[test]
+    fn child_env_points_at_gamescope() {
+        let mut c = Config::default();
+        c.gamescope.display = Some(":3".into());
+        c.gamescope.wayland_display = Some("gamescope-1".into());
+        let env = c.child_env();
+        assert!(env.contains(&("DISPLAY".into(), ":3".into())));
+        assert!(env.contains(&("WAYLAND_DISPLAY".into(), "gamescope-1".into())));
+    }
+
+    #[test]
+    fn app_ids() {
+        assert!(valid_app_id("steam-570") && valid_app_id("cmd-1") && valid_app_id("a.b_c"));
+        assert!(!valid_app_id("") && !valid_app_id("-a") && !valid_app_id("A"));
+    }
+}

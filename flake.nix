@@ -113,6 +113,13 @@
           // {
             inherit (rust) cargoArtifacts;
             cargoTestExtraArgs = "--workspace";
+            # Stand-ins for gamescope's Xwayland (Xvfb) and the system bus (a private
+            # dbus-daemon) in the session daemon's tests; required here, optional elsewhere.
+            nativeCheckInputs = [
+              pkgs.xvfb
+              pkgs.dbus
+            ];
+            HINTEROS_REQUIRE_TEST_TOOLS = "1";
           }
         );
         cargo-clippy = rust.craneLib.cargoClippy (

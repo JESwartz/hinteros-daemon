@@ -1,11 +1,10 @@
 //! Black-box tests: run the real `hinteros-session` binary on a temporary socket, talk to it over
 //! the wire and validate every message it sends against `schema/session-api.json`.
 
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
 
-use hinteros_api::client::{Client, ClientError};
 use hinteros_api::common::{Peer, Ping, PingParams};
 use hinteros_api::conformance::ApiSchema;
 use hinteros_api::session::{self, AppsList, AppsListParams, EventName, HomePressed};
@@ -14,86 +13,9 @@ use rustix::process::{Pid, Signal, kill_process};
 use serde_json::{Value, json};
 use tokio::time::timeout;
 
-const TIMEOUT: Duration = Duration::from_secs(10);
+mod common;
 
-struct Daemon {
-    child: Child,
-    socket: PathBuf,
-    _dir: tempfile::TempDir,
-}
-
-impl Daemon {
-    fn start() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        // A nested directory also exercises creating the socket's parent.
-        let socket = dir.path().join("hinteros/session.sock");
-        let child = Command::new(env!("CARGO_BIN_EXE_hinteros-session"))
-            .arg("--socket")
-            .arg(&socket)
-            .env("RUST_LOG", "debug")
-            .spawn()
-            .expect("start hinteros-session");
-        let daemon = Self {
-            child,
-            socket,
-            _dir: dir,
-        };
-        let deadline = Instant::now() + TIMEOUT;
-        while std::os::unix::net::UnixStream::connect(&daemon.socket).is_err() {
-            assert!(Instant::now() < deadline, "daemon did not start listening");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        daemon
-    }
-
-    fn signal(&self, sig: Signal) {
-        let pid = Pid::from_child(&self.child);
-        kill_process(pid, sig).unwrap();
-    }
-
-    async fn connect(&self) -> Client {
-        Client::connect(&self.socket).await.unwrap()
-    }
-
-    /// Connect and complete the handshake.
-    async fn client(&self) -> Client {
-        let mut c = self.connect().await;
-        let schema = ApiSchema::session();
-        let params = json!({
-            "api_version": session::VERSION,
-            "client": { "name": "test", "version": "0" },
-        });
-        schema.check_params("hello", &params).unwrap();
-        let result = c.call_raw("hello", params).await.unwrap();
-        schema.check_result("hello", &result).unwrap();
-        assert_eq!(result["api_version"], session::VERSION.to_string());
-        assert_eq!(result["server"]["name"], "hinteros-session");
-        c
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn rpc_error(r: Result<Value, ClientError>) -> Value {
-    match r {
-        Err(ClientError::Rpc(e)) => {
-            let v = serde_json::to_value(&e).unwrap();
-            ApiSchema::session().check_error(&v).unwrap();
-            v
-        }
-        other => panic!("expected an RPC error, got {other:?}"),
-    }
-}
-
-async fn assert_closed(c: &mut Client) {
-    let next = timeout(TIMEOUT, c.read_raw()).await.unwrap().unwrap();
-    assert_eq!(next, None, "server should have closed the connection");
-}
+use common::*;
 
 #[tokio::test]
 async fn handshake_ping_apps_and_home_event() {
@@ -268,4 +190,272 @@ async fn refuses_to_replace_a_live_socket() {
     assert!(!out.status.success());
     // The first instance is unaffected.
     d.client().await;
+}
+
+#[tokio::test]
+async fn launch_command_track_exit_and_focus() {
+    let d = Daemon::start();
+    let mut c = d.client().await;
+    call(
+        &mut c,
+        "subscribe",
+        json!({ "events": ["home_pressed", "app_started", "app_exited", "focus_changed"] }),
+    )
+    .await
+    .unwrap();
+
+    // The app runs under our reaper, as gamescope needs, and records its parent's name.
+    let out = d.dir.path().join("parent");
+    let app = call(
+        &mut c,
+        "apps.launch",
+        json!({
+            "command": ["sh", "-c", format!("cat /proc/$PPID/comm > {}; exec sleep 30", out.display())],
+            "name": "Sleeper",
+        }),
+    )
+    .await
+    .unwrap()["app"]
+        .clone();
+    assert_eq!(app["id"], "cmd-1");
+    assert_eq!(app["name"], "Sleeper");
+    assert_eq!(app["source"], "command");
+    assert_eq!(
+        next_event(&mut c).await,
+        ("app_started".into(), json!({ "app": app }))
+    );
+    assert_eq!(
+        next_event(&mut c).await,
+        ("focus_changed".into(), json!({ "app": "cmd-1" }))
+    );
+    let parent = eventually("the app to start", async || {
+        std::fs::read_to_string(&out).ok().filter(|s| !s.is_empty())
+    })
+    .await;
+    assert_eq!(parent.trim(), "reaper");
+
+    let running = call(&mut c, "apps.running", json!({})).await.unwrap();
+    assert_eq!(running, json!({ "apps": [app], "focused": "cmd-1" }));
+
+    // Home: the launcher gets focus, the app keeps running.
+    d.signal(Signal::USR1);
+    assert_eq!(next_event(&mut c).await.0, "home_pressed");
+    assert_eq!(
+        next_event(&mut c).await,
+        ("focus_changed".into(), json!({ "app": null }))
+    );
+    let running = call(&mut c, "apps.running", json!({})).await.unwrap();
+    assert_eq!(running["focused"], Value::Null);
+    assert_eq!(running["apps"][0]["id"], "cmd-1");
+
+    call(&mut c, "apps.focus", json!({ "id": "cmd-1" }))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_event(&mut c).await,
+        ("focus_changed".into(), json!({ "app": "cmd-1" }))
+    );
+
+    // Kill it: app_exited (killed = crashed, 128 + SIGKILL), and the launcher is back.
+    let pid = app["pid"].as_i64().unwrap() as i32;
+    let reaper = Pid::from_raw(pid).unwrap();
+    kill_process(reaper, Signal::TERM).unwrap(); // forwarded to the app's process group
+    assert_eq!(
+        next_event(&mut c).await,
+        (
+            "app_exited".into(),
+            json!({ "id": "cmd-1", "reason": "crashed", "exit_code": 143 })
+        )
+    );
+    assert_eq!(
+        next_event(&mut c).await,
+        ("focus_changed".into(), json!({ "app": null }))
+    );
+    assert_eq!(
+        call(&mut c, "apps.running", json!({})).await.unwrap(),
+        json!({ "apps": [], "focused": null })
+    );
+
+    // A clean exit is "exited".
+    call(&mut c, "apps.launch", json!({ "command": ["true"] }))
+        .await
+        .unwrap();
+    assert_eq!(next_event(&mut c).await.0, "app_started");
+    assert_eq!(next_event(&mut c).await.0, "focus_changed");
+    assert_eq!(
+        next_event(&mut c).await,
+        (
+            "app_exited".into(),
+            json!({ "id": "cmd-2", "reason": "exited", "exit_code": 0 })
+        )
+    );
+}
+
+#[tokio::test]
+async fn launch_steam_url_with_a_fake_steam() {
+    let d = Daemon::start_with(|dir| {
+        let steam = dir.join("steam");
+        script(
+            &steam,
+            &format!("echo \"$@\" >> {}/steam.log", dir.display()),
+        );
+        vec!["--steam-path".into(), steam.into()]
+    });
+    let mut c = d.client().await;
+    call(
+        &mut c,
+        "subscribe",
+        json!({ "events": ["app_started", "app_exited", "focus_changed"] }),
+    )
+    .await
+    .unwrap();
+    let r = call(
+        &mut c,
+        "apps.launch",
+        json!({ "url": "steam://rungameid/1000001" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        r,
+        json!({ "app": { "id": "steam-1000001", "name": "Steam game 1000001", "source": "steam", "gamescope_app_id": 1000001 } })
+    );
+    assert_eq!(next_event(&mut c).await.0, "app_started");
+    assert_eq!(next_event(&mut c).await.0, "focus_changed");
+    // Without gamescope the steam command's end stands in for the game's.
+    assert_eq!(
+        next_event(&mut c).await,
+        (
+            "app_exited".into(),
+            json!({ "id": "steam-1000001", "reason": "exited", "exit_code": 0 })
+        )
+    );
+    let log = std::fs::read_to_string(d.dir.path().join("steam.log")).unwrap();
+    assert_eq!(log, "-silent steam://rungameid/1000001\n");
+}
+
+#[tokio::test]
+async fn configured_apps_and_launch_errors() {
+    let d = Daemon::start_with(|dir| {
+        let config = dir.join("session.toml");
+        std::fs::write(
+            &config,
+            r#"
+            [[apps]]
+            id = "shell"
+            name = "Shell"
+            command = ["sleep", "30"]
+            [[apps]]
+            id = "broken"
+            name = "Broken"
+            command = ["/nonexistent/program"]
+            "#,
+        )
+        .unwrap();
+        vec!["--config".into(), config.into()]
+    });
+    let mut c = d.client().await;
+    let list = call(&mut c, "apps.list", json!({})).await.unwrap();
+    assert_eq!(
+        list,
+        json!({ "apps": [
+            { "id": "shell", "name": "Shell", "kind": "native" },
+            { "id": "broken", "name": "Broken", "kind": "native" },
+        ] })
+    );
+
+    let app = call(&mut c, "apps.launch", json!({ "id": "shell" }))
+        .await
+        .unwrap()["app"]
+        .clone();
+    assert_eq!(app["id"], "shell");
+    // Launching a running app focuses it instead of starting a second one.
+    let again = call(&mut c, "apps.launch", json!({ "id": "shell" }))
+        .await
+        .unwrap()["app"]
+        .clone();
+    assert_eq!(again, app);
+
+    let code = |r: Result<Value, Value>| r.unwrap_err()["code"].clone();
+    assert_eq!(
+        code(call(&mut c, "apps.launch", json!({ "id": "nope" })).await),
+        ErrorCode::AppNotFound.code()
+    );
+    assert_eq!(
+        code(call(&mut c, "apps.launch", json!({ "id": "broken" })).await),
+        ErrorCode::AppLaunchFailed.code()
+    );
+    assert_eq!(
+        code(
+            call(
+                &mut c,
+                "apps.launch",
+                json!({ "command": ["no-such-program-hinteros"] })
+            )
+            .await
+        ),
+        ErrorCode::AppLaunchFailed.code()
+    );
+    assert_eq!(
+        code(
+            call(
+                &mut c,
+                "apps.launch",
+                json!({ "id": "shell", "url": "steam://rungameid/1" })
+            )
+            .await
+        ),
+        ErrorCode::InvalidParams.code()
+    );
+    assert_eq!(
+        code(call(&mut c, "apps.focus", json!({ "id": "cmd-1" })).await),
+        ErrorCode::AppNotFound.code()
+    );
+    call(&mut c, "apps.focus", json!({ "id": null }))
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&mut c, "apps.running", json!({})).await.unwrap()["focused"],
+        Value::Null
+    );
+}
+
+#[test]
+fn reaper_subcommand() {
+    let dir = tempfile::tempdir().unwrap();
+    let late = dir.path().join("late");
+    let out = Command::new(env!("CARGO_BIN_EXE_hinteros-session"))
+        .args(["reaper", "SteamLaunch", "AppId=77", "--", "sh", "-c"])
+        .arg(format!(
+            "cat /proc/$PPID/comm; tr '\\0' ' ' < /proc/$PPID/cmdline; echo; \
+             (sleep 0.3; echo done > {}) & exit 5",
+            late.display()
+        ))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let mut lines = stdout.lines();
+    // What gamescope looks for: a process named "reaper" with SteamLaunch AppId=<id> before --.
+    assert_eq!(lines.next(), Some("reaper"));
+    assert!(
+        lines
+            .next()
+            .unwrap()
+            .contains(" reaper SteamLaunch AppId=77 -- sh -c "),
+        "{stdout}"
+    );
+    // The command's status, after waiting for the orphan it left behind.
+    assert_eq!(out.status.code(), Some(5));
+    assert_eq!(std::fs::read_to_string(&late).unwrap(), "done\n");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_hinteros-session"))
+        .args(["reaper", "--", "/nonexistent"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(127));
+    let out = Command::new(env!("CARGO_BIN_EXE_hinteros-session"))
+        .args(["reaper", "AppId=3", "--", "true"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
 }

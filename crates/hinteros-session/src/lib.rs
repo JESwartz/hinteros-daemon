@@ -9,6 +9,7 @@
 pub mod apps;
 pub mod config;
 pub mod focus;
+pub mod icons;
 pub mod input;
 pub mod keys;
 pub mod osk;

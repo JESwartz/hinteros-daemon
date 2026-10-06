@@ -114,8 +114,18 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
         Box::new(NoInput)
     };
 
+    let icon_store = hinteros_session::icons::IconStore::default();
+    {
+        let events = events.clone();
+        hinteros_session::icons::start(&config.apps, &config.icons, &icon_store, move || {
+            let params = serde_json::json!({});
+            let _ = events.send((session::EventName::AppsChanged, params, Audience::All));
+        });
+    }
+    let mut shell_config = ShellConfig::from(&config);
+    shell_config.icons = icon_store;
     let shell = Shell::new(
-        ShellConfig::from(&config),
+        shell_config,
         focus,
         input,
         key_injector(&config),

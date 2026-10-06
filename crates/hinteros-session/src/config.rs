@@ -30,6 +30,12 @@
 //! [input]
 //! repeat_delay_ms = 400
 //! repeat_interval_ms = 100
+//! dev_gamepad = false          # development only: read pads via evdev, no InputPlumber
+//!
+//! [icons]
+//! fetch = true                 # download web app icons (https only)
+//! refresh_days = 30
+//! # cache_dir = "~/.cache/hinteros/icons"  theme = "Papirus"
 //!
 //! [keys]
 //! uinput = true                # virtual keyboard (needs /dev/uinput, the 'uinput' group)
@@ -46,12 +52,14 @@
 //! id = "jellyfin"
 //! name = "Jellyfin"
 //! command = ["jellyfin-desktop"]
+//! desktop_id = "org.jellyfin.JellyfinDesktop"  # icon from its .desktop file and icon theme
 //!
 //! [[apps]]
 //! id = "youtube"
 //! name = "YouTube"
 //! kind = "web"
 //! command = ["firefox", "--kiosk", "https://www.youtube.com/tv"]
+//! site_url = "https://www.youtube.com/tv"  # icon from the site's manifest/favicon (or icon_url)
 //! input = "keyboard"           # controller -> key presses (default "gamepad": the pad itself)
 //! back_key = "escape"          # what B sends [default: escape]
 //! [apps.keymap]                # more (or other) actions -> keys
@@ -141,6 +149,18 @@ pub struct Cli {
     /// Start (and restart) the on-screen keyboard: program and arguments, split on spaces
     #[arg(long)]
     pub osk_command: Option<String>,
+
+    /// Development only: read gamepads directly (evdev, no grab) instead of through InputPlumber
+    #[arg(long)]
+    pub dev_gamepad: bool,
+
+    /// Don't download web app icons
+    #[arg(long)]
+    pub no_icon_fetch: bool,
+
+    /// Search only these data directories (colon-separated) for desktop files and icons (tests)
+    #[arg(long, env = "HINTEROS_ICON_DIRS", hide = true, value_delimiter = ':')]
+    pub icon_dirs: Option<Vec<PathBuf>>,
 }
 
 fn flag(on: bool, off: bool) -> Option<bool> {
@@ -159,6 +179,7 @@ pub struct Config {
     pub gamescope: GamescopeConfig,
     pub inputplumber: InputPlumberConfig,
     pub input: InputConfig,
+    pub icons: IconsConfig,
     pub close: CloseConfig,
     pub keys: KeysConfig,
     pub osk: OskConfig,
@@ -252,6 +273,9 @@ impl Default for InputPlumberConfig {
 pub struct InputConfig {
     pub repeat_delay_ms: u64,
     pub repeat_interval_ms: u64,
+    /// Development only: read gamepads directly through evdev (see `input::devpad`). Ignored
+    /// while InputPlumber is enabled.
+    pub dev_gamepad: bool,
 }
 
 impl Default for InputConfig {
@@ -259,6 +283,36 @@ impl Default for InputConfig {
         Self {
             repeat_delay_ms: 400,
             repeat_interval_ms: 100,
+            dev_gamepad: false,
+        }
+    }
+}
+
+/// Where app icons come from (see `icons`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IconsConfig {
+    /// Download web app icons (`site_url`, `icon_url`).
+    pub fetch: bool,
+    /// Refetch a cached web icon after this many days.
+    pub refresh_days: u64,
+    /// Where downloaded icons are cached [default: $XDG_CACHE_HOME/hinteros/icons].
+    pub cache_dir: Option<PathBuf>,
+    /// Icon theme to search first [default: GTK's setting, then hicolor].
+    pub theme: Option<String>,
+    /// Replace the data directories searched for `.desktop` files and icons (default: `$XDG_DATA_HOME`,
+    /// `$XDG_DATA_DIRS` and the system and user profiles).
+    pub data_dirs: Option<Vec<PathBuf>>,
+}
+
+impl Default for IconsConfig {
+    fn default() -> Self {
+        Self {
+            fetch: true,
+            refresh_days: 30,
+            cache_dir: None,
+            theme: None,
+            data_dirs: None,
         }
     }
 }
@@ -379,7 +433,15 @@ pub struct AppConfig {
     pub name: String,
     #[serde(default = "native")]
     pub kind: AppKind,
+    /// An absolute path to an image, or an icon theme name.
     pub icon: Option<String>,
+    /// The app's freedesktop `.desktop` id (`org.jellyfin.JellyfinDesktop`): its `Icon=` is looked up
+    /// in the installed icon themes.
+    pub desktop_id: Option<String>,
+    /// Web apps: an https URL of the icon image.
+    pub icon_url: Option<String>,
+    /// Web apps: an https page whose manifest, apple-touch-icon or favicon is the icon.
+    pub site_url: Option<String>,
     pub command: Option<Vec<String>>,
     pub steam_app_id: Option<u32>,
     #[serde(default)]
@@ -488,6 +550,15 @@ impl Config {
         if let Some(path) = &cli.fake_keyboard {
             self.keys.fake = Some(path.clone());
         }
+        if cli.dev_gamepad {
+            self.input.dev_gamepad = true;
+        }
+        if let Some(dirs) = &cli.icon_dirs {
+            self.icons.data_dirs = Some(dirs.clone());
+        }
+        if cli.no_icon_fetch {
+            self.icons.fetch = false;
+        }
         if let Some(cmd) = &cli.osk_command {
             self.osk.command = cmd.split_whitespace().map(String::from).collect();
         }
@@ -529,6 +600,22 @@ impl Config {
                 ensure!(
                     app.back_key.is_none() && app.keymap.is_empty(),
                     "app '{}': back_key and keymap need input = \"keyboard\"",
+                    app.id
+                );
+            }
+            for (what, url) in [("icon_url", &app.icon_url), ("site_url", &app.site_url)] {
+                if let Some(url) = url {
+                    ensure!(
+                        url.starts_with("https://"),
+                        "app '{}': {what} must be an https:// URL",
+                        app.id
+                    );
+                }
+            }
+            if let Some(id) = &app.desktop_id {
+                ensure!(
+                    !id.is_empty() && !id.contains('/'),
+                    "app '{}': invalid desktop_id",
                     app.id
                 );
             }
@@ -797,5 +884,35 @@ mod tests {
         assert!(!c.keys.uinput);
         assert_eq!(c.keys.fake, Some(PathBuf::from("/tmp/keys.log")));
         assert_eq!(c.osk.command, ["osk", "--flag"]);
+    }
+
+    #[test]
+    fn icon_and_dev_gamepad_settings() {
+        let c = Config::parse(
+            "[icons]\nrefresh_days = 7\n[input]\ndev_gamepad = true\n\
+             [[apps]]\nid = \"yt\"\nname = \"YT\"\ncommand = [\"x\"]\nsite_url = \"https://www.youtube.com/tv\"\n\
+             [[apps]]\nid = \"jf\"\nname = \"JF\"\ncommand = [\"x\"]\ndesktop_id = \"org.jellyfin.JellyfinDesktop\"",
+        )
+        .unwrap();
+        assert_eq!(c.icons.refresh_days, 7);
+        assert!(c.icons.fetch && c.input.dev_gamepad);
+        assert_eq!(
+            c.apps[0].site_url.as_deref(),
+            Some("https://www.youtube.com/tv")
+        );
+        assert!(!Config::default().input.dev_gamepad);
+        for bad in [
+            "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nicon_url = \"http://x.test/i.png\"",
+            "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\ndesktop_id = \"a/b\"",
+        ] {
+            assert!(Config::parse(bad).is_err(), "accepted: {bad}");
+        }
+        let mut c = Config::default();
+        c.apply(&Cli::parse_from([
+            "hinteros-session",
+            "--dev-gamepad",
+            "--no-icon-fetch",
+        ]));
+        assert!(c.input.dev_gamepad && !c.icons.fetch);
     }
 }

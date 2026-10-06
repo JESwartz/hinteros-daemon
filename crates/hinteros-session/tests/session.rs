@@ -83,7 +83,7 @@ async fn version_mismatch_is_rejected_and_closes() {
     for client_version in [
         ApiVersion::new(1, 0),
         ApiVersion::new(0, 2),
-        ApiVersion::new(0, 5),
+        ApiVersion::new(0, 6),
     ] {
         let mut c = d.connect().await;
         let e = rpc_error(
@@ -752,4 +752,49 @@ async fn keys_go_to_the_fake_keyboard() {
         (std::fs::read_to_string(&log).ok()? == expected).then_some(())
     })
     .await;
+}
+
+#[tokio::test]
+async fn apps_list_resolves_native_icons_from_desktop_files() {
+    let d = Daemon::start_with(|dir| {
+        let share = dir.join("share");
+        let icons = share.join("icons/hicolor/512x512/apps");
+        std::fs::create_dir_all(&icons).unwrap();
+        std::fs::create_dir_all(share.join("applications")).unwrap();
+        std::fs::write(icons.join("org.example.Player.png"), b"png").unwrap();
+        std::fs::write(
+            share.join("applications/org.example.Player.desktop"),
+            "[Desktop Entry]\nName=Player\nIcon=org.example.Player\n",
+        )
+        .unwrap();
+        let config = dir.join("session.toml");
+        std::fs::write(
+            &config,
+            r#"
+            [[apps]]
+            id = "player"
+            name = "Player"
+            command = ["sleep", "30"]
+            desktop_id = "org.example.Player"
+            [[apps]]
+            id = "plain"
+            name = "Plain"
+            command = ["sleep", "30"]
+            desktop_id = "org.example.Missing"
+            "#,
+        )
+        .unwrap();
+        vec!["--config".into(), config.into(), "--no-icon-fetch".into()]
+    });
+    let mut c = d.client().await;
+    let list = call(&mut c, "apps.list", json!({})).await.unwrap();
+    let icon = d
+        .dir
+        .path()
+        .join("share/icons/hicolor/512x512/apps/org.example.Player.png");
+    assert_eq!(
+        list["apps"][1],
+        json!({ "id": "player", "name": "Player", "kind": "native", "icon": icon })
+    );
+    assert!(list["apps"][2].get("icon").is_none());
 }

@@ -98,6 +98,23 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   only works where the daemon already sees Y). Because Guide may start a chord, Home happens on
   Guide *release*; `summon = "none"` puts it back on the press. The keyboard button (`ui_osk`,
   on pads that have one) also toggles it in keyboard-profile apps.
+- **App icons** (`icons/`): HinterOS ships no logos; `apps.list`'s `icon` is a local file found
+  on the box at runtime. Per app, first match wins: `icon` (an absolute path or an icon theme
+  name), then `desktop_id` (the app's freedesktop `.desktop` file, its `Icon=`, looked up in the
+  icon themes), then for web apps `icon_url` / `site_url`. The built-in `steam` entry uses
+  Steam's own `steam.desktop`. Desktop files and icons are searched in `$XDG_DATA_HOME`,
+  `$XDG_DATA_DIRS`, `/run/current-system/sw/share`, `/etc/profiles/per-user/$USER/share`,
+  `~/.nix-profile/share` and the Flatpak exports; themes searched are the active one (GTK's
+  `gtk-icon-theme-name`, or `icons.theme`), what it inherits, and `hicolor`, plus `pixmaps/`.
+  The best file wins: the largest PNG of at least 256 px, else an SVG, else the largest
+  smaller PNG. Web apps: the daemon fetches `icon_url`, or finds the icon of `site_url` (web app
+  manifest icons, `apple-touch-icon`, `<link rel=icon>`, `/favicon.ico`; the largest square one
+  of at least 192 px, not mask-only), over https only (also through redirects), with timeouts,
+  a 1 MiB limit and an image check, in a background thread; it caches the file as
+  `$XDG_CACHE_HOME/hinteros/icons/<app-id>.<ext>`, refetches after `icons.refresh_days` (30),
+  retries failures (1 min, 10 min, 1 h, then every 6 h), and sends `apps_changed` when an
+  icon appears. Offline or failing, the app just has no `icon` (the launcher draws a letter
+  tile) or keeps the stale cached one.
 - **Reaper** (`reaper.rs`): `hinteros-session reaper SteamLaunch AppId=<id> -- <command>` runs
   a command as a child subreaper named `reaper`, which is how gamescope (Steam mode) learns the
   app id of a process's windows, X11 and native Wayland alike. The daemon starts command apps
@@ -138,6 +155,12 @@ bus = "unix:path=/run/dbus/system_bus_socket"  # default: the system bus
 [input]
 repeat_delay_ms = 400
 repeat_interval_ms = 100
+dev_gamepad = false            # development only, see "Desktop preview"
+
+[icons]
+fetch = true                   # download web app icons (https only)
+refresh_days = 30
+# cache_dir = "~/.cache/hinteros/icons"   # theme = "Papirus"   # data_dirs = ["/usr/share"]
 
 [keys]
 uinput = true                  # create the virtual keyboard (/dev/uinput)
@@ -154,12 +177,14 @@ summon = "guide+context"       # hold Guide + press this button (Y); or "none"
 id = "jellyfin"
 name = "Jellyfin"
 command = ["jellyfin-desktop"]
+desktop_id = "org.jellyfin.JellyfinDesktop"   # icon from its .desktop file (or: icon = "/path.png")
 
 [[apps]]
 id = "youtube"
 name = "YouTube"
 kind = "web"
 command = ["firefox", "--kiosk", "--new-instance", "https://www.youtube.com/tv"]
+site_url = "https://www.youtube.com/tv"     # icon from the site (or: icon_url = "https://.../icon.png")
 input = "keyboard"             # "gamepad" (default) or "keyboard"
 back_key = "escape"            # what B sends [default: escape]; e.g. "backspace", "alt+left"
 
@@ -187,6 +212,7 @@ steam_app_id = 620
 | `--inputplumber-bus <address>` | `HINTEROS_INPUTPLUMBER_BUS` | `inputplumber.bus` |
 | `--no-uinput` | | `keys.uinput = false` |
 | `--osk-command "<cmd args>"` | | `osk.command` (split on spaces) |
+| `--no-icon-fetch` | | `icons.fetch = false` |
 | `--fake-keyboard <file>` (hidden) | `HINTEROS_FAKE_KEYBOARD` | append `down <code>`/`up <code>` lines to a file instead of creating a device (tests) |
 
 Keymap values are a key from the API's `Key` list (`a`-`z`, `0`-`9`, `f1`-`f12`, `enter`,

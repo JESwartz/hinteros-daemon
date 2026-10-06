@@ -48,6 +48,7 @@ use tracing::{debug, info, warn};
 use crate::apps::{ChildExit, Spawner};
 use crate::config::{AppConfig, Config};
 use crate::focus::{FocusControl, GamescopeEvent, GamescopeState, baselayer_for};
+use crate::icons::IconStore;
 use crate::input::{InputControl, Intent, InterceptMode, RawInput, Repeat, translate};
 use crate::keys::{KeyCombo, KeyInjector, KeyOp, Keymap, plan_action, plan_text};
 use crate::procs::{ProcessControl, Sig};
@@ -125,6 +126,8 @@ pub struct ShellConfig {
     pub osk_enabled: bool,
     /// The button that, pressed while Guide is held, shows/hides the on-screen keyboard.
     pub osk_summon: Option<NavAction>,
+    /// Resolved app icons (filled in by `icons::start`, possibly later).
+    pub icons: IconStore,
 }
 
 impl From<&Config> for ShellConfig {
@@ -142,6 +145,7 @@ impl From<&Config> for ShellConfig {
             apps: c.apps.clone(),
             osk_enabled: c.osk.enable,
             osk_summon: c.osk.summon_button().ok().flatten(),
+            icons: IconStore::default(),
         }
     }
 }
@@ -389,7 +393,7 @@ impl Shell {
             id: STEAM_CLIENT_APP_ID.into(),
             name: "Steam".into(),
             kind: AppKind::Native,
-            icon: None,
+            icon: self.icon_path(STEAM_CLIENT_APP_ID, None),
         };
         if self.cfg.apps.is_empty() {
             let mut list = stub_apps();
@@ -402,10 +406,23 @@ impl Shell {
                     id: a.id.clone(),
                     name: a.name.clone(),
                     kind: a.kind,
-                    icon: a.icon.clone(),
+                    icon: self.icon_path(&a.id, a.icon.as_deref()),
                 }))
                 .collect(),
         }
+    }
+
+    /// The resolved icon of an app, else a configured absolute path.
+    fn icon_path(&self, id: &str, configured: Option<&str>) -> Option<String> {
+        self.cfg
+            .icons
+            .get(id)
+            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| {
+                configured
+                    .filter(|p| std::path::Path::new(p).is_absolute())
+                    .map(String::from)
+            })
     }
 
     fn running(&self) -> AppsRunningResult {
@@ -1475,6 +1492,9 @@ mod tests {
             name: id.to_uppercase(),
             kind: AppKind::Native,
             icon: None,
+            desktop_id: None,
+            icon_url: None,
+            site_url: None,
             command: command.map(|c| vec![c.into()]),
             steam_app_id,
             input: InputProfile::Gamepad,
@@ -1528,6 +1548,7 @@ mod tests {
                 ],
                 osk_enabled: true,
                 osk_summon: None,
+                icons: IconStore::default(),
             };
             f(&mut cfg);
             let log = Log::default();
@@ -2226,6 +2247,26 @@ mod tests {
             t.call("games.list", json!({})).unwrap(),
             json!({"games": []})
         );
+    }
+
+    #[test]
+    fn apps_list_reports_resolved_icons() {
+        let icons = IconStore::default();
+        icons.set("jellyfin", Some("/icons/jellyfin.png".into()));
+        icons.set("steam", Some("/icons/steam.svg".into()));
+        let mut t = T::with(|c| {
+            c.icons = icons.clone();
+            c.apps[1].icon = Some("/configured/portal.png".into());
+            c.apps[2].icon = Some("theme-name".into());
+        });
+        let list = t.call("apps.list", json!({})).unwrap();
+        let icon = |i: usize| list["apps"][i]["icon"].as_str().map(String::from);
+        assert_eq!(icon(0).as_deref(), Some("/icons/steam.svg"));
+        assert_eq!(icon(1).as_deref(), Some("/icons/jellyfin.png"));
+        // A configured absolute path stands even if the resolver has nothing.
+        assert_eq!(icon(2).as_deref(), Some("/configured/portal.png"));
+        // A theme name alone is not a path.
+        assert_eq!(icon(3), None);
     }
 
     #[test]

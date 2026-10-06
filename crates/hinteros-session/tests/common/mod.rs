@@ -43,6 +43,8 @@ impl Daemon {
             .env("XDG_CONFIG_HOME", dir.path())
             // No real Steam library (games.list) unless the arguments point at one.
             .env("HOME", dir.path())
+            // Icons: only look in the temp dir (the desktop running the tests has real ones).
+            .env("HINTEROS_ICON_DIRS", dir.path().join("share"))
             .env("RUST_LOG", "debug")
             .spawn()
             .expect("start hinteros-session");

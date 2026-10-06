@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use base64::Engine;
-use hinteros_api::codec::{LineReader, ReadError, write_message};
+use hinteros_api::codec::{LineReader, ReadError, close_gracefully, write_message};
 use hinteros_api::common::{Peer as ApiPeer, Ping};
 use hinteros_api::jsonrpc;
 use hinteros_api::server::{self, Connection, Step, method_not_found};
@@ -181,18 +181,24 @@ async fn handle(svc: Arc<Service>, stream: UnixStream) -> Result<()> {
         exe = %peer.exe_display(),
         "connection"
     );
-    let _slot = {
+    let slot = {
         let mut map = svc.connections.lock().unwrap();
         let n = map.entry(peer.uid).or_insert(0);
         if *n >= svc.args.max_connections_per_uid {
-            warn!(uid = peer.uid, "too many connections; closing");
-            return Ok(());
+            None
+        } else {
+            *n += 1;
+            Some(Slot {
+                svc: &svc,
+                uid: peer.uid,
+            })
         }
-        *n += 1;
-        Slot {
-            svc: &svc,
-            uid: peer.uid,
-        }
+    };
+    let Some(_slot) = slot else {
+        warn!(uid = peer.uid, "too many connections; closing");
+        let (r, mut w) = stream.into_split();
+        close_gracefully(&mut LineReader::new(r), &mut w).await;
+        return Ok(());
     };
 
     let (r, mut w) = stream.into_split();
@@ -246,6 +252,10 @@ async fn handle(svc: Arc<Service>, stream: UnixStream) -> Result<()> {
             },
         }
     }
+    // Every `break` above is a deliberate close; make sure the client gets what we sent.
+    // The slot is free as soon as we stop serving; draining must not hold it.
+    drop(_slot);
+    close_gracefully(&mut reader, &mut w).await;
     Ok(())
 }
 

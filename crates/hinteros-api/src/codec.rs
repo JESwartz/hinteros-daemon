@@ -38,6 +38,26 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
         }
     }
 
+    /// Discard whatever the peer still sends, until EOF, `max_bytes` or `within` runs out.
+    ///
+    /// Closing a socket with unread input makes the kernel send RST, which can destroy the
+    /// reply we just wrote before the peer has read it. Call this after `shutdown`ing the
+    /// write side so the peer sees the reply and a clean EOF.
+    pub async fn drain(&mut self, max_bytes: usize, within: std::time::Duration) {
+        self.buf.clear();
+        let _ = tokio::time::timeout(within, async {
+            let mut left = max_bytes;
+            let mut sink = [0u8; 8192];
+            while left > 0 {
+                match self.inner.read(&mut sink).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => left = left.saturating_sub(n),
+                }
+            }
+        })
+        .await;
+    }
+
     /// Next line without its terminator; `None` at end of stream. Blank lines are skipped.
     ///
     /// Cancel safe: partially read data stays buffered for the next call, so this can be
@@ -92,6 +112,22 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
     bytes.push(b'\n');
     w.write_all(&bytes).await?;
     w.flush().await
+}
+
+/// How much input a closing connection discards, and for how long, before the real close.
+pub const CLOSE_DRAIN_BYTES: usize = 4 << 20;
+pub const CLOSE_DRAIN_TIME: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Close a connection the server ends on purpose without resetting it: half-close our side
+/// (the peer reads everything we sent, then EOF), then discard the peer's pending input
+/// briefly so the final close carries no unread data (which the kernel turns into an RST).
+pub async fn close_gracefully<R, W>(reader: &mut LineReader<R>, w: &mut W)
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let _ = w.shutdown().await;
+    reader.drain(CLOSE_DRAIN_BYTES, CLOSE_DRAIN_TIME).await;
 }
 
 #[cfg(test)]

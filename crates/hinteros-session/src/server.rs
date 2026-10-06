@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
-use hinteros_api::codec::{LineReader, ReadError, write_message};
+use hinteros_api::codec::{LineReader, ReadError, close_gracefully, write_message};
 use hinteros_api::common::{Peer, Ping};
 use hinteros_api::server::{self, Connection, Step, call, method_not_found};
 use hinteros_api::session::{self, EventName, Subscribe, SubscriptionResult, Unsubscribe};
@@ -93,6 +93,8 @@ pub async fn handle(
             },
         }
     }
+    // Every `break` above is a deliberate close; make sure the client gets what we sent.
+    close_gracefully(&mut reader, &mut w).await;
     Ok(())
 }
 

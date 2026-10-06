@@ -9,6 +9,7 @@ pub mod apps;
 pub mod config;
 pub mod focus;
 pub mod input;
+pub mod keys;
 pub mod procs;
 pub mod reaper;
 pub mod server;

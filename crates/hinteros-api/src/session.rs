@@ -632,14 +632,17 @@ impl Modifier {
         Modifier::Meta,
     ];
 
-    pub fn from_name(name: &str) -> Option<Modifier> {
-        match name {
-            "shift" => Some(Modifier::Shift),
-            "ctrl" => Some(Modifier::Ctrl),
-            "alt" => Some(Modifier::Alt),
-            "meta" => Some(Modifier::Meta),
-            _ => None,
+    pub const fn name(self) -> &'static str {
+        match self {
+            Modifier::Shift => "shift",
+            Modifier::Ctrl => "ctrl",
+            Modifier::Alt => "alt",
+            Modifier::Meta => "meta",
         }
+    }
+
+    pub fn from_name(name: &str) -> Option<Modifier> {
+        Self::ALL.iter().copied().find(|m| m.name() == name)
     }
 }
 

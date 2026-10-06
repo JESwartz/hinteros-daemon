@@ -38,7 +38,8 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   goes to Steam/the game; Guide still comes to us), except for keyboard-profile apps and while
   the on-screen keyboard is up (both ALL, see below). Guide sends `home_pressed` and brings the
   launcher back (on release, since Guide also starts the on-screen keyboard chord). Re-applies everything when InputPlumber restarts or a pad appears. Without
-  InputPlumber it logs and carries on.
+  InputPlumber it logs and carries on. `--dev-gamepad` reads
+  pads directly instead, for desktop previews only (see "Desktop preview").
 - **Apps** (`apps.rs`, `shell.rs`): `apps.launch` runs a command, or hands a
   `steam://rungameid/<id>` URL to `steam -silent`, and tracks it (`app_started`,
   `app_exited`, `focus_changed`). A command app has exited when its process tree has; a Steam
@@ -213,6 +214,7 @@ steam_app_id = 620
 | `--no-uinput` | | `keys.uinput = false` |
 | `--osk-command "<cmd args>"` | | `osk.command` (split on spaces) |
 | `--no-icon-fetch` | | `icons.fetch = false` |
+| `--dev-gamepad` | | `input.dev_gamepad = true` (development only) |
 | `--fake-keyboard <file>` (hidden) | `HINTEROS_FAKE_KEYBOARD` | append `down <code>`/`up <code>` lines to a file instead of creating a device (tests) |
 
 Keymap values are a key from the API's `Key` list (`a`-`z`, `0`-`9`, `f1`-`f12`, `enter`,
@@ -227,6 +229,43 @@ arrows, `accept` to `enter`, `back` to `back_key`.
 On a dev desktop run with `--no-gamescope --no-inputplumber --no-uinput` (otherwise it would
 grab your controllers through a running InputPlumber, and a keyboard-profile app or `keys.*`
 would type into your desktop).
+
+### Desktop preview (development only)
+
+To try the real launcher on a desktop, with an Xbox controller and without gamescope or
+InputPlumber:
+
+```sh
+nix run .#desktop-preview        # in this repo; prints the socket path and keeps running
+```
+
+It runs `hinteros-session --no-gamescope --no-inputplumber --no-uinput --dev-gamepad` on a
+temporary socket (removed on exit), with your real Steam library (`~/.local/share/Steam` or
+`~/.steam/steam`, or `HINTEROS_STEAM_DIR`; the daemon only reads it) and a sample app list
+(Jellyfin, Firefox, YouTube, Crunchyroll, Plex, VacuumTube; your own with
+`HINTEROS_SESSION_CONFIG=<file>`). Extra arguments go to `hinteros-session`. In another
+terminal, start the launcher against that socket:
+
+```sh
+HINTEROS_SESSION_SOCKET=/run/user/1000/hinteros-preview.XXXXXX/session.sock \
+  nix run <launcher flake> -- --windowed
+```
+
+**Launching an app or game from the launcher starts it for real on your desktop** (Steam
+games through your running Steam client, apps as ordinary processes). Home returns to the
+launcher but does not hide windows, and nothing is sandboxed. Keyboard input profiles and
+`keys.*` are off (they need uinput), so TV web apps get no controller-to-keys mapping here.
+
+`--dev-gamepad` / `[input] dev_gamepad = true` is the input backend behind it (`input/devpad.rs`).
+It is for development only: it reads gamepads straight from `/dev/input/event*` through evdev,
+read-only and never grabbed (no `EVIOCGRAB`), so Steam and games on the desktop keep seeing the
+pad. It produces the same `ui_*` events as InputPlumber, so `input_nav`, key repeat
+(`[input] repeat_*`) and Guide/Home (the Xbox button) behave the same: d-pad and left stick are
+directions, A accept, B back, X secondary, Y context, bumpers `page_left/right`, triggers (past
+half travel), View and Menu, Xbox button Home. Pads are picked up when plugged in. Reading
+needs access to the device (a pad on your seat has it through logind, else join the `input`
+group). It is ignored, with a warning, while InputPlumber is enabled, so on a real box it does
+nothing: it never takes part in the TV setup.
 
 ### What the session must provide
 

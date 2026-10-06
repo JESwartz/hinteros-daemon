@@ -92,6 +92,7 @@
     in
     {
       packages.${system} = {
+        desktop-preview = pkgs.callPackage ./preview.nix { inherit (rust) hinteros-session; };
         inherit (rust) hinteros-session hinteros-system;
         default = pkgs.symlinkJoin {
           name = "hinteros-daemon-0.1.0";
@@ -100,6 +101,12 @@
             rust.hinteros-system
           ];
         };
+      };
+
+      apps.${system}.desktop-preview = {
+        type = "app";
+        program = lib.getExe self.packages.${system}.desktop-preview;
+        meta.description = "Session daemon for trying the launcher on a desktop (development only)";
       };
 
       overlays.default = final: _prev: {

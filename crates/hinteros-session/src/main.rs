@@ -63,6 +63,10 @@ fn main() -> ExitCode {
 }
 
 async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
+    // Before binding: a client may signal us as soon as the socket accepts.
+    let mut usr1 = signal(SignalKind::user_defined1())?;
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
     let path = match socket {
         Some(p) => p,
         None => {
@@ -190,9 +194,6 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
         hinteros_session::system::Relay::disabled()
     };
 
-    let mut usr1 = signal(SignalKind::user_defined1())?;
-    let mut term = signal(SignalKind::terminate())?;
-    let mut int = signal(SignalKind::interrupt())?;
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {

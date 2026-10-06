@@ -139,6 +139,32 @@ fn method_examples_conform_and_round_trip() {
             for ex in decl["examples"].as_array().unwrap() {
                 let label = format!("{} {} example {:?}", info.api, m.name, ex["name"]);
                 let params = &ex["params"];
+                if m.name == "hello" {
+                    // Examples must speak the schema's own version (the "major mismatch" one
+                    // is the client being wrong, and the server answering with ours).
+                    let version = schema.doc()["version"].as_str().unwrap();
+                    let mismatch = ex.get("error").is_some();
+                    let cases = [
+                        (!mismatch).then(|| ("params", params["api_version"].clone())),
+                        ex.get("result")
+                            .map(|r| ("result", r["api_version"].clone())),
+                        ex.get("error")
+                            .map(|e| ("error", e["data"]["server_api_version"].clone())),
+                    ];
+                    for (what, v) in cases.into_iter().flatten() {
+                        assert_eq!(
+                            v, version,
+                            "{label}: {what} api_version is not the schema's"
+                        );
+                    }
+                    if let Some(e) = ex.get("error") {
+                        let message = e["message"].as_str().unwrap();
+                        assert!(
+                            message.ends_with(&format!("server {version}")),
+                            "{label}: message {message:?} names another server version"
+                        );
+                    }
+                }
                 schema
                     .check_params(m.name, params)
                     .unwrap_or_else(|e| panic!("{label}: {e}"));

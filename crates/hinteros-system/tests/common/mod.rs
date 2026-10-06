@@ -498,7 +498,9 @@ pub struct System {
     pub socket: PathBuf,
     pub root: Root,
     pub fakes: Shared,
-    pub journal: UnixDatagram,
+    /// Audit entries, read continuously from the fake journal socket (its queue may be short).
+    pub journal: Arc<Mutex<Vec<HashMap<String, String>>>>,
+    journal_stop: Arc<std::sync::atomic::AtomicBool>,
     _conn: zbus::Connection,
     _bus: Bus,
 }
@@ -525,8 +527,23 @@ impl System {
             ],
         ));
         let conn = serve_fakes(&bus.address, fakes.clone()).await;
-        let journal = UnixDatagram::bind(root.p("journal.sock")).unwrap();
-        journal.set_nonblocking(true).unwrap();
+        let sock = UnixDatagram::bind(root.p("journal.sock")).unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let journal: Arc<Mutex<Vec<HashMap<String, String>>>> = Arc::default();
+        let journal_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let (journal, stop) = (journal.clone(), journal_stop.clone());
+            std::thread::spawn(move || {
+                let mut buf = vec![0u8; 1 << 16];
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Ok(n) = sock.recv(&mut buf) {
+                        let m = hinteros_system::audit::parse_datagram(&buf[..n]);
+                        journal.lock().unwrap().push(m);
+                    }
+                }
+            });
+        }
         let socket = root.p("run/system.sock");
         let r = |p: &str| root.p(p).display().to_string();
         let mut args: Vec<String> = vec![
@@ -588,6 +605,7 @@ impl System {
             root,
             fakes,
             journal,
+            journal_stop,
             _conn: conn,
             _bus: bus,
         })
@@ -620,12 +638,8 @@ impl System {
 
     /// Audit entries received so far (fields of each journal message).
     pub fn audit(&self) -> Vec<HashMap<String, String>> {
-        let mut out = Vec::new();
-        let mut buf = vec![0u8; 1 << 16];
-        while let Ok(n) = self.journal.recv(&mut buf) {
-            out.push(hinteros_system::audit::parse_datagram(&buf[..n]));
-        }
-        out
+        std::thread::sleep(Duration::from_millis(100));
+        std::mem::take(&mut *self.journal.lock().unwrap())
     }
 
     pub fn log(&self) -> String {
@@ -639,6 +653,8 @@ impl System {
 
 impl Drop for System {
     fn drop(&mut self) {
+        self.journal_stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = self.child.kill();
         let _ = self.child.wait();
         let mut s = self.fakes.lock().unwrap();

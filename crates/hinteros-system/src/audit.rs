@@ -145,9 +145,26 @@ impl Audit {
         if !self.socket.exists() {
             return;
         }
-        let sent = UnixDatagram::unbound().and_then(|s| s.send_to(&datagram, &self.socket));
-        if let Err(e) = sent {
+        if let Err(e) = send_datagram(&self.socket, &datagram) {
             warn!("audit: cannot write to the journal: {e}");
+        }
+    }
+}
+
+/// Send without ever blocking the service for long: a full journal queue gets a few short retries,
+/// then the entry is reported as lost (it is still in the service's own log above).
+fn send_datagram(socket: &std::path::Path, datagram: &[u8]) -> std::io::Result<()> {
+    let s = UnixDatagram::unbound()?;
+    s.set_nonblocking(true)?;
+    let mut tries = 0;
+    loop {
+        match s.send_to(datagram, socket) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -240,6 +257,8 @@ mod tests {
         assert_eq!(m["HINTEROS_UID"], "1000");
         assert_eq!(m["HINTEROS_DECISION"], "allowed");
         assert_eq!(m["HINTEROS_JOB_ID"], "0123456789abcdef");
+        // Read as we go: the datagram queue may be as short as 10 (build sandboxes).
+        let mut count = 0;
         for _ in 0..30 {
             audit.request(
                 1000,
@@ -251,11 +270,25 @@ mod tests {
                 None,
                 "",
             );
+            while sock.recv(&mut buf).is_ok() {
+                count += 1;
+            }
         }
-        let mut count = 0;
-        while sock.recv(&mut buf).is_ok() {
-            count += 1;
+        // A full queue never blocks the caller.
+        let start = std::time::Instant::now();
+        for _ in 0..30 {
+            audit.request(
+                1001,
+                None,
+                "?",
+                "rebuild",
+                None,
+                Decision::Allowed,
+                None,
+                "",
+            );
         }
+        assert!(start.elapsed() < Duration::from_secs(10));
         assert_eq!(count, DENIALS_PER_MINUTE);
     }
 }

@@ -5,9 +5,10 @@ The Rust system services behind the launcher, built as two binaries:
 - **`hinteros-session`** (unprivileged, runs in the user's session): controller input and the
   global Home button, launching and focusing apps in gamescope, typing into apps and the
   on-screen keyboard. Serves the launcher on `$XDG_RUNTIME_DIR/hinteros/session.sock`.
-- **`hinteros-system`** (root, small, narrow API): applies settings from `state.json`, rebuilds,
-  updates, rollback and power. Listens on `/run/hinteros/system.sock`, used only by the session
-  daemon, and authenticates callers (`SO_PEERCRED` + polkit).
+- **`hinteros-system`** (root, small, narrow API): settings in `state.json`, SSH on/off,
+  rebuilds, verified updates, channel and base switches, rollback. Listens on
+  `/run/hinteros/system.sock`; the session daemon relays it to the launcher as `system.*`.
+  Authorizes every mutating request on its own (pidfd, seat0 owner, polkit) and audits it.
 
 This repo owns the versioned socket API schema that the launcher (and future clients such as
 a phone web admin UI) are generated from or contract-tested against.
@@ -123,6 +124,10 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   stored for the site, and exports it as `<app-id>.firefox.<ext>` in the icon cache. It is read
   at startup, when a download fails, and again whenever the app exits (`app_exited`), sending
   `apps_changed` if the icon changed; a downloaded icon always replaces it.
+- **System relay** (`system.rs`): one connection to the system service (see below), handshaken
+  and subscribed to its job events; the session API's `system.*` methods are passed through
+  unchanged and `job_*` events forwarded. While the service is down or speaks another version,
+  they fail with `system_unavailable {reason: down|version_mismatch}`.
 - **Reaper** (`reaper.rs`): `hinteros-session reaper SteamLaunch AppId=<id> -- <command>` runs
   a command as a child subreaper named `reaper`, which is how gamescope (Steam mode) learns the
   app id of a process's windows, X11 and native Wayland alike. The daemon starts command apps
@@ -181,6 +186,10 @@ enable = true
 command = ["hinteros-osk"]     # started (and restarted) if found; not under the reaper
 summon = "guide+context"       # hold Guide + press this button (Y); or "none"
 
+[system]
+enable = true                  # relay system.* to the system service
+socket = "/run/hinteros/system.sock"
+
 [[apps]]                       # what apps.list returns after the built-in "steam" (a stub list if none)
 id = "jellyfin"
 name = "Jellyfin"
@@ -221,6 +230,7 @@ steam_app_id = 620
 | `--inputplumber-bus <address>` | `HINTEROS_INPUTPLUMBER_BUS` | `inputplumber.bus` |
 | `--no-uinput` | | `keys.uinput = false` |
 | `--osk-command "<cmd args>"` | | `osk.command` (split on spaces) |
+| `--system-socket <path>` | `HINTEROS_SYSTEM_SOCKET` | `system.socket` |
 | `--no-icon-fetch` | | `icons.fetch = false` |
 | `--dev-gamepad` | | `input.dev_gamepad = true` (development only) |
 | `--fake-keyboard <file>` (hidden) | `HINTEROS_FAKE_KEYBOARD` | append `down <code>`/`up <code>` lines to a file instead of creating a device (tests) |
@@ -342,11 +352,176 @@ Guide flips the pad to ALL before Y (InputPlumber behaviour, spike 4), YouTube T
 Crunchyroll's reaction to the keys (YouTube TV may want `back_key = "backspace"`), and the
 input method on hardware.
 
+## System service
+
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.2
+(`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
+`hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
+trust.
+
+- **Methods:** read-only `system.info`, `settings.get`, `generations.list`, `jobs.get`,
+  `jobs.list`; mutating `settings.set {revision, changes}` (closed, typed `changes`; empty in
+  0.2), `ssh.set {enabled}`, `rebuild`, `hardware.redetect`, `rollback {generation?}`,
+  `update.check`, `update.apply {rev}`, `channel.set {channel, acknowledge_downgrade?}`,
+  `base.set {base, acknowledge_downgrade?}`, `jobs.cancel {job_id}`. Events `job_started`,
+  `job_progress`, `job_finished {…, session_restart_required}` after `subscribe`.
+- **Authorization** (`peer.rs`, `authz.rs`): uid/gid/pid from `SO_PEERCRED` and a pidfd from
+  `SO_PEERPIDFD` at accept. Mutating methods need: the pidfd (and the process alive), the caller
+  owning seat0's active logind session (or root), and polkit `CheckAuthorization` saying yes for
+  the method's action, with a `unix-process` subject carrying the pidfd, pid, start time and uid
+  and no user interaction. A polkit challenge (`auth_admin`) is `authentication_required`
+  (3012), anything else `permission_denied` (3002, `reason: peer|seat|polkit`). Before that:
+  strict params (every params object is closed; unknown fields are `invalid_params` with
+  `data: {field, reason}`), a token bucket per uid (10/min, burst 3, `rate_limited`). Limits: 8
+  connections per uid, 5 s to `hello`, 64 KiB per message.
+- **Audit** (`audit.rs`): every mutating request and denial, and every job outcome, goes to the
+  journal's native socket with `HINTEROS_AUDIT=1`, `HINTEROS_UID`, `_PID`, `_EXE`, `_METHOD`,
+  `_ACTION`, `_DECISION` (`allowed|denied_seat|denied_polkit|denied_peer|auth_required|invalid|
+  rate_limited`), `_JOB_ID`, `_PARAMS` (summary), and for jobs `_OUTCOME`, `_REV_BEFORE/AFTER`,
+  `_GENERATION_BEFORE/AFTER`. Denials are capped at 20 per minute and uid, then summarised.
+- **State** (`state.rs`): `state.json` is read into a typed `State` mirroring `state.nix`
+  (`schemaVersion`, `base`, `settings.ssh.{enable, authorizedKeys, allowAdmin}`, `apps`,
+  `profiles`; anything else refused) and written canonically from it, never from client JSON.
+  `revision` is the SHA-256 of the file. `apps` (M8) and `profiles` (M7) round-trip untouched,
+  ready for `apps.install/remove` and `profiles.*` to edit the same struct.
+- **Jobs** (`job.rs`, `jobs.rs`, `runner.rs`): one at a time (`job_busy`). The service writes a
+  root-only spec to `/run/hinteros/jobs/<id>/spec.json` and starts `hinteros-job@<id>.service`
+  (systemd `StartUnit` over D-Bus), which runs `hinteros-system job <id>`; a switch that
+  restarts the service doesn't touch it, and a restarted service re-attaches to it. The job
+  reports through `progress.ndjson` (stages; nix `internal-json` turned into paths/bytes and a
+  download percent) and `status.json`; the service turns them into events (at most 4/s) and
+  keeps the last 10 finished jobs. Apply flow: memory (2 GiB) and disk (4 GiB on the store's
+  filesystem) preflight → copy `/etc/hinteros` to `/var/lib/hinteros/staging` → edit (state,
+  flake input, lock, facter) → `nix build …#nixosConfigurations.hinteros.config.system.build.toplevel`
+  → `nix-env -p <profile> --set` + `switch-to-configuration switch` → replace `/etc/hinteros`
+  with the staging copy (`renameat2(RENAME_EXCHANGE)`). A failed switch puts the profile back
+  and runs the old system's `switch-to-configuration boot`. `jobs.cancel` works until the job
+  enters `activating` (it then kills the job's process group; the box is unchanged). Jobs hold a
+  logind `shutdown:sleep` inhibitor: `delay`, then `block` while activating.
+  `session_restart_required` is set when the new system's `sw/bin/hinteros-session` or
+  `hinteros-system` resolves to a different store path.
+- **Updates** (`update.rs`, `flake.rs`): the channel is the `ref` of the locked `hinteros`
+  input (`/etc/hinteros/flake.lock`); the repo URL and branches come only from the running
+  generation's `channels.json`. `update.check` runs `git ls-remote`, fetches the branch into
+  `/var/lib/hinteros/git`, verifies the tip with `git verify-commit` (SSH signatures,
+  `gpg.ssh.allowedSignersFile` = the running generation's `allowed_signers`, i.e.
+  `ssh-keygen -Y verify`), requires it to descend from the locked revision, and reports the
+  highest `Security: low|medium|high|critical` trailer among the new commits (unknown values
+  count as `high`). git runs with no config files, no prompts, and only the channel's transport
+  (`https`, or `file` for tests). Results are cached for 60 s; failures are
+  `update_unreachable {host}` or `update_verification_failed {reason}` in `job_finished`.
+  `update.apply {rev}` only accepts the last verified result for the current channel and
+  revision, re-verifies, and locks `?ref=<branch>&rev=<rev>` with
+  `nix flake lock --override-input`. `channel.set` rewrites `flake.nix`'s input URL (it must
+  appear exactly once, as `"git+<repo>?ref=<branch>"`) and locks the verified tip of the new
+  branch; beta → stable, or a tip that isn't a fast-forward, needs `acknowledge_downgrade`.
+  `base.set` edits `state.json` (unstable → stable needs the acknowledgement).
+- **Rollback**: `nix-env --switch-generation N` + `switch-to-configuration switch`, then
+  `/etc/hinteros`'s `flake.nix`, `flake.lock` and `state.json` from the generation's snapshot
+  (`$out/hinteros/`, as `hinteros-config-sync` does at boot).
+- **`hardware.redetect`**: `nixos-facter -o staging/facter.json`, then the apply flow.
+
+### Command line
+
+All paths default to the box's; tests point them at a temporary root.
+
+| Flag | Default |
+|---|---|
+| `--socket` (`HINTEROS_SYSTEM_SOCKET`) | `/run/hinteros/system.sock` |
+| `--config-dir` | `/etc/hinteros` |
+| `--state-dir` | `/var/lib/hinteros` (`staging/`, `git/`, `update-check.json`) |
+| `--run-dir` (`HINTEROS_RUN_DIR`) | `/run/hinteros` (`jobs/`) |
+| `--profile` | `/nix/var/nix/profiles/system` |
+| `--current-system`, `--booted-system` | `/run/current-system`, `/run/booted-system` |
+| `--policy-dir` | `<current-system>/sw/share/hinteros` (resolved per job, so the running generation's) |
+| `--ssh-host-key-dir` | `/etc/ssh` |
+| `--bus` (`HINTEROS_SYSTEM_BUS`) | the system bus (logind, polkit, systemd) |
+| `--journal-socket` | `/run/systemd/journal/socket` |
+| `--nix`, `--nix-env`, `--git`, `--ssh-keygen`, `--nixos-facter` | found on the job unit's `PATH` |
+| `--min-memory-bytes`, `--min-disk-bytes`, `--store-dir` | 2 GiB, 4 GiB, `/nix/store` |
+
+`hinteros-system job [--run-dir DIR] <id>` runs one job (the job unit's `ExecStart`).
+
+### What the system module must provide
+
+For `daemon.nix` (and the VM tests) in the system repo:
+
+- **Group** `hinteros`, with the session user (later: every profile user) in it.
+- **`hinteros-system.service`**: `ExecStart=hinteros-system`, `User=root`, `Group=hinteros`,
+  `RuntimeDirectory=hinteros` with `RuntimeDirectoryMode=0755` and
+  **`RuntimeDirectoryPreserve=yes`** (the job directories in `/run/hinteros/jobs` must survive a
+  restart of the service during a switch), `UMask=0077` or `0007`. It reads `/etc/hinteros`,
+  `/var/lib/hinteros/update-check.json`, `/proc`, the profile links and `/run/current-system`;
+  writes only `/run/hinteros`. So: `ProtectSystem=strict`, `ReadWritePaths=/run/hinteros`,
+  `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`,
+  `RestrictAddressFamilies=AF_UNIX` (D-Bus, journal), `SystemCallFilter=@system-service`,
+  `MemoryDenyWriteExecute=yes`, `CapabilityBoundingSet=CAP_SYS_PTRACE` (only so `HINTEROS_EXE`
+  can read `/proc/<pid>/exe` of another user's process; with an empty set the field is `?`).
+  `PATH`/`path` is irrelevant to it. `restartIfChanged` may stay on.
+- **`hinteros-job@.service`** (template, root, network allowed, no `ProtectSystem`: it switches
+  the system): `ExecStart=hinteros-system job %i`, `Type=exec`, `Nice=10`,
+  `IOSchedulingClass=idle`, `KillMode=control-group`, `path` with `nix`, `git`, `openssh`
+  (`ssh-keygen`), `nixos-facter`, `coreutils`, `SSL_CERT_FILE` for git over https, and
+  **`restartIfChanged = false; stopIfChanged = false`** (`X-RestartIfChanged=false`) so the
+  switch it performs never restarts the running instance. `StateDirectory=hinteros` (0700)
+  for `/var/lib/hinteros` on either unit.
+- **polkit** `share/polkit-1/actions/org.hinteros.system.policy` with the actions
+  `org.hinteros.system.{settings,rebuild,update.check,update.apply,rollback,channel,jobs.cancel}`
+  (defaults `no/no/no`) and `org.hinteros.system.ssh` (defaults `auth_admin` for
+  any/inactive/active: the admin password). The rules file grants the first group to
+  `hinteros` members and must **not** return YES for `org.hinteros.system.ssh`:
+  ```js
+  polkit.addRule(function (action, subject) {
+    if (action.id.indexOf("org.hinteros.system.") === 0 &&
+        action.id !== "org.hinteros.system.ssh" && subject.isInGroup("hinteros")) {
+      return polkit.Result.YES;
+    }
+  });
+  ```
+  (`hardening.nix`'s `org.hinteros.system.ssh.admin` action is no longer used; the SSH toggle
+  itself is `org.hinteros.system.ssh`.) `security.polkit.adminIdentities` decides whose password
+  that is.
+- **Files in every generation**, at `/run/current-system/sw/share/hinteros/` (a package in
+  `environment.systemPackages`, `pathsToLink = ["/share/hinteros"]`):
+  `release.json` = `{"version": "<HinterOS release>", "dev": <hinteros.dev.enable>}`;
+  `update/channels.json` = `{"repo": "https://justsomeshed.com/JSwartz/HinterOS/hinteros.git",
+  "branches": {"stable": "stable", "beta": "beta"}}`; `update/allowed_signers` (ssh-keygen
+  format, `principal namespaces="git" ssh-ed25519 AAAA…`, primary and offline backup key).
+- **Both daemon packages in `environment.systemPackages`** (so `sw/bin/hinteros-session` and
+  `sw/bin/hinteros-system` exist for `session_restart_required`).
+- **Paths:** `/etc/hinteros` (root, 0755) with `flake.nix` from the template, whose input line
+  is exactly `inputs.hinteros.url = "git+<repo>?ref=<branch>";` with `<repo>` as in
+  `channels.json`; `/var/lib/hinteros` (root, 0700); the config snapshot at `$out/hinteros/`
+  (`device-config.nix`, as today).
+- **sshd** for `ssh.set`: `state.nix` maps `settings.ssh.enable`; login is the admin account
+  with its password (the service doesn't touch sshd settings).
+- Power stays session-side (logind); nothing here.
+
+VM tests to add there: `system-escalation` and `system-authz` (direct socket access as the
+session user with hostile input, a non-member, a non-seat user, a rules file returning NO,
+`pkcheck` per action), `system-jobs` (a rebuild that changes `hinteros-system`'s own unit;
+cancel; `job_busy`; inhibitor), `update-verify` (git server + cache VMs). The daemon-side
+behaviour is covered by `crates/hinteros-system/tests/` against fakes.
+
+### What the launcher must do (session API 0.6)
+
+Move to session API 0.6 (the `system.*` methods are relayed unchanged): subscribe to
+`job_started`/`job_progress`/`job_finished` and drive progress UI from them (re-query
+`system.jobs.list` after reconnecting); treat `system_unavailable` (`down`/`version_mismatch`)
+as "settings unavailable" rather than an error; on `authentication_required` from
+`system.ssh.set` explain that the admin password is needed (the prompt comes with a polkit
+agent later); confirm `needs_acknowledgement` (channel/base downgrades) and retry with
+`acknowledge_downgrade: true`; show `system.update.check`'s cached `result` or wait for the job;
+when `available.security` is non-null show the full-screen security notice with the severity
+(not dismissable for 5 s); pass `settings.get`'s `revision` to `settings.set` and re-read on
+`state_conflict`; offer a session restart on `session_restart_required`; show `dev` as a DEV
+badge and the SSH host key fingerprints in Settings → System.
+
 ## Development
 
 ```sh
 nix develop          # Rust toolchain, rust-analyzer, cargo-watch; installs git hooks
-cargo watch -x test  # inner loop (gamescope/InputPlumber tests need Xvfb and dbus-daemon, else skip)
+cargo watch -x test  # inner loop (gamescope/InputPlumber/system tests need Xvfb, dbus-daemon, git, ssh-keygen, else skip)
 HINTEROS_TEST_UINPUT=1 cargo test uinput  # also create a real uinput device (VMs; grabbed before any key)
 nix flake check      # build, tests (with Xvfb and dbus-daemon), clippy, rustfmt, nixfmt/statix/deadnix
 nix build            # both binaries
@@ -355,7 +530,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.5","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.6","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

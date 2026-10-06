@@ -3,8 +3,8 @@
 The Rust system services behind the launcher, built as two binaries:
 
 - **`hinteros-session`** (unprivileged, runs in the user's session): controller input and the
-  global Home button, launching and focusing apps in gamescope. Serves the launcher on
-  `$XDG_RUNTIME_DIR/hinteros/session.sock`.
+  global Home button, launching and focusing apps in gamescope, typing into apps and the
+  on-screen keyboard. Serves the launcher on `$XDG_RUNTIME_DIR/hinteros/session.sock`.
 - **`hinteros-system`** (root, small, narrow API): applies settings from `state.json`, rebuilds,
   updates, rollback and power. Listens on `/run/hinteros/system.sock`, used only by the session
   daemon, and authenticates callers (`SO_PEERCRED` + polkit).
@@ -34,9 +34,10 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   this: `hinteros-docs/spikes/03-steam-launcher.md`.
 - **Input** (`input/`): InputPlumber over D-Bus. Sets `ManageAllDevices`, puts every pad in
   intercept mode ALL while the launcher has focus (input arrives as `ui_*` signals and becomes
-  `input_nav`, with key repeat for held directions) and PASS while an app has focus (the pad
-  goes to Steam/the game; Guide still comes to us). Guide sends `home_pressed` and brings the
-  launcher back. Re-applies everything when InputPlumber restarts or a pad appears. Without
+  `input_nav`, with key repeat for held directions), and PASS while an app has focus (the pad
+  goes to Steam/the game; Guide still comes to us), except for keyboard-profile apps and while
+  the on-screen keyboard is up (both ALL, see below). Guide sends `home_pressed` and brings the
+  launcher back (on release, since Guide also starts the on-screen keyboard chord). Re-applies everything when InputPlumber restarts or a pad appears. Without
   InputPlumber it logs and carries on.
 - **Apps** (`apps.rs`, `shell.rs`): `apps.launch` runs a command, or hands a
   `steam://rungameid/<id>` URL to `steam -silent`, and tracks it (`app_started`,
@@ -69,6 +70,34 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   `steam_attention` (also `steam.attention`). `steam.focus` brings them forward as the app
   `steam`; when they close, focus returns to whoever had it. Menus, tooltips, overlays
   (`STEAM_OVERLAY`), unmapped and 1x1 windows never count.
+- **Keyboard input profiles** (`shell.rs`, `keys/`): an `[[apps]]` entry with
+  `input = "keyboard"` (TV web apps: Firefox kiosk YouTube TV, Crunchyroll) keeps InputPlumber
+  in ALL while it has focus and turns the pad into key presses on the daemon's virtual keyboard:
+  d-pad/stick to arrows (with the daemon's key repeat), A to Enter, B to `back_key` (Escape
+  unless set), plus anything in `[apps.keymap]`. Guide is still Home. Steam games are always
+  `gamepad` (the default: InputPlumber PASS, Steam Input applies). Without a virtual keyboard a
+  keyboard app falls back to the gamepad.
+- **Typing** (`keys/`): `keys.type {text}` types per character through a uinput virtual US
+  keyboard (Shift for capitals and symbols; the spike's `kbd.py` table) or, for characters a US
+  keyboard does not have, gamescope's private `gamescope_input_method` protocol (one character
+  per commit, like Steam's keyboard); `untypeable` lists what neither could type.
+  `keys.key {key, modifiers}` and `keys.action {action}` send single keys and editing actions.
+  All of it goes to whatever has keyboard focus (never the on-screen keyboard), in order, from a
+  worker thread. Findings behind this: `hinteros-docs/spikes/05-on-screen-keyboard.md`.
+- **On-screen keyboard** (`osk.rs`, `focus/gamescope.rs`): the daemon starts and restarts
+  `[osk] command` (`hinteros-osk`, a second entrypoint of the launcher, which connects to the
+  same socket as client `hinteros-osk`; it gets `HINTEROS_SESSION_SOCKET`). Its X window
+  (`WM_CLASS` or process `hinteros-osk`, or the started pid) becomes a gamescope
+  `GAMESCOPE_EXTERNAL_OVERLAY`: painted over everything, never focused, shown and hidden with
+  `_NET_WM_WINDOW_OPACITY` (it stays resident). `osk.show`/`osk.hide` or the controller chord
+  (hold Guide, press Y) toggle it; `osk_visibility` reports it. While it is visible InputPlumber
+  is in ALL and `input_nav` goes only to the `hinteros-osk` connection, not the launcher; hiding
+  restores the previous mode. Home and focus changes hide it.
+  Chord: InputPlumber has no chord events, but in PASS mode it switches the pad to ALL on the
+  Guide press, so Y pressed while Guide is held reaches the daemon in every mode (Y held first
+  only works where the daemon already sees Y). Because Guide may start a chord, Home happens on
+  Guide *release*; `summon = "none"` puts it back on the press. The keyboard button (`ui_osk`,
+  on pads that have one) also toggles it in keyboard-profile apps.
 - **Reaper** (`reaper.rs`): `hinteros-session reaper SteamLaunch AppId=<id> -- <command>` runs
   a command as a child subreaper named `reaper`, which is how gamescope (Steam mode) learns the
   app id of a process's windows, X11 and native Wayland alike. The daemon starts command apps
@@ -110,10 +139,33 @@ bus = "unix:path=/run/dbus/system_bus_socket"  # default: the system bus
 repeat_delay_ms = 400
 repeat_interval_ms = 100
 
+[keys]
+uinput = true                  # create the virtual keyboard (/dev/uinput)
+gamescope_ime = true           # gamescope's input method for non-US characters (gamescope only)
+key_delay_ms = 12              # between key events
+ime_delay_ms = 80              # between input method characters
+
+[osk]
+enable = true
+command = ["hinteros-osk"]     # started (and restarted) if found; not under the reaper
+summon = "guide+context"       # hold Guide + press this button (Y); or "none"
+
 [[apps]]                       # what apps.list returns after the built-in "steam" (a stub list if none)
 id = "jellyfin"
 name = "Jellyfin"
 command = ["jellyfin-desktop"]
+
+[[apps]]
+id = "youtube"
+name = "YouTube"
+kind = "web"
+command = ["firefox", "--kiosk", "--new-instance", "https://www.youtube.com/tv"]
+input = "keyboard"             # "gamepad" (default) or "keyboard"
+back_key = "escape"            # what B sends [default: escape]; e.g. "backspace", "alt+left"
+
+[apps.keymap]                  # controller action = key, on top of the defaults ("none" unmaps)
+context = "ctrl+l"             # Y
+menu = "f11"                   # Start
 
 [[apps]]
 id = "portal-2"
@@ -133,9 +185,22 @@ steam_app_id = 620
 | `--gamescope-display <d>` | `HINTEROS_GAMESCOPE_DISPLAY` | `gamescope.display` |
 | `--inputplumber` / `--no-inputplumber` | | `inputplumber.enable` |
 | `--inputplumber-bus <address>` | `HINTEROS_INPUTPLUMBER_BUS` | `inputplumber.bus` |
+| `--no-uinput` | | `keys.uinput = false` |
+| `--osk-command "<cmd args>"` | | `osk.command` (split on spaces) |
+| `--fake-keyboard <file>` (hidden) | `HINTEROS_FAKE_KEYBOARD` | append `down <code>`/`up <code>` lines to a file instead of creating a device (tests) |
 
-On a dev desktop run with `--no-gamescope --no-inputplumber` (otherwise it would grab your
-controllers through a running InputPlumber).
+Keymap values are a key from the API's `Key` list (`a`-`z`, `0`-`9`, `f1`-`f12`, `enter`,
+`escape`/`esc`, `backspace`, `tab`, `space`, `delete`, `home`, `end`, `page_up`, `page_down`,
+arrows, punctuation names, `back`, `forward`, `refresh`, `play_pause`, `stop`, `next_track`,
+`previous_track`, `volume_up`, `volume_down`, `mute`, ...), optionally with modifiers
+(`ctrl+`, `shift+`, `alt+`, `meta+`). Keymap names are the `input_nav` actions (`up`, `down`,
+`left`, `right`, `accept`, `back`, `context`, `secondary`, `menu`, `view`, `page_left`,
+`page_right`, `trigger_left`, `trigger_right`, `quick`, `keyboard`). Defaults: directions to
+arrows, `accept` to `enter`, `back` to `back_key`.
+
+On a dev desktop run with `--no-gamescope --no-inputplumber --no-uinput` (otherwise it would
+grab your controllers through a running InputPlumber, and a keyboard-profile app or `keys.*`
+would type into your desktop).
 
 ### What the session must provide
 
@@ -152,6 +217,18 @@ controllers through a running InputPlumber).
 - InputPlumber: polkit, the session user in group `inputplumber`, its udev rules. The daemon
   sets `ManageAllDevices` itself on every InputPlumber (re)start.
 - A `steam` binary on the daemon's `PATH`, or `steam.path`.
+- For keyboard input profiles and `keys.*`: write access to `/dev/uinput` (the `uinput` kernel
+  module, `hardware.uinput.enable`, and the session user in the `uinput` group). If the device
+  cannot be created the daemon logs why and carries on without it (keyboard apps get the
+  gamepad, `keys.key` answers `keyboard_unavailable`). gamescope's XKB layout must be US
+  (`XKB_DEFAULT_LAYOUT=us`), since the virtual keyboard sends US key codes.
+- For non-US characters: gamescope's Wayland socket (`gamescope.wayland_display`) and its
+  private `gamescope_input_method` protocol, which only exists in gamescope and may change:
+  **pin gamescope** (tested against 3.16.31's `protocol/gamescope-input-method.xml`, copied to
+  `crates/hinteros-session/protocol/`) and re-check that file when updating it. It is unavailable
+  while Steam's own keyboard holds the input method.
+- For the on-screen keyboard: the `hinteros-osk` binary on the daemon's `PATH` (or `osk.command`),
+  rendering into an ARGB window on gamescope's Xwayland.
 - For `games.list`: the session user's Steam directory under `$HOME` (or `steam.dir`). Fake
   libraries for tests and VMs: `crates/hinteros-session/tests/fixtures/steam-home` (a home
   with `.local/share/Steam` and a second library at `SteamLibrary`, linked by a relative path in
@@ -176,11 +253,28 @@ inside its window instead); that `[769, launcher]` shows them with working input
 Big Picture writes `GAMESCOPECTRL_BASELAYER_APPID` itself (the daemon logs it if so); and that
 SIGTERM to the processes under Steam's reaper ends Proton games cleanly.
 
+### Keyboard and on-screen keyboard: what is verified and what needs hardware
+
+Verified here: the key planning and pacing (unit tests), the input method client against a
+fake compositor speaking the protocol XML (wayland-server), the overlay atoms and opacity on an
+Xvfb standing in for gamescope's Xwayland, keyboard-profile translation, `input_nav` routing
+and the Guide chord against the fake InputPlumber with a fake keyboard (`--fake-keyboard`),
+and creating the real uinput device (`HINTEROS_TEST_UINPUT=1`). Spike 5 proved in VMs that
+uinput typing reaches Firefox, that `gamescope_input_method` types Unicode into it, and that a
+`GAMESCOPE_EXTERNAL_OVERLAY` window toggled by opacity draws over Firefox without taking focus.
+
+Needs real gamescope and a pad: the overlay's size and position at the output resolution, the
+Flutter OSK's transparent window, Guide+Y reaching the daemon with Steam running, that a held
+Guide flips the pad to ALL before Y (InputPlumber behaviour, spike 4), YouTube TV's and
+Crunchyroll's reaction to the keys (YouTube TV may want `back_key = "backspace"`), and the
+input method on hardware.
+
 ## Development
 
 ```sh
 nix develop          # Rust toolchain, rust-analyzer, cargo-watch; installs git hooks
 cargo watch -x test  # inner loop (gamescope/InputPlumber tests need Xvfb and dbus-daemon, else skip)
+HINTEROS_TEST_UINPUT=1 cargo test uinput  # also create a real uinput device (VMs; grabbed before any key)
 nix flake check      # build, tests (with Xvfb and dbus-daemon), clippy, rustfmt, nixfmt/statix/deadnix
 nix build            # both binaries
 ```
@@ -188,7 +282,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.3","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.4","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

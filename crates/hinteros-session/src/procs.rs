@@ -194,7 +194,8 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let kids = loop {
             let kids = Procs.descendants(pid);
-            if !kids.is_empty() {
+            // The forked child is still `sh` until it has exec'd `sleep`.
+            if !kids.is_empty() && comm(kids[0]).as_deref() == Some("sleep") {
                 break kids;
             }
             assert!(std::time::Instant::now() < deadline);

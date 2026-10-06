@@ -4,7 +4,9 @@ The Rust system services behind the launcher, built as two binaries:
 
 - **`hinteros-session`** (unprivileged, runs in the user's session): controller input and the
   global Home button, launching and focusing apps in gamescope, typing into apps and the
-  on-screen keyboard. Serves the launcher on `$XDG_RUNTIME_DIR/hinteros/session.sock`.
+  on-screen keyboard. Also the
+  runtime settings (Wi-Fi, Bluetooth, audio, display mode, sleep/restart/shutdown) through
+  the system's own services. Serves the launcher on `$XDG_RUNTIME_DIR/hinteros/session.sock`.
 - **`hinteros-system`** (root, small, narrow API): settings in `state.json`, SSH on/off,
   rebuilds, verified updates, channel and base switches, rollback. Listens on
   `/run/hinteros/system.sock`; the session daemon relays it to the launcher as `system.*`.
@@ -124,6 +126,10 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   stored for the site, and exports it as `<app-id>.firefox.<ext>` in the icon cache. It is read
   at startup, when a download fails, and again whenever the app exits (`app_exited`), sending
   `apps_changed` if the icon changed; a downloaded icon always replaces it.
+- **Runtime settings** (`runtime/`): Wi-Fi through NetworkManager, Bluetooth through BlueZ
+  (with a pairing agent), power through logind (all D-Bus, zbus), audio through `pactl`, display
+  modes through gamescope's Wayland output, Xwayland and mode save file. Session API 0.7; see
+  "Runtime settings" below.
 - **System relay** (`system.rs`): one connection to the system service (see below), handshaken
   and subscribed to its job events; the session API's `system.*` methods are passed through
   unchanged and `job_*` events forwarded. While the service is down or speaks another version,
@@ -190,6 +196,23 @@ summon = "guide+context"       # hold Guide + press this button (Y); or "none"
 enable = true                  # relay system.* to the system service
 socket = "/run/hinteros/system.sock"
 
+[runtime]
+enable = true                  # network.*, wifi.*, bluetooth.*, audio.*, display.*, power.*
+# bus = "unix:path=/run/dbus/system_bus_socket"   # NetworkManager, BlueZ, logind [default: the system bus]
+
+[audio]
+pactl = "pactl"                # PipeWire's PulseAudio interface; found on PATH
+poll_ms = 2000                 # look for changes made elsewhere (only while a client is connected)
+
+[display]
+# save_file = "/home/tv/.local/state/hinteros/gamescope-modes"   # [default: $GAMESCOPE_MODE_SAVE_FILE]
+# modes_file = "/run/user/1000/gamescope-edid.modes"            # [default: $GAMESCOPE_PATCHED_EDID_FILE + ".modes"]
+apply_timeout_ms = 6000        # display.set_mode: how long gamescope gets to switch
+
+[bluetooth]
+pair_timeout_s = 45            # bluetooth.pair gives up
+confirm_timeout_s = 30         # a numeric comparison nobody answers is rejected
+
 [[apps]]                       # what apps.list returns after the built-in "steam" (a stub list if none)
 id = "jellyfin"
 name = "Jellyfin"
@@ -231,6 +254,9 @@ steam_app_id = 620
 | `--no-uinput` | | `keys.uinput = false` |
 | `--osk-command "<cmd args>"` | | `osk.command` (split on spaces) |
 | `--system-socket <path>` | `HINTEROS_SYSTEM_SOCKET` | `system.socket` |
+| `--no-runtime` | | `runtime.enable = false` |
+| `--runtime-bus <address>` | `HINTEROS_RUNTIME_BUS` | `runtime.bus` (tests: a private bus with fake services) |
+| `--pactl <path>` | `HINTEROS_PACTL` | `audio.pactl` (tests: a fake) |
 | `--no-icon-fetch` | | `icons.fetch = false` |
 | `--dev-gamepad` | | `input.dev_gamepad = true` (development only) |
 | `--fake-keyboard <file>` (hidden) | `HINTEROS_FAKE_KEYBOARD` | append `down <code>`/`up <code>` lines to a file instead of creating a device (tests) |
@@ -316,6 +342,132 @@ nothing: it never takes part in the TV setup.
   libraries for tests and VMs: `crates/hinteros-session/tests/fixtures/steam-home` (a home
   with `.local/share/Steam` and a second library at `SteamLibrary`, linked by a relative path in
   `libraryfolders.vdf`, which only the daemon accepts; real Steam writes absolute ones).
+
+### Runtime settings (session API 0.7)
+
+Settings that need no rebuild, served by the session daemon as the session user and authorised by
+the polkit rules of the system repo's `runtime.nix` (NetworkManager `network-control`,
+`enable-disable-wifi`, `wifi.scan`, `settings.modify.own` and `.system`; logind suspend, reboot,
+power-off, for the active local session user). Code in `crates/hinteros-session/src/runtime/`;
+every method and event is in `schema/session-api.json` with examples.
+
+| Area | Methods | Events | Through |
+|---|---|---|---|
+| Wi-Fi | `network.status`, `wifi.scan`, `wifi.list`, `wifi.connect {ssid, password?}`, `wifi.disconnect`, `wifi.forget {ssid}`, `wifi.enable {enabled}` | `network_changed`, `wifi_list_changed` | NetworkManager (D-Bus) |
+| Bluetooth | `bluetooth.status`, `.scan {enabled, timeout_s?}`, `.devices`, `.pair {address}`, `.confirm {address, accept}`, `.connect`, `.disconnect`, `.forget` | `bluetooth_changed`, `bluetooth_confirm` | BlueZ (D-Bus) |
+| Audio | `audio.outputs`, `.set_output {id}`, `.volume {percent?}`, `.mute {muted}` (all return the same state) | `audio_changed` | `pactl` (PipeWire's pulse server) |
+| Display | `display.modes`, `.set_mode {width, height, refresh}`, `.keep`, `.revert` | | gamescope (Wayland output, Xwayland, mode save file) |
+| Power | `power.capabilities`, `.suspend`, `.reboot`, `.poweroff` | | logind (D-Bus) |
+
+Events carry the same object as the matching query (`network_changed` = `network.status`,
+`wifi_list_changed` = `wifi.list`, `audio_changed` = `audio.outputs`, `bluetooth_changed` =
+`{status, devices}`), are debounced, and only sent when something changed (signal strength moves
+in steps of 5 for Wi-Fi and 10 dBm for Bluetooth). Our own changes reach other clients at once.
+
+Errors (4xxx): `unavailable {service: networkmanager|bluez|audio|display|logind, reason}` when the
+service is missing, `device_failed {reason?}` (a connection, pairing or mode change that failed),
+`wrong_password`, `not_authorized` (polkit said no), `power_inhibited {who?, why?}` (logind's
+inhibitor refusal, its text unchanged), plus the existing `not_found` and `invalid_params`. Each
+feature degrades on its own: without NetworkManager, BlueZ, `pactl`, gamescope or logind only
+that feature answers `unavailable`; the rest of the API is unaffected, which is what a desktop
+preview or CI sees. Every call has a time limit (30 s; `wifi.connect` 60 s, `bluetooth.pair`
+90 s), so a hung service cannot hang the launcher.
+
+**Wi-Fi.** `wifi.connect` creates a *system* connection (`AddConnection`, then
+`ActivateConnection`), so it exists before login and for every profile; a stored network needs no
+password, a new password replaces the stored one. WPA/WPA2 (`wpa-psk`) and WPA3 (`sae`) and open
+networks work; WEP and 802.1X are refused (`invalid_params {reason: unsupported_security}`). The
+call waits for the device to be activated; a rejected key (NetworkManager asking for secrets it
+has no agent for, or reason `NO_SECRETS`) is `wrong_password`, and a connection it created is
+deleted again. Passwords go only into the D-Bus call; they are never logged (the `Debug` of the
+params hides them, and a test greps the daemon's debug log). `wifi.scan` returns after the scan
+(NetworkManager refuses scans right after another one; the current list comes back then).
+
+**Bluetooth.** The daemon registers a BlueZ agent with capability `DisplayYesNo` the first time
+the user scans or pairs (not at startup, so a desktop preview keeps its own agent), and again
+after BlueZ restarts: devices without input or output (controllers, most headsets) pair as "just
+works" without any prompt. A numeric comparison becomes `bluetooth_confirm {address, name,
+passkey, mode: confirm}` and waits (30 s) for `bluetooth.confirm`; a passkey the user must type on
+the device is `mode: display` (no answer); a legacy PIN request is answered with `0000`.
+The agent says yes only while the user is scanning or pairing: any device in range could
+otherwise start pairing. `bluetooth.pair` also sets `Trusted` (so a pad reconnects by itself) and
+connects if the device did not. `bluetooth.scan` stops by itself after `timeout_s` (30, at most
+300). `kind` comes from BlueZ's `Icon`, else the class of device, else the GAP appearance
+(`gamepad`, `headset`, `speaker`, `keyboard`, `mouse`, `phone`, `computer`, `other`); `battery`
+from `org.bluez.Battery1` when the device reports it.
+
+**Audio: `pactl`, not `wpctl`.** `pactl --format=json list sinks` is structured output of a stable
+protocol (PipeWire's pulse server emulates it, `pulse.enable = true` in `runtime.nix`) with each
+sink's name, description, volume, mute state, ports and device properties (`device.bus`
+tells Bluetooth and USB, ports and names tell HDMI), and `get-default-sink`, `set-default-sink`,
+`set-sink-volume` and `set-sink-mute` cover the rest. `wpctl` has no machine-readable listing
+(`wpctl status` is a tree for humans, `wpctl inspect` prints properties as text), so the output
+list and kinds would need fragile parsing. There is no subscription (`pactl subscribe` would be a
+child process to supervise): changes made elsewhere are found by polling every `audio.poll_ms`
+while a client is connected. Volume is capped at 100 (`invalid_params` above; a sink already
+above 100 reports 100). Outputs are sinks; `id` is the sink name, stable across restarts.
+
+**Display: gamescope's mode save file plus a nudge.** What gamescope 3.16.31 offers (read from
+its source in nixpkgs): there is *no* request to change the output mode at runtime, neither in
+`gamescope_control` (v7) nor in `gamescope_private` (which only runs convars such as
+`backend_set_dirty`); restarting it with other `-W/-H/-r` would take the session with it. But for
+an *external* display with no `-W/-H/-r`, gamescope's `setup_best_connector` looks the display up
+by name in the file `GAMESCOPE_MODE_SAVE_FILE` (`<make> <model>:<W>x<H>@<R>` lines) and picks that
+mode, and setting the root-window property `GAMESCOPE_DISPLAY_MODE_NUDGE` on its Xwayland makes it
+run `setup_best_connector` again with a forced modeset. So `display.set_mode` writes the
+display's line (the other lines and gamescope's trailing field are kept) and sets the nudge,
+then waits (`display.apply_timeout_ms`) until gamescope's `wl_output` shows the new mode. This is
+a real runtime change, and the saved mode is also what gamescope uses at its next start, so it
+persists across gamescope and session restarts with no rebuild. If gamescope does not switch
+(it runs with `-W/-H/-r`, which win) the old file is restored and the call fails with
+`device_failed {reason: not_applied}`. Listing: gamescope writes the connector's modes (`WxH@R`
+per line, its preference order, the first is the display's own choice) to
+`<GAMESCOPE_PATCHED_EDID_FILE>.modes` whenever it picks a connector; the current mode and the
+display's name come from its Wayland display (`wl_output.mode`, `gamescope_control`'s
+`active_display_info`). `can_set` is false for an internal panel (its mode is never read from the
+file) or without the save file. Refresh rates are whole Hz (59.94 is 60).
+Keep-or-revert: `display.set_mode` returns `{previous, current}` and remembers the mode it
+replaced; the launcher's 15 s dialog calls `display.keep` when the user keeps it and
+`display.revert` when the time runs out (also after a second change before deciding: revert goes
+back to the mode before both).
+
+**Power.** `Suspend`, `Reboot` and `PowerOff` go to logind with `interactive = false`;
+`power.capabilities` reports `CanSuspend`/`CanReboot`/`CanPowerOff` (`yes`, `no`, `challenge`,
+`na`). While a system job switches over, its `block` inhibitor makes logind refuse; that is
+`power_inhibited` with logind's message and the `who`/`why` it names.
+
+**What the system repo must provide for these** (beyond `runtime.nix`'s polkit rules, services
+and `hardware.bluetooth`/`pipewire` settings):
+
+- `hinteros-session.service` (or however the session starts the daemon) runs as the session user
+  with access to the **system bus** (`DBUS_SYSTEM_BUS_ADDRESS` default is fine; no sandboxing of
+  `/run/dbus`). The user must be allowed to talk to **org.bluez** (BlueZ's stock bus policy allows
+  `at_console` users and group `lp`) and to NetworkManager and logind (their stock policies
+  allow any user; polkit decides). Verify the BlueZ part in the VM test: pairing as the session
+  user over the system bus.
+- **`pactl`** on the daemon's `PATH` (`pkgs.pulseaudio`; the server is PipeWire's), and
+  `XDG_RUNTIME_DIR` set so it finds `pipewire-pulse`'s socket. The session user's PipeWire and
+  WirePlumber must be running (the default sink is WirePlumber's).
+- **gamescope** started with `GAMESCOPE_PATCHED_EDID_FILE` (a file in `$XDG_RUNTIME_DIR`) and
+  **`GAMESCOPE_MODE_SAVE_FILE`** (a persistent file, e.g. `$XDG_STATE_HOME/hinteros/gamescope-modes`),
+  and **without `-W`, `-H`, `-r`** (and not `--prefer-output` pinned to an internal panel) so
+  that the saved mode applies. The same two variables must be in the daemon's environment (or set
+  `[display] save_file` and `modes_file`). gamescope in Steam mode (`-e`), where its Wayland output
+  is the real output size. The daemon needs gamescope's Xwayland (`gamescope.display`) and Wayland
+  display (`gamescope.wayland_display`, default `gamescope-0`, in `$XDG_RUNTIME_DIR`), the same
+  as for focus control and the input method; the private `gamescope_control` protocol is pinned
+  with gamescope like the input method one (`protocol/gamescope-control.xml`).
+- The polkit rules of `runtime.nix` as they are; `hinteros-system`'s `block` inhibitor during
+  activation (system-api.md) for `power_inhibited`.
+
+Verified here: all of it against fakes on private buses and sockets (`tests/runtime_*.rs`:
+logind, NetworkManager with scripted passwords and access points, BlueZ including the agent
+being called the way BlueZ calls it, a fake `pactl`, an Xvfb plus a wayland-server compositor
+that reacts to the nudge like gamescope does), never the machine's own services. Needs real
+hardware: NetworkManager's exact failure reasons for a wrong WPA3 password, BlueZ pairing with a
+real controller and headset (and the bus policy for the session user), that gamescope 3.16.31
+really switches on the nudge on the target display (read in its source, not run), PipeWire sink
+names and ports of the real HDMI and USB devices, and logind's inhibitor error text.
 
 ### Steam: what is verified and what is inferred
 
@@ -517,6 +669,19 @@ when `available.security` is non-null show the full-screen security notice with 
 `state_conflict`; offer a session restart on `session_restart_required`; show `dev` as a DEV
 badge and the SSH host key fingerprints in Settings → System.
 
+### What the launcher must do (session API 0.7)
+
+Move to session API 0.7 (additive: the 0.6 methods and events are unchanged). The new methods map
+onto the launcher's `lib/src/system` repository interfaces:
+
+| Interface | Calls |
+|---|---|
+| `NetworkRepository.status / scan / connect / disconnect / forget / setWifiEnabled` | `network.status`, `wifi.scan` (a fresh scan, strongest first), `wifi.connect`, `wifi.disconnect`, `wifi.forget`, `wifi.enable`; `wrong_password` (4003) is `wrongPassword`, `device_failed` (4002) is `deviceFailed`; `WifiNetwork.saved` is `known`, `secured` is `security != open`, `signal` is 0 to 100 |
+| `BluetoothRepository.devices / current / scanning` | `bluetooth.devices`, `bluetooth_changed` (`{status, devices}`), `bluetooth.status`; `startScan`/`stopScan` are `bluetooth.scan`; `pair`/`connect`/`disconnect`/`forget` take the device's `address` (`BtDevice.id`); `kind: gamepad` is `controller`; show `bluetooth_confirm {passkey}` and answer with `bluetooth.confirm` |
+| `DisplayAudioRepository.displayModes / setDisplayMode` | `display.modes` (`preferred`, `current`; refresh in whole Hz), `display.set_mode`, then the 15 s dialog: `display.keep` or `display.revert`; check `can_set` first |
+| `DisplayAudioRepository.audio / setAudioOutput / setVolume / setMuted` | `audio.outputs` (`AudioState`: outputs with `default` for `current`, `volume` 0 to 100, `muted`), `audio.set_output`, `audio.volume`, `audio.mute`; `audio_changed` |
+| `SystemRepository.power` | `power.suspend` (sleep), `power.reboot` (restart), `power.poweroff` (shutdown); `power.capabilities` to hide what is not offered; `power_inhibited` (4005) while an update switches over; `unavailable` (4001) is `SystemErrorKind.unavailable` |
+
 ## Development
 
 ```sh
@@ -530,7 +695,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.6","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.7","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hinteros_api::conformance::ApiSchema;
 use hinteros_api::session::{
-    AppKind, AppSource, EventName, ExitReason, InstallState, NavAction, NavPhase,
+    AppKind, AppSource, EventName, ExitReason, InstallState, Key, KeyAction, Modifier, NavAction,
+    NavPhase,
 };
 use hinteros_api::{ApiInfo, ApiVersion, ErrorCode, session, system};
 use serde_json::Value;
@@ -234,6 +235,19 @@ fn enums_match() {
         schema_enum(&schema, "InstallState"),
         rust_enum(InstallState::ALL)
     );
+    assert_eq!(schema_enum(&schema, "Key"), rust_enum(Key::ALL));
+    assert_eq!(schema_enum(&schema, "Modifier"), rust_enum(Modifier::ALL));
+    assert_eq!(schema_enum(&schema, "KeyAction"), rust_enum(KeyAction::ALL));
+    for k in Key::ALL {
+        assert_eq!(rust_enum(&[*k]).pop_first().unwrap(), k.name());
+        assert_eq!(Key::from_name(k.name()), Some(*k));
+    }
+    for m in Modifier::ALL {
+        assert_eq!(
+            Modifier::from_name(&rust_enum(&[*m]).pop_first().unwrap()),
+            Some(*m)
+        );
+    }
     for e in EventName::ALL {
         assert_eq!(rust_enum(&[*e]).pop_first().unwrap(), e.wire_name());
     }
@@ -297,6 +311,20 @@ fn schema_rejects_what_it_should() {
             r#"{"games":[{"appid":1,"name":"x","install_state":"installed","size_bytes":0,"last_played":null,"artwork":{"portrait":null}}]}"#,
         ),
         ("/methods/games.list/params", r#"{"x":1}"#),
+        ("/methods/keys.type/params", r#"{"text":""}"#),
+        ("/methods/keys.type/params", r#"{}"#),
+        ("/methods/keys.key/params", r#"{"key":"A"}"#),
+        (
+            "/methods/keys.key/params",
+            r#"{"key":"a","modifiers":["hyper"]}"#,
+        ),
+        (
+            "/methods/keys.key/params",
+            r#"{"key":"a","modifiers":["ctrl","ctrl"]}"#,
+        ),
+        ("/methods/keys.action/params", r#"{"action":"jump"}"#),
+        ("/methods/osk.show/result", r#"{}"#),
+        ("/events/osk_visibility/params", r#"{"visible":"yes"}"#),
     ];
     for (pointer, instance) in bad {
         let v: Value = serde_json::from_str(instance).unwrap();

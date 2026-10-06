@@ -18,6 +18,8 @@ pub enum ErrorCode {
     AppNotFound,
     AppLaunchFailed,
     SteamNoWindows,
+    KeyboardUnavailable,
+    OskUnavailable,
 }
 
 impl ErrorCode {
@@ -33,6 +35,8 @@ impl ErrorCode {
         Self::AppNotFound,
         Self::AppLaunchFailed,
         Self::SteamNoWindows,
+        Self::KeyboardUnavailable,
+        Self::OskUnavailable,
     ];
 
     /// The JSON-RPC and protocol errors, which every API declares.
@@ -60,6 +64,8 @@ impl ErrorCode {
             Self::AppNotFound => 2001,
             Self::AppLaunchFailed => 2002,
             Self::SteamNoWindows => 2003,
+            Self::KeyboardUnavailable => 2004,
+            Self::OskUnavailable => 2005,
         }
     }
 
@@ -77,6 +83,8 @@ impl ErrorCode {
             Self::AppNotFound => "app_not_found",
             Self::AppLaunchFailed => "app_launch_failed",
             Self::SteamNoWindows => "steam_no_windows",
+            Self::KeyboardUnavailable => "keyboard_unavailable",
+            Self::OskUnavailable => "osk_unavailable",
         }
     }
 

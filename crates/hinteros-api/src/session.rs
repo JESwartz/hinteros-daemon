@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 3);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 4);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -25,6 +25,7 @@ pub enum EventName {
     InputNav,
     GamesChanged,
     SteamAttention,
+    OskVisibility,
 }
 
 impl EventName {
@@ -36,6 +37,7 @@ impl EventName {
         EventName::InputNav,
         EventName::GamesChanged,
         EventName::SteamAttention,
+        EventName::OskVisibility,
     ];
 
     /// The event's wire name (its JSON-RPC notification method).
@@ -48,6 +50,7 @@ impl EventName {
             EventName::InputNav => InputNav::NAME,
             EventName::GamesChanged => GamesChanged::NAME,
             EventName::SteamAttention => SteamAttention::NAME,
+            EventName::OskVisibility => OskVisibility::NAME,
         }
     }
 }
@@ -509,6 +512,221 @@ impl Method for SteamFocus {
     type Result = SteamFocusResult;
 }
 
+/// The `hello` client name of the on-screen keyboard. Connections with this name get
+/// `input_nav` while the keyboard is visible (and only then).
+pub const OSK_CLIENT_NAME: &str = "hinteros-osk";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OskParams {}
+
+/// Result of `osk.show` / `osk.hide`, and the `osk_visibility` event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OskState {
+    pub visible: bool,
+}
+
+pub struct OskShow;
+impl Method for OskShow {
+    const NAME: &'static str = "osk.show";
+    type Params = OskParams;
+    type Result = OskState;
+}
+
+pub struct OskHide;
+impl Method for OskHide {
+    const NAME: &'static str = "osk.hide";
+    type Params = OskParams;
+    type Result = OskState;
+}
+
+pub struct OskVisibility;
+impl Event for OskVisibility {
+    const NAME: &'static str = "osk_visibility";
+    type Params = OskState;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeysTypeParams {
+    pub text: String,
+}
+
+/// Longest `keys.type` text, in characters (the schema's `maxLength`).
+pub const KEYS_TYPE_MAX_CHARS: usize = 4096;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeysTypeResult {
+    /// Characters that were skipped, in order.
+    pub untypeable: Vec<String>,
+}
+
+pub struct KeysType;
+impl Method for KeysType {
+    const NAME: &'static str = "keys.type";
+    type Params = KeysTypeParams;
+    type Result = KeysTypeResult;
+}
+
+/// Defines [`Key`] with its wire names.
+macro_rules! keys {
+    ($($variant:ident = $name:literal,)*) => {
+        /// A key on the daemon's virtual keyboard (US layout).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        pub enum Key {
+            $(#[serde(rename = $name)] $variant,)*
+        }
+
+        impl Key {
+            pub const ALL: &[Key] = &[$(Key::$variant,)*];
+
+            /// The key's wire name (`"a"`, `"page_up"`, ...).
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Key::$variant => $name,)*
+                }
+            }
+
+            pub fn from_name(name: &str) -> Option<Key> {
+                match name {
+                    $($name => Some(Key::$variant),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+keys! {
+    A = "a", B = "b", C = "c", D = "d", E = "e", F = "f", G = "g", H = "h", I = "i", J = "j",
+    K = "k", L = "l", M = "m", N = "n", O = "o", P = "p", Q = "q", R = "r", S = "s", T = "t",
+    U = "u", V = "v", W = "w", X = "x", Y = "y", Z = "z",
+    Digit0 = "0", Digit1 = "1", Digit2 = "2", Digit3 = "3", Digit4 = "4",
+    Digit5 = "5", Digit6 = "6", Digit7 = "7", Digit8 = "8", Digit9 = "9",
+    F1 = "f1", F2 = "f2", F3 = "f3", F4 = "f4", F5 = "f5", F6 = "f6",
+    F7 = "f7", F8 = "f8", F9 = "f9", F10 = "f10", F11 = "f11", F12 = "f12",
+    Enter = "enter", Escape = "escape", Backspace = "backspace", Tab = "tab", Space = "space",
+    Delete = "delete", Insert = "insert", Home = "home", End = "end",
+    PageUp = "page_up", PageDown = "page_down", Up = "up", Down = "down", Left = "left", Right = "right",
+    Minus = "minus", Equal = "equal", LeftBracket = "left_bracket", RightBracket = "right_bracket",
+    Backslash = "backslash", Semicolon = "semicolon", Apostrophe = "apostrophe", Grave = "grave",
+    Comma = "comma", Period = "period", Slash = "slash", CapsLock = "caps_lock",
+    ContextMenu = "context_menu",
+    Back = "back", Forward = "forward", Refresh = "refresh", PlayPause = "play_pause", Stop = "stop",
+    NextTrack = "next_track", PreviousTrack = "previous_track",
+    VolumeUp = "volume_up", VolumeDown = "volume_down", Mute = "mute",
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Modifier {
+    Shift,
+    Ctrl,
+    Alt,
+    Meta,
+}
+
+impl Modifier {
+    pub const ALL: &[Modifier] = &[
+        Modifier::Shift,
+        Modifier::Ctrl,
+        Modifier::Alt,
+        Modifier::Meta,
+    ];
+
+    pub fn from_name(name: &str) -> Option<Modifier> {
+        match name {
+            "shift" => Some(Modifier::Shift),
+            "ctrl" => Some(Modifier::Ctrl),
+            "alt" => Some(Modifier::Alt),
+            "meta" => Some(Modifier::Meta),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeysKeyParams {
+    pub key: Key,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<Modifier>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeysKeyResult {}
+
+pub struct KeysKey;
+impl Method for KeysKey {
+    const NAME: &'static str = "keys.key";
+    type Params = KeysKeyParams;
+    type Result = KeysKeyResult;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyAction {
+    Backspace,
+    Delete,
+    Enter,
+    Tab,
+    Escape,
+    Space,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+}
+
+impl KeyAction {
+    pub const ALL: &[KeyAction] = &[
+        KeyAction::Backspace,
+        KeyAction::Delete,
+        KeyAction::Enter,
+        KeyAction::Tab,
+        KeyAction::Escape,
+        KeyAction::Space,
+        KeyAction::Left,
+        KeyAction::Right,
+        KeyAction::Up,
+        KeyAction::Down,
+        KeyAction::Home,
+        KeyAction::End,
+    ];
+
+    /// The key that performs the action.
+    pub const fn key(self) -> Key {
+        match self {
+            KeyAction::Backspace => Key::Backspace,
+            KeyAction::Delete => Key::Delete,
+            KeyAction::Enter => Key::Enter,
+            KeyAction::Tab => Key::Tab,
+            KeyAction::Escape => Key::Escape,
+            KeyAction::Space => Key::Space,
+            KeyAction::Left => Key::Left,
+            KeyAction::Right => Key::Right,
+            KeyAction::Up => Key::Up,
+            KeyAction::Down => Key::Down,
+            KeyAction::Home => Key::Home,
+            KeyAction::End => Key::End,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeysActionParams {
+    pub action: KeyAction,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeysActionResult {}
+
+pub struct KeysAction;
+impl Method for KeysAction {
+    const NAME: &'static str = "keys.action";
+    type Params = KeysActionParams;
+    type Result = KeysActionResult;
+}
+
 pub static API: ApiInfo = ApiInfo {
     api: "session",
     version: VERSION,
@@ -525,6 +743,11 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<GamesList>(),
         MethodInfo::of::<SteamAttentionQuery>(),
         MethodInfo::of::<SteamFocus>(),
+        MethodInfo::of::<OskShow>(),
+        MethodInfo::of::<OskHide>(),
+        MethodInfo::of::<KeysType>(),
+        MethodInfo::of::<KeysKey>(),
+        MethodInfo::of::<KeysAction>(),
     ],
     events: &[
         EventInfo::of::<HomePressed>(),
@@ -534,6 +757,7 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<InputNav>(),
         EventInfo::of::<GamesChanged>(),
         EventInfo::of::<SteamAttention>(),
+        EventInfo::of::<OskVisibility>(),
     ],
     errors: ErrorCode::ALL,
 };

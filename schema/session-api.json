@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.3",
+  "version": "0.4",
   "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). See hinteros-docs/design/api.md for the protocol rules.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -12,7 +12,7 @@
   "methods": {
     "hello": {
       "summary": "Version handshake. Must be the first request on a connection.",
-      "description": "The client sends the API version it was built against. Majors must match (during 0.x the minor must match too). The result carries the negotiated version: min(client, server). On a mismatch the server answers with version_mismatch and closes the connection.",
+      "description": "The client sends the API version it was built against. Majors must match (during 0.x the minor must match too). The result carries the negotiated version: min(client, server). On a mismatch the server answers with version_mismatch and closes the connection. The client name 'hinteros-osk' is reserved for the on-screen keyboard: such connections receive input_nav while the keyboard is visible, and only then.",
       "since": "0.1",
       "handshake": true,
       "params": {
@@ -37,16 +37,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.3", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
-          "result": { "api_version": "0.3", "server": { "name": "hinteros-session", "version": "0.1.0" } }
+          "params": { "api_version": "0.4", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
+          "result": { "api_version": "0.4", "server": { "name": "hinteros-session", "version": "0.1.0" } }
         },
         {
           "name": "major mismatch",
           "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 1.0, server 0.3",
-            "data": { "client_api_version": "1.0", "server_api_version": "0.3" }
+            "message": "API version mismatch: client 1.0, server 0.4",
+            "data": { "client_api_version": "1.0", "server_api_version": "0.4" }
           }
         }
       ]
@@ -400,6 +400,125 @@
         { "name": "steam game", "params": { "id": "steam-620" }, "result": {} },
         { "name": "not running", "params": { "id": "cmd-7" }, "error": { "code": 2001, "message": "no running app with id 'cmd-7'" } }
       ]
+    },
+    "osk.show": {
+      "summary": "Show the on-screen keyboard over whatever has focus.",
+      "description": "The on-screen keyboard is a separate client (hinteros-osk) whose window the daemon shows as a gamescope overlay; it never takes focus, so typed keys reach the focused app. While it is visible, InputPlumber is in intercept mode ALL and input_nav goes only to the connection whose hello client name is 'hinteros-osk' (not to the launcher). osk_visibility follows if the visibility changed. Showing it again does nothing. The user can also summon it with the controller (Guide + Y by default).",
+      "since": "0.4",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": ["visible"],
+        "additionalProperties": false,
+        "properties": {
+          "visible": { "description": "Whether the on-screen keyboard is now visible.", "type": "boolean" }
+        }
+      },
+      "errors": ["osk_unavailable"],
+      "examples": [
+        { "name": "shown", "params": {}, "result": { "visible": true } },
+        { "name": "disabled in the config", "params": {}, "error": { "code": 2005, "message": "the on-screen keyboard is disabled ([osk] enable = false)" } }
+      ]
+    },
+    "osk.hide": {
+      "summary": "Hide the on-screen keyboard.",
+      "description": "Restores the previous input routing: InputPlumber's mode for whatever has focus, input_nav to the launcher while it has focus. osk_visibility follows if the visibility changed. Home and focus changes also hide it.",
+      "since": "0.4",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": ["visible"],
+        "additionalProperties": false,
+        "properties": {
+          "visible": { "description": "Whether the on-screen keyboard is now visible.", "type": "boolean" }
+        }
+      },
+      "errors": [],
+      "examples": [{ "name": "hidden", "params": {}, "result": { "visible": false } }]
+    },
+    "keys.type": {
+      "summary": "Type text into the focused app (never into the on-screen keyboard).",
+      "description": "Characters on the US keyboard layout are typed through the daemon's virtual keyboard (uinput, with Shift for capitals and symbols; newline = Enter, tab = Tab); others go through gamescope's input method, one character at a time. Returns at once; typing happens in the background in order with other keys.* calls. Characters neither path can type are skipped and listed in 'untypeable'.",
+      "since": "0.4",
+      "params": {
+        "type": "object",
+        "required": ["text"],
+        "additionalProperties": false,
+        "properties": {
+          "text": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        }
+      },
+      "result": {
+        "type": "object",
+        "required": ["untypeable"],
+        "additionalProperties": false,
+        "properties": {
+          "untypeable": { "description": "Characters that were skipped, in order (duplicates kept).", "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "errors": ["keyboard_unavailable"],
+      "examples": [
+        { "name": "URL", "params": { "text": "https://example.com/a?b=1" }, "result": { "untypeable": [] } },
+        { "name": "no input method", "params": { "text": "café" }, "result": { "untypeable": ["é"] } },
+        { "name": "no keyboard", "params": { "text": "x" }, "error": { "code": 2004, "message": "no virtual keyboard (/dev/uinput) and no gamescope input method" } }
+      ]
+    },
+    "keys.key": {
+      "summary": "Press and release one key, optionally with modifiers, in the focused app.",
+      "description": "For keys that are not text (function keys, shortcuts such as ctrl+l). Needs the virtual keyboard (uinput). Returns at once; the key is sent in order with other keys.* calls.",
+      "since": "0.4",
+      "params": {
+        "type": "object",
+        "required": ["key"],
+        "additionalProperties": false,
+        "properties": {
+          "key": { "$ref": "#/$defs/Key" },
+          "modifiers": { "type": "array", "items": { "$ref": "#/$defs/Modifier" }, "uniqueItems": true }
+        }
+      },
+      "result": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": ["keyboard_unavailable"],
+      "examples": [
+        { "name": "F5", "params": { "key": "f5" }, "result": {} },
+        { "name": "address bar", "params": { "key": "l", "modifiers": ["ctrl"] }, "result": {} },
+        { "name": "no uinput", "params": { "key": "escape" }, "error": { "code": 2004, "message": "no virtual keyboard (/dev/uinput)" } }
+      ]
+    },
+    "keys.action": {
+      "summary": "An editing action in the focused app: backspace, enter, cursor movement, ...",
+      "description": "Sent as the matching key through the virtual keyboard; without it, backspace, delete, enter and the arrows fall back to gamescope's input method. Returns at once.",
+      "since": "0.4",
+      "params": {
+        "type": "object",
+        "required": ["action"],
+        "additionalProperties": false,
+        "properties": {
+          "action": { "$ref": "#/$defs/KeyAction" }
+        }
+      },
+      "result": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": ["keyboard_unavailable"],
+      "examples": [
+        { "name": "backspace", "params": { "action": "backspace" }, "result": {} },
+        { "name": "submit", "params": { "action": "enter" }, "result": {} },
+        { "name": "no keyboard", "params": { "action": "tab" }, "error": { "code": 2004, "message": "no virtual keyboard (/dev/uinput) for 'tab'" } }
+      ]
     }
   },
   "events": {
@@ -468,8 +587,8 @@
       ]
     },
     "input_nav": {
-      "summary": "A controller navigation intent, sent only while the launcher has focus.",
-      "description": "Directions repeat while held (phase 'repeat', key repeat done by the daemon); other actions only press and release. The launcher should map arrow keys, Enter and Escape to the same intents so it works without a controller. Clients must ignore unknown actions.",
+      "summary": "A controller navigation intent, sent to the launcher while it has focus, or only to the on-screen keyboard while it is visible.",
+      "description": "Directions repeat while held (phase 'repeat', key repeat done by the daemon); other actions only press and release. Recipients (0.4): while the on-screen keyboard is visible, only connections whose hello client name is 'hinteros-osk'; otherwise, while the launcher has focus, every other subscribed connection. Apps get the pad itself (InputPlumber PASS) or, with a keyboard input profile, key presses from the daemon; no input_nav is sent then. The launcher should map arrow keys, Enter and Escape to the same intents so it works without a controller. Clients must ignore unknown actions.",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -513,6 +632,22 @@
         { "name": "Steam Guard", "params": { "windows": [{ "window": 6291459, "title": "Steam Guard", "pid": 2412 }] } },
         { "name": "cleared", "params": { "windows": [] } }
       ]
+    },
+    "osk_visibility": {
+      "summary": "The on-screen keyboard was shown or hidden (osk.show/osk.hide, the controller chord, Home, or a focus change).",
+      "since": "0.4",
+      "params": {
+        "type": "object",
+        "required": ["visible"],
+        "additionalProperties": false,
+        "properties": {
+          "visible": { "type": "boolean" }
+        }
+      },
+      "examples": [
+        { "name": "shown", "params": { "visible": true } },
+        { "name": "hidden", "params": { "visible": false } }
+      ]
     }
   },
   "errors": {
@@ -540,7 +675,9 @@
     "already_handshaken": { "code": 1003, "since": "0.1", "summary": "'hello' was called twice on one connection." },
     "app_not_found": { "code": 2001, "since": "0.2", "summary": "No such app (apps.launch: not in apps.list; apps.focus, apps.close: not running)." },
     "app_launch_failed": { "code": 2002, "since": "0.2", "summary": "The app could not be started (spawn failed, or it has nothing to launch)." },
-    "steam_no_windows": { "code": 2003, "since": "0.3", "summary": "steam.focus: Steam has no windows that could be shown (not running, or no gamescope)." }
+    "steam_no_windows": { "code": 2003, "since": "0.3", "summary": "steam.focus: Steam has no windows that could be shown (not running, or no gamescope)." },
+    "keyboard_unavailable": { "code": 2004, "since": "0.4", "summary": "keys.*: nothing can deliver the input (no virtual keyboard because /dev/uinput could not be opened, and, for text and some actions, no gamescope input method)." },
+    "osk_unavailable": { "code": 2005, "since": "0.4", "summary": "osk.show: the on-screen keyboard is disabled in the daemon's config." }
   },
   "$defs": {
     "ApiVersion": {
@@ -560,7 +697,7 @@
     },
     "EventName": {
       "type": "string",
-      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "steam_attention"]
+      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "steam_attention", "osk_visibility"]
     },
     "AppId": {
       "description": "App identifier: an apps.list id, or for running apps started by command or Steam URL 'cmd-<n>' / 'steam-<appid>'. 'steam' is Steam itself (Big Picture and its other windows).",
@@ -653,6 +790,28 @@
         "last_played": { "description": "When it was last played (Unix time, seconds), or null if never or unknown.", "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
         "artwork": { "$ref": "#/$defs/GameArtwork" }
       }
+    },
+    "Key": {
+      "description": "A key on the daemon's virtual keyboard (US layout). Letters and digits are the unshifted keys: add the 'shift' modifier for capitals and symbols, or use keys.type for text. back, forward, refresh and the media keys are the multimedia keys of that name.",
+      "type": "string",
+      "enum": [
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+        "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+        "enter", "escape", "backspace", "tab", "space", "delete", "insert", "home", "end", "page_up", "page_down", "up", "down", "left", "right",
+        "minus", "equal", "left_bracket", "right_bracket", "backslash", "semicolon", "apostrophe", "grave", "comma", "period", "slash", "caps_lock", "context_menu",
+        "back", "forward", "refresh", "play_pause", "stop", "next_track", "previous_track", "volume_up", "volume_down", "mute"
+      ]
+    },
+    "Modifier": {
+      "description": "A modifier held while a key is pressed.",
+      "type": "string",
+      "enum": ["shift", "ctrl", "alt", "meta"]
+    },
+    "KeyAction": {
+      "description": "An editing action for keys.action.",
+      "type": "string",
+      "enum": ["backspace", "delete", "enter", "tab", "escape", "space", "left", "right", "up", "down", "home", "end"]
     },
     "SteamWindow": {
       "description": "One of Steam's own top-level windows on gamescope's Xwayland.",

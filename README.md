@@ -256,7 +256,7 @@ terminal, start the launcher against that socket:
 
 ```sh
 HINTEROS_SESSION_SOCKET=/run/user/1000/hinteros-preview.XXXXXX/session.sock \
-  nix run <launcher flake> -- --windowed
+  nix run git+https://justsomeshed.com/JSwartz/HinterOS/hinteros-launcher.git -- --windowed
 ```
 
 **Launching an app or game from the launcher starts it for real on your desktop** (Steam

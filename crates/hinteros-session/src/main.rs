@@ -135,6 +135,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         let opts = WatchOptions {
             tag_steam_windows: config.steam.tag_windows,
             osk_pid: osk_pid.clone(),
+            unmap_gl_dummies: config.gamescope.unmap_gl_dummies,
         };
         spawn_watcher(dpy.clone(), Duration::from_secs(1), opts, tx);
         Box::new(GamescopeFocus::new(dpy, config.launcher.app_id))

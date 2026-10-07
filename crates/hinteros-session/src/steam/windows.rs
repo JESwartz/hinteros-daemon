@@ -57,6 +57,10 @@ pub struct WindowInfo {
     pub steam_overlay: bool,
     pub steam_bigpicture: bool,
     pub helper_type: Option<HelperType>,
+    /// Any `_NET_WM_WINDOW_TYPE` is set (of a kind in `helper_type` or not).
+    pub has_window_type: bool,
+    /// Properties that say what the window is for: an opacity, `GAMESCOPE_EXTERNAL_OVERLAY`.
+    pub content_hints: bool,
 }
 
 impl WindowInfo {

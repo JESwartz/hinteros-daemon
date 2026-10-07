@@ -259,6 +259,18 @@ impl FakeGamescope {
         if let Some(game) = w.steam_game {
             self.set_on(id, "STEAM_GAME", &[game]);
         }
+        if w.popup_menu_type {
+            let popup = self.atom("_NET_WM_WINDOW_TYPE_POPUP_MENU");
+            self.conn
+                .change_property32(
+                    PropMode::REPLACE,
+                    id,
+                    self.atom("_NET_WM_WINDOW_TYPE"),
+                    AtomEnum::ATOM,
+                    &[popup],
+                )
+                .unwrap();
+        }
         self.conn.map_window(id).unwrap();
         self.conn.flush().unwrap();
         id
@@ -301,6 +313,8 @@ struct TestWindow {
     pid: Option<u32>,
     steam_game: Option<u32>,
     override_redirect: bool,
+    /// Set `_NET_WM_WINDOW_TYPE` to `_NET_WM_WINDOW_TYPE_POPUP_MENU`.
+    popup_menu_type: bool,
 }
 
 fn start_daemon(gs: &FakeGamescope, extra_config: &str) -> Daemon {
@@ -687,4 +701,92 @@ async fn focus_is_applied_again_after_gamescope_restarts() {
     // And once more, to be sure it keeps working.
     gs.restart();
     gs.baselayer_becomes(&[570, LAUNCHER]).await;
+}
+
+impl FakeGamescope {
+    fn is_mapped(&self, window: Window) -> bool {
+        use x11rb::protocol::xproto::MapState;
+        self.conn
+            .get_window_attributes(window)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .map_state
+            != MapState::UNMAPPED
+    }
+}
+
+/// A launched app (under the daemon's reaper) and the windows GTK3 would make for it.
+async fn gtk_dummy_scenario(
+    extra_config: &str,
+) -> (FakeGamescope, Daemon, Vec<(&'static str, Window)>) {
+    let gs = FakeGamescope::start().expect("Xvfb");
+    let d = start_daemon(&gs, extra_config);
+    gs.baselayer_becomes(&[LAUNCHER]).await;
+    let mut c = d.client().await;
+    let app = call(
+        &mut c,
+        "apps.launch",
+        json!({ "command": ["sleep", "60"], "name": "GTK app" }),
+    )
+    .await
+    .unwrap()["app"]
+        .clone();
+    let reaper = u32::try_from(app["pid"].as_u64().unwrap()).unwrap();
+    // Windows are created by this process; _NET_WM_PID says who they belong to.
+    let ours = |class, title, override_redirect, pid| TestWindow {
+        class,
+        title,
+        override_redirect,
+        pid,
+        ..Default::default()
+    };
+    // Things that must be left alone, each looking a bit like the dummy.
+    let menu = gs.window(&TestWindow {
+        popup_menu_type: true,
+        ..ours(None, "", true, Some(reaper))
+    });
+    let steam = gs.window(&ours(Some("steamwebhelper"), "", true, Some(reaper)));
+    let classed = gs.window(&ours(Some("gtk-popup"), "", true, Some(reaper)));
+    let stranger = gs.window(&ours(None, "", true, None)); // not an app of ours
+    // The app's real window, then its dummy.
+    let real = gs.window(&ours(Some("gtkapp"), "GTK app", false, Some(reaper)));
+    let dummy = gs.window(&ours(None, "", true, Some(reaper)));
+    let windows = vec![
+        ("menu", menu),
+        ("steam", steam),
+        ("classed", classed),
+        ("stranger", stranger),
+        ("real", real),
+        ("dummy", dummy),
+    ];
+    (gs, d, windows)
+}
+
+#[tokio::test]
+async fn an_invisible_override_redirect_window_over_an_app_is_unmapped() {
+    if FakeGamescope::start().is_none() {
+        return;
+    }
+    let (gs, _d, w) = gtk_dummy_scenario("").await;
+    let id = |name: &str| w.iter().find(|(n, _)| *n == name).unwrap().1;
+    eventually("the dummy is unmapped", async || {
+        (!gs.is_mapped(id("dummy"))).then_some(())
+    })
+    .await;
+    for keep in ["menu", "steam", "classed", "stranger", "real"] {
+        assert!(gs.is_mapped(id(keep)), "{keep} was left alone");
+    }
+}
+
+#[tokio::test]
+async fn gl_dummies_are_left_alone_when_turned_off() {
+    if FakeGamescope::start().is_none() {
+        return;
+    }
+    let (gs, _d, w) = gtk_dummy_scenario("unmap_gl_dummies = false\n").await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    for (name, window) in w {
+        assert!(gs.is_mapped(window), "{name}");
+    }
 }

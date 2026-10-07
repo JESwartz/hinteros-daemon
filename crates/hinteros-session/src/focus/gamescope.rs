@@ -2,7 +2,8 @@
 //!
 //! No auth is needed: gamescope's Xwayland accepts local connections from the same user.
 
-use std::collections::HashMap;
+use std::cell::OnceCell;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
@@ -22,6 +23,7 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
+use super::dummies;
 use super::{FocusControl, GamescopeEvent, GamescopeState, baselayer_for};
 use crate::osk;
 use crate::procs;
@@ -208,6 +210,8 @@ pub struct WatchOptions {
     pub tag_steam_windows: bool,
     /// The on-screen keyboard process the daemon started (0: none), to find its windows.
     pub osk_pid: Arc<AtomicU32>,
+    /// Unmap invisible override-redirect windows that cover an app (see [`super::dummies`]).
+    pub unmap_gl_dummies: bool,
 }
 
 impl Default for WatchOptions {
@@ -215,6 +219,7 @@ impl Default for WatchOptions {
         Self {
             tag_steam_windows: true,
             osk_pid: Arc::default(),
+            unmap_gl_dummies: true,
         }
     }
 }
@@ -282,6 +287,8 @@ impl Conn {
         let overlay = prop(a.STEAM_OVERLAY, AtomEnum::CARDINAL.into())?;
         let bigpicture = prop(a.STEAM_BIGPICTURE, AtomEnum::ANY.into())?;
         let wtype = prop(a._NET_WM_WINDOW_TYPE, AtomEnum::ATOM.into())?;
+        let opacity = prop(a._NET_WM_WINDOW_OPACITY, AtomEnum::ANY.into())?;
+        let external = prop(a.GAMESCOPE_EXTERNAL_OVERLAY, AtomEnum::ANY.into())?;
         let client = if xres {
             Some(c.res_query_client_ids(&[ClientIdSpec {
                 client: window,
@@ -338,7 +345,12 @@ impl Conn {
             (a._NET_WM_WINDOW_TYPE_DESKTOP, HelperType::Desktop),
             (a._NET_WM_WINDOW_TYPE_DND, HelperType::Dnd),
         ];
-        let helper_type = window_reply(wtype.reply())?
+        let wtype = window_reply(wtype.reply())?;
+        let has_window_type = wtype.as_ref().is_some_and(|r| r.type_ != 0);
+        let set = |r: Option<GetPropertyReply>| r.is_some_and(|r| r.type_ != 0);
+        let content_hints =
+            set(window_reply(opacity.reply())?) || set(window_reply(external.reply())?);
+        let helper_type = wtype
             .and_then(|r| r.value32().map(Iterator::collect::<Vec<u32>>))
             .and_then(|types| {
                 helper_types
@@ -360,12 +372,20 @@ impl Conn {
             steam_overlay: first32(window_reply(overlay.reply())?).is_some_and(|v| v != 0),
             steam_bigpicture: window_reply(bigpicture.reply())?.is_some_and(|r| r.format != 0),
             helper_type,
+            has_window_type,
+            content_hints,
         }))
     }
 
     /// Read every top-level window, tag Steam's (if `tag`), and return Steam's windows (all of
     /// them), the ones that want attention, and the on-screen keyboard's.
-    fn scan(&self, tag: bool, xres: bool, osk_pid: u32) -> Result<Scan> {
+    fn scan(
+        &self,
+        tag: bool,
+        xres: bool,
+        osk_pid: u32,
+        dummies: Option<&mut HashSet<Window>>,
+    ) -> Result<Scan> {
         let tree = self.conn.query_tree(self.root)?.reply()?;
         let mut infos = Vec::new();
         for w in tree.children {
@@ -384,6 +404,9 @@ impl Conn {
                 infos.push(info);
             }
         }
+        if let Some(seen) = dummies {
+            self.unmap_dummies(&infos, osk_pid, seen)?;
+        }
         self.conn.flush()?;
         let steam = infos
             .iter()
@@ -395,11 +418,61 @@ impl Conn {
             .filter(|i| i.input_output && osk::is_osk_window(i, osk_pid))
             .map(|i| i.window)
             .collect();
+        let blank = infos
+            .iter()
+            .filter(|i| dummies::is_blank_override_redirect(i))
+            .map(|i| i.window)
+            .collect();
         Ok(Scan {
             steam,
             attention: windows::attention_candidates(&infos),
             osk,
+            blank,
         })
+    }
+
+    /// Unmap the GL dummies among `infos` (see [`dummies`]). `seen` holds those already logged.
+    fn unmap_dummies(
+        &self,
+        infos: &[WindowInfo],
+        osk_pid: u32,
+        seen: &mut HashSet<Window>,
+    ) -> Result<()> {
+        if !infos.iter().any(dummies::is_blank_override_redirect) {
+            seen.clear();
+            return Ok(());
+        }
+        let root = self.conn.get_geometry(self.root)?.reply()?;
+        let table = OnceCell::new();
+        let found = dummies::find(
+            infos,
+            (root.width.into(), root.height.into()),
+            osk_pid,
+            |w| {
+                w.owners.iter().find_map(|(pid, _)| {
+                    procs::managed_app_id_of(table.get_or_init(procs::list), *pid)
+                })
+            },
+        );
+        seen.retain(|w| infos.iter().any(|i| i.window == *w));
+        for d in found {
+            if seen.insert(d.window) {
+                info!(
+                    window = d.window,
+                    "unmapped an empty override-redirect window of {} (likely a GTK GL dummy)",
+                    d.owner
+                );
+            } else {
+                debug!(
+                    window = d.window,
+                    app_id = d.app_id,
+                    "unmapped a GL dummy again"
+                );
+            }
+            self.conn.unmap_window(d.window)?;
+        }
+        self.conn.flush()?;
+        Ok(())
     }
 
     /// The on-screen keyboard visibility the shell asked for.
@@ -432,6 +505,9 @@ struct Scan {
     steam: Vec<Window>,
     attention: Vec<SteamWindow>,
     osk: Vec<Window>,
+    /// Mapped override-redirect windows with nothing on them: if one is resized to the whole
+    /// screen, it may be a dummy.
+    blank: Vec<Window>,
 }
 
 /// Keeps the on-screen keyboard's windows external overlays with the wanted opacity.
@@ -522,7 +598,14 @@ fn watch_session(
         return Ok(());
     }
     let osk_pid = || opts.osk_pid.load(Ordering::SeqCst);
-    let scan = c.scan(opts.tag_steam_windows, xres, osk_pid())?;
+    let mut gl_dummies = HashSet::new();
+    let scan = c.scan(
+        opts.tag_steam_windows,
+        xres,
+        osk_pid(),
+        opts.unmap_gl_dummies.then_some(&mut gl_dummies),
+    )?;
+    let mut blank = scan.blank;
     let mut osk = OskWindows {
         visible: c.osk_wanted()?,
         ..OskWindows::default()
@@ -576,7 +659,10 @@ fn watch_session(
                 | Event::UnmapNotify(_)
                 | Event::DestroyNotify(_)
                 | Event::ReparentNotify(_) => rescan = true,
-                Event::ConfigureNotify(ev) => rescan |= steam.contains(&ev.window),
+                Event::ConfigureNotify(ev) => {
+                    rescan |= steam.contains(&ev.window)
+                        || (opts.unmap_gl_dummies && blank.contains(&ev.window));
+                }
                 _ => {}
             }
         }
@@ -610,11 +696,17 @@ fn watch_session(
             }
         }
         if rescan {
-            let scan = match c.scan(opts.tag_steam_windows, xres, osk_pid()) {
+            let scan = match c.scan(
+                opts.tag_steam_windows,
+                xres,
+                osk_pid(),
+                opts.unmap_gl_dummies.then_some(&mut gl_dummies),
+            ) {
                 Ok(r) => r,
                 Err(e) => break Err(e),
             };
             steam = scan.steam;
+            blank = scan.blank;
             osk_windows = scan.osk;
             if scan.attention != last_attention {
                 if !send(GamescopeEvent::SteamWindows(scan.attention.clone())) {

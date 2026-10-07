@@ -59,6 +59,58 @@ pub fn is_steam_reaper_cmdline(cmdline: &[u8], app_id: u32) -> bool {
     before.contains(&&b"SteamLaunch"[..]) && before.contains(&wanted.as_bytes())
 }
 
+/// The app id in a reaper command line (`reaper SteamLaunch AppId=<id> -- ...`), if it is one.
+pub fn reaper_app_id(cmdline: &[u8]) -> Option<u32> {
+    let args: Vec<&[u8]> = cmdline.split(|&b| b == 0).collect();
+    let before = args
+        .iter()
+        .position(|a| *a == b"--")
+        .map_or(&args[..], |i| &args[..i]);
+    if !before.contains(&&b"SteamLaunch"[..]) {
+        return None;
+    }
+    before.iter().find_map(|a| {
+        std::str::from_utf8(a)
+            .ok()?
+            .strip_prefix("AppId=")?
+            .parse()
+            .ok()
+    })
+}
+
+/// The gamescope app id `pid` runs under: that of its outermost ancestor (or itself) named
+/// `reaper` that launched an app (as gamescope decides it). `cmdline` reads a process's
+/// command line.
+pub fn managed_app_id(
+    procs: &[Proc],
+    pid: u32,
+    cmdline: impl Fn(u32) -> Option<Vec<u8>>,
+) -> Option<u32> {
+    let mut found = None;
+    let mut at = pid;
+    // A process table has no cycles, but do not trust it.
+    for _ in 0..procs.len() + 1 {
+        let Some(p) = procs.iter().find(|p| p.pid == at) else {
+            break;
+        };
+        if p.comm == "reaper"
+            && let Some(id) = cmdline(p.pid).and_then(|c| reaper_app_id(&c))
+        {
+            found = Some(id);
+        }
+        if p.ppid == 0 || p.ppid == at {
+            break;
+        }
+        at = p.ppid;
+    }
+    found
+}
+
+/// [`managed_app_id`] on the real `/proc`.
+pub fn managed_app_id_of(procs: &[Proc], pid: u32) -> Option<u32> {
+    managed_app_id(procs, pid, |p| fs::read(format!("/proc/{p}/cmdline")).ok())
+}
+
 /// Every pid in `procs` below `root`.
 pub fn descendants_of(procs: &[Proc], root: u32) -> Vec<u32> {
     let mut found = Vec::new();
@@ -215,6 +267,33 @@ impl Children {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_app_is_the_outermost_reaper_above_a_process() {
+        let p = |pid, ppid, comm: &str| Proc {
+            pid,
+            ppid,
+            comm: comm.into(),
+        };
+        let procs = vec![
+            p(1, 0, "init"),
+            p(10, 1, "reaper"),
+            p(11, 10, "sh"),
+            p(12, 11, "game"),
+            p(20, 1, "reaper"),
+            p(21, 20, "steam"),
+        ];
+        let cmdline = |pid| match pid {
+            10 => Some(b"hinteros-session\0reaper\0SteamLaunch\0AppId=570\0--\0game\0".to_vec()),
+            20 => Some(b"reaper\0-x\0--\0AppId=9\0".to_vec()),
+            _ => None,
+        };
+        assert_eq!(managed_app_id(&procs, 12, cmdline), Some(570));
+        assert_eq!(managed_app_id(&procs, 10, cmdline), Some(570));
+        assert_eq!(managed_app_id(&procs, 21, cmdline), None);
+        assert_eq!(managed_app_id(&procs, 1, cmdline), None);
+        assert_eq!(managed_app_id(&procs, 999, cmdline), None);
+    }
 
     #[test]
     fn parses_stat_lines() {

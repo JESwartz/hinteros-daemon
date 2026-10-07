@@ -22,6 +22,7 @@
 //! display = ":0"               # gamescope's Xwayland [default: $DISPLAY, else :0]
 //! wayland_display = "gamescope-0"  # passed to launched apps [default: $WAYLAND_DISPLAY, else gamescope-0]
 //! focus_loss_debounce_ms = 1500
+//! unmap_gl_dummies = true      # unmap invisible full-screen override-redirect windows over an app
 //!
 //! [inputplumber]
 //! enable = true
@@ -465,6 +466,9 @@ pub struct GamescopeConfig {
     pub display: Option<String>,
     pub wayland_display: Option<String>,
     pub focus_loss_debounce_ms: u64,
+    /// Unmap invisible override-redirect windows that cover an app's real window (GTK3 GL
+    /// dummies that gamescope enlarges to the whole output).
+    pub unmap_gl_dummies: bool,
 }
 
 impl Default for GamescopeConfig {
@@ -474,6 +478,7 @@ impl Default for GamescopeConfig {
             display: None,
             wayland_display: None,
             focus_loss_debounce_ms: 1500,
+            unmap_gl_dummies: true,
         }
     }
 }

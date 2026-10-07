@@ -194,6 +194,7 @@ enable = true
 display = ":0"                 # gamescope's Xwayland [default: $DISPLAY, else :0]
 wayland_display = "gamescope-0"  # given to launched apps [default: $WAYLAND_DISPLAY, else gamescope-0]
 focus_loss_debounce_ms = 1500  # how long the focused app may be without a window
+unmap_gl_dummies = true     # unmap invisible full-screen override-redirect windows (GTK3 GL dummies) over an app
 
 [inputplumber]
 enable = true

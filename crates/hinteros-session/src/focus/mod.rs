@@ -10,6 +10,7 @@
 //! [`FocusControl`] is the seam: [`gamescope::GamescopeFocus`] is the real thing, [`NoFocus`]
 //! is used when gamescope integration is off, and tests use a recording mock.
 
+pub mod dummies;
 pub mod gamescope;
 
 /// The focus-related properties gamescope publishes on its Xwayland root window.

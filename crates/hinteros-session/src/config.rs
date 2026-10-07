@@ -47,6 +47,7 @@
 //! enable = true
 //! command = ["hinteros-osk"]   # started (and restarted) by the daemon if it is on PATH
 //! summon = "guide+context"     # hold Guide and press Y; or "none"
+//! auto_show = true             # show it when a text field gets focus (Firefox extension)
 //!
 //! [[apps]]                     # apps.list entries; launchable with apps.launch {id}
 //! id = "jellyfin"
@@ -599,6 +600,10 @@ pub struct OskConfig {
     /// Controller chord that shows/hides it: `guide+<action>` (hold Guide, press the button) or
     /// `none`.
     pub summon: String,
+    /// Show it when a text field gets focus in a keyboard-profile app (Firefox, through the
+    /// HinterOS extension and its native-messaging host), and hide it when the field loses
+    /// focus.
+    pub auto_show: bool,
 }
 
 impl Default for OskConfig {
@@ -607,6 +612,7 @@ impl Default for OskConfig {
             enable: true,
             command: vec!["hinteros-osk".into()],
             summon: "guide+context".into(),
+            auto_show: true,
         }
     }
 }

@@ -2,6 +2,9 @@
 //!
 //! `hinteros-session reaper SteamLaunch AppId=<id> -- <command>` runs a command so that
 //! gamescope tags its windows with `<id>` (see `reaper.rs`).
+//!
+//! `hinteros-session osk-native-host` (also: this binary started as `hinteros-osk-native-host`)
+//! is the Firefox native-messaging host that reports text field focus (see `textfocus.rs`).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -28,7 +31,7 @@ use hinteros_session::keys::{KeyInjector, NoKeys};
 use hinteros_session::procs::{Children, Procs};
 use hinteros_session::shell::{Msg, Shell, ShellConfig};
 use hinteros_session::steam;
-use hinteros_session::{Audience, Broadcast, osk, reaper, server, shell};
+use hinteros_session::{Audience, Broadcast, osk, reaper, server, shell, textfocus};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
@@ -38,6 +41,17 @@ fn main() -> ExitCode {
     if args.get(1).map(String::as_str) == Some(reaper::SUBCOMMAND) {
         let code = reaper::run(&args[2..]);
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
+    // Firefox starts the host by path with its own arguments (manifest path, extension id).
+    let invoked_as = args
+        .first()
+        .and_then(|a| Path::new(a).file_name())
+        .and_then(|n| n.to_str());
+    if invoked_as == Some(textfocus::HOST_BIN) {
+        return ExitCode::from(u8::try_from(textfocus::run_host(&args[1..])).unwrap_or(1));
+    }
+    if args.get(1).map(String::as_str) == Some(textfocus::HOST_SUBCOMMAND) {
+        return ExitCode::from(u8::try_from(textfocus::run_host(&args[2..])).unwrap_or(1));
     }
 
     tracing_subscriber::fmt()
@@ -85,6 +99,26 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
     let (shell_tx, shell_rx) = mpsc::unbounded_channel::<Msg>();
     let exe = std::env::current_exe().context("finding our own executable (for the reaper)")?;
     let env = config.child_env();
+
+    // Text field focus from Firefox's native-messaging host (not part of the session API).
+    let osk_socket = textfocus::socket_beside(&path);
+    let osk_listener = if config.osk.enable && config.osk.auto_show {
+        match api_server::bind_unix(&osk_socket, 0o600, 0o700) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                warn!(socket = %osk_socket.display(), "no automatic on-screen keyboard: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut env = env;
+    // For the native-messaging host, which Firefox (an app we start) starts.
+    env.push((
+        textfocus::SOCKET_ENV.into(),
+        osk_socket.to_string_lossy().into_owned(),
+    ));
 
     let (exit_tx, exit_rx) = mpsc::unbounded_channel();
     forward(exit_rx, shell_tx.clone(), Msg::ChildExit);
@@ -180,6 +214,10 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         events.clone(),
     );
     tokio::spawn(shell::run(shell, shell_rx));
+    if let Some(listener) = osk_listener {
+        info!(socket = %osk_socket.display(), "listening for text field focus (Firefox extension)");
+        tokio::spawn(textfocus::serve(listener, shell_tx.clone()));
+    }
 
     // New apps without a restart: watch the config (and the catalog, for its icons), and look
     // again whenever a system job ends (a switch writes a new session.toml).
@@ -301,6 +339,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
     }
     info!("shutting down");
     let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&osk_socket);
     // The apps, the launcher and the on-screen keyboard are ours: they must not outlive us.
     children
         .shutdown(Duration::from_millis(config.close.shutdown_grace_ms))

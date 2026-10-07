@@ -53,6 +53,7 @@ use crate::input::{InputControl, Intent, InterceptMode, RawInput, Repeat, transl
 use crate::keys::{KeyCombo, KeyInjector, KeyOp, Keymap, plan_action, plan_text};
 use crate::procs::{ProcessControl, Sig};
 use crate::steam::library;
+use crate::textfocus::FieldFocus;
 use crate::{Audience, Broadcast};
 
 /// A request from a connection, with the channel for its result.
@@ -76,6 +77,12 @@ pub enum Msg {
     SetApps(Vec<AppConfig>),
     /// The usable Steam binary changed (`None`: Steam is not installed).
     SetSteam(Option<PathBuf>),
+    /// A text field in a web app gained or lost focus (see [`crate::textfocus`]); `pid` is the
+    /// reporting process (Firefox's native-messaging host).
+    TextFocus {
+        pid: Option<u32>,
+        focus: FieldFocus,
+    },
 }
 
 /// The methods the shell answers (the connection handles the rest).
@@ -97,6 +104,10 @@ pub const METHODS: &[&str] = &[
 
 /// A Guide press older than this no longer starts a chord (its release may have been lost).
 const GUIDE_HOLD_MAX: Duration = Duration::from_secs(10);
+
+/// How long after a text field loses focus an automatically shown keyboard hides: moving to
+/// the next field (or into a frame) reports `none` and then `text` again.
+pub const OSK_AUTO_HIDE_DELAY: Duration = Duration::from_millis(250);
 
 /// Where controller navigation goes right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +140,8 @@ pub struct ShellConfig {
     pub repeat_interval: Duration,
     pub apps: Vec<AppConfig>,
     pub osk_enabled: bool,
+    /// Show the on-screen keyboard when a text field gets focus in a keyboard-profile app.
+    pub osk_auto_show: bool,
     /// The button that, pressed while Guide is held, shows/hides the on-screen keyboard.
     pub osk_summon: Option<NavAction>,
     /// Resolved app icons (filled in by `icons::start`, possibly later).
@@ -151,6 +164,7 @@ impl From<&Config> for ShellConfig {
             repeat_interval: c.input.repeat_interval(),
             apps: c.apps.clone(),
             osk_enabled: c.osk.enable,
+            osk_auto_show: c.osk.auto_show,
             osk_summon: c.osk.summon_button().ok().flatten(),
             icons: IconStore::default(),
             icon_refresh: Refresher::default(),
@@ -225,6 +239,10 @@ pub struct Shell {
     /// Who gets focus back when Steam, focused through steam.focus, closes its windows.
     steam_return: Option<String>,
     osk_visible: bool,
+    /// The keyboard is up because a text field got focus (not because someone asked).
+    osk_auto: bool,
+    /// The text field lost focus: hide the automatically shown keyboard at this time.
+    osk_auto_hide_at: Option<Instant>,
     /// Guide is held: since when, and whether it was used for a chord.
     guide: Option<(Instant, bool)>,
     /// Navigation buttons currently held (as far as we can see them).
@@ -268,6 +286,8 @@ impl Shell {
             attention: Vec::new(),
             steam_return: None,
             osk_visible: false,
+            osk_auto: false,
+            osk_auto_hide_at: None,
             guide: None,
             held: BTreeSet::new(),
             swallow: BTreeSet::new(),
@@ -309,6 +329,7 @@ impl Shell {
             Msg::ChildExit(exit) => self.child_exit(exit),
             Msg::SetApps(apps) => self.cfg.apps = apps,
             Msg::SetSteam(path) => self.set_steam(path),
+            Msg::TextFocus { pid, focus } => self.text_focus(pid, focus, now),
         }
     }
 
@@ -917,10 +938,50 @@ impl Shell {
         }
     }
 
+    /// A text field in a web app gained or lost focus. Shows the keyboard when the focused
+    /// app has the keyboard input profile and the report comes from inside its process tree;
+    /// hides it again (after [`OSK_AUTO_HIDE_DELAY`]) only if it was shown this way.
+    fn text_focus(&mut self, pid: Option<u32>, focus: FieldFocus, now: Instant) {
+        if !self.cfg.osk_enabled || !self.cfg.osk_auto_show {
+            debug!(?focus, "text field focus: automatic keyboard off");
+            return;
+        }
+        let Some(app) = self.focused_app() else {
+            debug!(?focus, "text field focus, but the launcher has focus");
+            return;
+        };
+        if app.keymap.is_none() {
+            debug!(app = %app.info.id, ?focus, "text field focus in an app without the keyboard profile");
+            return;
+        }
+        let (id, root) = (app.info.id.clone(), app.info.pid);
+        if let (Some(pid), Some(root)) = (pid, root)
+            && pid != root
+            && !self.procs.descendants(root).contains(&pid)
+        {
+            debug!(pid, app = %id, ?focus, "text field focus from another app; ignored");
+            return;
+        }
+        if focus.editable() {
+            self.osk_auto_hide_at = None;
+            if !self.osk_visible {
+                info!(app = %id, ?focus, "text field focused → on-screen keyboard");
+                self.set_osk(true, true);
+                self.osk_auto = true;
+            }
+        } else if self.osk_visible && self.osk_auto && self.osk_auto_hide_at.is_none() {
+            debug!(app = %id, "text field lost focus; hiding the keyboard soon");
+            self.osk_auto_hide_at = Some(now + OSK_AUTO_HIDE_DELAY);
+        }
+    }
+
     /// Show or hide the on-screen keyboard; with `apply_mode`, switch InputPlumber to match.
     fn set_osk(&mut self, visible: bool, apply_mode: bool) {
         info!(visible, "on-screen keyboard");
         self.osk_visible = visible;
+        // Whoever shows or hides it now owns it (text_focus marks its own).
+        self.osk_auto = false;
+        self.osk_auto_hide_at = None;
         self.repeat.clear();
         self.held.clear();
         if let Err(e) = self.focus.set_osk_visible(visible) {
@@ -1339,10 +1400,18 @@ impl Shell {
             .flatten()
             .chain(self.repeat.deadline())
             .chain(self.focus_lost_at)
+            .chain(self.osk_auto_hide_at)
             .min()
     }
 
     pub fn tick(&mut self, now: Instant) {
+        if self.osk_auto_hide_at.is_some_and(|at| now >= at) {
+            self.osk_auto_hide_at = None;
+            if self.osk_visible && self.osk_auto {
+                info!("text field no longer focused → keyboard hidden");
+                self.set_osk(false, true);
+            }
+        }
         if let Some(action) = self.repeat.tick(now) {
             match self.route() {
                 route @ (Route::Launcher | Route::Osk) => self.nav(action, NavPhase::Repeat, route),
@@ -1661,6 +1730,7 @@ mod tests {
                     },
                 ],
                 osk_enabled: true,
+                osk_auto_show: true,
                 osk_summon: None,
                 icons: IconStore::default(),
                 icon_refresh: Refresher::default(),
@@ -2905,6 +2975,145 @@ mod tests {
         t.input("ui_guide", 0.0);
         assert_eq!(t.shell.focused(), None);
         assert_eq!(t.events()[0], ev(EventName::HomePressed, json!({})));
+    }
+
+    impl T {
+        fn text_focus(&mut self, pid: u32, focus: FieldFocus) {
+            self.shell.handle(
+                Msg::TextFocus {
+                    pid: Some(pid),
+                    focus,
+                },
+                self.now,
+            );
+        }
+    }
+
+    /// The keyboard-profile app `youtube` (Firefox) running with a native-messaging host (pid
+    /// 555) in its process tree.
+    fn firefox_with_host(f: impl FnOnce(&mut ShellConfig)) -> T {
+        let mut t = T::with(f);
+        let app = t.launch(json!({"id": "youtube"}));
+        let root = app.pid.unwrap();
+        t.procs
+            .lock()
+            .unwrap()
+            .trees
+            .insert(root, vec![root + 1, 555]);
+        t.events();
+        t.log.take();
+        t
+    }
+
+    #[test]
+    fn text_field_focus_shows_and_hides_the_keyboard() {
+        let mut t = firefox_with_host(|_| {});
+        t.text_focus(555, FieldFocus::Text);
+        assert!(t.shell.osk_visible());
+        assert_eq!(
+            t.log.take(),
+            [Call::Osk(true), Call::Mode(InterceptMode::All)]
+        );
+        assert_eq!(
+            t.events(),
+            [ev(EventName::OskVisibility, json!({"visible": true}))]
+        );
+        // Moving to the next field (none, then text): no flicker.
+        t.text_focus(555, FieldFocus::None);
+        t.advance(MS(100));
+        t.text_focus(555, FieldFocus::Password);
+        t.advance(MS(1000));
+        assert!(t.shell.osk_visible());
+        assert!(t.log.take().is_empty() && t.events().is_empty());
+
+        // Leaving the field: hidden after the delay, keyboard profile again.
+        t.text_focus(555, FieldFocus::None);
+        t.advance(OSK_AUTO_HIDE_DELAY - MS(1));
+        assert!(t.shell.osk_visible());
+        t.advance(MS(1));
+        assert!(!t.shell.osk_visible());
+        assert_eq!(
+            t.log.take(),
+            [Call::Osk(false), Call::Mode(InterceptMode::All)]
+        );
+        assert_eq!(
+            t.events(),
+            [ev(EventName::OskVisibility, json!({"visible": false}))]
+        );
+        assert_eq!(t.shell.deadline(), None);
+    }
+
+    #[test]
+    fn text_field_focus_leaves_a_keyboard_someone_asked_for() {
+        let mut t = firefox_with_host(|_| {});
+        // Shown by hand, then a field comes and goes: it stays.
+        t.call("osk.show", json!({})).unwrap();
+        t.text_focus(555, FieldFocus::Text);
+        t.text_focus(555, FieldFocus::None);
+        t.advance(Duration::from_secs(1));
+        assert!(t.shell.osk_visible());
+        t.call("osk.hide", json!({})).unwrap();
+
+        // Shown automatically, hidden by hand while the field still has focus: stays hidden
+        // until a field gets focus again.
+        t.text_focus(555, FieldFocus::Text);
+        assert!(t.shell.osk_visible());
+        t.call("osk.hide", json!({})).unwrap();
+        t.text_focus(555, FieldFocus::None);
+        t.advance(Duration::from_secs(1));
+        assert!(!t.shell.osk_visible());
+        t.text_focus(555, FieldFocus::Text);
+        assert!(t.shell.osk_visible());
+
+        // Shown automatically, then Home: hidden with the focus change, nothing pending.
+        t.input("ui_guide", 1.0);
+        assert!(!t.shell.osk_visible());
+        t.text_focus(555, FieldFocus::None);
+        t.advance(Duration::from_secs(1));
+        assert_eq!(t.shell.deadline(), None);
+        // A field in the background app does nothing while the launcher has focus.
+        t.log.take();
+        t.text_focus(555, FieldFocus::Text);
+        assert!(!t.shell.osk_visible());
+        assert!(t.log.take().is_empty());
+    }
+
+    #[test]
+    fn text_field_focus_needs_the_focused_keyboard_app() {
+        // A gamepad-profile app (Jellyfin) gets no automatic keyboard.
+        let mut t = T::new();
+        let app = t.launch(json!({"id": "jellyfin"}));
+        t.procs
+            .lock()
+            .unwrap()
+            .trees
+            .insert(app.pid.unwrap(), vec![555]);
+        t.text_focus(555, FieldFocus::Text);
+        assert!(!t.shell.osk_visible());
+
+        // A host outside the focused app's process tree (another Firefox) is ignored.
+        let mut t = firefox_with_host(|_| {});
+        t.text_focus(999, FieldFocus::Text);
+        assert!(!t.shell.osk_visible());
+        // An unknown pid is believed (the socket only takes the session user).
+        t.shell.handle(
+            Msg::TextFocus {
+                pid: None,
+                focus: FieldFocus::Text,
+            },
+            t.now,
+        );
+        assert!(t.shell.osk_visible());
+
+        // Turned off, or no keyboard at all.
+        for f in [
+            (|c: &mut ShellConfig| c.osk_auto_show = false) as fn(&mut ShellConfig),
+            |c: &mut ShellConfig| c.osk_enabled = false,
+        ] {
+            let mut t = firefox_with_host(f);
+            t.text_focus(555, FieldFocus::Text);
+            assert!(!t.shell.osk_visible());
+        }
     }
 
     #[test]

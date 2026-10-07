@@ -24,6 +24,7 @@ pub mod shell;
 pub mod steam;
 pub mod store;
 pub mod system;
+pub mod textfocus;
 
 /// Which connections an event is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

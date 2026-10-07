@@ -105,14 +105,14 @@ pub fn spawn(
 }
 
 /// An inotify instance watching `dirs`; `None` if there is nothing to watch (or no inotify).
-fn watch(dirs: &BTreeSet<PathBuf>) -> Option<OwnedFd> {
+pub(crate) fn watch(dirs: &BTreeSet<PathBuf>) -> Option<OwnedFd> {
     if dirs.is_empty() {
         return None;
     }
     let fd = match inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK) {
         Ok(fd) => fd,
         Err(e) => {
-            warn!("inotify unavailable, rescanning the Steam library periodically: {e}");
+            warn!("inotify unavailable, rescanning periodically instead: {e}");
             return None;
         }
     };
@@ -150,7 +150,7 @@ fn wait(fd: &OwnedFd, timeout: Option<Duration>) -> bool {
     }
 }
 
-fn drain(fd: &OwnedFd) {
+pub(crate) fn drain(fd: &OwnedFd) {
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 4096];
     let mut reader = inotify::Reader::new(fd, &mut buf);
     while reader.next().is_ok() {}

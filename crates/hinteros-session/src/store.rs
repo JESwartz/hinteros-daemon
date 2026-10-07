@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tracing::debug;
 
+use crate::icons::IconStore;
 use crate::system::Relay;
 use crate::{Audience, Broadcast};
 
@@ -36,6 +37,7 @@ struct State {
 
 struct Inner {
     index: PathBuf,
+    icons: IconStore,
     events: broadcast::Sender<Broadcast>,
     state: Mutex<State>,
 }
@@ -48,10 +50,11 @@ pub struct Store {
 
 impl Store {
     /// Start watching job events.
-    pub fn spawn(index: PathBuf, events: broadcast::Sender<Broadcast>) -> Self {
+    pub fn spawn(index: PathBuf, icons: IconStore, events: broadcast::Sender<Broadcast>) -> Self {
         let store = Self {
             inner: Arc::new(Inner {
                 index,
+                icons,
                 events: events.clone(),
                 state: Mutex::new(State::default()),
             }),
@@ -160,7 +163,13 @@ impl Store {
             }
             (ins, rem, s.more_after_update)
         };
-        let apps = merge(&index, &installed, &installing, &removing);
+        let apps = merge(
+            &index,
+            &installed,
+            &installing,
+            &removing,
+            &self.inner.icons,
+        );
         encode_result::<StoreList>(StoreListResult {
             index_version: hinteros_api::catalog::INDEX_VERSION,
             apps,
@@ -192,6 +201,7 @@ pub fn merge(
     installed: &[String],
     installing: &BTreeSet<String>,
     removing: &BTreeSet<String>,
+    icons: &IconStore,
 ) -> Vec<StoreApp> {
     let mut out: Vec<StoreApp> = Vec::new();
     for e in index.apps.values() {
@@ -212,7 +222,7 @@ pub fn merge(
                 Status::Retired | Status::Unknown => StoreState::Retired,
             }
         };
-        out.push(app(index, e, state));
+        out.push(app(index, e, state, icons.get(&e.id)));
     }
     // Installed, but unknown to this catalog: shown so it can be removed.
     for id in installed.iter().filter(|i| index.get(i).is_none()) {
@@ -263,7 +273,7 @@ fn empty(id: &str) -> StoreApp {
     }
 }
 
-fn app(index: &Index, e: &Entry, state: StoreState) -> StoreApp {
+fn app(index: &Index, e: &Entry, state: StoreState, icon: Option<PathBuf>) -> StoreApp {
     StoreApp {
         id: e.id.clone(),
         name: e.name.chars().take(40).collect(),
@@ -282,6 +292,7 @@ fn app(index: &Index, e: &Entry, state: StoreState) -> StoreApp {
             site_url: e.icon.site_url.clone(),
             icon_url: e.icon.icon_url.clone(),
             firefox_profile: e.icon.firefox_profile,
+            path: icon.map(|p| p.to_string_lossy().into_owned()),
         },
         requires: e.requires.clone(),
         depends: e.depends.clone(),
@@ -360,7 +371,9 @@ mod tests {
             .collect();
         let installing = BTreeSet::from(["steam".to_string()]);
         let removing = BTreeSet::from(["moonlight".to_string()]);
-        let apps = merge(&index, &installed, &installing, &removing);
+        let icons = IconStore::default();
+        icons.set("youtube", Some("/cache/youtube.png".into()));
+        let apps = merge(&index, &installed, &installing, &removing, &icons);
         let view: Vec<(&str, StoreState)> = apps.iter().map(|a| (a.id.as_str(), a.state)).collect();
         assert_eq!(
             view,
@@ -378,6 +391,9 @@ mod tests {
             steam.terms.as_ref().unwrap().file,
             "/run/current-system/sw/share/hinteros/terms/steam-2026-09-10.txt"
         );
+        let icon_of = |id: &str| apps.iter().find(|a| a.id == id).unwrap().icon.path.clone();
+        assert_eq!(icon_of("youtube").as_deref(), Some("/cache/youtube.png"));
+        assert_eq!(icon_of("steam"), None);
         assert_eq!(
             apps.iter().find(|a| a.id == "youtube").unwrap().kind,
             AppKind::Web

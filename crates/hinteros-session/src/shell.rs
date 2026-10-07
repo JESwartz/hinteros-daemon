@@ -72,6 +72,8 @@ pub enum Msg {
     Input(RawInput),
     Gamescope(GamescopeEvent),
     ChildExit(ChildExit),
+    /// The config was reloaded: this is the new app list (running apps are left alone).
+    SetApps(Vec<AppConfig>),
 }
 
 /// The methods the shell answers (the connection handles the rest).
@@ -296,6 +298,7 @@ impl Shell {
             Msg::Input(input) => self.input(input, now),
             Msg::Gamescope(event) => self.gamescope(event, now),
             Msg::ChildExit(exit) => self.child_exit(exit),
+            Msg::SetApps(apps) => self.cfg.apps = apps,
         }
     }
 
@@ -2273,6 +2276,35 @@ mod tests {
         assert_eq!(icon(2).as_deref(), Some("/configured/portal.png"));
         // A theme name alone is not a path.
         assert_eq!(icon(3), None);
+    }
+
+    #[test]
+    fn a_reloaded_app_list_leaves_running_apps_alone() {
+        let mut t = T::new();
+        let ids = |t: &mut T| -> Vec<String> {
+            let list = t.call("apps.list", json!({})).unwrap();
+            list["apps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let before = ids(&mut t);
+        let first = before[1].clone();
+        let launched = t.launch(json!({"id": first}));
+        t.shell.handle(
+            Msg::SetApps(vec![app_config("new", Some("true"), None)]),
+            t.now,
+        );
+        assert_eq!(ids(&mut t), ["steam", "new"]);
+        // The removed app keeps running, cannot be launched again, and can still be closed.
+        let running = t.call("apps.running", json!({})).unwrap();
+        assert_eq!(running["apps"][0]["id"], launched.id);
+        let e = t.call("apps.launch", json!({"id": first})).unwrap_err();
+        assert_eq!(e.code, ErrorCode::AppNotFound.code());
+        t.call("apps.close", json!({"id": launched.id})).unwrap();
+        t.launch(json!({"id": "new"}));
     }
 
     #[test]

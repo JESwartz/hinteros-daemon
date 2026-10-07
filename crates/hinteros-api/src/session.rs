@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 8);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 9);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -1137,6 +1137,11 @@ pub struct StoreIcon {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_url: Option<String>,
     pub firefox_profile: bool,
+    /// The resolved icon on this box (an absolute path to an image), when there is one: from
+    /// the installed app's desktop file, or downloaded and cached from `icon_url` /
+    /// `site_url`. Absent until resolved; `store_changed` is sent when it appears (0.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// The vendor's terms, shown in full before install.

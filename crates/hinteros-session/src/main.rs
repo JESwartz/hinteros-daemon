@@ -17,6 +17,7 @@ use hinteros_session::apps::{ProcessSpawner, which};
 use hinteros_session::config::{Cli, Config};
 use hinteros_session::focus::gamescope::{GamescopeFocus, WatchOptions, spawn_watcher};
 use hinteros_session::focus::{FocusControl, NoFocus};
+use hinteros_session::icons::{self, Icons};
 use hinteros_session::input::{InputControl, InterceptMode, NoInput, devpad, inputplumber};
 use hinteros_session::keys::ime::GamescopeIme;
 use hinteros_session::keys::uinput::UinputKeyboard;
@@ -51,7 +52,7 @@ fn main() -> ExitCode {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
-            .block_on(serve(cli.socket, config))
+            .block_on(serve(cli, config))
     });
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -62,7 +63,8 @@ fn main() -> ExitCode {
     }
 }
 
-async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
+async fn serve(cli: Cli, config: Config) -> Result<()> {
+    let socket = cli.socket.clone();
     // Before binding: a client may signal us as soon as the socket accepts.
     let mut usr1 = signal(SignalKind::user_defined1())?;
     let mut term = signal(SignalKind::terminate())?;
@@ -134,16 +136,32 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
     };
 
     let icon_store = hinteros_session::icons::IconStore::default();
-    let icon_refresh = {
+    let catalog = hinteros_api::catalog::Index::load(&config.store.index)
+        .map(|i| icons::catalog_specs(&i))
+        .unwrap_or_default();
+    let icons = {
         let events = events.clone();
-        hinteros_session::icons::start(&config.apps, &config.icons, &icon_store, move || {
-            let params = serde_json::json!({});
-            let _ = events.send((session::EventName::AppsChanged, params, Audience::All));
-        })
+        Icons::start(
+            &config.apps,
+            catalog.clone(),
+            &config.icons,
+            &icon_store,
+            move |changed| {
+                for (yes, name) in [
+                    (changed.apps, session::EventName::AppsChanged),
+                    (changed.store, session::EventName::StoreChanged),
+                ] {
+                    if yes {
+                        let params = serde_json::json!({});
+                        let _ = events.send((name, params, Audience::All));
+                    }
+                }
+            },
+        )
     };
     let mut shell_config = ShellConfig::from(&config);
-    shell_config.icons = icon_store;
-    shell_config.icon_refresh = icon_refresh;
+    shell_config.icons = icon_store.clone();
+    shell_config.icon_refresh = icons.refresher();
     let shell = Shell::new(
         shell_config,
         focus,
@@ -154,6 +172,37 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
         events.clone(),
     );
     tokio::spawn(shell::run(shell, shell_rx));
+
+    // New apps without a restart: watch the config (and the catalog, for its icons), and look
+    // again whenever a system job ends (a switch writes a new session.toml).
+    let reload = hinteros_session::reload::spawn(hinteros_session::reload::Options {
+        cli: cli.clone(),
+        index: config.store.index.clone(),
+        apps: config.apps.clone(),
+        catalog,
+        icons: icons.clone(),
+        shell: shell_tx.clone(),
+        events: events.clone(),
+        poll: Duration::from_secs(30),
+        debounce: Duration::from_millis(300),
+    });
+    {
+        let mut rx = events.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok((session::EventName::JobFinished, ..))
+                    | Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if reload.send(()).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+    }
 
     let library_events = events.clone();
     steam::watch::spawn(
@@ -207,7 +256,11 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
         relay,
         runtime,
         auth: hinteros_session::auth::Auth::spawn(config.auth.clone(), events.clone()),
-        store: hinteros_session::store::Store::spawn(config.store.index.clone(), events.clone()),
+        store: hinteros_session::store::Store::spawn(
+            config.store.index.clone(),
+            icon_store.clone(),
+            events.clone(),
+        ),
         restarter: hinteros_session::restart::Restarter::new(
             config.session.clone(),
             config.runtime.bus.clone(),

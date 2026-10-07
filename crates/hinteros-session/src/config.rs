@@ -90,7 +90,7 @@ pub const DEFAULT_LAUNCHER_APP_ID: u32 = 4_100_000_000;
 /// gamescope's app id for Steam's own windows (Big Picture, dialogs); never used for anything else.
 pub use hinteros_api::session::STEAM_CLIENT_GAMESCOPE_APP_ID as STEAM_BIG_PICTURE_APP_ID;
 
-#[derive(Parser, Debug, Default)]
+#[derive(Parser, Debug, Default, Clone)]
 #[command(version, about)]
 pub struct Cli {
     /// Socket to listen on [default: $XDG_RUNTIME_DIR/hinteros/session.sock]
@@ -158,6 +158,10 @@ pub struct Cli {
     /// Don't download web app icons
     #[arg(long)]
     pub no_icon_fetch: bool,
+
+    /// Allow http:// icon URLs (tests against a local server)
+    #[arg(long, env = "HINTEROS_ICON_ALLOW_HTTP", hide = true)]
+    pub icon_allow_http: bool,
 
     /// Search only these data directories (colon-separated) for desktop files and icons (tests)
     #[arg(long, env = "HINTEROS_ICON_DIRS", hide = true, value_delimiter = ':')]
@@ -523,6 +527,9 @@ pub struct IconsConfig {
     /// Replace the data directories searched for `.desktop` files and icons (default: `$XDG_DATA_HOME`,
     /// `$XDG_DATA_DIRS` and the system and user profiles).
     pub data_dirs: Option<Vec<PathBuf>>,
+    /// Accept http:// icon URLs (tests only; `--icon-allow-http`).
+    #[serde(skip)]
+    pub allow_http: bool,
 }
 
 impl Default for IconsConfig {
@@ -533,6 +540,7 @@ impl Default for IconsConfig {
             cache_dir: None,
             theme: None,
             data_dirs: None,
+            allow_http: false,
         }
     }
 }
@@ -734,15 +742,21 @@ impl Config {
         Ok(config)
     }
 
-    /// Load the file named on the command line, or the default one if it exists, then apply
-    /// the command-line overrides.
-    pub fn load(cli: &Cli) -> Result<Self> {
-        let path = cli.config.clone().or_else(|| {
+    /// The config file: the one named on the command line, else the default location (which
+    /// may not exist yet).
+    pub fn config_path(cli: &Cli) -> Option<PathBuf> {
+        cli.config.clone().or_else(|| {
             let base = std::env::var_os("XDG_CONFIG_HOME")
                 .map(PathBuf::from)
                 .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config")))?;
-            Some(base.join("hinteros/session.toml")).filter(|p| p.exists())
-        });
+            Some(base.join("hinteros/session.toml"))
+        })
+    }
+
+    /// Load the file named on the command line, or the default one if it exists, then apply
+    /// the command-line overrides.
+    pub fn load(cli: &Cli) -> Result<Self> {
+        let path = Self::config_path(cli).filter(|p| cli.config.is_some() || p.exists());
         let mut config = match &path {
             Some(path) => {
                 let text = std::fs::read_to_string(path)
@@ -792,6 +806,9 @@ impl Config {
         }
         if let Some(dirs) = &cli.icon_dirs {
             self.icons.data_dirs = Some(dirs.clone());
+        }
+        if cli.icon_allow_http {
+            self.icons.allow_http = true;
         }
         if cli.no_icon_fetch {
             self.icons.fetch = false;

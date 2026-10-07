@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.8",
+  "version": "0.9",
   "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). Responses to system.*, auth.*, store.list and session.restart may arrive out of order relative to other calls on the same connection (match them by id): a relayed call can wait minutes for an admin password. See hinteros-docs/design/api.md for the protocol rules.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -37,16 +37,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.8", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
-          "result": { "api_version": "0.8", "server": { "name": "hinteros-session", "version": "0.1.0" } }
+          "params": { "api_version": "0.9", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
+          "result": { "api_version": "0.9", "server": { "name": "hinteros-session", "version": "0.1.0" } }
         },
         {
           "name": "major mismatch",
           "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 1.0, server 0.8",
-            "data": { "client_api_version": "1.0", "server_api_version": "0.8" }
+            "message": "API version mismatch: client 1.0, server 0.9",
+            "data": { "client_api_version": "1.0", "server_api_version": "0.9" }
           }
         }
       ]
@@ -1956,7 +1956,7 @@
                 "id": "moonlight", "name": "Moonlight", "summary": "Stream games from your gaming PC to the TV.",
                 "description": "Moonlight plays games streamed from a PC running Sunshine.", "category": "games",
                 "homepage": "https://moonlight-stream.org", "kind": "native", "size_mib": 150,
-                "icon": { "desktop_id": "com.moonlight_stream.Moonlight", "site_url": "https://moonlight-stream.org", "firefox_profile": false },
+                "icon": { "desktop_id": "com.moonlight_stream.Moonlight", "site_url": "https://moonlight-stream.org", "firefox_profile": false, "path": "/usr/share/icons/hicolor/256x256/apps/com.moonlight_stream.Moonlight.png" },
                 "requires": [], "depends": [], "conflicts": [], "installer": true, "on_iso": false, "installer_default": false,
                 "data_paths": [".config/Moonlight Game Streaming Project"], "terms": null, "builds_on_device": false,
                 "free": true, "redistributable": true, "status": "available", "status_reason": null, "state": "installed"
@@ -2076,8 +2076,8 @@
       "examples": [{ "name": "changed", "params": {} }]
     },
     "apps_changed": {
-      "summary": "An app's resolved icon became available or changed (for example a web app's icon finished downloading). Call apps.list again.",
-      "description": "Sent only when the apps.list result actually changed. The daemon resolves icons at runtime from the box (desktop files and icon themes) or fetches and caches them (web apps), never from files it ships; fetching happens in the background after startup, so apps.list may first return apps without an icon.",
+      "summary": "The apps.list result changed: an app's resolved icon became available or changed (for example a web app's icon finished downloading), or (0.9) the daemon reloaded its app list after a switch installed or removed apps. Call apps.list again.",
+      "description": "Sent only when the apps.list result actually changed. Since 0.9 the daemon also reloads its app list (the generated session.toml) when it changes on disk or an apps job finished, so newly installed apps appear without a restart; apps that are running and were removed keep running until they exit. The daemon resolves icons at runtime from the box (desktop files and icon themes) or fetches and caches them (web apps), never from files it ships; fetching happens in the background after startup, so apps.list may first return apps without an icon.",
       "since": "0.5",
       "params": {
         "type": "object",
@@ -2400,7 +2400,7 @@
       "examples": [{ "name": "authorized", "params": { "cookie": "3-6f1c0e2a9b7d4c58-1-0a9f3e1d2c4b5a69", "outcome": "authorized" } }]
     },
     "store_changed": {
-      "summary": "What store.list returns may have changed: an apps job started or finished, any other job that switched the system finished, or an update check changed more_after_update. Query store.list again.",
+      "summary": "What store.list returns may have changed: an apps job started or finished, any other job that switched the system finished, or an update check changed more_after_update, or (0.9) a catalog app's icon was resolved (icon.path). Query store.list again.",
       "since": "0.8",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "examples": [{ "name": "changed", "params": {} }]
@@ -2962,7 +2962,8 @@
             "desktop_id": { "type": "string" },
             "site_url": { "type": "string" },
             "icon_url": { "type": "string" },
-            "firefox_profile": { "type": "boolean" }
+            "firefox_profile": { "type": "boolean" },
+            "path": { "description": "0.9: the resolved icon on this box (absolute path to an image), when there is one: the installed app's desktop file and icon theme, or downloaded from icon_url / site_url and cached (https only; same cache, size limits and refresh as apps.list icons). Absent until resolved; store_changed is sent when it appears.", "type": "string" }
           }
         },
         "requires": { "type": "array", "items": { "type": "string" } },

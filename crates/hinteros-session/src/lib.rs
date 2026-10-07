@@ -16,6 +16,7 @@ pub mod keys;
 pub mod osk;
 pub mod procs;
 pub mod reaper;
+pub mod reload;
 pub mod restart;
 pub mod runtime;
 pub mod server;

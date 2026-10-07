@@ -22,34 +22,61 @@ pub mod desktop;
 pub mod firefox;
 pub mod web;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime};
 
 use tracing::{debug, info, warn};
 
 use crate::config::{AppConfig, IconsConfig};
 
-/// Resolved icon paths by app id, shared between the shell (`apps.list`) and the fetcher.
+/// Resolved icon paths by app id, shared between the shell (`apps.list`), the Store
+/// (`store.list`) and the fetcher.
 #[derive(Debug, Clone, Default)]
-pub struct IconStore(Arc<Mutex<HashMap<String, PathBuf>>>);
+pub struct IconStore(Arc<Mutex<StoreInner>>);
+
+#[derive(Debug, Default)]
+struct StoreInner {
+    icons: HashMap<String, PathBuf>,
+    /// Ids set or cleared since [`IconStore::take_dirty`].
+    dirty: BTreeSet<String>,
+}
 
 impl IconStore {
     pub fn get(&self, id: &str) -> Option<PathBuf> {
-        self.0.lock().ok()?.get(id).cloned()
+        self.0.lock().ok()?.icons.get(id).cloned()
     }
 
     /// Set or clear an app's icon. Whether that changed anything.
     pub fn set(&self, id: &str, path: Option<PathBuf>) -> bool {
-        let Ok(mut map) = self.0.lock() else {
+        let Ok(mut inner) = self.0.lock() else {
             return false;
         };
-        match path {
-            Some(p) => map.insert(id.to_string(), p.clone()) != Some(p),
-            None => map.remove(id).is_some(),
+        let changed = match path {
+            Some(p) => inner.icons.insert(id.to_string(), p.clone()) != Some(p),
+            None => inner.icons.remove(id).is_some(),
+        };
+        if changed {
+            inner.dirty.insert(id.to_string());
         }
+        changed
+    }
+
+    /// Note that the image behind `id`'s (unchanged) path changed.
+    pub fn mark(&self, id: &str) {
+        if let Ok(mut inner) = self.0.lock() {
+            inner.dirty.insert(id.to_string());
+        }
+    }
+
+    /// The ids changed since the last call.
+    pub fn take_dirty(&self) -> BTreeSet<String> {
+        self.0
+            .lock()
+            .map(|mut i| std::mem::take(&mut i.dirty))
+            .unwrap_or_default()
     }
 }
 
@@ -261,7 +288,13 @@ pub fn refresh_firefox(
         return false;
     }
     match export_firefox(spec, cache) {
-        Some((path, content_changed)) => store.set(&spec.id, Some(path)) | content_changed,
+        Some((path, content_changed)) => {
+            let changed = store.set(&spec.id, Some(path));
+            if content_changed {
+                store.mark(&spec.id);
+            }
+            changed | content_changed
+        }
         None => false,
     }
 }
@@ -334,17 +367,254 @@ pub fn fetch_pass(
     (changed, failed)
 }
 
-/// Start the background fetcher: downloads missing and stale web icons, retries failures
-/// (after 1 min, 10 min, 1 h), then re-checks staleness every 6 hours. `changed` is called
-/// when the store changed.
-pub fn spawn_fetcher(
-    specs: Vec<IconSpec>,
-    todo: Vec<IconSpec>,
+/// What changed when icons were resolved: whether `apps.list` and whether `store.list`
+/// results differ now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Changed {
+    pub apps: bool,
+    pub store: bool,
+}
+
+impl Changed {
+    pub fn any(self) -> bool {
+        self.apps || self.store
+    }
+}
+
+/// The icon spec of a Store catalog entry: what the index says (`desktopId`, `iconUrl`,
+/// `siteUrl`). Never a Firefox profile: that only exists once the app is installed and has run.
+pub fn catalog_specs(index: &hinteros_api::catalog::Index) -> Vec<IconSpec> {
+    index
+        .apps
+        .values()
+        .map(|e| IconSpec {
+            id: e.id.clone(),
+            desktop_id: e.icon.desktop_id.clone(),
+            web: match (&e.icon.icon_url, &e.icon.site_url) {
+                (Some(url), _) => Some(web::Source::IconUrl(url.clone())),
+                (None, Some(url)) => Some(web::Source::Site(url.clone())),
+                _ => None,
+            },
+            ..IconSpec::default()
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct Specs {
+    apps: Vec<IconSpec>,
+    catalog: Vec<IconSpec>,
+    /// Ids that have been resolved at some point (to clear the ones that went away).
+    known: BTreeSet<String>,
+}
+
+impl Specs {
+    /// The built-in Steam entry, the apps, then catalog entries that are not one of those.
+    fn all(&self) -> Vec<IconSpec> {
+        let mut specs = vec![IconSpec::steam()];
+        specs.extend(self.apps.iter().cloned());
+        for c in &self.catalog {
+            if !specs.iter().any(|s| s.id == c.id) {
+                specs.push(c.clone());
+            }
+        }
+        specs
+    }
+
+    fn classify(&self, dirty: &BTreeSet<String>) -> Changed {
+        Changed {
+            apps: dirty.iter().any(|id| {
+                id == hinteros_api::session::STEAM_CLIENT_APP_ID
+                    || self.apps.iter().any(|a| &a.id == id)
+            }),
+            store: dirty
+                .iter()
+                .any(|id| self.catalog.iter().any(|a| &a.id == id)),
+        }
+    }
+}
+
+struct IconsInner {
     dirs: desktop::Dirs,
-    cache: Cache,
+    cache: Option<Cache>,
     store: IconStore,
+    specs: Mutex<Specs>,
+    /// To the fetcher thread: the apps whose download is wanted now.
+    wake: Mutex<Option<mpsc::Sender<Vec<IconSpec>>>>,
+    notify: Box<dyn Fn(Changed) + Send + Sync>,
+}
+
+impl IconsInner {
+    /// Tell whoever listens about the ids the store changed since the last call.
+    fn notify_dirty(&self) {
+        let dirty = self.store.take_dirty();
+        let changed = self.specs.lock().unwrap().classify(&dirty);
+        if changed.any() {
+            (self.notify)(changed);
+        }
+    }
+
+    /// Resolve everything that needs no network, drop what is gone, and have the fetcher look
+    /// at what is missing. Returns what changed (not announced).
+    fn sync(&self) -> Changed {
+        let (all, gone) = {
+            let mut s = self.specs.lock().unwrap();
+            let all = s.all();
+            let now: BTreeSet<String> = all.iter().map(|a| a.id.clone()).collect();
+            let gone: Vec<String> = s.known.difference(&now).cloned().collect();
+            s.known = now;
+            (all, gone)
+        };
+        for id in &gone {
+            self.store.set(id, None);
+        }
+        let (_, stale) = resolve_local(&all, &self.dirs, self.cache.as_ref(), &self.store);
+        match self.wake.lock().unwrap().as_ref() {
+            Some(tx) => {
+                let _ = tx.send(stale);
+            }
+            None if !stale.is_empty() => {
+                info!("web icon fetching is off; apps without a cached icon show a placeholder")
+            }
+            None => {}
+        }
+        let dirty = self.store.take_dirty();
+        self.specs.lock().unwrap().classify(&dirty)
+    }
+}
+
+/// Icon resolution for the apps and the Store catalog, now and when either changes. Cheap to
+/// clone.
+#[derive(Clone)]
+pub struct Icons {
+    inner: Arc<IconsInner>,
+}
+
+impl Icons {
+    /// Resolve locally now and start the background fetcher. `notify` is called from the
+    /// fetcher's and the Firefox refresh's threads when downloaded icons arrive; changes made
+    /// by [`Self::set_apps`] and [`Self::set_catalog`] are returned to their callers instead.
+    pub fn start(
+        apps: &[AppConfig],
+        catalog: Vec<IconSpec>,
+        cfg: &IconsConfig,
+        store: &IconStore,
+        notify: impl Fn(Changed) + Send + Sync + 'static,
+    ) -> Self {
+        let mut dirs = desktop::Dirs::from_env(cfg.theme.as_deref());
+        if let Some(only) = &cfg.data_dirs {
+            dirs.data.clone_from(only);
+            dirs.icon_roots.clear();
+        }
+        let cache = cfg
+            .cache_dir
+            .clone()
+            .or_else(Cache::default_dir)
+            .map(|dir| Cache {
+                dir,
+                max_age: Duration::from_secs(cfg.refresh_days * 86400),
+            });
+        let inner = Arc::new(IconsInner {
+            dirs,
+            cache: cache.clone(),
+            store: store.clone(),
+            specs: Mutex::new(Specs {
+                apps: apps.iter().map(IconSpec::from_app).collect(),
+                catalog,
+                known: BTreeSet::new(),
+            }),
+            wake: Mutex::new(None),
+            notify: Box::new(notify),
+        });
+        // The first pass is quick and local; the fetcher gets the rest.
+        let all = inner.specs.lock().unwrap().all();
+        inner.specs.lock().unwrap().known = all.iter().map(|a| a.id.clone()).collect();
+        let (_, todo) = resolve_local(&all, &inner.dirs, cache.as_ref(), store);
+        let _ = store.take_dirty();
+        match cache {
+            Some(cache) if cfg.fetch => {
+                if !todo.is_empty() {
+                    debug!(apps = todo.len(), "web icons to fetch");
+                }
+                let (tx, rx) = mpsc::channel();
+                *inner.wake.lock().unwrap() = Some(tx);
+                spawn_fetcher(
+                    inner.clone(),
+                    cache,
+                    rx,
+                    todo,
+                    web::Fetcher::new(cfg.allow_http),
+                );
+            }
+            _ if !todo.is_empty() => {
+                info!("web icon fetching is off; apps without a cached icon show a placeholder")
+            }
+            _ => {}
+        }
+        Self { inner }
+    }
+
+    /// The apps changed (the config was reloaded): resolve their icons, forget removed ones's.
+    /// Returns what changed; the caller announces it.
+    pub fn set_apps(&self, apps: &[AppConfig]) -> Changed {
+        self.inner.specs.lock().unwrap().apps = apps.iter().map(IconSpec::from_app).collect();
+        self.inner.sync()
+    }
+
+    /// The catalog changed (a new generation): resolve and fetch its icons. Returns what changed.
+    pub fn set_catalog(&self, catalog: Vec<IconSpec>) -> Changed {
+        self.inner.specs.lock().unwrap().catalog = catalog;
+        self.inner.sync()
+    }
+
+    /// Re-resolve everything (apps installed or removed change which desktop files exist).
+    pub fn rescan(&self) -> Changed {
+        self.inner.sync()
+    }
+
+    /// Called when an app exits: re-reads its Firefox favicon in the background.
+    pub fn refresher(&self) -> Refresher {
+        let inner = self.inner.clone();
+        Refresher(Arc::new(move |id| {
+            let Some(cache) = inner.cache.clone() else {
+                return;
+            };
+            let Some(spec) = inner
+                .specs
+                .lock()
+                .unwrap()
+                .apps
+                .iter()
+                .find(|s| s.id == id && s.firefox.is_some())
+                .cloned()
+            else {
+                return;
+            };
+            let inner = inner.clone();
+            // SQLite and file copies: not on the shell's thread.
+            let spawned = std::thread::Builder::new()
+                .name("icon-refresh".into())
+                .spawn(move || {
+                    if refresh_firefox(&spec, &inner.dirs, &cache, &inner.store) {
+                        inner.notify_dirty();
+                    }
+                });
+            if let Err(e) = spawned {
+                warn!("cannot refresh the icon: {e}");
+            }
+        }))
+    }
+}
+
+/// The background fetcher: downloads missing and stale web icons, retries failures (after
+/// 1 min, 10 min, 1 h), re-checks staleness every 6 hours, and downloads at once what
+/// [`IconsInner::sync`] sends it.
+fn spawn_fetcher(
+    inner: Arc<IconsInner>,
+    cache: Cache,
+    rx: mpsc::Receiver<Vec<IconSpec>>,
+    todo: Vec<IconSpec>,
     fetcher: web::Fetcher,
-    changed: impl Fn() + Send + 'static,
 ) {
     let spawned = std::thread::Builder::new()
         .name("icon-fetch".into())
@@ -354,10 +624,8 @@ pub fn spawn_fetcher(
             let mut attempt = 0;
             loop {
                 if !todo.is_empty() {
-                    let (did_change, failed) = fetch_pass(&todo, &fetcher, &cache, &store);
-                    if did_change {
-                        changed();
-                    }
+                    let (_, failed) = fetch_pass(&todo, &fetcher, &cache, &inner.store);
+                    inner.notify_dirty();
                     todo = failed;
                 }
                 let wait = if todo.is_empty() {
@@ -368,100 +636,33 @@ pub fn spawn_fetcher(
                     attempt += 1;
                     w
                 };
-                std::thread::sleep(wait);
-                if todo.is_empty() {
-                    // Newly installed apps, expired caches.
-                    let (did_change, stale) = resolve_local(&specs, &dirs, Some(&cache), &store);
-                    if did_change {
-                        changed();
+                match rx.recv_timeout(wait) {
+                    Ok(mut stale) => {
+                        // The apps or the catalog changed: what is wanted now replaces the
+                        // retry state.
+                        while let Ok(newer) = rx.try_recv() {
+                            stale = newer;
+                        }
+                        todo = stale;
+                        attempt = 0;
                     }
-                    debug!(stale = stale.len(), "icon cache check");
-                    todo = stale;
+                    Err(mpsc::RecvTimeoutError::Timeout) if todo.is_empty() => {
+                        // Newly installed apps, expired caches.
+                        let all = inner.specs.lock().unwrap().all();
+                        let (_, stale) =
+                            resolve_local(&all, &inner.dirs, Some(&cache), &inner.store);
+                        inner.notify_dirty();
+                        debug!(stale = stale.len(), "icon cache check");
+                        todo = stale;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 }
             }
         });
     if let Err(e) = spawned {
         warn!("cannot start the icon fetcher: {e}");
     }
-}
-
-/// Everything the daemon does with icons at startup: resolve locally now, fetch in the
-/// background. The returned [`Refresher`] re-reads Firefox favicons when apps exit.
-pub fn start(
-    apps: &[AppConfig],
-    cfg: &IconsConfig,
-    store: &IconStore,
-    changed: impl Fn() + Send + Sync + 'static,
-) -> Refresher {
-    let mut specs = vec![IconSpec::steam()];
-    specs.extend(apps.iter().map(IconSpec::from_app));
-    let mut dirs = desktop::Dirs::from_env(cfg.theme.as_deref());
-    if let Some(only) = &cfg.data_dirs {
-        dirs.data.clone_from(only);
-        dirs.icon_roots.clear();
-    }
-    let cache = cfg
-        .cache_dir
-        .clone()
-        .or_else(Cache::default_dir)
-        .map(|dir| Cache {
-            dir,
-            max_age: Duration::from_secs(cfg.refresh_days * 86400),
-        });
-    let (_, todo) = resolve_local(&specs, &dirs, cache.as_ref(), store);
-    let changed = Arc::new(changed);
-    let refresher = match &cache {
-        Some(cache) if specs.iter().any(|s| s.firefox.is_some()) => {
-            let (specs, dirs, cache, store) =
-                (specs.clone(), dirs.clone(), cache.clone(), store.clone());
-            let changed = changed.clone();
-            Refresher(Arc::new(move |id| {
-                let Some(spec) = specs.iter().find(|s| s.id == id && s.firefox.is_some()) else {
-                    return;
-                };
-                let (spec, dirs, cache, store, changed) = (
-                    spec.clone(),
-                    dirs.clone(),
-                    cache.clone(),
-                    store.clone(),
-                    changed.clone(),
-                );
-                // SQLite and file copies: not on the shell's thread.
-                let spawned = std::thread::Builder::new()
-                    .name("icon-refresh".into())
-                    .spawn(move || {
-                        if refresh_firefox(&spec, &dirs, &cache, &store) {
-                            changed();
-                        }
-                    });
-                if let Err(e) = spawned {
-                    warn!("cannot refresh the icon: {e}");
-                }
-            }))
-        }
-        _ => Refresher::none(),
-    };
-    match cache {
-        Some(cache) if cfg.fetch => {
-            if !todo.is_empty() {
-                debug!(apps = todo.len(), "web icons to fetch");
-            }
-            spawn_fetcher(
-                specs,
-                todo,
-                dirs,
-                cache,
-                store.clone(),
-                web::Fetcher::default(),
-                move || changed(),
-            );
-        }
-        _ if !todo.is_empty() => {
-            info!("web icon fetching is off; apps without a cached icon show a placeholder")
-        }
-        _ => {}
-    }
-    refresher
 }
 
 #[cfg(test)]
@@ -629,6 +830,109 @@ mod tests {
             fs::read(t.path().join("c/ok.png")).unwrap(),
             b"\x89PNG\r\n\x1a\nlogo"
         );
+    }
+
+    #[test]
+    fn icons_follow_apps_and_catalog_and_report_what_changed() {
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { return };
+                let mut buf = [0u8; 512];
+                let _ = s.read(&mut buf);
+                let body = b"\x89PNG\r\n\x1a\nlogo";
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = s.write_all(body);
+            }
+        });
+        let t = tempfile::tempdir().unwrap();
+        let cfg = IconsConfig {
+            cache_dir: Some(t.path().join("cache")),
+            data_dirs: Some(vec![t.path().join("share")]),
+            allow_http: true,
+            ..IconsConfig::default()
+        };
+        let catalog = |ids: &[&str]| -> Vec<IconSpec> {
+            ids.iter()
+                .map(|id| IconSpec {
+                    web: Some(web::Source::IconUrl(format!("{base}/{id}.png"))),
+                    ..spec(id)
+                })
+                .collect()
+        };
+        let app = |id: &str| AppConfig {
+            id: id.into(),
+            name: id.into(),
+            kind: hinteros_api::session::AppKind::Web,
+            icon: None,
+            desktop_id: None,
+            icon_url: Some(format!("{base}/{id}.png")),
+            site_url: None,
+            firefox_profile: None,
+            command: Some(vec!["x".into()]),
+            steam_app_id: None,
+            input: Default::default(),
+            back_key: None,
+            keymap: Default::default(),
+        };
+        let (tx, rx) = mpsc::channel();
+        let store = IconStore::default();
+        let icons = Icons::start(&[], catalog(&["cat"]), &cfg, &store, move |c| {
+            let _ = tx.send(c);
+        });
+        // A catalog icon arrives: a store change, not an apps change.
+        let got = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(
+            got,
+            Changed {
+                apps: false,
+                store: true
+            }
+        );
+        assert_eq!(store.get("cat"), Some(t.path().join("cache/cat.png")));
+
+        // A new app: resolved by the call that adds it, the download is announced as apps.
+        let c = icons.set_apps(&[app("new")]);
+        assert_eq!(c, Changed::default());
+        let got = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(
+            got,
+            Changed {
+                apps: true,
+                store: false
+            }
+        );
+        assert_eq!(store.get("new"), Some(t.path().join("cache/new.png")));
+
+        // The app is in the catalog too: its icon is both, and set_catalog resolves from cache.
+        let c = icons.set_catalog(catalog(&["cat", "new", "later"]));
+        assert_eq!(c, Changed::default());
+        let got = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(
+            got,
+            Changed {
+                apps: false,
+                store: true
+            }
+        );
+        assert_eq!(store.get("later"), Some(t.path().join("cache/later.png")));
+
+        // A removed app keeps its icon only as far as the catalog has it (the callers announce
+        // the list changes themselves).
+        let c = icons.set_apps(&[]);
+        assert_eq!(c, Changed::default());
+        assert_eq!(store.get("new"), Some(t.path().join("cache/new.png")));
+        let c = icons.set_catalog(catalog(&["cat"]));
+        assert_eq!(c, Changed::default());
+        assert_eq!(store.get("new"), None);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

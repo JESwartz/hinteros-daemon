@@ -1,0 +1,7 @@
+{
+  "name": "hinteros_osk",
+  "description": "HinterOS on-screen keyboard: text field focus to the session daemon",
+  "path": "@path@",
+  "type": "stdio",
+  "allowed_extensions": ["hinteros-osk@hinteros"]
+}

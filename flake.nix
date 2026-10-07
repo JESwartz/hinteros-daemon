@@ -48,9 +48,10 @@
           # Dependencies are built once and shared by every package and check.
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
           mkBin =
-            name:
+            name: extra:
             craneLib.buildPackage (
               commonArgs
+              // extra
               // {
                 inherit cargoArtifacts;
                 pname = name;
@@ -68,11 +69,67 @@
         in
         {
           inherit craneLib commonArgs cargoArtifacts;
-          hinteros-session = mkBin "hinteros-session";
-          hinteros-system = mkBin "hinteros-system";
+          # Also the Firefox native-messaging host of the on-screen keyboard extension: the same
+          # binary under the name Firefox starts, and its host manifest where Firefox (and
+          # nixpkgs' `programs.firefox.nativeMessagingHosts.packages`) look for it.
+          hinteros-session = mkBin "hinteros-session" {
+            postInstall = ''
+              ln -s hinteros-session $out/bin/hinteros-osk-native-host
+              mkdir -p $out/lib/mozilla/native-messaging-hosts
+              substitute ${./firefox-extension/native-messaging/hinteros_osk.json} \
+                $out/lib/mozilla/native-messaging-hosts/hinteros_osk.json \
+                --replace-fail @path@ $out/bin/hinteros-osk-native-host
+            '';
+          };
+          hinteros-system = mkBin "hinteros-system" { };
         };
 
       rust = mkRust pkgs;
+
+      # The on-screen keyboard's Firefox extension, as an unsigned .xpi (a zip of the
+      # extension directory). Installed by the system through Firefox's enterprise policies.
+      mkFirefoxExtension =
+        pkgs:
+        pkgs.stdenvNoCC.mkDerivation {
+          pname = "hinteros-osk-firefox-extension";
+          version = "0.1.0";
+          src = lib.fileset.toSource {
+            root = ./firefox-extension;
+            fileset = lib.fileset.unions [
+              ./firefox-extension/manifest.json
+              ./firefox-extension/background.js
+              ./firefox-extension/content.js
+            ];
+          };
+          nativeBuildInputs = [
+            pkgs.zip
+            pkgs.jq
+            pkgs.nodejs
+          ];
+          buildPhase = ''
+            runHook preBuild
+            jq -e '.browser_specific_settings.gecko.id == "hinteros-osk@hinteros"' manifest.json
+            node --check background.js
+            node --check content.js
+            # Reproducible: fixed order and timestamps, no extra attributes.
+            touch -d @315619200 manifest.json background.js content.js
+            zip -X -D -q hinteros-osk@hinteros.xpi manifest.json background.js content.js
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            install -Dm644 hinteros-osk@hinteros.xpi \
+              $out/share/hinteros/firefox/hinteros-osk@hinteros.xpi
+            runHook postInstall
+          '';
+          passthru.extensionId = "hinteros-osk@hinteros";
+          meta = {
+            description = "HinterOS on-screen keyboard: Firefox extension reporting text field focus";
+            license = lib.licenses.gpl3Only;
+            platforms = lib.platforms.all;
+          };
+        };
+      firefox-extension = mkFirefoxExtension pkgs;
 
       preCommit = git-hooks.lib.${system}.run {
         src = ./.;
@@ -94,11 +151,13 @@
       packages.${system} = {
         desktop-preview = pkgs.callPackage ./preview.nix { inherit (rust) hinteros-session; };
         inherit (rust) hinteros-session hinteros-system;
+        hinteros-osk-firefox-extension = firefox-extension;
         default = pkgs.symlinkJoin {
           name = "hinteros-daemon-0.1.0";
           paths = [
             rust.hinteros-session
             rust.hinteros-system
+            firefox-extension
           ];
         };
       };
@@ -111,10 +170,20 @@
 
       overlays.default = final: _prev: {
         inherit (mkRust final) hinteros-session hinteros-system;
+        hinteros-osk-firefox-extension = mkFirefoxExtension final;
       };
 
       checks.${system} = {
         inherit (rust) hinteros-session hinteros-system;
+        hinteros-osk-firefox-extension = firefox-extension;
+        # The installed host manifest points at the installed host.
+        native-messaging-host = pkgs.runCommand "native-messaging-host-check" { } ''
+          m=${rust.hinteros-session}/lib/mozilla/native-messaging-hosts/hinteros_osk.json
+          ${lib.getExe pkgs.jq} -e --arg p ${rust.hinteros-session}/bin/hinteros-osk-native-host \
+            '.path == $p and .name == "hinteros_osk" and .allowed_extensions == ["hinteros-osk@hinteros"]' $m
+          test -x ${rust.hinteros-session}/bin/hinteros-osk-native-host
+          touch $out
+        '';
         cargo-test = rust.craneLib.cargoTest (
           rust.commonArgs
           // {

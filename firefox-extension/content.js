@@ -1,0 +1,87 @@
+// HinterOS on-screen keyboard: report whether a text field has focus in this frame.
+//
+// Sends {focus: "text" | "password" | "none"} to the background script whenever that
+// changes. Focus moving from one field to the next (focusout, then focusin) is settled
+// before reporting, so a field change does not report "none" in between.
+"use strict";
+
+// <input> types that take typed text. Everything else (checkbox, range, color, date
+// pickers, buttons) has its own controls.
+const TEXT_TYPES = new Set([
+  "", "text", "search", "email", "url", "tel", "number", "password",
+]);
+
+// The element that really has focus, looking inside open shadow roots.
+function deepActiveElement() {
+  let el = document.activeElement;
+  while (el && el.shadowRoot && el.shadowRoot.activeElement) {
+    el = el.shadowRoot.activeElement;
+  }
+  return el;
+}
+
+// "text", "password" or "none" for an element.
+function kindOf(el) {
+  if (!el || el.disabled || el.readOnly) {
+    return "none";
+  }
+  const tag = el.localName;
+  if (tag === "textarea") {
+    return "text";
+  }
+  if (tag === "input") {
+    const type = (el.getAttribute("type") || "").toLowerCase();
+    if (!TEXT_TYPES.has(type)) {
+      return "none";
+    }
+    return type === "password" ? "password" : "text";
+  }
+  if (el.isContentEditable) {
+    return "text";
+  }
+  return "none";
+}
+
+let reported = "none";
+let pending = false;
+
+function report() {
+  pending = false;
+  // A frame without focus has nothing focused, whatever its activeElement says.
+  const focus = document.hasFocus() ? kindOf(deepActiveElement()) : "none";
+  if (focus === reported) {
+    return;
+  }
+  reported = focus;
+  browser.runtime.sendMessage({ focus }).catch(() => {
+    // The background page is reloading; the next change reports again.
+  });
+}
+
+// Look once focus has settled (after the focusout/focusin pair of a field change).
+function settle() {
+  if (!pending) {
+    pending = true;
+    setTimeout(report, 0);
+  }
+}
+
+// Capture phase: pages cannot stop these from reaching us.
+window.addEventListener("focusin", settle, true);
+window.addEventListener("focusout", settle, true);
+window.addEventListener("focus", settle, true);
+window.addEventListener("blur", settle, true);
+// The page goes away or into the background: nothing has focus any more.
+window.addEventListener("pagehide", () => {
+  if (reported !== "none") {
+    reported = "none";
+    browser.runtime.sendMessage({ focus: "none" }).catch(() => {});
+  }
+}, true);
+document.addEventListener("visibilitychange", settle, true);
+// An autofocused field may have focus before our listeners ran.
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", settle, { once: true });
+} else {
+  settle();
+}

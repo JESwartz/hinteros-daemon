@@ -23,6 +23,7 @@ a phone web admin UI) are generated from or contract-tested against.
 | `crates/hinteros-api/` | Rust wire types, NDJSON framing, handshake, client; tests that check the types against `schema/` |
 | `crates/hinteros-session/` | Session daemon |
 | `crates/hinteros-system/` | Privileged system service |
+| `firefox-extension/` | The on-screen keyboard's Firefox extension (text field focus) and its native-messaging host manifest template |
 
 The protocol is JSON-RPC 2.0, one message per line, starting with a `hello` version handshake.
 The design and its reasoning live in `hinteros-docs/design/api.md`.
@@ -107,6 +108,10 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   only works where the daemon already sees Y). Because Guide may start a chord, Home happens on
   Guide *release*; `summon = "none"` puts it back on the press. The keyboard button (`ui_osk`,
   on pads that have one) also toggles it in keyboard-profile apps.
+  **Automatic** (`textfocus.rs`, `firefox-extension/`): in a keyboard-profile app, a text or
+  password field getting focus in Firefox shows it, and losing focus hides it again 250 ms later
+  (so moving between fields does not flicker), unless it was shown or hidden by hand meanwhile.
+  See "Automatic on-screen keyboard in Firefox" below.
   Every chord step is logged at info level with the raw `ui_*` name of the other button
   (`chord guide+context → on-screen keyboard button=ui_context`, `guide released alone → Home`,
   `guide+secondary → ignored (not a chord) button=ui_action`), so a pad whose buttons arrive
@@ -210,6 +215,7 @@ ime_delay_ms = 80              # between input method characters
 enable = true
 command = ["hinteros-osk"]     # started (and restarted) if found; not under the reaper
 summon = "guide+context"       # hold Guide + press this button (Y); or "none"
+auto_show = true               # show it when a text field gets focus in a keyboard-profile app (Firefox extension)
 
 [system]
 enable = true                  # relay system.* to the system service
@@ -366,7 +372,8 @@ nothing: it never takes part in the TV setup.
   `WAYLAND_DISPLAY` from the config, since a user service does not inherit gamescope's.
 - InputPlumber: polkit, the session user in group `inputplumber`, its udev rules. The daemon
   sets `ManageAllDevices` itself on every InputPlumber (re)start.
-- A `steam` binary on the daemon's `PATH`, or `steam.path`.
+- A `steam` binary on the daemon's `PATH`, or `steam.path`, for the built-in `steam` app (left
+  out of `apps.list` while there is none).
 - For keyboard input profiles and `keys.*`: write access to `/dev/uinput` (the `uinput` kernel
   module, `hardware.uinput.enable`, and the session user in the `uinput` group). If the device
   cannot be created the daemon logs why and carries on without it (keyboard apps get the
@@ -529,13 +536,70 @@ inside its window instead); that `[769, launcher]` shows them with working input
 Big Picture writes `GAMESCOPECTRL_BASELAYER_APPID` itself (the daemon logs it if so); and that
 SIGTERM to the processes under Steam's reaper ends Proton games cleanly.
 
+### Automatic on-screen keyboard in Firefox
+
+The chain (design: `hinteros-docs/spikes/05-on-screen-keyboard.md`, "auto-summon"):
+
+1. The extension `hinteros-osk@hinteros` (`firefox-extension/`, manifest v2, which Firefox keeps
+   supporting) has a content script in every frame that follows `focusin`/`focusout` and
+   reports `{focus: "text"|"password"|"none"}` (inputs that take text, textareas,
+   contenteditable, open shadow roots) when it changes; the background script combines frames
+   and passes the result on with `runtime.connectNative("hinteros_osk")`.
+2. Firefox starts the native-messaging host `hinteros-osk-native-host` (a symlink to
+   `hinteros-session`; `hinteros-session osk-native-host` is the same), which reads Firefox's
+   length-prefixed JSON on stdin, answers `{ok}` on stdout, and forwards each message as one line
+   to the daemon's internal socket `osk.sock` (next to `session.sock`;
+   `$HINTEROS_OSK_SOCKET`, which the daemon sets for the apps it starts, else
+   `$XDG_RUNTIME_DIR/hinteros/osk.sock`). It reconnects when the daemon restarts.
+3. The daemon believes a report only while the focused app has `input = "keyboard"` and the
+   host runs inside that app's process tree, and shows/hides the keyboard (`osk_visibility`).
+   A closed host connection counts as `none`. `osk.sock` is not part of the session API (no
+   handshake, no replies) and accepts only the session user.
+
+**What the system repo must install** (Nix packages from this flake: `hinteros-session` and
+`hinteros-osk-firefox-extension`, also in `overlays.default`):
+
+- The native-messaging host manifest: `hinteros-session` ships it as
+  `lib/mozilla/native-messaging-hosts/hinteros_osk.json` (its `path` is the package's
+  `bin/hinteros-osk-native-host`). With the NixOS Firefox module:
+  `programs.firefox.nativeMessagingHosts.packages = [ pkgs.hinteros-session ];` (the wrapper links
+  it into Firefox's own `lib/mozilla/native-messaging-hosts/`). Without the module, link that
+  file into `~/.mozilla/native-messaging-hosts/` of the session user (or a wrapped Firefox's
+  `lib/mozilla/native-messaging-hosts/`). The kiosk profiles need nothing else for it.
+- The extension, force-installed through enterprise policies (`programs.firefox.policies`):
+
+  ```nix
+  ExtensionSettings."hinteros-osk@hinteros" = {
+    installation_mode = "force_installed";
+    install_url = "file://${pkgs.hinteros-osk-firefox-extension}/share/hinteros/firefox/hinteros-osk@hinteros.xpi";
+  };
+  ```
+
+  (or `Extensions.Install = [ "<that .xpi path>" ]` plus `Extensions.Locked`). It needs the
+  `nativeMessaging` permission and content scripts on all sites, granted at install; in private
+  windows only if `private_browsing = true` is added to that entry.
+- **Signing**: the .xpi is unsigned. Release Firefox (nixpkgs `firefox`) refuses unsigned
+  extensions even through policies. Options: Firefox ESR (`pkgs.firefox-esr`) with
+  `lockPref("xpinstall.signatures.required", false);` (`programs.firefox.autoConfig`), which
+  ESR, Developer Edition, Nightly and unbranded builds honour; a Firefox built with
+  `enableAddonSigning = false` (a full Firefox build, no binary cache); or signing the .xpi as an
+  unlisted (self-distributed) add-on on addons.mozilla.org (`web-ext sign --channel=unlisted`) and
+  shipping the signed file instead.
+- The kiosk apps keep `input = "keyboard"` in `session.toml` (only those get the automatic
+  keyboard) and must be started by the daemon (so the host is in their process tree and gets
+  `HINTEROS_OSK_SOCKET`). `[osk] auto_show = false` turns it off.
+
 ### Keyboard and on-screen keyboard: what is verified and what needs hardware
 
 Verified here: the key planning and pacing (unit tests), the input method client against a
 fake compositor speaking the protocol XML (wayland-server), the overlay atoms and opacity on an
 Xvfb standing in for gamescope's Xwayland, keyboard-profile translation, `input_nav` routing
 and the Guide chord against the fake InputPlumber with a fake keyboard (`--fake-keyboard`),
-and creating the real uinput device (`HINTEROS_TEST_UINPUT=1`). Spike 5 proved in VMs that
+and creating the real uinput device (`HINTEROS_TEST_UINPUT=1`). The automatic keyboard: host
+framing and forwarding (unit tests), the focus state machine (shell unit tests with fakes), and
+an app starting the installed-name host the way Firefox does, end to end
+(`tests/textfocus.rs`); the extension itself is only syntax-checked (`nix flake check`), not yet
+run in Firefox. Spike 5 proved in VMs that
 uinput typing reaches Firefox, that `gamescope_input_method` types Unicode into it, and that a
 `GAMESCOPE_EXTERNAL_OVERLAY` window toggled by opacity draws over Firefox without taking focus.
 

@@ -542,11 +542,17 @@ impl Default for IconsConfig {
 pub struct CloseConfig {
     /// How long apps.close waits for an app to quit before killing it.
     pub timeout_ms: u64,
+    /// How long the daemon waits at shutdown (SIGTERM) for the apps it started, the launcher and
+    /// the on-screen keyboard to quit before killing them.
+    pub shutdown_grace_ms: u64,
 }
 
 impl Default for CloseConfig {
     fn default() -> Self {
-        Self { timeout_ms: 5000 }
+        Self {
+            timeout_ms: 5000,
+            shutdown_grace_ms: 3000,
+        }
     }
 }
 

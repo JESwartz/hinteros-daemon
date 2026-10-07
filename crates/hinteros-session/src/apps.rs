@@ -10,6 +10,7 @@ use std::process::Stdio;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::procs::Children;
 use crate::reaper;
 
 /// A process started by a [`Spawner`] has ended.
@@ -65,6 +66,7 @@ pub struct ProcessSpawner {
     reaper_exe: PathBuf,
     env: Vec<(String, String)>,
     exits: mpsc::UnboundedSender<ChildExit>,
+    children: Children,
 }
 
 impl ProcessSpawner {
@@ -77,7 +79,14 @@ impl ProcessSpawner {
             reaper_exe,
             env,
             exits,
+            children: Children::default(),
         }
+    }
+
+    /// Register the processes started here with `children` (to end them at shutdown).
+    pub fn with_children(mut self, children: Children) -> Self {
+        self.children = children;
+        self
     }
 }
 
@@ -105,6 +114,12 @@ impl Spawner for ProcessSpawner {
             .kill_on_drop(false);
         let mut child = cmd.spawn()?;
         let pid = child.id().unwrap_or_default();
+        let children = self.children.clone();
+        if !children.add(pid) {
+            // Shutting down: no new apps.
+            let _ = child.start_kill();
+            return Err(io::Error::other("the session daemon is shutting down"));
+        }
         debug!(key, pid, ?argv, ?app_id, "spawned");
         let exits = self.exits.clone();
         let key = key.to_string();
@@ -119,6 +134,7 @@ impl Spawner for ProcessSpawner {
                     None
                 }
             };
+            children.remove(pid);
             let _ = exits.send(ChildExit { key, pid, code });
         });
         Ok(pid)

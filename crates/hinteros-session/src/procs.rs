@@ -136,6 +136,82 @@ impl ProcessControl for Procs {
     }
 }
 
+/// The processes the daemon started and still has (apps' reapers, the launcher, the
+/// on-screen keyboard), so that it can end them when it shuts down. Cheap to clone.
+#[derive(Debug, Clone, Default)]
+pub struct Children(std::sync::Arc<std::sync::Mutex<ChildrenInner>>);
+
+#[derive(Debug, Default)]
+struct ChildrenInner {
+    pids: std::collections::BTreeSet<u32>,
+    closing: bool,
+}
+
+impl Children {
+    /// Remember a child. `false` once the daemon is shutting down: the caller must end the
+    /// child itself.
+    pub fn add(&self, pid: u32) -> bool {
+        let mut inner = self.0.lock().unwrap();
+        if inner.closing {
+            return false;
+        }
+        inner.pids.insert(pid);
+        true
+    }
+
+    /// The child was waited for.
+    pub fn remove(&self, pid: u32) {
+        self.0.lock().unwrap().pids.remove(&pid);
+    }
+
+    pub fn is_closing(&self) -> bool {
+        self.0.lock().unwrap().closing
+    }
+
+    fn pids(&self) -> Vec<u32> {
+        self.0.lock().unwrap().pids.iter().copied().collect()
+    }
+
+    /// End every child: SIGTERM (a reaper forwards it to its app's process group), wait up to
+    /// `grace` for them to be gone (the tasks that wait for them call [`Self::remove`]), then
+    /// SIGKILL what is left, descendants first. No child is added afterwards.
+    pub async fn shutdown(&self, grace: std::time::Duration) {
+        self.0.lock().unwrap().closing = true;
+        let mut procs = Procs;
+        let pids = self.pids();
+        if pids.is_empty() {
+            return;
+        }
+        debug!(?pids, "ending child processes");
+        for &pid in &pids {
+            procs.signal(pid, Sig::Term);
+        }
+        let deadline = tokio::time::Instant::now() + grace;
+        while !self.pids().is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let left = self.pids();
+        if left.is_empty() {
+            return;
+        }
+        debug!(
+            ?left,
+            "children still running after the grace period: killing"
+        );
+        let table = list();
+        for &pid in &left {
+            for d in descendants_of(&table, pid) {
+                procs.signal(d, Sig::Kill);
+            }
+            procs.signal(pid, Sig::Kill);
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !self.pids().is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,7 +7,8 @@
 //! alike, unlike the `STEAM_GAME` window property (X11 only). We become such a process:
 //! rename the thread to `reaper`, become a child subreaper (so the app's orphaned descendants
 //! are re-parented to us), run the command in its own process group, forward termination
-//! signals to that group, and exit with the command's status once every descendant is gone.
+//! signals to that group (also when the process that started us dies), and exit with the
+//! command's status once every descendant is gone.
 //!
 //! The process must not be started below another reaper with an app id: the outermost one wins.
 
@@ -88,6 +89,7 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
+    let parent = rustix::process::getppid();
     // Best effort: without these the command still runs, gamescope just can't tag it.
     if let Err(e) = rustix::thread::set_name(&CString::new(SUBCOMMAND).expect("no NUL")) {
         eprintln!("reaper: cannot rename process: {e}");
@@ -127,6 +129,18 @@ pub fn run(args: &[String]) -> i32 {
             });
         }
         Err(e) => eprintln!("reaper: cannot forward signals: {e}"),
+    }
+
+    // If the session daemon dies without cleaning up (SIGKILL, a crash), end the app too: the
+    // kernel sends us SIGTERM, which is forwarded to the command's process group above. (Only the
+    // daemon starts a reaper, from its main thread.)
+    match rustix::process::set_parent_process_death_signal(Some(Signal::TERM)) {
+        Ok(()) if rustix::process::getppid() != parent => {
+            // The parent was already gone.
+            let _ = kill_process_group(child_pid, Signal::TERM);
+        }
+        Ok(()) => {}
+        Err(e) => eprintln!("reaper: cannot ask for the parent's death: {e}"),
     }
 
     // Reap everything: the command and whatever it leaves behind.

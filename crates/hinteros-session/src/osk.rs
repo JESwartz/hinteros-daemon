@@ -22,6 +22,7 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 use crate::apps::which;
+use crate::procs::Children;
 use crate::steam::windows::WindowInfo;
 
 pub const OSK_NAME: &str = "hinteros-osk";
@@ -51,7 +52,12 @@ pub fn is_osk_window(info: &WindowInfo, osk_pid: u32) -> bool {
 /// Keep the OSK running, restarting it when it exits; its pid goes to `pid` (0 while it is
 /// not running). Not under the reaper: it must not become a focusable app. Does nothing if the
 /// program cannot be found (dev desktops, tests).
-pub async fn supervise(argv: Vec<String>, env: Vec<(String, String)>, pid: Arc<AtomicU32>) {
+pub async fn supervise(
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+    pid: Arc<AtomicU32>,
+    children: Children,
+) {
     let Some(program) = argv.first() else { return };
     let program: PathBuf = match which(program) {
         Ok(p) => p,
@@ -60,7 +66,7 @@ pub async fn supervise(argv: Vec<String>, env: Vec<(String, String)>, pid: Arc<A
             return;
         }
     };
-    loop {
+    while !children.is_closing() {
         let mut cmd = tokio::process::Command::new(&program);
         cmd.args(&argv[1..])
             .envs(env.iter().map(|(k, v)| (k, v)))
@@ -69,12 +75,17 @@ pub async fn supervise(argv: Vec<String>, env: Vec<(String, String)>, pid: Arc<A
         match cmd.spawn() {
             Ok(mut child) => {
                 let id = child.id().unwrap_or_default();
+                if !children.add(id) {
+                    let _ = child.start_kill();
+                    return;
+                }
                 pid.store(id, Ordering::SeqCst);
                 info!(pid = id, ?argv, "on-screen keyboard started");
                 match child.wait().await {
                     Ok(status) => warn!(%status, "on-screen keyboard exited; restarting"),
                     Err(e) => warn!("waiting for the on-screen keyboard: {e}"),
                 }
+                children.remove(id);
                 pid.store(0, Ordering::SeqCst);
             }
             Err(e) => error!(?argv, "cannot start the on-screen keyboard: {e}"),

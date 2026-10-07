@@ -24,7 +24,7 @@ use hinteros_session::keys::worker::{
     FileSink, ImeConnect, ImeSink, KeySink, ThreadInjector, Timing, Worker,
 };
 use hinteros_session::keys::{KeyInjector, NoKeys};
-use hinteros_session::procs::Procs;
+use hinteros_session::procs::{Children, Procs};
 use hinteros_session::shell::{Msg, Shell, ShellConfig};
 use hinteros_session::steam;
 use hinteros_session::{Audience, Broadcast, osk, reaper, server, shell};
@@ -86,7 +86,9 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
 
     let (exit_tx, exit_rx) = mpsc::unbounded_channel();
     forward(exit_rx, shell_tx.clone(), Msg::ChildExit);
-    let spawner = ProcessSpawner::new(exe.clone(), env.clone(), exit_tx);
+    let children = Children::default();
+    let spawner =
+        ProcessSpawner::new(exe.clone(), env.clone(), exit_tx).with_children(children.clone());
 
     let osk_pid = Arc::new(AtomicU32::new(0));
     let focus: Box<dyn FocusControl> = if config.gamescope.enable {
@@ -171,6 +173,7 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
             argv,
             config.launcher.app_id,
             env.clone(),
+            children.clone(),
         ));
     }
     if config.steam.autostart {
@@ -183,7 +186,12 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
             "HINTEROS_SESSION_SOCKET".into(),
             path.to_string_lossy().into_owned(),
         ));
-        tokio::spawn(osk::supervise(config.osk.command.clone(), osk_env, osk_pid));
+        tokio::spawn(osk::supervise(
+            config.osk.command.clone(),
+            osk_env,
+            osk_pid,
+            children.clone(),
+        ));
     }
 
     let relay = if config.system.enable {
@@ -231,6 +239,10 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
     }
     info!("shutting down");
     let _ = std::fs::remove_file(&path);
+    // The apps, the launcher and the on-screen keyboard are ours: they must not outlive us.
+    children
+        .shutdown(Duration::from_millis(config.close.shutdown_grace_ms))
+        .await;
     Ok(())
 }
 
@@ -306,19 +318,26 @@ async fn supervise_launcher(
     argv: Vec<String>,
     app_id: u32,
     env: Vec<(String, String)>,
+    children: Children,
 ) {
-    loop {
+    while !children.is_closing() {
         let mut cmd = tokio::process::Command::new(&exe);
         cmd.args(reaper::args(app_id, &argv))
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(std::process::Stdio::null());
         match cmd.spawn() {
             Ok(mut child) => {
+                let pid = child.id().unwrap_or_default();
+                if !children.add(pid) {
+                    let _ = child.start_kill();
+                    return;
+                }
                 info!(pid = child.id(), ?argv, "launcher started");
                 match child.wait().await {
                     Ok(status) => warn!(%status, "launcher exited; restarting"),
                     Err(e) => warn!("waiting for the launcher: {e}"),
                 }
+                children.remove(pid);
             }
             Err(e) => error!(?argv, "cannot start the launcher: {e}"),
         }

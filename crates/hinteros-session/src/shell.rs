@@ -74,6 +74,8 @@ pub enum Msg {
     ChildExit(ChildExit),
     /// The config was reloaded: this is the new app list (running apps are left alone).
     SetApps(Vec<AppConfig>),
+    /// The usable Steam binary changed (`None`: Steam is not installed).
+    SetSteam(Option<PathBuf>),
 }
 
 /// The methods the shell answers (the connection handles the rest).
@@ -113,7 +115,8 @@ enum Route {
 #[derive(Debug, Clone)]
 pub struct ShellConfig {
     pub launcher_app_id: u32,
-    pub steam_path: PathBuf,
+    /// The Steam binary, resolved (`None`: not installed, so no built-in `steam` app).
+    pub steam_path: Option<PathBuf>,
     /// The configured Steam directory (`None`: found under `$HOME`).
     pub steam_dir: Option<PathBuf>,
     /// Whether gamescope reports state (decides how Steam games are tracked).
@@ -138,7 +141,7 @@ impl From<&Config> for ShellConfig {
     fn from(c: &Config) -> Self {
         Self {
             launcher_app_id: c.launcher.app_id,
-            steam_path: c.steam.path.clone(),
+            steam_path: crate::apps::steam_binary(&c.steam.path),
             steam_dir: c.steam.dir.clone(),
             gamescope: c.gamescope.enable,
             steam_launch_timeout: Duration::from_secs(c.steam.launch_timeout_s),
@@ -299,6 +302,7 @@ impl Shell {
             Msg::Gamescope(event) => self.gamescope(event, now),
             Msg::ChildExit(exit) => self.child_exit(exit),
             Msg::SetApps(apps) => self.cfg.apps = apps,
+            Msg::SetSteam(path) => self.set_steam(path),
         }
     }
 
@@ -394,20 +398,44 @@ impl Shell {
         library::default_steam_dir(self.cfg.steam_dir.as_deref())
     }
 
+    /// Steam was installed or removed (or moved): the built-in `steam` app follows. The caller
+    /// announces `apps_changed`.
+    fn set_steam(&mut self, path: Option<PathBuf>) {
+        info!(steam = ?path, "Steam binary changed");
+        self.cfg.steam_path = path;
+        if self.cfg.steam_path.is_none() {
+            // Nothing to bring forward any more.
+            self.steam_windows(Vec::new());
+        }
+    }
+
+    /// The Steam binary, or `code` with "Steam is not installed".
+    fn steam_binary(&self, code: ErrorCode) -> Result<String, ErrorObject> {
+        self.cfg
+            .steam_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .ok_or_else(|| ErrorObject::new(code, "Steam is not installed"))
+    }
+
     fn list(&self) -> AppsListResult {
-        let steam = App {
+        // The built-in entry only while there is a Steam to start.
+        let steam = self.cfg.steam_path.as_ref().map(|_| App {
             id: STEAM_CLIENT_APP_ID.into(),
             name: "Steam".into(),
             kind: AppKind::Native,
             icon: self.icon_path(STEAM_CLIENT_APP_ID, None),
-        };
+        });
         if self.cfg.apps.is_empty() {
             let mut list = stub_apps();
-            list.apps.insert(0, steam);
+            if let Some(steam) = steam {
+                list.apps.insert(0, steam);
+            }
             return list;
         }
         AppsListResult {
-            apps: std::iter::once(steam)
+            apps: steam
+                .into_iter()
                 .chain(self.cfg.apps.iter().map(|a| App {
                     id: a.id.clone(),
                     name: a.name.clone(),
@@ -478,6 +506,13 @@ impl Shell {
         // Resolve to (key, name, what to run).
         let (key, name, target) = match request {
             LaunchRequest::Id(id) if id == STEAM_CLIENT_APP_ID => {
+                if self.cfg.steam_path.is_none() && !self.apps.contains_key(&id) {
+                    // Not in apps.list either.
+                    return Err(ErrorObject::new(
+                        ErrorCode::AppNotFound,
+                        "no app with id 'steam': Steam is not installed",
+                    ));
+                }
                 (id, "Steam".to_string(), Target::SteamClient)
             }
             LaunchRequest::Id(id) => {
@@ -544,7 +579,6 @@ impl Shell {
                 format!("cannot start {what}: {e}"),
             )
         };
-        let steam_path = self.cfg.steam_path.to_string_lossy().into_owned();
         let info = match target {
             Target::Command(argv) => {
                 let gamescope_app_id = self.allocate_app_id();
@@ -564,6 +598,7 @@ impl Shell {
                 }
             }
             Target::Steam(steam) => {
+                let steam_path = self.steam_binary(ErrorCode::AppLaunchFailed)?;
                 let argv = vec![
                     steam_path.clone(),
                     "-silent".into(),
@@ -583,6 +618,7 @@ impl Shell {
                 }
             }
             Target::SteamClient => {
+                let steam_path = self.steam_binary(ErrorCode::AppNotFound)?;
                 // A running client opens Big Picture for the URL; otherwise start Steam
                 // straight into it. Never under a reaper (games must get Steam's app ids).
                 let arg = if self.procs.steam_running() {
@@ -670,10 +706,14 @@ impl Shell {
                 }
             }
             AppSource::SteamClient => {
-                let steam_path = self.cfg.steam_path.to_string_lossy().into_owned();
-                let argv = [steam_path, "steam://close/bigpicture".into()];
-                if let Err(e) = self.spawner.spawn("steam-close", &argv, None) {
-                    warn!("cannot ask Steam to close Big Picture: {e}");
+                match self.steam_binary(ErrorCode::AppNotFound) {
+                    Ok(steam_path) => {
+                        let argv = [steam_path, "steam://close/bigpicture".into()];
+                        if let Err(e) = self.spawner.spawn("steam-close", &argv, None) {
+                            warn!("cannot ask Steam to close Big Picture: {e}");
+                        }
+                    }
+                    Err(e) => warn!("cannot ask Steam to close Big Picture: {}", e.message),
                 }
                 if !self.cfg.gamescope {
                     // Nothing to watch: consider it closed.
@@ -942,7 +982,11 @@ impl Shell {
     }
 
     /// New list of Steam's windows from the gamescope watcher.
-    fn steam_windows(&mut self, windows: Vec<SteamWindow>) {
+    fn steam_windows(&mut self, mut windows: Vec<SteamWindow>) {
+        if self.cfg.steam_path.is_none() {
+            // No Steam app to bring them forward as (and no Steam to have made them).
+            windows.clear();
+        }
         self.seen_windows
             .retain(|w| windows.iter().any(|s| s.window == *w));
         if self.focused.as_deref() == Some(STEAM_CLIENT_APP_ID) {
@@ -1528,7 +1572,7 @@ mod tests {
         fn with_keys(caps: KeyCaps, f: impl FnOnce(&mut ShellConfig)) -> Self {
             let mut cfg = ShellConfig {
                 launcher_app_id: L,
-                steam_path: "/fake/steam".into(),
+                steam_path: Some("/fake/steam".into()),
                 steam_dir: Some(
                     crate::steam::library::tests::fixture_home().join(".local/share/Steam"),
                 ),
@@ -2276,6 +2320,81 @@ mod tests {
         assert_eq!(icon(2).as_deref(), Some("/configured/portal.png"));
         // A theme name alone is not a path.
         assert_eq!(icon(3), None);
+    }
+
+    #[test]
+    fn without_steam_there_is_no_steam_app() {
+        let mut t = T::with(|c| c.steam_path = None);
+        let ids = |t: &mut T| -> Vec<String> {
+            let list = t.call("apps.list", json!({})).unwrap();
+            list["apps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(ids(&mut t), ["jellyfin", "portal", "youtube"]);
+        // Launching it is "no such app", not a failed spawn; Steam games cannot start either.
+        let e = t.call("apps.launch", json!({"id": "steam"})).unwrap_err();
+        assert_eq!(e.code, ErrorCode::AppNotFound.code());
+        assert!(
+            e.message.contains("Steam is not installed"),
+            "{}",
+            e.message
+        );
+        let e = t.call("apps.launch", json!({"id": "portal"})).unwrap_err();
+        assert_eq!(e.code, ErrorCode::AppLaunchFailed.code());
+        assert!(
+            e.message.contains("Steam is not installed"),
+            "{}",
+            e.message
+        );
+        assert!(t.log.take().is_empty(), "nothing spawned");
+        // No attention for windows that look like Steam's.
+        steam_windows(&mut t, &[(5, "Steam")]);
+        assert!(t.events().is_empty());
+        assert_eq!(
+            t.call("steam.attention", json!({})).unwrap(),
+            json!({"windows": []})
+        );
+        assert_eq!(
+            t.call("steam.focus", json!({})).unwrap_err().code,
+            ErrorCode::SteamNoWindows.code()
+        );
+
+        // Installed later: the entry comes back and launches.
+        t.shell
+            .handle(Msg::SetSteam(Some("/new/steam".into())), t.now);
+        assert_eq!(ids(&mut t), ["steam", "jellyfin", "portal", "youtube"]);
+        let app = t.launch(json!({"id": "steam"}));
+        assert_eq!(app.id, "steam");
+        assert_eq!(
+            t.log.take()[0],
+            Call::Spawn {
+                key: "steam".into(),
+                argv: vec!["/new/steam".into(), "-gamepadui".into()],
+                app_id: None,
+            }
+        );
+        // And its windows count again.
+        t.call("apps.focus", json!({"id": null})).unwrap();
+        t.events();
+        steam_windows(&mut t, &[(6, "Friends")]);
+        assert!(
+            t.events()
+                .iter()
+                .any(|(n, p)| *n == EventName::SteamAttention && p["windows"][0]["window"] == 6)
+        );
+
+        // Removed again: attention clears; the running entry stays focusable until it ends.
+        t.shell.handle(Msg::SetSteam(None), t.now);
+        assert_eq!(
+            t.events(),
+            [ev(EventName::SteamAttention, json!({"windows": []}))]
+        );
+        assert_eq!(ids(&mut t), ["jellyfin", "portal", "youtube"]);
+        assert_eq!(t.launch(json!({"id": "steam"})).id, "steam");
     }
 
     #[test]

@@ -61,8 +61,13 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   prefixes for future versions). inotify on the library directories (debounced, plus a periodic
   rescan) sends `games_changed` when the result changes. Launch a game with
   `apps.launch {url: "steam://rungameid/<appid>"}`; it is named from its manifest.
-- **Steam itself** (`shell.rs`, `steam/windows.rs`): `apps.list` always starts with the built-in
-  `steam` entry. Launching it runs `steam steam://open/bigpicture` (or `steam -gamepadui` if no
+- **Steam itself** (`shell.rs`, `steam/windows.rs`): `apps.list` starts with the built-in
+  `steam` entry while Steam is installed: `steam.path` (a path, or a name looked up in `PATH`)
+  must be an executable file. Without one the entry is left out, `apps.launch {id: "steam"}`
+  answers `app_not_found` ("Steam is not installed"), Steam games answer `app_launch_failed`,
+  and no window counts as Steam's for `steam_attention`. Every app-list reload (see `reload.rs`:
+  config change, end of a system job, the 30 s poll) looks again and sends `apps_changed` when
+  Steam appears or goes away. Launching it runs `steam steam://open/bigpicture` (or `steam -gamepadui` if no
   Steam client runs) and shows Steam's windows: they are gamescope app 769, so focus is
   `[769, launcher]`, with InputPlumber in PASS. Home returns to the launcher; `apps.close`
   asks Steam to close Big Picture (`steam://close/bigpicture`) and never kills Steam.

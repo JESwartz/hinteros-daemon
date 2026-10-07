@@ -40,10 +40,24 @@ impl Daemon {
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let extra = args(dir.path());
-        let extra_env = env(dir.path());
+        let mut extra_env = env(dir.path());
+        // HINTEROS_STEAM set empty: no Steam at all (`steam.path` from the config, or PATH).
+        let no_steam = extra_env
+            .iter()
+            .any(|(k, v)| k == "HINTEROS_STEAM" && v.is_empty());
+        extra_env.retain(|(k, _)| k != "HINTEROS_STEAM" || !no_steam);
+        // A stand-in Steam, so that the built-in `steam` app is listed (it is only there while
+        // a Steam binary exists); tests that need a real-looking Steam pass `--steam-path`.
+        script(&dir.path().join("steam-stub"), "exit 0");
         // A nested directory also exercises creating the socket's parent.
         let socket = dir.path().join("hinteros/session.sock");
-        let child = Command::new(env!("CARGO_BIN_EXE_hinteros-session"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_hinteros-session"));
+        if no_steam {
+            command.env_remove("HINTEROS_STEAM");
+        } else {
+            command.env("HINTEROS_STEAM", dir.path().join("steam-stub"));
+        }
+        let child = command
             .arg("--socket")
             .arg(&socket)
             // No real virtual keyboard: it would type into the desktop running the tests.

@@ -162,6 +162,14 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
     let mut shell_config = ShellConfig::from(&config);
     shell_config.icons = icon_store.clone();
     shell_config.icon_refresh = icons.refresher();
+    let steam = shell_config.steam_path.clone();
+    match &steam {
+        Some(p) => info!(steam = %p.display(), "Steam found"),
+        None => info!(
+            configured = %config.steam.path.display(),
+            "Steam not found: no built-in steam app until it is installed"
+        ),
+    }
     let shell = Shell::new(
         shell_config,
         focus,
@@ -179,6 +187,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         cli: cli.clone(),
         index: config.store.index.clone(),
         apps: config.apps.clone(),
+        steam,
         catalog,
         icons: icons.clone(),
         shell: shell_tx.clone(),

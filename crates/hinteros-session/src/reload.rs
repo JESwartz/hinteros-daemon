@@ -8,7 +8,9 @@
 //! periodic check as a safety net. The look is a re-read of the config (the same loading as
 //! at startup) and of the catalog index, comparing with what is loaded.
 //!
-//! What a reload changes: the app list (`apps.list`, what `apps.launch` can start) and the
+//! What a reload changes: the app list (`apps.list`, what `apps.launch` can start), whether
+//! the built-in `steam` app is there (only while `steam.path` names an executable, checked on
+//! every look, so Steam installed later shows up within the poll interval at worst) and the
 //! icons of apps and catalog entries. Everything else in the file (gamescope, input, paths)
 //! needs a restart. Running apps are never touched: a removed app that is running keeps
 //! running (and stays in `apps.running`) until it exits. A broken new file is logged and the
@@ -38,6 +40,8 @@ pub struct Options {
     pub index: PathBuf,
     /// What is loaded now.
     pub apps: Vec<AppConfig>,
+    /// The Steam binary the shell has now (`None`: Steam is not installed).
+    pub steam: Option<PathBuf>,
     pub catalog: Vec<IconSpec>,
     pub icons: Icons,
     pub shell: mpsc::UnboundedSender<Msg>,
@@ -84,6 +88,7 @@ fn chain(path: &Path, dirs: &mut BTreeSet<PathBuf>, depth: usize) {
 
 struct State {
     apps: Vec<AppConfig>,
+    steam: Option<PathBuf>,
     catalog: Vec<IconSpec>,
     last_error: Option<String>,
 }
@@ -109,6 +114,7 @@ async fn ready(fd: &Option<AsyncFd<OwnedFd>>) {
 async fn run(opts: Options, mut rx: mpsc::UnboundedReceiver<()>) {
     let mut state = State {
         apps: opts.apps.clone(),
+        steam: opts.steam.clone(),
         catalog: opts.catalog.clone(),
         last_error: None,
     };
@@ -180,6 +186,20 @@ fn reload(o: &Options, state: &mut State, rescan: bool) {
                 state.apps.clone_from(&config.apps);
                 // Before the event, so that apps.list (queued behind it) sees the new list.
                 let _ = o.shell.send(Msg::SetApps(config.apps));
+                apps = true;
+            }
+            // Steam installed (a Store install, a new `steam.path`) or removed: the built-in
+            // `steam` app comes and goes with it.
+            let steam = crate::apps::steam_binary(&config.steam.path);
+            if steam != state.steam {
+                info!(
+                    steam = ?steam,
+                    configured = %config.steam.path.display(),
+                    "Steam {}",
+                    if steam.is_some() { "found" } else { "not found" }
+                );
+                state.steam.clone_from(&steam);
+                let _ = o.shell.send(Msg::SetSteam(steam));
                 apps = true;
             }
         }

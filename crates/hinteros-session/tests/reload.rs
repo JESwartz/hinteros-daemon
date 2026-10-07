@@ -307,3 +307,57 @@ async fn a_switched_config_reloads_the_app_list() {
     let list = call(&mut c, "apps.list", json!({})).await.unwrap();
     assert_eq!(ids(&list), ["steam", "one", "two"]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_steam_app_appears_when_steam_is_installed() {
+    let d = Daemon::start_env(
+        |dir| {
+            // Like a box without Steam whose next generation (a Store install) has it.
+            switch_config(dir, 1, &format!("[steam]\npath = \"steam\"\n{ONE}"));
+            vec![
+                "--config".into(),
+                dir.join("session.toml").into(),
+                "--no-icon-fetch".into(),
+            ]
+        },
+        // No stub: `steam` is looked up on a PATH that does not have it.
+        |dir| {
+            vec![
+                ("HINTEROS_STEAM".into(), "".into()),
+                ("PATH".into(), dir.join("bin").into()),
+            ]
+        },
+    );
+    let dir = d.dir.path();
+    let mut c = d.client().await;
+    call(&mut c, "subscribe", json!({"events": ["apps_changed"]}))
+        .await
+        .unwrap();
+    let list = call(&mut c, "apps.list", json!({})).await.unwrap();
+    assert_eq!(ids(&list), ["one"]);
+    let e = call(&mut c, "apps.launch", json!({"id": "steam"}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["code"], hinteros_api::ErrorCode::AppNotFound.code());
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap()
+            .contains("Steam is not installed"),
+        "{e}"
+    );
+
+    // The new generation points steam.path at an installed Steam.
+    std::fs::create_dir_all(dir.join("store/steam/bin")).unwrap();
+    script(&dir.join("store/steam/bin/steam"), "exit 0");
+    let path = dir.join("store/steam/bin/steam");
+    switch_config(
+        dir,
+        2,
+        &format!("[steam]\npath = \"{}\"\n{ONE}", path.display()),
+    );
+    event_named(&mut c, "apps_changed").await;
+    let list = call(&mut c, "apps.list", json!({})).await.unwrap();
+    assert_eq!(ids(&list), ["steam", "one"]);
+    assert!(d.log().contains("Steam found"));
+}

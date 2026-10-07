@@ -60,6 +60,12 @@ pub fn which(program: &str) -> io::Result<PathBuf> {
         })
 }
 
+/// The Steam binary for the configured `steam.path` (a path, or a name looked up in `$PATH`),
+/// if it is an executable file: `None` means Steam is not installed.
+pub fn steam_binary(configured: &Path) -> Option<PathBuf> {
+    which(&configured.to_string_lossy()).ok()
+}
+
 /// Starts real processes with tokio and reports their exit.
 pub struct ProcessSpawner {
     /// Our own executable, which provides the `reaper` subcommand.
@@ -155,6 +161,24 @@ mod tests {
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn steam_binary_needs_an_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let steam = t.path().join("steam");
+        assert_eq!(steam_binary(&steam), None, "missing");
+        std::fs::write(&steam, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&steam, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(steam_binary(&steam), None, "not executable");
+        std::fs::set_permissions(&steam, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(steam_binary(&steam), Some(steam));
+        assert_eq!(steam_binary(t.path()), None, "a directory");
+        assert_eq!(
+            steam_binary(Path::new("definitely-not-steam-hinteros")),
+            None
         );
     }
 }

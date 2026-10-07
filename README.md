@@ -134,6 +134,13 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   and subscribed to its job events; the session API's `system.*` methods are passed through
   unchanged and `job_*` events forwarded. While the service is down or speaks another version,
   they fail with `system_unavailable {reason: down|version_mismatch}`.
+- **Admin password** (`auth/`): a polkit authentication agent for this process; prompts go to
+  the launcher (`authentication_requested`, `auth.respond`, `auth.cancel`). Session API 0.8; see
+  "Admin password, session restart and Store" below.
+- **Session restart** (`restart.rs`): `session.restart` ends the greetd session through logind
+  (greetd starts it again) and restarts the daemon's own user unit.
+- **Store** (`store.rs`): `store.list` merges the catalog index with the installed apps;
+  `store_changed`; `system.apps.install`/`.remove` are relayed.
 - **Reaper** (`reaper.rs`): `hinteros-session reaper SteamLaunch AppId=<id> -- <command>` runs
   a command as a child subreaper named `reaper`, which is how gamescope (Steam mode) learns the
   app id of a process's windows, X11 and native Wayland alike. The daemon starts command apps
@@ -195,6 +202,22 @@ summon = "guide+context"       # hold Guide + press this button (Y); or "none"
 [system]
 enable = true                  # relay system.* to the system service
 socket = "/run/hinteros/system.sock"
+
+[auth]
+enable = true                  # polkit authentication agent for this process
+# bus = "unix:path=/run/dbus/system_bus_socket"   # polkit's bus [default: the system bus]
+helper = "/run/wrappers/bin/polkit-agent-helper-1"   # setuid helper (fallback)
+helper_socket = "/run/polkit/agent-helper.socket"     # socket-activated helper (preferred if present)
+prompt_timeout_s = 120         # an unanswered prompt is cancelled
+max_attempts = 3               # wrong passwords per request
+
+[session]
+restart_services = ["greetd", "greetd-greeter"]   # PAM services session.restart may end
+# unit = "hinteros-session.service"   # own user unit to restart [default: from /proc/self/cgroup]
+# user_bus = "unix:path=/run/user/1000/bus"      # the user's systemd [default: the session bus]
+
+[store]
+index = "/run/current-system/sw/share/hinteros/catalog.json"
 
 [runtime]
 enable = true                  # network.*, wifi.*, bluetooth.*, audio.*, display.*, power.*
@@ -258,6 +281,12 @@ steam_app_id = 620
 | `--runtime-bus <address>` | `HINTEROS_RUNTIME_BUS` | `runtime.bus` (tests: a private bus with fake services) |
 | `--pactl <path>` | `HINTEROS_PACTL` | `audio.pactl` (tests: a fake) |
 | `--no-icon-fetch` | | `icons.fetch = false` |
+| `--no-auth-agent` | | `auth.enable = false` (desktop previews) |
+| `--auth-bus <address>` | `HINTEROS_AUTH_BUS` | `auth.bus` (tests: a private bus with a fake polkit) |
+| `--polkit-agent-helper <path>` | `HINTEROS_POLKIT_AGENT_HELPER` | `auth.helper` (tests: a fake) |
+| `--polkit-agent-helper-socket <path>` | `HINTEROS_POLKIT_AGENT_HELPER_SOCKET` | `auth.helper_socket` |
+| `--session-user-bus <address>` | `HINTEROS_SESSION_USER_BUS` | `session.user_bus` |
+| `--catalog-index <path>` | `HINTEROS_CATALOG_INDEX` | `store.index` |
 | `--dev-gamepad` | | `input.dev_gamepad = true` (development only) |
 | `--fake-keyboard <file>` (hidden) | `HINTEROS_FAKE_KEYBOARD` | append `down <code>`/`up <code>` lines to a file instead of creating a device (tests) |
 
@@ -506,7 +535,7 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.2
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.3
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
 trust.
@@ -515,16 +544,23 @@ trust.
   `jobs.list`; mutating `settings.set {revision, changes}` (closed, typed `changes`; empty in
   0.2), `ssh.set {enabled}`, `rebuild`, `hardware.redetect`, `rollback {generation?}`,
   `update.check`, `update.apply {rev}`, `channel.set {channel, acknowledge_downgrade?}`,
-  `base.set {base, acknowledge_downgrade?}`, `jobs.cancel {job_id}`. Events `job_started`,
+  `base.set {base, acknowledge_downgrade?}`, `apps.install {ids, revision, accepted_terms?}`,
+  `apps.remove {ids, revision, delete_data}` (0.3, see "Store backend" below), `jobs.cancel {job_id}`. Events `job_started`,
   `job_progress`, `job_finished {…, session_restart_required}` after `subscribe`.
 - **Authorization** (`peer.rs`, `authz.rs`): uid/gid/pid from `SO_PEERCRED` and a pidfd from
   `SO_PEERPIDFD` at accept. Mutating methods need: the pidfd (and the process alive), the caller
   owning seat0's active logind session (or root), and polkit `CheckAuthorization` saying yes for
-  the method's action, with a `unix-process` subject carrying the pidfd, pid, start time and uid
-  and no user interaction. A polkit challenge (`auth_admin`) is `authentication_required`
+  the method's action, with a `unix-process` subject carrying the pidfd, pid, start time and uid,
+  without user interaction except for `org.hinteros.system.ssh` (0.3: see "Admin password" below).
+  A polkit challenge (`auth_admin`) is `authentication_required`
   (3012), anything else `permission_denied` (3002, `reason: peer|seat|polkit`). Before that:
   strict params (every params object is closed; unknown fields are `invalid_params` with
-  `data: {field, reason}`), a token bucket per uid (10/min, burst 3, `rate_limited`). Limits: 8
+  `data: {field, reason}`), a token bucket per uid (10/min, burst 3, `rate_limited`);
+  `update.check` has a bucket of its own,
+  so the launcher's background checks (startup, relayed with the session user's uid; the result
+  is cached 60 s anyway) never use up the budget of the user's own actions. Mutating requests run
+  as tasks, at most 4 in flight per connection, so a connection keeps serving while one waits for
+  the admin password. `hello`'s params are closed like every other method's (both daemons). Limits: 8
   connections per uid, 5 s to `hello`, 64 KiB per message.
 - **Audit** (`audit.rs`): every mutating request and denial, and every job outcome, goes to the
   journal's native socket with `HINTEROS_AUDIT=1`, `HINTEROS_UID`, `_PID`, `_EXE`, `_METHOD`,
@@ -591,6 +627,8 @@ All paths default to the box's; tests point them at a temporary root.
 | `--journal-socket` | `/run/systemd/journal/socket` |
 | `--nix`, `--nix-env`, `--git`, `--ssh-keygen`, `--nixos-facter` | found on the job unit's `PATH` |
 | `--min-memory-bytes`, `--min-disk-bytes`, `--store-dir` | 2 GiB, 4 GiB, `/nix/store` |
+| `--catalog-index` | `<current-system>/sw/share/hinteros/catalog.json` (resolved per request) |
+| `--auth-timeout-s` | 300 (how long an interactive polkit check waits for the admin password) |
 
 `hinteros-system job [--run-dir DIR] <id>` runs one job (the job unit's `ExecStart`).
 
@@ -618,7 +656,7 @@ For `daemon.nix` (and the VM tests) in the system repo:
   switch it performs never restarts the running instance. `StateDirectory=hinteros` (0700)
   for `/var/lib/hinteros` on either unit.
 - **polkit** `share/polkit-1/actions/org.hinteros.system.policy` with the actions
-  `org.hinteros.system.{settings,rebuild,update.check,update.apply,rollback,channel,jobs.cancel}`
+  `org.hinteros.system.{settings,rebuild,update.check,update.apply,rollback,channel,jobs.cancel,apps}`
   (defaults `no/no/no`) and `org.hinteros.system.ssh` (defaults `auth_admin` for
   any/inactive/active: the admin password). The rules file grants the first group to
   `hinteros` members and must **not** return YES for `org.hinteros.system.ssh`:
@@ -682,6 +720,171 @@ onto the launcher's `lib/src/system` repository interfaces:
 | `DisplayAudioRepository.audio / setAudioOutput / setVolume / setMuted` | `audio.outputs` (`AudioState`: outputs with `default` for `current`, `volume` 0 to 100, `muted`), `audio.set_output`, `audio.volume`, `audio.mute`; `audio_changed` |
 | `SystemRepository.power` | `power.suspend` (sleep), `power.reboot` (restart), `power.poweroff` (shutdown); `power.capabilities` to hide what is not offered; `power_inhibited` (4005) while an update switches over; `unavailable` (4001) is `SystemErrorKind.unavailable` |
 
+## Admin password, session restart and Store (session API 0.8, system API 0.3)
+
+### Admin password: the polkit authentication agent
+
+`ssh.set` needs `org.hinteros.system.ssh`, which is `auth_admin` (the admin password). The flow:
+
+1. The launcher calls `system.ssh.set {enabled: true}`; the session daemon relays it.
+2. `hinteros-system` checks the action with `CheckAuthorization` **with `AllowUserInteraction`**
+   (only the actions in `system::INTERACTIVE_ACTIONS`, today just this one) and a `unix-process`
+   subject for its peer, the session daemon. The request waits (at most `--auth-timeout-s`, 300 s;
+   then `CancelCheckAuthorization`), while the connection keeps serving other requests.
+3. polkit finds the agent registered for that process: the session daemon (`auth/`) registers one
+   at startup with `RegisterAuthenticationAgent`, subject `unix-process` with its own pidfd, pid,
+   start time and uid (again whenever polkit restarts). A process-scoped agent works although the
+   daemon is a user service outside the greetd session (threat model open question 4), and it
+   only ever sees requests whose subject is the daemon, i.e. calls it relayed.
+4. polkit calls `BeginAuthentication` (only accepted from the owner of
+   `org.freedesktop.PolicyKit1`); the daemon sends `authentication_requested {cookie, action,
+   message, identities}` to connections named `hinteros-launcher` only (non-root identities first;
+   it authenticates as the first) and waits up to `[auth] prompt_timeout_s` (120).
+5. The launcher answers `auth.respond {cookie, password}` (only a `hinteros-launcher` connection
+   may; others get `not_authorized`). The daemon runs polkit's helper for the identity: the
+   socket-activated helper (`/run/polkit/agent-helper.socket`, `polkit-agent-helper.socket`) when
+   it exists, else the setuid `polkit-agent-helper-1` (`[auth] helper`), writes the cookie, answers
+   the first PAM prompt with the password, and reads `SUCCESS`/`FAILURE` (protocol of polkit 127's
+   `polkitagenthelper-pam.c`/`polkitagentsession.c`). `{ok: true}`: the helper told polkit,
+   `BeginAuthentication` returns, polkit authorizes, `ssh.set` starts its job. `{ok: false,
+   attempts_left}`: try again; after 3 the request fails. `auth.cancel`, polkit's
+   `CancelAuthentication` and the timeout cancel it. `authentication_finished {cookie,
+   outcome: authorized|failed|cancelled}` tells the launcher.
+6. `ssh.set` answers: the job id; `authentication_required` (no agent, dismissed or timed out);
+   `permission_denied {reason: polkit}` (3 wrong passwords).
+
+The password is taken out of the request into a zeroizing buffer, the request line is wiped,
+it is written only to the helper's stdin (or socket) and wiped; it is never logged (a test greps
+the debug log). Responses to `system.*`, `auth.*`, `store.list` and `session.restart` may come out
+of order on a connection (they run as tasks, so the launcher can send `auth.respond` while
+`system.ssh.set` waits; relayed interactive calls wait up to 330 s).
+
+Verified here: the agent against a fake polkit authority on a private bus that plays polkitd
+(registration subject, `BeginAuthentication`/`CancelAuthentication`, a caller that is not
+polkit, a polkit restart) with a fake helper script speaking the helper's protocol; the socket
+helper protocol against a fake socket; the system service's interactive check (flags,
+cancellation id, timeout and `CancelCheckAuthorization`, dismissal) against the fake polkit; the
+relay not blocking. **Needs a real VM test** (system repo): real polkitd and PAM with the admin
+password: that polkit matches the system service's pidfd subject to the agent registered by the
+user service (hash of pid and start time), that the setuid helper works from the user unit (see
+`NoNewPrivileges` below) or the helper socket is used, that a wrong password gives `{ok: false}`
+and three give `permission_denied`, and that `ssh.set` then really enables sshd.
+
+### Session restart
+
+`session.restart` (after `job_finished {session_restart_required: true}` or `system_unavailable
+{reason: version_mismatch}`): the daemon answers `{}`, then asks logind to terminate the user's
+graphical session on seat0 (`User.Display`, else seat0's active session; it must be ours, on
+seat0, and its PAM `Service` one of `[session] restart_services`, default `greetd` and
+`greetd-greeter`, else `unavailable {service: logind, reason: not_greetd}`), so a desktop session
+is never ended. greetd's `default_session = initial_session` starts the session again with the new
+generation's gamescope and launcher. Then it asks the user's systemd (`[session] user_bus`, default
+the session bus) to `RestartUnit` its own unit (`[session] unit`, default from
+`/proc/self/cgroup`), so the new launcher meets the new daemon; apps the daemon started end with
+its cgroup. Why this way: logind lets a user end their own session without polkit; killing
+gamescope by pid would leave the logind session and the session scope behind; restarting greetd
+or terminating the user needs root or ends every user service; restarting only the unit would
+keep the old launcher. Verified against a fake logind and a fake user systemd; needs a VM test that
+greetd really comes back and the daemon restarts with the new store path.
+
+### Store backend
+
+System API 0.3, `apps.install {ids, revision, accepted_terms?}` and `apps.remove {ids, revision,
+delete_data}` (polkit `org.hinteros.system.apps`, seat check, rate limit, audit), in
+`crates/hinteros-system/src/store.rs`:
+
+- ids (1 to 8) are checked against the **running generation's** catalog index
+  (`--catalog-index`, default `<current-system>/sw/share/hinteros/catalog.json`, index version 2,
+  read by `hinteros_api::catalog`; never the caller's copy). Unknown id: `not_found`; retired or
+  removed: `invalid_params {reason: not_available}`; already installed: skipped (`job_id: null`
+  when nothing is left). `depends` are added transitively. A conflict either way with an installed
+  or requested app: `app_conflict` (3013, `{id, conflicts_with}`; catalog.md's 3012 was taken by
+  `authentication_required`). Every new app with vendor terms needs `accepted_terms[id] ==
+  terms.version`, else `terms_required` (3014, `{id, version}`); terms for apps the request does not
+  install are `invalid_params`. Stale `revision`: `state_conflict`. Free space: the new apps'
+  `sizeMiB` on top of the rebuild margin (`insufficient_resources`).
+- Accepted terms are audited (`HINTEROS_TERMS_ID`, `_TERMS_VERSION`, `_USER`, `_PROFILE`,
+  `_JOB_ID`) and the job records them before building in `/var/lib/hinteros/terms-accepted.json`
+  (0600, written atomically): `{"<id>": [{"version", "accepted_at" (RFC 3339 UTC), "by" (user name
+  or "installer")}]}`, a list per id so re-acceptance keeps the history (the installer writes the
+  same format).
+- `apps.remove`: every id must be installed (`not_found`); an app an installed app depends on
+  cannot go alone (`app_conflict`, naming the dependent). Removing works without a usable index
+  (a broken generation), but not with `delete_data`.
+- The job writes `state.json`'s `apps` from the typed state and runs the apply flow (job kinds
+  `apps_install`, `apps_remove`). With `delete_data`, after a successful switch it deletes the
+  removed apps' `dataPaths` (from the index, checked again: relative, no `.`/`..`, no wildcards)
+  in every profile home: the caller's home plus the homes of `state.json`'s profile users (M7),
+  from the user database, never root's. `datadel.rs` opens the home with `O_NOFOLLOW` (it must be a
+  directory owned by the profile's uid), every component with `openat(O_NOFOLLOW|O_DIRECTORY)`,
+  removes trees with `unlinkat` relative to directory descriptors, unlinks symlinks without
+  following them, refuses an intermediate symlink and never enters another filesystem; each
+  outcome is logged to the job's journal.
+- `settings.get` lists the installed apps; `update.check`'s `available` gains `new_apps` and
+  `removed_apps`: after verifying the tip, the job runs `nix eval --json --option
+  allow-import-from-derivation false "<input url>&rev=<rev>#lib.catalogIds"` and compares with the
+  running index (null when that fails; the update is still offered).
+
+Session API 0.8: `store.list` merges the index (`[store] index`) with `system.settings.get`'s apps:
+available apps plus installed ones whatever their status, by name, with `state`
+(`available|installed|installing|removing|retired|unavailable`; installing/removing from apps jobs
+relayed through this daemon), all catalog fields in snake_case, terms with the absolute path of the
+text so the launcher shows it offline, and `more_after_update` from the last update check's
+`new_apps`. `store_changed` after an apps job starts or finishes, any other switching job finishes,
+or `more_after_update` changes. `unavailable {service: catalog}` without an index (or an unknown
+index version); `system_unavailable` while the system service is down. `system.apps.install` and
+`system.apps.remove` are relayed. Verified against fake roots and fakes; needs the system repo's
+`store-install` VM test (real build, `apps.list` reload).
+
+### What the system repo must provide (0.8 / 0.3)
+
+- **polkit agent helper**: on NixOS the setuid wrapper `/run/wrappers/bin/polkit-agent-helper-1`
+  (`security.polkit.enable` provides it; the daemon's default `[auth] helper`). **The session
+  daemon's unit has `NoNewPrivileges=true`, which defeats setuid**: either enable polkit's
+  socket-activated helper (`polkit-agent-helper.socket` from the polkit package, socket at
+  `/run/polkit/agent-helper.socket`, which the daemon prefers; recommended, keeps
+  `NoNewPrivileges`) or drop `NoNewPrivileges` from `hinteros-session.service`.
+  `security.polkit.adminIdentities` names the admin account whose password is asked (polkit sends
+  the identities; root is only used if nothing else is offered).
+- **polkit actions**: `org.hinteros.system.apps` (defaults `no/no/no`, granted to `hinteros` by the
+  existing rule; the rule must keep excluding `org.hinteros.system.ssh`, which stays `auth_admin`
+  with a `message` the launcher shows, e.g. "Authentication is required to turn remote login (SSH)
+  on or off"). The user must be allowed to call `RegisterAuthenticationAgent` (polkit allows any
+  user to register for its own process).
+- **Catalog index** at `/run/current-system/sw/share/hinteros/catalog.json` and the **terms texts**
+  next to it in `share/hinteros/terms/` (the catalog's `packages.index` in `systemPackages`,
+  `pathsToLink` `/share/hinteros`).
+- **`lib.catalogIds`** in the system flake: `{ "<id>": { name, status, statusReason } }` (status
+  `available|retired|removed`), evaluable without building anything.
+- **`/var/lib/hinteros/terms-accepted.json`**: created by the job (the job unit already has
+  `StateDirectory=hinteros`); the installer writes the same format.
+- **greetd** with `default_session = initial_session` (as `session.nix` has it) and the session
+  daemon as the user unit `hinteros-session.service` (found from its cgroup); the daemon needs the
+  user's session bus (`DBUS_SESSION_BUS_ADDRESS`, set for user units) for `RestartUnit`.
+- VM tests to add: `polkit-agent` (enable SSH through the launcher path with the admin password:
+  right, wrong, cancelled), `session-restart`, `store-install` (catalog.md), and hostile `apps.*`
+  input in `system-escalation` (`../x`, store paths, unknown ids, terms for other apps, a symlinked
+  data path pointing out of the home).
+
+### What the launcher must do (session API 0.8)
+
+Say hello with 0.8 (client name `hinteros-launcher`), match responses by id (they may come out of
+order), and:
+
+- Subscribe to `authentication_requested`/`authentication_finished`. On a request show the admin
+  password dialog (`adminPasswordUi` on) with `message` and the first identity's name; send
+  `auth.respond`; on `{ok: false}` say "wrong password" and keep the dialog while `attempts_left >
+  0`; Back sends `auth.cancel`; close it on `authentication_finished`. Keep awaiting the
+  `system.ssh.set` call meanwhile; `authentication_required` after a cancel means "not changed".
+- Offer "Restart session" on `session_restart_required` and call `session.restart`; the launcher
+  is ended right after the answer and comes back with the new session.
+- Store: `store.list` (re-query on `store_changed` and after reconnecting); install with
+  `system.apps.install {ids, revision (from system.settings.get), accepted_terms}` after showing
+  each new app's (and dependency's) terms text from `terms.file` in full; `terms_required` means
+  show the named terms; `app_conflict` names the other app; remove with `system.apps.remove {ids,
+  revision, delete_data}` after closing the app (and confirming `data_paths` twice); progress from
+  the job events; "More apps after the next update" when `more_after_update`.
+
 ## Development
 
 ```sh
@@ -695,7 +898,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.7","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.8","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

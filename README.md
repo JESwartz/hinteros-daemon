@@ -135,12 +135,14 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   unchanged and `job_*` events forwarded. While the service is down or speaks another version,
   they fail with `system_unavailable {reason: down|version_mismatch}`.
 - **Admin password** (`auth/`): a polkit authentication agent for this process; prompts go to
-  the launcher (`authentication_requested`, `auth.respond`, `auth.cancel`). Session API 0.8; see
+  the launcher (`authentication_requested`, `auth.respond`, `auth.cancel`). Session API 0.8, 0.9; see
   "Admin password, session restart and Store" below.
 - **Session restart** (`restart.rs`): `session.restart` ends the greetd session through logind
   (greetd starts it again) and restarts the daemon's own user unit.
 - **Store** (`store.rs`): `store.list` merges the catalog index with the installed apps;
-  `store_changed`; `system.apps.install`/`.remove` are relayed.
+  `store_changed`; `system.apps.install`/`.remove` are relayed. Catalog icons are resolved like app
+  icons (`icon.path`, 0.9). **Reload** (`reload.rs`): the app list follows the config file and
+  the catalog without a restart; see "Store icons and the app list without a restart".
 - **Reaper** (`reaper.rs`): `hinteros-session reaper SteamLaunch AppId=<id> -- <command>` runs
   a command as a child subreaper named `reaper`, which is how gamescope (Steam mode) learns the
   app id of a process's windows, X11 and native Wayland alike. The daemon starts command apps
@@ -167,6 +169,7 @@ library_debounce_ms = 500      # wait after a library change before rescanning
 
 [close]
 timeout_ms = 5000              # apps.close: SIGKILL after this
+shutdown_grace_ms = 3000         # SIGTERM of the daemon: SIGKILL its apps after this
 
 [gamescope]
 enable = true
@@ -836,6 +839,47 @@ index version); `system_unavailable` while the system service is down. `system.a
 `system.apps.remove` are relayed. Verified against fake roots and fakes; needs the system repo's
 `store-install` VM test (real build, `apps.list` reload).
 
+### Store icons and the app list without a restart (session API 0.9)
+
+**Store icons.** Every `store.list` entry's `icon` object gains an optional `path`: the resolved
+icon on this box, absent until there is one. The daemon resolves the catalog index's `icon` fields
+like an app's: `desktopId` (when the app happens to be installed, through its desktop file and the
+icon themes), else `iconUrl` or `siteUrl` downloaded into the same cache
+(`$XDG_CACHE_HOME/hinteros/icons/<id>.<ext>`, https only, the same limits, `icons.refresh_days`
+refresh, and the same 1 min / 10 min / 1 h / 6 h retries, in the same background thread). An
+installed app's own `[[apps]]` entry wins for the same id. `store_changed` is sent when a catalog
+icon arrives (and `apps_changed` when an app's does). `icons.fetch = false` turns downloads off
+for both. The catalog is re-read on a new generation. Why 0.9: the schema's `icon` object is closed
+(`additionalProperties: false`), and while the major version is 0 every minor is breaking for a
+client built against the old schema; the new field is the only change to an existing object.
+
+**Reloading the app list.** The daemon watches the config file named by `--config` (default
+`$XDG_CONFIG_HOME/hinteros/session.toml`, also while it does not exist yet) and the catalog
+index. NixOS switches by replacing symlinks, so inotify watches every directory along the path's
+symlink chain (the file's, and each directory symlink such as `/etc/static`), not only the file.
+A change, the end of any system job (`job_finished`: a switch is done) or the 30 s safety-net
+check makes the daemon re-read the config (the same loading as at startup, command-line overrides
+included) and compare. A changed `[[apps]]` list replaces the list `apps.list` and `apps.launch`
+use, icons are re-resolved (desktop files of newly installed apps appear), and `apps_changed` is
+sent. Only `[[apps]]` is reloaded; everything else in the file needs a restart. A file that does
+not parse or validate is logged (once) and the old list stays.
+
+Running apps keep running: an app that was removed from the list while it runs stays in
+`apps.running`, can be focused and closed, and leaves when it exits; it just cannot be launched
+again. Steam, Steam games and `apps.launch {command}` are unaffected.
+
+### Shutdown
+
+On SIGTERM or SIGINT the daemon ends the processes it started: every app's reaper (and so the app's
+process group), the launcher and the on-screen keyboard get SIGTERM, then SIGKILL (descendants
+first) after `close.shutdown_grace_ms` (3000), and it exits. Steam and the games it runs are not
+the daemon's and are left alone. A `reaper` also sets `PR_SET_PDEATHSIG`: if the daemon dies without
+cleaning up (SIGKILL, a crash), the kernel sends each reaper SIGTERM, which it forwards to the app's
+process group, so no `reaper ... sleep 60` is left behind. Verified in `tests/shutdown.rs` (SIGTERM,
+a TERM-ignoring app killed after the grace period, SIGKILL of the daemon) and `tests/reload.rs`
+(reload with a symlink switch, broken file, running removed app; Store icons from a local HTTP
+server, `--icon-allow-http`, a hidden test flag).
+
 ### What the system repo must provide (0.8 / 0.3)
 
 - **polkit agent helper**: on NixOS the setuid wrapper `/run/wrappers/bin/polkit-agent-helper-1`
@@ -866,9 +910,9 @@ index version); `system_unavailable` while the system service is down. `system.a
   input in `system-escalation` (`../x`, store paths, unknown ids, terms for other apps, a symlinked
   data path pointing out of the home).
 
-### What the launcher must do (session API 0.8)
+### What the launcher must do (session API 0.9)
 
-Say hello with 0.8 (client name `hinteros-launcher`), match responses by id (they may come out of
+Say hello with 0.9 (client name `hinteros-launcher`), match responses by id (they may come out of
 order), and:
 
 - Subscribe to `authentication_requested`/`authentication_finished`. On a request show the admin
@@ -898,7 +942,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.8","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.9","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

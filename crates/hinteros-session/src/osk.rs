@@ -36,6 +36,34 @@ pub const TRANSPARENT: u32 = 0;
 
 /// Whether a top-level window belongs to the OSK. `osk_pid` is the process the daemon started
 /// (0: none).
+/// Set by [`restart`] so that [`supervise`] starts the next one without its usual pause.
+static RESTART_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Make the running OSK exit so that [`supervise`] starts a new one (an overlay is sized by
+/// gamescope when it is mapped, so after a display mode change it must be mapped again).
+/// Returns whether there was one to stop.
+pub fn restart(pid: &AtomicU32) -> bool {
+    let id = pid.load(Ordering::SeqCst);
+    let Some(target) = i32::try_from(id)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return false;
+    };
+    RESTART_REQUESTED.store(true, Ordering::SeqCst);
+    match rustix::process::kill_process(target, rustix::process::Signal::TERM) {
+        Ok(()) => true,
+        Err(e) => {
+            RESTART_REQUESTED.store(false, Ordering::SeqCst);
+            warn!(
+                pid = id,
+                "cannot stop the on-screen keyboard to restart it: {e}"
+            );
+            false
+        }
+    }
+}
+
 pub fn is_osk_window(info: &WindowInfo, osk_pid: u32) -> bool {
     let named = |s: &str| {
         let s = s.trim_start_matches('.');
@@ -82,6 +110,9 @@ pub async fn supervise(
                 pid.store(id, Ordering::SeqCst);
                 info!(pid = id, ?argv, "on-screen keyboard started");
                 match child.wait().await {
+                    Ok(status) if RESTART_REQUESTED.load(Ordering::SeqCst) => {
+                        info!(%status, "on-screen keyboard stopped; restarting it")
+                    }
                     Ok(status) => warn!(%status, "on-screen keyboard exited; restarting"),
                     Err(e) => warn!("waiting for the on-screen keyboard: {e}"),
                 }
@@ -90,7 +121,12 @@ pub async fn supervise(
             }
             Err(e) => error!(?argv, "cannot start the on-screen keyboard: {e}"),
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        let pause = if RESTART_REQUESTED.swap(false, Ordering::SeqCst) {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(2)
+        };
+        tokio::time::sleep(pause).await;
     }
 }
 

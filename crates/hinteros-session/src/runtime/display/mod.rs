@@ -5,7 +5,8 @@
 //! * **Listing modes**: with `GAMESCOPE_PATCHED_EDID_FILE=<path>` set, gamescope writes the
 //!   connector's modes, one `WxH@R` per line in its own preference order, to `<path>.modes`
 //!   every time it picks a connector. The first line is the display's preferred mode.
-//! * **The current mode**: gamescope's Wayland `wl_output` (the one it shows Wayland clients)
+//! * **The current mode**: gamescope's Wayland `wl_output` (all are read, the display's is picked by
+//!   connector name, else make/model, else not gamescope's own virtual one; see `control::pick_output`)
 //!   reports the output size and refresh (`wl_output.mode`, current flag), and its private
 //!   `gamescope_control` protocol names the display (`active_display_info`: make, model,
 //!   internal or external). Both arrive when a client binds ([`control`]).
@@ -23,6 +24,9 @@
 //!   changes nothing; `display.set_mode` notices (the mode does not change), puts the file
 //!   back and answers `device_failed {reason: not_applied}`. Internal panels ignore the save
 //!   file too, so `can_set` is false for them.
+//!
+//! A kept (or reverted) mode change restarts the on-screen keyboard, whose overlay window gamescope
+//! sizes only when it maps it. On a failed switch the log says what gamescope showed.
 //!
 //! The 15-second keep-or-revert flow: `display.set_mode` remembers the mode it replaced,
 //! `display.keep` forgets it, `display.revert` goes back to it.
@@ -303,16 +307,26 @@ async fn apply(ctx: &Ctx, info: &control::Info, target: Mode) -> Result<(), Erro
         .map_err(|e| failed("nudge_failed", e.to_string()))??;
 
     let deadline = Instant::now() + Duration::from_millis(ctx.display.apply_timeout_ms);
+    let last;
     loop {
         sleep(Duration::from_millis(150)).await;
-        if query(ctx).await.and_then(|i| i.mode) == Some(target) {
+        let seen = query(ctx).await;
+        if seen.as_ref().and_then(|i| i.mode) == Some(target) {
             return Ok(());
         }
         if Instant::now() >= deadline {
+            last = seen;
             break;
         }
     }
-    warn!(mode = %mode_text(target), "gamescope did not switch; restoring the mode file");
+    let saw = match last {
+        Some(i) => i.describe_outputs(),
+        None => "gamescope's Wayland display not reachable".into(),
+    };
+    warn!(
+        "gamescope did not switch: expected {}, saw {saw}; restoring the mode file",
+        mode_text(target)
+    );
     if let Err(e) = write_atomically(&save, &before) {
         warn!("cannot restore {}: {e}", save.display());
     }
@@ -365,11 +379,25 @@ pub async fn set_mode(ctx: &Ctx, target: Mode) -> Result<DisplaySetResult, Error
     })
 }
 
+/// The on-screen keyboard is an overlay that gamescope sizes when it maps the window, so it
+/// is started again to pick up the new screen size.
+fn restart_osk(ctx: &Ctx) {
+    if crate::osk::restart(&ctx.osk_pid) {
+        info!("restarting the on-screen keyboard for the new display mode");
+    }
+}
+
 pub async fn keep(ctx: &Ctx) -> Result<Empty, ErrorObject> {
-    *ctx.display_state
+    let changed = ctx
+        .display_state
         .pending
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) = None;
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .is_some();
+    if changed {
+        restart_osk(ctx);
+    }
     Ok(Empty {})
 }
 
@@ -393,6 +421,7 @@ pub async fn revert(ctx: &Ctx) -> Result<DisplayRevertResult, ErrorObject> {
     })?;
     if info.mode != Some(previous) {
         apply(ctx, &info, previous).await?;
+        restart_osk(ctx);
     }
     Ok(DisplayRevertResult { current: previous })
 }

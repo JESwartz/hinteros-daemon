@@ -71,16 +71,45 @@ impl ClientData for NoData {
     fn disconnected(&self, _: ClientId, _: DisconnectReason) {}
 }
 
-impl GlobalDispatch<WlOutput, ()> for Compositor {
+/// Global data: whether this is gamescope's own virtual output (for the second Xwayland), not
+/// the display.
+impl GlobalDispatch<WlOutput, bool> for Compositor {
     fn bind(
         state: &mut Self,
         _: &DisplayHandle,
         _: &Client,
         resource: New<WlOutput>,
-        _: &(),
+        decoy: &bool,
         init: &mut DataInit<'_, Self>,
     ) {
         let out = init.init(resource, ());
+        if *decoy {
+            out.geometry(
+                0,
+                0,
+                0,
+                0,
+                wl_output::Subpixel::Unknown,
+                "gamescope".into(),
+                "Virtual".into(),
+                wl_output::Transform::Normal,
+            );
+            out.name("xwayland-virtual".into());
+            out.mode(wl_output::Mode::Current, 1024, 768, 75_000);
+            out.done();
+            return;
+        }
+        out.geometry(
+            0,
+            0,
+            0,
+            0,
+            wl_output::Subpixel::Unknown,
+            "Sony".into(),
+            "TV".into(),
+            wl_output::Transform::Normal,
+        );
+        out.name("HDMI-A-1".into());
         let M(w, h, r) = *state.shared.current.lock().unwrap();
         out.mode(
             wl_output::Mode::Current | wl_output::Mode::Preferred,
@@ -195,7 +224,9 @@ impl FakeGamescope {
         threads.push(thread::spawn(move || {
             let mut display = Display::<Compositor>::new().unwrap();
             let dh = display.handle();
-            dh.create_global::<Compositor, WlOutput, ()>(4, ());
+            // The decoy comes first: the first output is not the display.
+            dh.create_global::<Compositor, WlOutput, bool>(4, true);
+            dh.create_global::<Compositor, WlOutput, bool>(4, false);
             dh.create_global::<Compositor, GamescopeControl, ()>(7, ());
             let socket = ListeningSocket::bind_absolute(path).unwrap();
             let mut state = Compositor { shared: s.clone() };
@@ -304,6 +335,11 @@ impl FakeGamescope {
 
     /// The daemon, configured the way the system repo configures the session.
     fn daemon(&self, apply_timeout_ms: u64, with_save_file: bool) -> Daemon {
+        self.daemon_with(apply_timeout_ms, with_save_file, "")
+    }
+
+    fn daemon_with(&self, apply_timeout_ms: u64, with_save_file: bool, extra: &str) -> Daemon {
+        let extra = extra.to_owned();
         let display = self.display.clone();
         let wayland = self.wayland.clone();
         let dir = self.dir.path().to_owned();
@@ -313,7 +349,7 @@ impl FakeGamescope {
                 std::fs::write(
                     &config,
                     format!(
-                        "[gamescope]\nwayland_display = \"{}\"\n[display]\napply_timeout_ms = {apply_timeout_ms}\n",
+                        "[gamescope]\nwayland_display = \"{}\"\n[display]\napply_timeout_ms = {apply_timeout_ms}\n{extra}",
                         wayland.display()
                     ),
                 )
@@ -656,4 +692,74 @@ async fn gamescope_without_a_wayland_display() {
     let e = call(&mut c, "display.modes", json!({})).await.unwrap_err();
     assert_eq!(e["code"], 4001);
     assert_eq!(e["data"]["service"], "display");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_display_is_not_the_first_output() {
+    // gamescope also advertises a virtual output (1024x768@75) first; the mode listed is
+    // the display's, found by its connector.
+    let Some(gs) = FakeGamescope::start(true, false) else {
+        return;
+    };
+    let d = gs.daemon(3000, true);
+    let mut c = d.client().await;
+    let modes = call(&mut c, "display.modes", json!({})).await.unwrap();
+    assert_eq!(current_of(&modes), [(3840, 2160, 60)]);
+    let r = call(&mut c, "display.set_mode", mode(1280, 720, 60))
+        .await
+        .unwrap();
+    assert_eq!(r["previous"], mode(3840, 2160, 60));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_switch_says_what_gamescope_showed() {
+    let Some(gs) = FakeGamescope::start(false, false) else {
+        return;
+    };
+    let d = gs.daemon(500, true);
+    let mut c = d.client().await;
+    call(&mut c, "display.set_mode", mode(1280, 720, 60))
+        .await
+        .unwrap_err();
+    let log = d.log();
+    let line = log
+        .lines()
+        .find(|l| l.contains("gamescope did not switch"))
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!(line.contains("expected 1280x720@60"), "{line}");
+    assert!(
+        line.contains(r#""HDMI-A-1" (Sony TV) 3840x2160@60"#),
+        "{line}"
+    );
+    assert!(line.contains("1024x768@75"), "{line}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kept_mode_change_restarts_the_on_screen_keyboard() {
+    let Some(gs) = FakeGamescope::start(true, false) else {
+        return;
+    };
+    let d = gs.daemon_with(3000, true, "[osk]\ncommand = [\"sleep\", \"300\"]\n");
+    let mut c = d.client().await;
+    let started = |d: &Daemon| d.log().matches("on-screen keyboard started").count();
+    eventually("the on-screen keyboard", async || {
+        (started(&d) == 1).then_some(())
+    })
+    .await;
+    // Reverting nothing and keeping nothing leave it alone.
+    call(&mut c, "display.keep", json!({})).await.unwrap();
+    call(&mut c, "display.set_mode", mode(1280, 720, 60))
+        .await
+        .unwrap();
+    assert_eq!(started(&d), 1);
+    call(&mut c, "display.keep", json!({})).await.unwrap();
+    eventually("the restart", async || (started(&d) == 2).then_some(())).await;
+    assert!(
+        d.log()
+            .contains("restarting the on-screen keyboard for the new display mode")
+    );
+    // Keeping again changes nothing, so it is not restarted again.
+    call(&mut c, "display.keep", json!({})).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(started(&d), 2);
 }

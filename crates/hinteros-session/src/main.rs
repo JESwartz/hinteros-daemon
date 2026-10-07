@@ -286,7 +286,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         tokio::spawn(osk::supervise(
             config.osk.command.clone(),
             osk_env,
-            osk_pid,
+            osk_pid.clone(),
             children.clone(),
         ));
     }
@@ -299,7 +299,8 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         hinteros_session::system::Relay::disabled()
     };
 
-    let runtime = hinteros_session::runtime::Runtime::spawn(&config, events.clone());
+    let runtime =
+        hinteros_session::runtime::Runtime::spawn(&config, events.clone(), osk_pid.clone());
     let services = server::Services {
         relay,
         runtime,

@@ -17,6 +17,7 @@ pub mod network;
 pub mod power;
 
 use std::future::Future;
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 
 use std::time::Duration;
@@ -48,6 +49,8 @@ pub struct Ctx {
     conn: OnceCell<Connection>,
     pub bt: bluetooth::Shared,
     pub display_state: display::Shared,
+    /// Pid of the on-screen keyboard the daemon runs (0: none), restarted after a mode change.
+    pub osk_pid: Arc<AtomicU32>,
     /// The audio state the clients last heard.
     pub audio_last: Mutex<Option<hinteros_api::session::AudioState>>,
 }
@@ -120,7 +123,11 @@ where
 
 impl Runtime {
     /// Start the watchers that send `network_changed` and friends.
-    pub fn spawn(config: &Config, events: broadcast::Sender<Broadcast>) -> Self {
+    pub fn spawn(
+        config: &Config,
+        events: broadcast::Sender<Broadcast>,
+        osk_pid: Arc<AtomicU32>,
+    ) -> Self {
         let ctx = Arc::new(Ctx {
             enabled: config.runtime.enable,
             bus: config.runtime.bus.clone(),
@@ -133,6 +140,7 @@ impl Runtime {
             conn: OnceCell::new(),
             bt: bluetooth::Shared::default(),
             display_state: display::Shared::default(),
+            osk_pid,
             audio_last: Mutex::new(None),
         });
         if ctx.enabled {

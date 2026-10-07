@@ -36,17 +36,33 @@ impl Manager {
     }
 }
 
-struct Composite(Arc<AtomicU32>);
+struct Composite {
+    mode: Arc<AtomicU32>,
+    name: String,
+    targets: Vec<String>,
+}
 
 #[zbus::interface(name = "org.shadowblip.Input.CompositeDevice")]
 impl Composite {
     #[zbus(property)]
     fn intercept_mode(&self) -> u32 {
-        self.0.load(Ordering::SeqCst)
+        self.mode.load(Ordering::SeqCst)
     }
     #[zbus(property)]
     fn set_intercept_mode(&mut self, value: u32) {
-        self.0.store(value, Ordering::SeqCst);
+        self.mode.store(value, Ordering::SeqCst);
+    }
+    #[zbus(property)]
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+    #[zbus(property, name = "DBusDevices")]
+    fn dbus_devices(&self) -> Vec<String> {
+        self.targets.clone()
+    }
+    #[zbus(property)]
+    fn source_device_paths(&self) -> Vec<String> {
+        vec!["/dev/input/event99".into()]
     }
 }
 
@@ -69,6 +85,10 @@ struct Fake {
 
 impl Fake {
     async fn start(address: &str) -> Self {
+        Self::start_named(address, "Generic Gamepad").await
+    }
+
+    async fn start_named(address: &str, name: &str) -> Self {
         let manage_all = Arc::new(AtomicBool::new(false));
         let mode = Arc::new(AtomicU32::new(0));
         let conn = zbus::connection::Builder::address(address)
@@ -77,7 +97,14 @@ impl Fake {
             .unwrap()
             .serve_at(MANAGER, Manager(manage_all.clone()))
             .unwrap()
-            .serve_at(device(0), Composite(mode.clone()))
+            .serve_at(
+                device(0),
+                Composite {
+                    mode: mode.clone(),
+                    name: name.into(),
+                    targets: vec![TARGET.into()],
+                },
+            )
             .unwrap()
             .serve_at(TARGET, DBusDevice)
             .unwrap()
@@ -103,17 +130,52 @@ impl Fake {
         let path = device(self.modes.len() as u32);
         self.conn
             .object_server()
-            .at(path, Composite(mode.clone()))
+            .at(
+                path,
+                Composite {
+                    mode: mode.clone(),
+                    name: "Generic Gamepad".into(),
+                    targets: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        self.modes.push(mode);
+    }
+
+    /// Plug in a named pad with its own D-Bus target.
+    async fn add_pad(&mut self, name: &str, target: &str) {
+        let mode = Arc::new(AtomicU32::new(0));
+        let path = device(self.modes.len() as u32);
+        self.conn
+            .object_server()
+            .at(target.to_string(), DBusDevice)
+            .await
+            .unwrap();
+        self.conn
+            .object_server()
+            .at(
+                path,
+                Composite {
+                    mode: mode.clone(),
+                    name: name.into(),
+                    targets: vec![target.into()],
+                },
+            )
             .await
             .unwrap();
         self.modes.push(mode);
     }
 
     async fn press(&self, event: &str, value: f64) {
+        self.press_on(TARGET, event, value).await;
+    }
+
+    async fn press_on(&self, target: &str, event: &str, value: f64) {
         self.conn
             .emit_signal(
                 None::<BusName<'_>>,
-                TARGET,
+                target,
                 "org.shadowblip.Input.DBusDevice",
                 "InputEvent",
                 &(event, value),
@@ -418,4 +480,72 @@ context = "ctrl+l"
         assert!(log.contains(line), "{line:?} not in the log");
     }
     assert!(log.contains("button=ui_context"));
+}
+
+#[tokio::test]
+async fn xbox_pad_labels_are_swapped_per_device() {
+    let Some(bus) = Bus::start() else { return };
+    let address = bus.address.clone();
+    let d = Daemon::start_with(|_| {
+        vec![
+            "--inputplumber".into(),
+            "--inputplumber-bus".into(),
+            address.into(),
+        ]
+    });
+    let mut c = d.client().await;
+    call(
+        &mut c,
+        "subscribe",
+        json!({ "events": ["input_nav", "osk_visibility", "home_pressed"] }),
+    )
+    .await
+    .unwrap();
+    let mut fake = Fake::start_named(&bus.address, "Microsoft X-Box One pad").await;
+    ready(&fake, 0, 2).await;
+    let ds_target = format!("{ROOT}/devices/target/dbus1");
+    fake.add_pad(
+        "Sony Interactive Entertainment DualSense Wireless Controller",
+        &ds_target,
+    )
+    .await;
+    ready(&fake, 1, 2).await;
+
+    // The Xbox pad: physical Y (ui_action) is Context, physical X (ui_context) is Secondary.
+    for (raw, action) in [("ui_action", "context"), ("ui_context", "secondary")] {
+        fake.press(raw, 1.0).await;
+        assert_eq!(nav(&mut c).await, (action.into(), "press".into()));
+        fake.press(raw, 0.0).await;
+        assert_eq!(nav(&mut c).await, (action.into(), "release".into()));
+    }
+    // The DualSense is not swapped: triangle arrives as ui_context and stays Context.
+    fake.press_on(&ds_target, "ui_action", 1.0).await;
+    assert_eq!(nav(&mut c).await, ("secondary".into(), "press".into()));
+    fake.press_on(&ds_target, "ui_action", 0.0).await;
+    assert_eq!(nav(&mut c).await, ("secondary".into(), "release".into()));
+    fake.press_on(&ds_target, "ui_context", 1.0).await;
+    assert_eq!(nav(&mut c).await, ("context".into(), "press".into()));
+    fake.press_on(&ds_target, "ui_context", 0.0).await;
+    assert_eq!(nav(&mut c).await, ("context".into(), "release".into()));
+
+    // Guide + physical Y on the Xbox pad (ui_action) summons the on-screen keyboard.
+    fake.press("ui_guide", 1.0).await;
+    fake.press("ui_action", 1.0).await;
+    fake.press("ui_action", 0.0).await;
+    fake.press("ui_guide", 0.0).await;
+    assert_eq!(
+        event_named(&mut c, "osk_visibility").await,
+        json!({ "visible": true })
+    );
+    let log = d.log();
+    assert!(
+        log.contains(
+            "Xbox layout: swapping ui_action/ui_context labels for Microsoft X-Box One pad"
+        ),
+        "{log}"
+    );
+    assert!(
+        !log.contains("Xbox layout: swapping ui_action/ui_context labels for Sony"),
+        "{log}"
+    );
 }

@@ -6,7 +6,7 @@
 //! composite device that appears later (one per pad). If there is no bus or no InputPlumber,
 //! this logs and waits; the rest of the daemon works without it.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -18,7 +18,7 @@ use zbus::names::BusName;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath};
 use zbus::{Connection, MatchRule, MessageStream, Proxy};
 
-use super::{InputControl, InterceptMode, RawInput};
+use super::{InputControl, InterceptMode, LabelSwap, RawInput, swap_xbox_label, xbox_layout};
 
 pub const SERVICE: &str = "org.shadowblip.InputPlumber";
 /// Where InputPlumber's ObjectManager lives; all its objects are below.
@@ -44,11 +44,12 @@ impl InputControl for InputPlumber {
 pub fn spawn(
     bus: Option<String>,
     initial: InterceptMode,
+    swap: LabelSwap,
     events: mpsc::UnboundedSender<RawInput>,
 ) -> InputPlumber {
     let (tx, rx) = watch::channel(initial);
     tokio::spawn(async move {
-        if let Err(e) = run(bus, rx, events).await {
+        if let Err(e) = run(bus, rx, swap, events).await {
             warn!("InputPlumber integration stopped: {e:#}");
         }
     });
@@ -65,6 +66,7 @@ async fn connect(bus: Option<&str>) -> zbus::Result<Connection> {
 async fn run(
     bus: Option<String>,
     mut mode: watch::Receiver<InterceptMode>,
+    swap: LabelSwap,
     events: mpsc::UnboundedSender<RawInput>,
 ) -> Result<()> {
     let conn = match connect(bus.as_deref()).await {
@@ -93,11 +95,12 @@ async fn run(
         .build();
     let mut inputs = MessageStream::for_match_rule(rule, &conn, Some(256)).await?;
 
-    let mut devices = HashSet::new();
+    let mut devices: Devices = HashMap::new();
+    let mut targets: HashMap<String, bool> = HashMap::new();
     let service = BusName::try_from(SERVICE)?;
     if dbus.name_has_owner(service).await? {
         let m = *mode.borrow_and_update();
-        setup(&conn, &objects, &mut devices, m).await;
+        setup(&conn, &objects, &mut devices, m, swap).await;
     } else {
         info!("waiting for InputPlumber ({SERVICE}) to appear on D-Bus");
     }
@@ -106,10 +109,11 @@ async fn run(
         tokio::select! {
             Some(change) = owner_changes.next() => {
                 devices.clear();
+                targets.clear();
                 if change.args()?.new_owner().is_some() {
                     info!("InputPlumber appeared");
                     let m = *mode.borrow_and_update();
-                    setup(&conn, &objects, &mut devices, m).await;
+                    setup(&conn, &objects, &mut devices, m, swap).await;
                 } else {
                     warn!("InputPlumber went away; waiting for it to come back");
                 }
@@ -121,7 +125,8 @@ async fn run(
                     info!(device = %path, "new controller");
                     let m = *mode.borrow();
                     apply(&conn, &path, m).await;
-                    devices.insert(path);
+                    devices.insert(path.clone(), classify(&conn, &path, swap).await);
+                    targets.clear();
                 }
             }
             Some(signal) = removed.next() => {
@@ -129,6 +134,7 @@ async fn run(
                 if args.interfaces().iter().any(|i| i.as_str() == COMPOSITE_IFACE) {
                     info!(device = %args.object_path(), "controller gone");
                     devices.remove(&OwnedObjectPath::from(args.object_path().clone()));
+                    targets.clear();
                 }
             }
             Some(msg) = inputs.next() => {
@@ -137,6 +143,11 @@ async fn run(
                 match msg.body().deserialize::<(String, f64)>() {
                     Ok((event, value)) => {
                         debug!(%source, %event, value, "input");
+                        let event = if swaps(&conn, &devices, &mut targets, &source).await {
+                            swap_xbox_label(&event).to_string()
+                        } else {
+                            event
+                        };
                         if events.send(RawInput { source, event, value }).is_err() {
                             return Ok(());
                         }
@@ -150,7 +161,7 @@ async fn run(
                 }
                 let m = *mode.borrow_and_update();
                 debug!(mode = ?m, devices = devices.len(), "intercept mode");
-                for path in &devices {
+                for path in devices.keys() {
                     apply(&conn, path, m).await;
                 }
             }
@@ -163,8 +174,9 @@ async fn run(
 async fn setup(
     conn: &Connection,
     objects: &ObjectManagerProxy<'_>,
-    devices: &mut HashSet<OwnedObjectPath>,
+    devices: &mut Devices,
     mode: InterceptMode,
+    swap: LabelSwap,
 ) {
     let result: Result<()> = async {
         let manager = Proxy::new(conn, SERVICE, MANAGER_PATH, MANAGER_IFACE).await?;
@@ -175,7 +187,8 @@ async fn setup(
         for (path, interfaces) in objects.get_managed_objects().await? {
             if interfaces.keys().any(|i| i.as_str() == COMPOSITE_IFACE) {
                 apply(conn, &path, mode).await;
-                devices.insert(path);
+                let label_swap = classify(conn, &path, swap).await;
+                devices.insert(path, label_swap);
             }
         }
         Ok(())
@@ -196,5 +209,86 @@ async fn apply(conn: &Connection, path: &ObjectPath<'_>, mode: InterceptMode) {
     .await;
     if let Err(e) = result {
         warn!(device = %path, ?mode, "setting InterceptMode: {e}");
+    }
+}
+
+/// Per composite device: whether its `ui_action`/`ui_context` labels get swapped.
+type Devices = HashMap<OwnedObjectPath, bool>;
+
+/// Decide (and log) the Xbox label swap for a composite device.
+async fn classify(conn: &Connection, path: &ObjectPath<'_>, swap: LabelSwap) -> bool {
+    let proxy = Proxy::new(conn, SERVICE, path.to_owned(), COMPOSITE_IFACE).await;
+    let name: String = match &proxy {
+        Ok(p) => p.get_property("Name").await.unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    let sources: Vec<String> = match &proxy {
+        Ok(p) => p
+            .get_property("SourceDevicePaths")
+            .await
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let drivers: Vec<String> = sources.iter().filter_map(|s| source_driver(s)).collect();
+    let (swapped, why) = match swap {
+        LabelSwap::Off => (false, "disabled"),
+        LabelSwap::On => (true, "forced"),
+        LabelSwap::Auto => match xbox_layout(&name, &drivers) {
+            Some(why) => (true, why),
+            None => (false, "not an Xbox layout"),
+        },
+    };
+    if swapped {
+        info!(%why, ?drivers, "Xbox layout: swapping ui_action/ui_context labels for {name}");
+    } else {
+        info!(%why, ?drivers, "not swapping ui_action/ui_context labels for {name}");
+    }
+    swapped
+}
+
+/// The kernel driver bound to an input (`/dev/input/eventN`) or hidraw source device.
+fn source_driver(dev: &str) -> Option<String> {
+    let path = std::path::Path::new(dev);
+    let node = path.file_name()?.to_str()?;
+    let link = if dev.starts_with("/dev/input/") {
+        format!("/sys/class/input/{node}/device/device/driver")
+    } else if dev.starts_with("/dev/hidraw") {
+        format!("/sys/class/hidraw/{node}/device/driver")
+    } else {
+        return None;
+    };
+    let target = std::fs::read_link(link).ok()?;
+    Some(target.file_name()?.to_str()?.to_string())
+}
+
+/// Whether events from the D-Bus target `source` get their labels swapped: maps the target
+/// back to its composite device through the `DBusDevices` property (cached in `targets`; asked
+/// again when a target is not known yet, as targets appear after their composite device). A
+/// target nobody claims follows the only pad when there is exactly one.
+async fn swaps(
+    conn: &Connection,
+    devices: &Devices,
+    targets: &mut HashMap<String, bool>,
+    source: &str,
+) -> bool {
+    if !devices.values().any(|&s| s) {
+        return false;
+    }
+    if !targets.contains_key(source) {
+        for (path, &swapped) in devices {
+            let Ok(proxy) = Proxy::new(conn, SERVICE, path.to_owned(), COMPOSITE_IFACE).await
+            else {
+                continue;
+            };
+            if let Ok(paths) = proxy.get_property::<Vec<String>>("DBusDevices").await {
+                for t in paths {
+                    targets.insert(t, swapped);
+                }
+            }
+        }
+    }
+    match targets.get(source) {
+        Some(&s) => s,
+        None => devices.len() == 1 && devices.values().all(|&s| s),
     }
 }

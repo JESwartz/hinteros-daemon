@@ -93,6 +93,51 @@ pub fn translate(event: &str) -> Option<Intent> {
     Some(Intent::Nav(nav))
 }
 
+/// `[input] xbox_label_swap`: whether to swap `ui_action` and `ui_context` for Xbox pads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LabelSwap {
+    /// Decide per pad with [`xbox_layout`].
+    #[default]
+    Auto,
+    /// Swap on every pad.
+    On,
+    /// Never swap.
+    Off,
+}
+
+/// Whether a composite device uses the Xbox button layout that InputPlumber (0.81) maps
+/// positionally: xpad reports the top button as `BTN_Y` (=`BTN_WEST`) and the left one as
+/// `BTN_X` (=`BTN_NORTH`), so physical Y arrives as `ui_action` and X as `ui_context`, the
+/// other way round from every other pad. `name` is the CompositeDevice `Name` (the device
+/// config's name), `drivers` the kernel drivers of its event sources (`xpad`, `playstation`,
+/// `microsoft`, ...; empty when unknown). Returns the reason when the labels need swapping.
+///
+/// Driver first: `xpad` is the case seen on real hardware. A Bluetooth Xbox pad (config name
+/// "Microsoft X-Box One pad" too, but driver `microsoft` and a hidraw source that InputPlumber
+/// decodes itself) is not known to share the quirk, so it is left alone unless forced with
+/// `xbox_label_swap = "on"`. Without any driver information the config name decides.
+pub fn xbox_layout(name: &str, drivers: &[String]) -> Option<&'static str> {
+    if drivers.iter().any(|d| d == "xpad") {
+        return Some("xpad driver");
+    }
+    if !drivers.is_empty() {
+        return None;
+    }
+    // Configs: "Microsoft X-Box pad", "... 360 pad", "... One pad", "... One Elite pad".
+    name.starts_with("Microsoft X-Box")
+        .then_some("Xbox device config")
+}
+
+/// `ui_action` and `ui_context` exchanged; everything else unchanged.
+pub fn swap_xbox_label(event: &str) -> &str {
+    match event {
+        "ui_action" => "ui_context",
+        "ui_context" => "ui_action",
+        other => other,
+    }
+}
+
 /// Key repeat for held directions: the most recently pressed direction repeats after `delay`,
 /// then every `interval`, until it is released or another direction is pressed.
 #[derive(Debug)]
@@ -197,6 +242,31 @@ mod tests {
         for a in NavAction::ALL {
             assert!(reachable.contains(a), "{a:?}");
         }
+    }
+
+    #[test]
+    fn xbox_layout_detection() {
+        let d = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(xbox_layout("Microsoft X-Box One pad", &d(&["xpad"])).is_some());
+        assert!(xbox_layout("Whatever", &d(&["xpad", "usbhid"])).is_some());
+        assert!(xbox_layout("Microsoft X-Box 360 pad", &[]).is_some());
+        assert!(xbox_layout("Microsoft X-Box One Elite pad", &[]).is_some());
+        // Bluetooth Xbox (hid-microsoft), PlayStation, Switch, 8BitDo: untouched.
+        assert!(xbox_layout("Microsoft X-Box One pad", &d(&["microsoft"])).is_none());
+        assert!(
+            xbox_layout(
+                "Sony Interactive Entertainment DualSense Wireless Controller",
+                &[]
+            )
+            .is_none()
+        );
+        assert!(xbox_layout("Sony DualSense", &d(&["playstation"])).is_none());
+        assert!(xbox_layout("Nintendo Co., Ltd. Pro Controller", &d(&["nintendo"])).is_none());
+        assert!(xbox_layout("8BitDo 8BitDo Pro 2", &[]).is_none());
+        assert!(xbox_layout("", &[]).is_none());
+        assert_eq!(swap_xbox_label("ui_action"), "ui_context");
+        assert_eq!(swap_xbox_label("ui_context"), "ui_action");
+        assert_eq!(swap_xbox_label("ui_accept"), "ui_accept");
     }
 
     #[test]

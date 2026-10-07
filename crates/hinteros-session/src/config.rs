@@ -30,6 +30,7 @@
 //! [input]
 //! repeat_delay_ms = 400
 //! repeat_interval_ms = 100
+//! xbox_label_swap = "auto"     # "auto" | "on" | "off": swap ui_action/ui_context on Xbox (xpad) pads
 //! dev_gamepad = false          # development only: read pads via evdev, no InputPlumber
 //!
 //! [icons]
@@ -498,6 +499,10 @@ impl Default for InputPlumberConfig {
 pub struct InputConfig {
     pub repeat_delay_ms: u64,
     pub repeat_interval_ms: u64,
+    /// Xbox pads (xpad) arrive from InputPlumber with Y as `ui_action` and X as `ui_context`;
+    /// swap them so Y is Context and X is Secondary like on other pads. `auto` detects it per
+    /// pad (see `input::xbox_layout`).
+    pub xbox_label_swap: crate::input::LabelSwap,
     /// Development only: read gamepads directly through evdev (see `input::devpad`). Ignored
     /// while InputPlumber is enabled.
     pub dev_gamepad: bool,
@@ -508,6 +513,7 @@ impl Default for InputConfig {
         Self {
             repeat_delay_ms: 400,
             repeat_interval_ms: 100,
+            xbox_label_swap: Default::default(),
             dev_gamepad: false,
         }
     }

@@ -162,6 +162,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         Box::new(inputplumber::spawn(
             config.inputplumber.bus.clone(),
             InterceptMode::All,
+            config.input.xbox_label_swap,
             tx,
         ))
     } else {

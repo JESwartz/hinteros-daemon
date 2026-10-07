@@ -108,6 +108,10 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   only works where the daemon already sees Y). Because Guide may start a chord, Home happens on
   Guide *release*; `summon = "none"` puts it back on the press. The keyboard button (`ui_osk`,
   on pads that have one) also toggles it in keyboard-profile apps.
+  Xbox pads (xpad): InputPlumber maps positionally, so physical Y arrives as `ui_action` and X as
+  `ui_context`; the daemon swaps them per composite device (`[input] xbox_label_swap`, detection
+  by the xpad driver of the sources, else the "Microsoft X-Box ..." config name; Bluetooth Xbox
+  pads, PlayStation, Switch are left alone), so Y is always the chord button.
   **Automatic** (`textfocus.rs`, `firefox-extension/`): in a keyboard-profile app, a text or
   password field getting focus in Firefox shows it, and losing focus hides it again 250 ms later
   (so moving between fields does not flicker), unless it was shown or hidden by hand meanwhile.
@@ -198,6 +202,7 @@ bus = "unix:path=/run/dbus/system_bus_socket"  # default: the system bus
 [input]
 repeat_delay_ms = 400
 repeat_interval_ms = 100
+xbox_label_swap = "auto"       # "auto" | "on" | "off": Xbox (xpad) pads give Y as ui_action, X as ui_context
 dev_gamepad = false            # development only, see "Desktop preview"
 
 [icons]

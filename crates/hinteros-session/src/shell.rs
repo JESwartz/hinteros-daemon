@@ -212,6 +212,9 @@ fn steam_client_app() -> RunningApp {
     }
 }
 
+/// How long to wait before writing the focus to gamescope again after a failure.
+const FOCUS_RETRY: Duration = Duration::from_secs(1);
+
 pub struct Shell {
     cfg: ShellConfig,
     focus: Box<dyn FocusControl>,
@@ -227,6 +230,8 @@ pub struct Shell {
     gamescope: Option<GamescopeState>,
     /// The focused app's window is gone; fall back to the launcher at this time.
     focus_lost_at: Option<Instant>,
+    /// Writing the focus to gamescope failed (it is restarting?): try again at this time.
+    focus_retry_at: Option<Instant>,
     /// The last few focus orders we wrote; gamescope state can lag behind our writes.
     written: std::collections::VecDeque<Vec<u32>>,
     next_command: u64,
@@ -279,6 +284,7 @@ impl Shell {
             repeat,
             gamescope: None,
             focus_lost_at: None,
+            focus_retry_at: None,
             written: std::collections::VecDeque::new(),
             next_command: 1,
             steam_windows: Vec::new(),
@@ -880,8 +886,18 @@ impl Shell {
             Some(id) => self.focus.focus_app(id),
             None => self.focus.focus_launcher(),
         };
-        if let Err(e) = result {
-            warn!("setting gamescope focus: {e:#}");
+        match result {
+            Ok(()) => self.focus_retry_at = None,
+            Err(e) => {
+                // gamescope may be gone or restarting; the watcher says when it is back, but
+                // do not depend on that alone.
+                if self.focus_retry_at.is_none() {
+                    warn!("setting gamescope focus (will retry): {e:#}");
+                } else {
+                    debug!("setting gamescope focus (will retry): {e:#}");
+                }
+                self.focus_retry_at = Some(Instant::now() + FOCUS_RETRY);
+            }
         }
         self.input.set_mode(self.intercept_mode());
     }
@@ -1400,11 +1416,16 @@ impl Shell {
             .flatten()
             .chain(self.repeat.deadline())
             .chain(self.focus_lost_at)
+            .chain(self.focus_retry_at)
             .chain(self.osk_auto_hide_at)
             .min()
     }
 
     pub fn tick(&mut self, now: Instant) {
+        if self.focus_retry_at.is_some_and(|at| now >= at) {
+            self.focus_retry_at = None;
+            self.apply_focus();
+        }
         if self.osk_auto_hide_at.is_some_and(|at| now >= at) {
             self.osk_auto_hide_at = None;
             if self.osk_visible && self.osk_auto {

@@ -138,7 +138,23 @@ impl GamescopeFocus {
         }
     }
 
-    fn with<T>(&mut self, f: impl FnOnce(&Conn) -> Result<T>) -> Result<T> {
+    fn with<T>(&mut self, f: impl Fn(&Conn) -> Result<T>) -> Result<T> {
+        let had_conn = self.conn.is_some();
+        let result = self.with_once(&f);
+        if result.is_err() && had_conn {
+            // The connection may have been to a gamescope that has since restarted (EPIPE,
+            // connection closed): any error drops it, and the first try on a new one is made
+            // right away.
+            debug!(
+                "gamescope connection failed, reconnecting: {:#}",
+                result.as_ref().err().unwrap()
+            );
+            return self.with_once(&f);
+        }
+        result
+    }
+
+    fn with_once<T>(&mut self, f: &impl Fn(&Conn) -> Result<T>) -> Result<T> {
         let conn = match &mut self.conn {
             Some(conn) => conn,
             slot => slot.insert(Conn::open(&self.display)?),
@@ -462,13 +478,29 @@ impl OskWindows {
     }
 }
 
-/// One connection's worth of watching. `Ok` means the receiver is gone.
+/// One connection's worth of watching. `Ok` means the receiver is gone. Any error (a broken or
+/// closed connection, gamescope restarting) ends it; the caller reconnects.
 fn watch_once(
     dpy: &str,
     opts: &WatchOptions,
     events: &mpsc::UnboundedSender<GamescopeEvent>,
 ) -> Result<()> {
+    let mut connected = false;
+    let result = watch_session(dpy, opts, events, &mut connected);
+    if result.is_err() && connected {
+        let _ = events.send(GamescopeEvent::Disconnected);
+    }
+    result
+}
+
+fn watch_session(
+    dpy: &str,
+    opts: &WatchOptions,
+    events: &mpsc::UnboundedSender<GamescopeEvent>,
+    connected: &mut bool,
+) -> Result<()> {
     let c = Conn::open(dpy)?;
+    let gamescope_pid = c.cardinals(c.atoms.GAMESCOPE_PID)?;
     c.conn
         .change_window_attributes(
             c.root,
@@ -485,6 +517,7 @@ fn watch_once(
     }
     info!(display = %dpy, xres, "watching gamescope focus and Steam windows");
     let send = |e| events.send(e).is_ok();
+    *connected = true;
     if !send(GamescopeEvent::Connected) || !send(GamescopeEvent::State(c.state()?)) {
         return Ok(());
     }
@@ -522,12 +555,14 @@ fn watch_once(
             }
         }
         let mut focus_changed = false;
+        let mut pid_changed = false;
         let mut rescan = false;
         let mut osk_changed = false;
         for event in batch {
             match event {
                 Event::PropertyNotify(ev) if ev.window == c.root => {
                     focus_changed |= focus_atoms.contains(&ev.atom);
+                    pid_changed |= ev.atom == c.atoms.GAMESCOPE_PID;
                     osk_changed |= ev.atom == c.atoms.HINTEROS_OSK_VISIBLE;
                 }
                 Event::PropertyNotify(ev) => rescan |= c.is_window_atom(ev.atom),
@@ -543,6 +578,17 @@ fn watch_once(
                 | Event::ReparentNotify(_) => rescan = true,
                 Event::ConfigureNotify(ev) => rescan |= steam.contains(&ev.window),
                 _ => {}
+            }
+        }
+        if pid_changed {
+            match c.cardinals(c.atoms.GAMESCOPE_PID) {
+                Ok(now) if now == gamescope_pid => {}
+                Ok(_) => {
+                    break Err(anyhow::anyhow!(
+                        "GAMESCOPE_PID changed: gamescope restarted"
+                    ));
+                }
+                Err(e) => break Err(e),
             }
         }
         if focus_changed {
@@ -586,8 +632,7 @@ fn watch_once(
     finish(events, result)
 }
 
-fn finish(events: &mpsc::UnboundedSender<GamescopeEvent>, result: Result<()>) -> Result<()> {
-    let _ = events.send(GamescopeEvent::Disconnected);
+fn finish(_events: &mpsc::UnboundedSender<GamescopeEvent>, result: Result<()>) -> Result<()> {
     result
 }
 
@@ -609,7 +654,16 @@ mod tests {
 
     impl Xvfb {
         fn start() -> Option<Self> {
-            let mut child = match Command::new("Xvfb")
+            Self::start_on(None)
+        }
+
+        /// Start on a given display (`:7`), or any free one.
+        fn start_on(display: Option<&str>) -> Option<Self> {
+            let mut cmd = Command::new("Xvfb");
+            if let Some(d) = display {
+                cmd.arg(d);
+            }
+            let mut child = match cmd
                 .args([
                     "-displayfd",
                     "1",
@@ -645,6 +699,19 @@ mod tests {
                 child,
                 display: format!(":{}", line.trim()),
             })
+        }
+
+        /// Kill the server and start another on the same display (gamescope restarting).
+        fn restart(&mut self) {
+            let _ = rustix::process::kill_process(
+                rustix::process::Pid::from_raw(self.child.id() as i32).unwrap(),
+                rustix::process::Signal::TERM,
+            );
+            let _ = self.child.wait();
+            let mut again = Self::start_on(Some(&self.display)).expect("Xvfb started before");
+            assert_eq!(again.display, self.display);
+            // `again` now owns the dead server and kills nothing when dropped.
+            std::mem::swap(&mut self.child, &mut again.child);
         }
 
         /// A raw connection playing gamescope.
@@ -750,5 +817,90 @@ mod tests {
                 other => panic!("unexpected {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn watcher_and_focus_recover_after_the_x_server_restarts() {
+        let Some(mut x) = Xvfb::start() else { return };
+        {
+            let gs = x.gamescope();
+            gs.set_cardinals(gs.atoms.GAMESCOPE_PID, &[1]).unwrap();
+        }
+        let mut focus = GamescopeFocus::new(&x.display, 4000);
+        focus.focus_launcher().unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_watcher(
+            x.display.clone(),
+            Duration::from_millis(50),
+            WatchOptions::default(),
+            tx,
+        );
+        let wait_for = |rx: &mut mpsc::UnboundedReceiver<GamescopeEvent>, want: GamescopeEvent| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match rx.try_recv() {
+                    Ok(e) if e == want => return,
+                    Ok(_) => {}
+                    Err(_) => {
+                        assert!(std::time::Instant::now() < deadline, "no {want:?}");
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        };
+        wait_for(&mut rx, GamescopeEvent::Connected);
+
+        x.restart();
+        wait_for(&mut rx, GamescopeEvent::Disconnected);
+        // Not gamescope yet (no GAMESCOPE_PID): the watcher keeps trying.
+        let gs = x.gamescope();
+        gs.set_cardinals(gs.atoms.GAMESCOPE_PID, &[2]).unwrap();
+        wait_for(&mut rx, GamescopeEvent::Connected);
+
+        // The controller held a connection to the old server: its first write fails, is
+        // retried on a new connection, and lands.
+        focus.focus_app(570).unwrap();
+        assert_eq!(
+            gs.cardinals(gs.atoms.GAMESCOPECTRL_BASELAYER_APPID)
+                .unwrap(),
+            vec![570, 4000]
+        );
+    }
+
+    #[test]
+    fn watcher_reconnects_when_gamescope_pid_changes() {
+        let Some(x) = Xvfb::start() else { return };
+        let gs = x.gamescope();
+        gs.set_cardinals(gs.atoms.GAMESCOPE_PID, &[1]).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_watcher(
+            x.display.clone(),
+            Duration::from_millis(50),
+            WatchOptions::default(),
+            tx,
+        );
+        let mut seen = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut changed = false;
+        while std::time::Instant::now() < deadline {
+            while let Ok(e) = rx.try_recv() {
+                seen.push(e);
+            }
+            if !changed && seen.contains(&GamescopeEvent::Connected) {
+                gs.set_cardinals(gs.atoms.GAMESCOPE_PID, &[2]).unwrap();
+                changed = true;
+            }
+            let connects = seen
+                .iter()
+                .filter(|e| **e == GamescopeEvent::Connected)
+                .count();
+            if connects == 2 {
+                assert!(seen.contains(&GamescopeEvent::Disconnected));
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("no reconnect: {seen:?}");
     }
 }

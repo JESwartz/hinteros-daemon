@@ -101,29 +101,40 @@ impl Worker {
         }
     }
 
-    fn with_ime(&mut self, f: impl FnOnce(&mut dyn ImeSink) -> Result<()>) {
+    fn with_ime(&mut self, f: impl Fn(&mut dyn ImeSink) -> Result<()>) {
         let Some(connect) = &mut self.ime_connect else {
             debug!("no input method; dropping input");
             return;
         };
-        if self.ime.is_none() {
-            if self.ime_retry_at.is_some_and(|at| Instant::now() < at) {
-                debug!("input method unavailable; dropping input");
-                return;
-            }
-            match connect() {
-                Ok(ime) => self.ime = Some(ime),
-                Err(e) => {
-                    warn!("gamescope input method unavailable: {e:#}");
-                    self.ime_retry_at = Some(Instant::now() + Duration::from_secs(5));
+        // A connection that broke (gamescope restarted) is dropped and the operation is tried
+        // once more on a new one.
+        let mut reconnected = false;
+        loop {
+            if self.ime.is_none() {
+                if self.ime_retry_at.is_some_and(|at| Instant::now() < at) {
+                    debug!("input method unavailable; dropping input");
                     return;
                 }
+                match connect() {
+                    Ok(ime) => self.ime = Some(ime),
+                    Err(e) => {
+                        warn!("gamescope input method unavailable: {e:#}");
+                        self.ime_retry_at = Some(Instant::now() + Duration::from_secs(5));
+                        return;
+                    }
+                }
             }
-        }
-        let ime = self.ime.as_mut().expect("connected above");
-        if let Err(e) = f(ime.as_mut()) {
-            warn!("gamescope input method: {e:#}");
-            self.ime = None;
+            let ime = self.ime.as_mut().expect("connected above");
+            match f(ime.as_mut()) {
+                Ok(()) => break,
+                Err(e) => {
+                    warn!("gamescope input method: {e:#}");
+                    self.ime = None;
+                    if std::mem::replace(&mut reconnected, true) {
+                        break;
+                    }
+                }
+            }
         }
         thread::sleep(self.timing.ime_delay);
     }
@@ -274,11 +285,13 @@ pub(crate) mod tests {
         w.run(&KeyOp::ImeAction(ImeAction::DeleteLeft));
         assert_eq!(rec.take(), ["ime é", "ime-action 2"]);
         assert_eq!(*connects.lock().unwrap(), 1);
-        // An error drops the connection; the next op reconnects.
+        // An error drops the connection and is tried once more on a new one (here it fails
+        // again); the next op reconnects.
         w.run(&KeyOp::Ime("fail".into()));
+        assert_eq!(*connects.lock().unwrap(), 2);
         w.run(&KeyOp::Ime("x".into()));
         assert_eq!(rec.take(), ["ime x"]);
-        assert_eq!(*connects.lock().unwrap(), 2);
+        assert_eq!(*connects.lock().unwrap(), 3);
         // Keys without a keyboard are dropped.
         w.run(&KeyOp::Tap {
             code: 1,

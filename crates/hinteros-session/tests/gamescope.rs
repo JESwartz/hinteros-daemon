@@ -620,3 +620,71 @@ async fn on_screen_keyboard_is_an_overlay_shown_by_opacity() {
     .await;
     assert_eq!(state(app), (vec![], vec![]));
 }
+
+impl FakeGamescope {
+    /// gamescope restarting: the X server dies and another one comes up on the same display,
+    /// with the properties of a fresh gamescope.
+    fn restart(&mut self) {
+        rustix::process::kill_process(
+            rustix::process::Pid::from_raw(i32::try_from(self.xvfb.id()).unwrap()).unwrap(),
+            rustix::process::Signal::TERM,
+        )
+        .unwrap();
+        self.xvfb.wait().unwrap();
+        let mut xvfb = Command::new("Xvfb")
+            .arg(&self.display)
+            .args([
+                "-displayfd",
+                "1",
+                "-noreset",
+                "-nolisten",
+                "tcp",
+                "-screen",
+                "0",
+                "64x64x24",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(xvfb.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(!line.is_empty(), "Xvfb exited before it was ready");
+        self.xvfb = xvfb;
+        let (conn, screen) = x11rb::connect(Some(&self.display)).unwrap();
+        self.root = conn.setup().roots[screen].root;
+        self.conn = conn;
+        self.set("GAMESCOPE_PID", &[std::process::id() + 1]);
+        self.set("GAMESCOPE_FOCUSED_APP", &[]);
+        self.set("GAMESCOPE_FOCUSABLE_APPS", &[]);
+    }
+}
+
+#[tokio::test]
+async fn focus_is_applied_again_after_gamescope_restarts() {
+    let Some(mut gs) = FakeGamescope::start() else {
+        return;
+    };
+    let d = start_daemon(&gs, "");
+    gs.baselayer_becomes(&[LAUNCHER]).await;
+    let mut c = d.client().await;
+    call(
+        &mut c,
+        "apps.launch",
+        json!({ "url": "steam://rungameid/570" }),
+    )
+    .await
+    .unwrap();
+    gs.baselayer_becomes(&[570, LAUNCHER]).await;
+
+    // greetd restarts gamescope and its Xwayland: the daemon's connections are dead.
+    gs.restart();
+    assert!(gs.get("GAMESCOPECTRL_BASELAYER_APPID").is_empty());
+    gs.baselayer_becomes(&[570, LAUNCHER]).await;
+
+    // And once more, to be sure it keeps working.
+    gs.restart();
+    gs.baselayer_becomes(&[570, LAUNCHER]).await;
+}

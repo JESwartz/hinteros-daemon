@@ -481,6 +481,24 @@ async fn register(conn: &zbus::Connection) -> zbus::Result<()> {
     Ok(())
 }
 
+/// polkit's current unique bus name, if it runs.
+async fn polkit_owner(dbus: &zbus::fdo::DBusProxy<'_>) -> Option<String> {
+    let name = zbus::names::BusName::try_from(POLKIT).ok()?;
+    dbus.get_name_owner(name).await.ok().map(|o| o.to_string())
+}
+
+/// Whether polkit appearing as `new_owner` means registering again: not if that is the
+/// instance the agent is already registered with.
+fn needs_registering(registered_with: Option<&str>, new_owner: &str) -> bool {
+    registered_with != Some(new_owner)
+}
+
+/// polkit's answer when this process already has an agent ("An authentication agent already
+/// exists for the given subject"): nothing to do.
+fn already_registered(e: &zbus::Error) -> bool {
+    e.to_string().contains("already exists")
+}
+
 async fn register_loop(auth: Auth) {
     let mut backoff = Duration::from_secs(2);
     let mut logged = false;
@@ -523,15 +541,32 @@ async fn serve(auth: &Auth) -> zbus::Result<()> {
     let mut owners = dbus
         .receive_name_owner_changed_with_args(&[(0, POLKIT)])
         .await?;
-    register(&conn).await?;
-    info!("registered the polkit authentication agent for this process");
+    match register(&conn).await {
+        Err(e) if already_registered(&e) => debug!("polkit already has our authentication agent"),
+        r => r?,
+    }
+    // Which polkit we registered with: our first call usually starts it (bus activation),
+    // and the NameOwnerChanged for that start arrives afterwards. Only a different owner is
+    // a restart that forgot us.
+    let mut registered_with = polkit_owner(&dbus).await;
+    info!(polkit = ?registered_with, "registered the polkit authentication agent for this process");
     while let Some(change) = owners.next().await {
         let Ok(args) = change.args() else { continue };
-        if args.new_owner().is_some() {
-            info!("polkit restarted; registering the authentication agent again");
-            if let Err(e) = register(&conn).await {
-                warn!("registering the polkit authentication agent: {e}");
+        let Some(owner) = args.new_owner().as_ref().map(ToString::to_string) else {
+            continue;
+        };
+        if !needs_registering(registered_with.as_deref(), &owner) {
+            debug!(polkit = %owner, "polkit started; already registered with it");
+            continue;
+        }
+        info!(polkit = %owner, "polkit restarted; registering the authentication agent again");
+        match register(&conn).await {
+            Ok(()) => registered_with = Some(owner),
+            Err(e) if already_registered(&e) => {
+                debug!("polkit already has our authentication agent");
+                registered_with = Some(owner);
             }
+            Err(e) => warn!("registering the polkit authentication agent: {e}"),
         }
     }
     Err(zbus::Error::Failure("the bus connection ended".into()))
@@ -540,6 +575,23 @@ async fn serve(auth: &Auth) -> zbus::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registers_again_only_with_a_new_polkit() {
+        // The NameOwnerChanged of the start our own registration caused.
+        assert!(!needs_registering(Some(":1.5"), ":1.5"));
+        // A restart.
+        assert!(needs_registering(Some(":1.5"), ":1.9"));
+        // We could not tell whom we registered with.
+        assert!(needs_registering(None, ":1.9"));
+        let dup = zbus::Error::Failure(
+            "org.freedesktop.PolicyKit1.Error.Failed: An authentication agent already exists \
+             for the given subject"
+                .into(),
+        );
+        assert!(already_registered(&dup));
+        assert!(!already_registered(&zbus::Error::Failure("denied".into())));
+    }
 
     #[test]
     fn admin_before_root() {

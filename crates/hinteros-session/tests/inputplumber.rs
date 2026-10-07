@@ -399,4 +399,23 @@ context = "ctrl+l"
     fake.press("ui_left", 1.0).await;
     assert_eq!(nav(&mut launcher).await, ("left".into(), "press".into()));
     assert_eq!(key_log(&keys_file), expected);
+
+    // Guide with another button (Xbox Y arriving as ui_action) is no chord, and the journal
+    // says so with the raw name.
+    fake.press("ui_guide", 1.0).await;
+    fake.press("ui_action", 1.0).await;
+    fake.press("ui_action", 0.0).await;
+    fake.press("ui_guide", 0.0).await;
+    event_named(&mut launcher, "home_pressed").await;
+    let log = d.log();
+    for line in [
+        "chord guide+context → on-screen keyboard",
+        "guide released after the chord: no Home",
+        "guide released alone → Home",
+        "guide+secondary → ignored (not a chord) button=ui_action",
+        "guide released (no chord) → Home buttons=[\"ui_action\"]",
+    ] {
+        assert!(log.contains(line), "{line:?} not in the log");
+    }
+    assert!(log.contains("button=ui_context"));
 }

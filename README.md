@@ -107,6 +107,10 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   only works where the daemon already sees Y). Because Guide may start a chord, Home happens on
   Guide *release*; `summon = "none"` puts it back on the press. The keyboard button (`ui_osk`,
   on pads that have one) also toggles it in keyboard-profile apps.
+  Every chord step is logged at info level with the raw `ui_*` name of the other button
+  (`chord guide+context → on-screen keyboard button=ui_context`, `guide released alone → Home`,
+  `guide+secondary → ignored (not a chord) button=ui_action`), so a pad whose buttons arrive
+  under unexpected names shows in the journal.
 - **App icons** (`icons/`): HinterOS ships no logos; `apps.list`'s `icon` is a local file found
   on the box at runtime. Per app, first match wins: `icon` (an absolute path or an icon theme
   name), then `desktop_id` (the app's freedesktop `.desktop` file, its `Icon=`, looked up in the

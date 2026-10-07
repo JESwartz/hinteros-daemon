@@ -231,6 +231,10 @@ pub struct Shell {
     held: BTreeSet<NavAction>,
     /// Releases to drop (buttons used in a chord).
     swallow: BTreeSet<NavAction>,
+    /// The raw `ui_*` name each held button last arrived as (for the chord log).
+    raw_names: BTreeMap<NavAction, String>,
+    /// Buttons pressed while Guide was held that made no chord (raw `ui_*` names, for the log).
+    guide_others: Vec<String>,
 }
 
 impl Shell {
@@ -267,6 +271,8 @@ impl Shell {
             guide: None,
             held: BTreeSet::new(),
             swallow: BTreeSet::new(),
+            raw_names: BTreeMap::new(),
+            guide_others: Vec::new(),
         }
     }
 
@@ -1028,31 +1034,72 @@ impl Shell {
     /// release unless the summon button was pressed while Guide was held (then the on-screen
     /// keyboard toggles instead). In `Pass` mode InputPlumber only sends us Guide, and switches
     /// to `All` by itself on the press, so the chord button pressed *after* Guide reaches us.
+    ///
+    /// Every step is logged at info level with the raw `ui_*` names, so that a pad whose
+    /// buttons arrive under other names than expected shows in the journal.
     fn guide(&mut self, pressed: bool, now: Instant) {
         let summon = self.cfg.osk_summon.filter(|_| self.cfg.osk_enabled);
         let Some(summon) = summon else {
             if pressed {
+                info!("guide pressed → Home (no chord configured)");
                 self.home();
             }
             return;
         };
         if pressed {
+            self.guide_others.clear();
             // The button already held (visible to us in `All` mode) also makes a chord.
             let chord = self.held.contains(&summon);
             if chord {
+                let raw = self.raw_names.get(&summon).cloned().unwrap_or_default();
+                info!(
+                    button = %raw,
+                    "chord {}+guide → on-screen keyboard",
+                    nav_name(summon)
+                );
                 self.toggle_osk();
+            } else {
+                info!(
+                    "guide pressed: chord started (guide+{} toggles the on-screen keyboard)",
+                    nav_name(summon)
+                );
             }
             self.guide = Some((now, chord));
-        } else if let Some((_, chord)) = self.guide.take()
-            && !chord
-        {
-            self.home();
+        } else if let Some((_, chord)) = self.guide.take() {
+            let others = std::mem::take(&mut self.guide_others);
+            if chord {
+                info!("guide released after the chord: no Home");
+            } else if others.is_empty() {
+                info!("guide released alone → Home");
+                self.home();
+            } else {
+                info!(buttons = ?others, "guide released (no chord) → Home");
+                self.home();
+            }
+        } else {
+            debug!("guide released without a press");
         }
+    }
+
+    /// A button pressed while Guide is held that is not the chord button.
+    fn guide_other(&mut self, raw: &str, action: Option<NavAction>, now: Instant) {
+        let held = self
+            .guide
+            .is_some_and(|(since, _)| now.duration_since(since) < GUIDE_HOLD_MAX);
+        if !held || self.cfg.osk_summon.is_none() || !self.cfg.osk_enabled {
+            return;
+        }
+        let name = action.map_or_else(|| "unmapped".to_string(), nav_name);
+        info!(button = %raw, "guide+{name} → ignored (not a chord)");
+        self.guide_others.push(raw.to_string());
     }
 
     fn input(&mut self, input: RawInput, now: Instant) {
         let Some(intent) = translate(&input.event) else {
             debug!(event = %input.event, "unmapped input");
+            if input.pressed() {
+                self.guide_other(&input.event, None, now);
+            }
             return;
         };
         let pressed = input.pressed();
@@ -1065,12 +1112,19 @@ impl Shell {
                 .guide
                 .is_some_and(|(since, _)| now.duration_since(since) < GUIDE_HOLD_MAX);
             if guide_held && self.cfg.osk_summon == Some(action) && self.cfg.osk_enabled {
+                info!(
+                    button = %input.event,
+                    "chord guide+{} → on-screen keyboard",
+                    nav_name(action)
+                );
                 self.guide = self.guide.map(|(since, _)| (since, true));
                 self.swallow.insert(action);
                 self.toggle_osk();
                 return;
             }
+            self.guide_other(&input.event, Some(action), now);
             self.held.insert(action);
+            self.raw_names.insert(action, input.event.clone());
         } else {
             self.held.remove(&action);
             if self.swallow.remove(&action) {
@@ -1337,6 +1391,14 @@ impl Shell {
             }
         }
     }
+}
+
+/// A navigation action's wire name (`context`, `secondary`, ...), for logs.
+fn nav_name(action: NavAction) -> String {
+    serde_json::to_value(action)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| format!("{action:?}"))
 }
 
 enum Target {

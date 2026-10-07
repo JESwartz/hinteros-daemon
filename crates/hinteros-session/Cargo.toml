@@ -17,6 +17,7 @@ rusqlite.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 signal-hook.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
@@ -30,6 +31,8 @@ wayland-client.workspace = true
 wayland-scanner.workspace = true
 x11rb.workspace = true
 zbus.workspace = true
+zeroize.workspace = true
+nix = { workspace = true, features = ["user"] }
 
 [dev-dependencies]
 hinteros-api = { workspace = true, features = ["conformance"] }

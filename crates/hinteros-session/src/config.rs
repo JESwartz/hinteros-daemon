@@ -178,6 +178,30 @@ pub struct Cli {
     /// The pactl binary used for audio
     #[arg(long, env = "HINTEROS_PACTL")]
     pub pactl: Option<PathBuf>,
+
+    /// Don't register a polkit authentication agent (desktop previews)
+    #[arg(long)]
+    pub no_auth_agent: bool,
+
+    /// D-Bus address of polkit's bus for the agent [default: the system bus]
+    #[arg(long, env = "HINTEROS_AUTH_BUS")]
+    pub auth_bus: Option<String>,
+
+    /// polkit's agent helper binary
+    #[arg(long, env = "HINTEROS_POLKIT_AGENT_HELPER")]
+    pub polkit_agent_helper: Option<PathBuf>,
+
+    /// polkit's agent helper socket
+    #[arg(long, env = "HINTEROS_POLKIT_AGENT_HELPER_SOCKET")]
+    pub polkit_agent_helper_socket: Option<PathBuf>,
+
+    /// D-Bus address of the user's systemd, for session.restart [default: the session bus]
+    #[arg(long, env = "HINTEROS_SESSION_USER_BUS")]
+    pub session_user_bus: Option<String>,
+
+    /// The App Store catalog index
+    #[arg(long, env = "HINTEROS_CATALOG_INDEX")]
+    pub catalog_index: Option<PathBuf>,
 }
 
 fn flag(on: bool, off: bool) -> Option<bool> {
@@ -202,6 +226,9 @@ pub struct Config {
     pub osk: OskConfig,
     pub system: SystemConfig,
     pub runtime: RuntimeConfig,
+    pub auth: AuthConfig,
+    pub session: SessionConfig,
+    pub store: StoreConfig,
     pub audio: AudioConfig,
     pub display: DisplayConfig,
     pub bluetooth: BluetoothConfig,
@@ -303,6 +330,78 @@ impl Default for SystemConfig {
         Self {
             enable: true,
             socket: PathBuf::from(hinteros_api::system::DEFAULT_SOCKET),
+        }
+    }
+}
+
+/// The polkit authentication agent (`auth.*`, `authentication_requested`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthConfig {
+    /// Register the agent with polkit for this process.
+    pub enable: bool,
+    /// D-Bus address of polkit's bus [default: the system bus].
+    pub bus: Option<String>,
+    /// polkit's setuid helper (used when the helper socket does not exist).
+    pub helper: PathBuf,
+    /// polkit's socket-activated helper (`polkit-agent-helper.socket`), preferred when it exists:
+    /// it works without setuid, so under `NoNewPrivileges`.
+    pub helper_socket: PathBuf,
+    /// A request nobody answers is cancelled after this long.
+    pub prompt_timeout_s: u64,
+    /// Wrong passwords per request before it fails.
+    pub max_attempts: u32,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            bus: None,
+            helper: "/run/wrappers/bin/polkit-agent-helper-1".into(),
+            helper_socket: "/run/polkit/agent-helper.socket".into(),
+            prompt_timeout_s: 120,
+            max_attempts: 3,
+        }
+    }
+}
+
+/// `session.restart`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SessionConfig {
+    /// PAM services of sessions `session.restart` may end (greetd's session and its
+    /// `default_session`, which greetd runs as the greeter); never a desktop session.
+    pub restart_services: Vec<String>,
+    /// This daemon's systemd user unit, restarted after the session [default: from
+    /// /proc/self/cgroup; none outside a user unit].
+    pub unit: Option<String>,
+    /// D-Bus address of the user's systemd [default: the session bus].
+    pub user_bus: Option<String>,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            restart_services: vec!["greetd".into(), "greetd-greeter".into()],
+            unit: None,
+            user_bus: None,
+        }
+    }
+}
+
+/// The App Store (`store.list`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StoreConfig {
+    /// The running generation's catalog index.
+    pub index: PathBuf,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            index: hinteros_api::catalog::DEFAULT_INDEX.into(),
         }
     }
 }
@@ -705,6 +804,24 @@ impl Config {
         }
         if let Some(pactl) = &cli.pactl {
             self.audio.pactl = pactl.clone();
+        }
+        if cli.no_auth_agent {
+            self.auth.enable = false;
+        }
+        if let Some(bus) = &cli.auth_bus {
+            self.auth.bus = Some(bus.clone());
+        }
+        if let Some(p) = &cli.polkit_agent_helper {
+            self.auth.helper = p.clone();
+        }
+        if let Some(p) = &cli.polkit_agent_helper_socket {
+            self.auth.helper_socket = p.clone();
+        }
+        if let Some(bus) = &cli.session_user_bus {
+            self.session.user_bus = Some(bus.clone());
+        }
+        if let Some(p) = &cli.catalog_index {
+            self.store.index = p.clone();
         }
     }
 

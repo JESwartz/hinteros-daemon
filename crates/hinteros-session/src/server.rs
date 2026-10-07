@@ -14,10 +14,34 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use crate::auth::Auth;
+use crate::restart::Restarter;
 use crate::runtime::Runtime;
 use crate::shell::{METHODS, Msg};
+use crate::store::Store;
 use crate::system::Relay;
 use crate::{Audience, Broadcast};
+
+/// Everything a connection dispatches to besides the shell; cheap to clone.
+#[derive(Clone)]
+pub struct Services {
+    pub relay: Relay,
+    pub runtime: Runtime,
+    pub auth: Auth,
+    pub store: Store,
+    pub restarter: Restarter,
+}
+
+/// Methods answered by a task of their own, so a slow one (a relayed call waiting for the admin
+/// password) never holds up the connection: the launcher answers the password prompt on the
+/// same connection. Their responses may come out of order (clients match them by id).
+fn concurrent(method: &str) -> bool {
+    session::relay_target(method).is_some()
+        || matches!(
+            method,
+            "auth.respond" | "auth.cancel" | "store.list" | "session.restart"
+        )
+}
 
 pub const NAME: &str = "hinteros-session";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -27,8 +51,7 @@ pub async fn handle(
     stream: UnixStream,
     mut events: broadcast::Receiver<Broadcast>,
     shell: mpsc::UnboundedSender<Msg>,
-    relay: Relay,
-    runtime: Runtime,
+    services: Services,
 ) -> Result<()> {
     // Defence in depth: the socket is 0600 in a 0700 directory, but only our own user may talk to us.
     let cred = stream.peer_cred()?;
@@ -43,6 +66,7 @@ pub async fn handle(
     let mut reader = LineReader::new(r);
     let mut conn = Connection::new(session::VERSION, Peer::new(NAME, VERSION));
     let mut subscriptions = BTreeSet::new();
+    let (answers_tx, mut answers) = mpsc::unbounded_channel::<Value>();
 
     loop {
         tokio::select! {
@@ -68,21 +92,32 @@ pub async fn handle(
                     Step::Ignore => debug!("ignoring client notification"),
                     Step::Dispatch(req) => {
                         let id = req.id.expect("dispatched requests have an id");
-                        let outcome = dispatch(
-                            &req.method,
-                            req.params,
-                            &mut subscriptions,
-                            &shell,
-                            &relay,
-                            &runtime,
-                        ).await;
-                        write_message(&mut w, &jsonrpc::response(&id, outcome)).await?;
+                        if concurrent(&req.method) {
+                            let client = conn.negotiated().map(|(_, c)| c.name.clone());
+                            let (services, tx) = (services.clone(), answers_tx.clone());
+                            tokio::spawn(async move {
+                                let outcome = slow(&req.method, req.params, client.as_deref(), &services).await;
+                                let _ = tx.send(jsonrpc::response(&id, outcome));
+                            });
+                        } else {
+                            let outcome = dispatch(
+                                &req.method,
+                                req.params,
+                                &mut subscriptions,
+                                &shell,
+                                &services.runtime,
+                            ).await;
+                            write_message(&mut w, &jsonrpc::response(&id, outcome)).await?;
+                        }
                     }
                 }
                 if let (false, Some((version, client))) = (was_handshaken, conn.negotiated()) {
                     info!(client = %client.name, client_version = %client.version, api_version = %version, "handshake done");
                 }
+                // The line may have carried a password (auth.respond): wipe it.
+                zeroize::Zeroize::zeroize(&mut line.into_bytes());
             }
+            Some(answer) = answers.recv() => write_message(&mut w, &answer).await?,
             event = events.recv() => match event {
                 Ok((name, params, audience)) if subscriptions.contains(&name) && for_us(audience, &conn) => {
                     write_message(&mut w, &jsonrpc::notification(name.wire_name(), params)).await?;
@@ -107,6 +142,9 @@ fn for_us(audience: Audience, conn: &Connection) -> bool {
         Audience::All => true,
         Audience::Osk => osk,
         Audience::Launcher => !osk,
+        Audience::LauncherClient => conn
+            .negotiated()
+            .is_some_and(|(_, client)| client.name == session::LAUNCHER_CLIENT_NAME),
     }
 }
 
@@ -115,14 +153,10 @@ async fn dispatch(
     params: Option<Value>,
     subscriptions: &mut BTreeSet<EventName>,
     shell: &mpsc::UnboundedSender<Msg>,
-    relay: &Relay,
     runtime: &Runtime,
 ) -> Result<Value, ErrorObject> {
     if Runtime::handles(method) {
         return runtime.call(method, params).await;
-    }
-    if let Some(target) = session::relay_target(method) {
-        return relay.call(target, params).await;
     }
     match method {
         Ping::NAME => call::<Ping>(params, server::ping),
@@ -152,6 +186,34 @@ async fn dispatch(
                 })
                 .map_err(|_| unavailable())?;
             result.await.map_err(|_| unavailable())?
+        }
+        _ => Err(method_not_found(method)),
+    }
+}
+
+/// The [`concurrent`] methods.
+async fn slow(
+    method: &str,
+    params: Option<Value>,
+    client: Option<&str>,
+    s: &Services,
+) -> Result<Value, ErrorObject> {
+    if let Some(target) = session::relay_target(method) {
+        let kept = params.clone();
+        let result = s.relay.call(target, params).await?;
+        s.store.relayed(method, kept.as_ref(), &result);
+        return Ok(result);
+    }
+    match method {
+        "auth.respond" => s.auth.respond(client, params).await,
+        "auth.cancel" => s.auth.cancel(client, params),
+        "store.list" => {
+            hinteros_api::server::decode_params::<session::StoreList>(params)?;
+            s.store.list(&s.relay).await
+        }
+        "session.restart" => {
+            hinteros_api::server::decode_params::<session::SessionRestart>(params.clone())?;
+            s.restarter.restart(params).await
         }
         _ => Err(method_not_found(method)),
     }

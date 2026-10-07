@@ -661,12 +661,14 @@ dependencies = [
  "evdev",
  "futures-util",
  "hinteros-api",
+ "nix 0.31.3",
  "rusqlite",
  "rustix",
  "serde",
  "serde_json",
  "signal-hook",
  "tempfile",
+ "thiserror",
  "tokio",
  "toml",
  "tracing",
@@ -679,6 +681,7 @@ dependencies = [
  "wayland-server",
  "x11rb",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]

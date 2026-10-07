@@ -29,6 +29,9 @@ const BACKOFF_MAX: Duration = Duration::from_secs(10);
 /// A relayed call that gets no answer in this time fails (the service answers at once; jobs
 /// report through events).
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// A call whose action is checked interactively waits for the user to type the admin password
+/// (the system service gives up after 300 s).
+const INTERACTIVE_CALL_TIMEOUT: Duration = Duration::from_secs(330);
 
 type Reply = oneshot::Sender<Result<Value, ErrorObject>>;
 
@@ -95,7 +98,14 @@ impl Relay {
             reply,
         })
         .map_err(|_| unavailable(Unavailable::Down))?;
-        match tokio::time::timeout(CALL_TIMEOUT, rx).await {
+        let interactive =
+            system::polkit_action(method).is_some_and(|a| system::INTERACTIVE_ACTIONS.contains(&a));
+        let limit = if interactive {
+            INTERACTIVE_CALL_TIMEOUT
+        } else {
+            CALL_TIMEOUT
+        };
+        match tokio::time::timeout(limit, rx).await {
             Ok(Ok(outcome)) => outcome,
             _ => Err(unavailable(Unavailable::Down)),
         }

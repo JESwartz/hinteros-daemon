@@ -7,6 +7,7 @@
 //! through traits, so its behaviour is unit-tested with mocks.
 
 pub mod apps;
+pub mod auth;
 pub mod config;
 pub mod focus;
 pub mod icons;
@@ -15,10 +16,12 @@ pub mod keys;
 pub mod osk;
 pub mod procs;
 pub mod reaper;
+pub mod restart;
 pub mod runtime;
 pub mod server;
 pub mod shell;
 pub mod steam;
+pub mod store;
 pub mod system;
 
 /// Which connections an event is for.
@@ -30,6 +33,9 @@ pub enum Audience {
     Osk,
     /// Every other connection (the launcher).
     Launcher,
+    /// Only connections of the launcher itself (hello client name `hinteros-launcher`):
+    /// authentication prompts.
+    LauncherClient,
 }
 
 /// An event as broadcast to the connections: name, encoded params and audience.

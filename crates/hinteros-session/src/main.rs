@@ -195,6 +195,16 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
     };
 
     let runtime = hinteros_session::runtime::Runtime::spawn(&config, events.clone());
+    let services = server::Services {
+        relay,
+        runtime,
+        auth: hinteros_session::auth::Auth::spawn(config.auth.clone(), events.clone()),
+        store: hinteros_session::store::Store::spawn(config.store.index.clone(), events.clone()),
+        restarter: hinteros_session::restart::Restarter::new(
+            config.session.clone(),
+            config.runtime.bus.clone(),
+        ),
+    };
 
     loop {
         tokio::select! {
@@ -202,10 +212,9 @@ async fn serve(socket: Option<PathBuf>, config: Config) -> Result<()> {
                 Ok((stream, _)) => {
                     let rx = events.subscribe();
                     let shell = shell_tx.clone();
-                    let relay = relay.clone();
-                    let runtime = runtime.clone();
+                    let services = services.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = server::handle(stream, rx, shell, relay, runtime).await {
+                        if let Err(e) = server::handle(stream, rx, shell, services).await {
                             debug!("connection ended: {e:#}");
                         }
                     });

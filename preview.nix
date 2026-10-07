@@ -25,7 +25,7 @@ writeShellApplication {
     trap 'rm -rf "$dir"' EXIT
     socket="$dir/session.sock"
 
-    args=(--socket "$socket" --no-gamescope --no-inputplumber --no-uinput --dev-gamepad)
+    args=(--socket "$socket" --no-gamescope --no-inputplumber --no-uinput --dev-gamepad --no-auth-agent)
 
     # The user's real Steam library, if there is one (the daemon only reads it).
     for steam in "''${HINTEROS_STEAM_DIR:-}" "$HOME/.local/share/Steam" "$HOME/.steam/steam"; do

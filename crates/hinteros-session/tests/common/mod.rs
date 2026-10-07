@@ -63,6 +63,22 @@ impl Daemon {
                 format!("unix:path={}/no-bus", dir.path().display()),
             )
             .env("HINTEROS_PACTL", dir.path().join("no-pactl"))
+            // The polkit agent never registers on this desktop's system bus, session.restart never
+            // reaches its user manager, store.list reads no real catalog.
+            .env(
+                "HINTEROS_AUTH_BUS",
+                format!("unix:path={}/no-bus", dir.path().display()),
+            )
+            .env(
+                "HINTEROS_SESSION_USER_BUS",
+                format!("unix:path={}/no-bus", dir.path().display()),
+            )
+            .env("HINTEROS_POLKIT_AGENT_HELPER", dir.path().join("no-helper"))
+            .env(
+                "HINTEROS_POLKIT_AGENT_HELPER_SOCKET",
+                dir.path().join("no-helper.socket"),
+            )
+            .env("HINTEROS_CATALOG_INDEX", dir.path().join("catalog.json"))
             .env_remove("GAMESCOPE_PATCHED_EDID_FILE")
             .env_remove("GAMESCOPE_MODE_SAVE_FILE")
             .envs(extra_env)

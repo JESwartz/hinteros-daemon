@@ -18,7 +18,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hinteros_api::system::{
-    AppliedResult, JobResult, JobState, Stage, UpdateCheckResult, is_job_id,
+    AppliedResult, CatalogApp, JobResult, JobState, RemovedApp, Stage, UpdateCheckResult, is_job_id,
 };
 use hinteros_api::{ErrorCode, ErrorObject};
 use rustix::fs::{FlockOperation, flock};
@@ -446,7 +446,15 @@ impl Runner {
         for s in stages {
             self.set_stage(s);
         }
-        let available = checked.map_err(|e| self.git_error(&source, e, NotFastForward::Reject))?;
+        let mut available =
+            checked.map_err(|e| self.git_error(&source, e, NotFastForward::Reject))?;
+        if let (Some(a), Some(cat)) = (available.as_mut(), &source.catalog) {
+            self.set_stage(Stage::Evaluating);
+            if let Some((new, removed)) = self.catalog_diff(cat, &a.rev)? {
+                a.new_apps = Some(new);
+                a.removed_apps = Some(removed);
+            }
+        }
         let result = UpdateCheckResult {
             channel: source.channel,
             current_rev: source.current_rev.clone(),
@@ -462,6 +470,44 @@ impl Runner {
         Ok((Some(JobResult::UpdateCheck(result)), false))
     }
 
+    /// The apps the update at `rev` adds and removes: `lib.catalogIds` of the target revision
+    /// (`nix eval`, pure metadata, no import-from-derivation) against the running generation's
+    /// index. `None` if the target's catalog cannot be read (the update is still offered).
+    fn catalog_diff(
+        &mut self,
+        cat: &job::CatalogCheck,
+        rev: &str,
+    ) -> Result<Option<CatalogChanges>, Failure> {
+        let mut cmd = self.nix_command();
+        cmd.args([
+            "eval",
+            "--json",
+            "--option",
+            "allow-import-from-derivation",
+            "false",
+        ])
+        .arg(format!("{}&rev={rev}#lib.catalogIds", cat.input_url));
+        let out = match self.exec(cmd, true, &mut |_, _| {}) {
+            Ok(out) => out,
+            Err(Failure::Cancelled) => return Err(Failure::Cancelled),
+            Err(Failure::Error(e)) => {
+                warn!("cannot read the target's catalog: {}", e.message);
+                return Ok(None);
+            }
+        };
+        let target: serde_json::Value = match serde_json::from_str(out.trim()) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("lib.catalogIds is not JSON: {e}");
+                return Ok(None);
+            }
+        };
+        let current = hinteros_api::catalog::Index::load(&cat.index)
+            .map_err(|e| warn!("no current catalog: {e}"))
+            .ok();
+        Ok(catalog_changes(current.as_ref(), &target, &cat.installed))
+    }
+
     fn apply(&mut self, a: &Apply) -> Outcome {
         self.set_stage(Stage::Preparing);
         self.inhibit("delay");
@@ -469,6 +515,13 @@ impl Runner {
         let tools = self.spec.tools.clone();
         if !paths.config_dir.join("flake.nix").is_file() {
             return Err(self.fail(format!("{} has no flake.nix", paths.config_dir.display())));
+        }
+        if !a.terms.is_empty() {
+            record_terms(&paths.terms_accepted(), &a.terms)
+                .map_err(|e| self.fail(format!("recording the accepted terms: {e}")))?;
+            for t in &a.terms {
+                info!(id = %t.id, version = %t.version, by = %t.by, "terms acceptance recorded");
+            }
         }
         let old_toplevel = fs::canonicalize(&paths.profile).ok();
 
@@ -600,6 +653,9 @@ impl Runner {
         fsutil::replace_dir(&staging, &paths.config_dir, &self.spec.id)
             .map_err(|e| self.fail(format!("replacing {}: {e}", paths.config_dir.display())))?;
         let _ = fsutil::remove(&staging);
+        if let Some(d) = &a.delete_data {
+            delete_data(d);
+        }
         let after = self.snapshot();
         let restart = session_restart_required(old_toplevel.as_deref(), &toplevel);
         Ok((
@@ -756,4 +812,228 @@ pub fn session_restart_required(old: Option<&Path>, new: &Path) -> bool {
         let b = fs::canonicalize(new.join("sw/bin").join(bin)).ok();
         a.is_some() && b.is_some() && a != b
     })
+}
+
+/// Compare the target's `lib.catalogIds` with the running catalog. The target is an object of
+/// id to `{name, status, statusReason?}` (or to just the status string). New: available in the
+/// target and not available now. Removed: installed, and removed from or missing in the
+/// target. `None` if the target is not such an object.
+/// Apps an update adds and removes.
+pub type CatalogChanges = (Vec<CatalogApp>, Vec<RemovedApp>);
+
+pub fn catalog_changes(
+    current: Option<&hinteros_api::catalog::Index>,
+    target: &serde_json::Value,
+    installed: &[String],
+) -> Option<CatalogChanges> {
+    use hinteros_api::catalog::{Status, is_app_id};
+    let map = target.as_object()?;
+    let field = |v: &serde_json::Value, k: &str| -> Option<String> {
+        v.get(k)
+            .and_then(|s| s.as_str())
+            .map(|s| s.chars().take(200).collect())
+    };
+    let status = |v: &serde_json::Value| -> Option<String> {
+        v.as_str().map(str::to_owned).or_else(|| field(v, "status"))
+    };
+    let mut new = Vec::new();
+    for (id, v) in map {
+        if !is_app_id(id) || status(v).as_deref() != Some("available") {
+            continue;
+        }
+        let available_now = current
+            .and_then(|c| c.get(id))
+            .is_some_and(|e| e.status == Status::Available);
+        if !available_now {
+            let name: String = field(v, "name").unwrap_or_else(|| id.clone());
+            new.push(CatalogApp {
+                id: id.clone(),
+                name: name.chars().take(40).collect(),
+            });
+        }
+    }
+    let mut removed = Vec::new();
+    for id in installed {
+        let gone = match map.get(id) {
+            None => true,
+            Some(v) => status(v).as_deref() == Some("removed"),
+        };
+        if gone {
+            let v = map.get(id);
+            let name = v
+                .and_then(|v| field(v, "name"))
+                .or_else(|| current.and_then(|c| c.get(id)).map(|e| e.name.clone()))
+                .unwrap_or_else(|| id.clone());
+            removed.push(RemovedApp {
+                id: id.clone(),
+                name: name.chars().take(40).collect(),
+                reason: v.and_then(|v| field(v, "statusReason")),
+            });
+        }
+    }
+    removed.sort_by(|a, b| a.id.cmp(&b.id));
+    Some((new, removed))
+}
+
+/// Delete the removed apps' data in every profile home (after the switch; best effort, every
+/// outcome logged to the job's journal).
+fn delete_data(d: &job::DeleteData) {
+    for home in &d.homes {
+        for rel in &d.paths {
+            match crate::datadel::delete_in_home(&home.dir, home.uid, rel) {
+                Ok(crate::datadel::Deleted::Removed(n)) => info!(
+                    user = %home.user, home = %home.dir.display(), path = %rel, entries = n,
+                    "deleted app data"
+                ),
+                Ok(crate::datadel::Deleted::Missing) => info!(
+                    user = %home.user, path = %rel, "no app data to delete"
+                ),
+                Err(e) => warn!(user = %home.user, path = %rel, "not deleting app data: {e}"),
+            }
+        }
+    }
+}
+
+/// Add accepted terms to `terms-accepted.json` (root-only):
+/// `{"<id>": [{"version", "accepted_at" (RFC 3339 UTC), "by"}]}`, a list per id so that
+/// accepting a new version keeps the history. Written atomically; the installer writes the
+/// same format.
+pub fn record_terms(path: &Path, records: &[job::TermsRecord]) -> std::io::Result<()> {
+    let mut doc: serde_json::Map<String, serde_json::Value> = match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} is not a JSON object: {e}", path.display()),
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(e) => return Err(e),
+    };
+    for r in records {
+        let entry = json!({
+            "version": r.version,
+            "accepted_at": rfc3339(r.accepted_at),
+            "by": r.by,
+        });
+        match doc.entry(r.id.clone()).or_insert_with(|| json!([])) {
+            serde_json::Value::Array(list) => list.push(entry),
+            other => *other = json!([entry]),
+        }
+    }
+    if let Some(parent) = path.parent() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
+    }
+    let mut bytes = serde_json::to_vec_pretty(&doc)?;
+    bytes.push(b'\n');
+    fsutil::write_atomic(path, &bytes, 0o600)
+}
+
+/// Unix seconds as RFC 3339 UTC (`2026-10-06T12:00:00Z`).
+pub fn rfc3339(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_changes_between_generations() {
+        let current = hinteros_api::catalog::Index::parse(
+            br#"{"indexVersion":2,"apps":[
+              {"id":"steam","name":"Steam","status":"available"},
+              {"id":"old","name":"Old","status":"available"},
+              {"id":"later","name":"Later","status":"retired","statusReason":"x"}]}"#,
+            "/".into(),
+        )
+        .unwrap();
+        let target = json!({
+            "steam": {"name": "Steam", "status": "available"},
+            "old": {"name": "Old", "status": "removed", "statusReason": "Discontinued."},
+            "later": {"name": "Later", "status": "available"},
+            "moonlight": {"name": "Moonlight", "status": "available"},
+            "hidden": "retired",
+            "BAD": "available"
+        });
+        let installed = vec!["steam".to_string(), "old".into(), "vanished".into()];
+        let (new, removed) = catalog_changes(Some(&current), &target, &installed).unwrap();
+        let ids: Vec<&str> = new.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["later", "moonlight"]);
+        assert_eq!(new[1].name, "Moonlight");
+        assert_eq!(
+            serde_json::to_value(&removed).unwrap(),
+            json!([
+                {"id": "old", "name": "Old", "reason": "Discontinued."},
+                {"id": "vanished", "name": "vanished", "reason": null}
+            ])
+        );
+        assert!(catalog_changes(None, &json!([]), &installed).is_none());
+        // Without a current index every available target app is new.
+        let (new, _) = catalog_changes(None, &json!({"a": "available"}), &[]).unwrap();
+        assert_eq!(new[0].name, "a");
+    }
+
+    #[test]
+    fn rfc3339_dates() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339(1_791_300_000), "2026-10-06T15:20:00Z");
+    }
+
+    #[test]
+    fn terms_record_keeps_history() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("terms-accepted.json");
+        // What the installer may already have written.
+        fs::write(
+            &path,
+            r#"{"youtube":[{"version":"1","accepted_at":"2026-01-01T00:00:00Z","by":"installer"}]}"#,
+        )
+        .unwrap();
+        let rec = |v: &str| job::TermsRecord {
+            id: "steam".into(),
+            version: v.into(),
+            accepted_at: 1_791_300_000,
+            by: "hinteros".into(),
+        };
+        record_terms(&path, &[rec("2026-09-10")]).unwrap();
+        record_terms(&path, &[rec("2027-01-01")]).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["youtube"][0]["by"], "installer");
+        assert_eq!(
+            v["steam"],
+            json!([
+                {"version": "2026-09-10", "accepted_at": "2026-10-06T15:20:00Z", "by": "hinteros"},
+                {"version": "2027-01-01", "accepted_at": "2026-10-06T15:20:00Z", "by": "hinteros"}
+            ])
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // A damaged file is not overwritten.
+        fs::write(&path, "[]").unwrap();
+        assert!(record_terms(&path, &[rec("x")]).is_err());
+    }
 }

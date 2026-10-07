@@ -132,6 +132,31 @@ impl Audit {
         }
     }
 
+    /// A vendor terms acceptance (`apps.install` with `accepted_terms`): app, terms version, who
+    /// (uid, user, profile) and the job that installs it.
+    pub fn terms_accepted(
+        &self,
+        uid: u32,
+        user: &str,
+        profile: Option<&str>,
+        id: &str,
+        version: &str,
+        job_id: &str,
+    ) {
+        let message = format!("terms of {id} version {version} accepted by {user} (uid {uid})");
+        self.send(
+            &message,
+            &[
+                ("UID", uid.to_string()),
+                ("USER", user.to_owned()),
+                ("PROFILE", profile.unwrap_or("").to_owned()),
+                ("TERMS_ID", id.to_owned()),
+                ("TERMS_VERSION", version.to_owned()),
+                ("JOB_ID", job_id.to_owned()),
+            ],
+        );
+    }
+
     fn send(&self, message: &str, fields: &[(&str, String)]) {
         info!(target: "audit", "{message}");
         let mut datagram = Vec::new();

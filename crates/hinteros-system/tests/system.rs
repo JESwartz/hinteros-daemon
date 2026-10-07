@@ -633,6 +633,17 @@ async fn updates_are_verified() {
     );
     let c3 = up.commit("Release 0.2.1", Some("release"));
     up.push(&c3, "stable");
+    // The running catalog and the target's lib.catalogIds (what the fake `nix eval` prints).
+    std::fs::write(
+        root.p("policy/catalog.json"),
+        r#"{"indexVersion":2,"apps":[{"id":"steam","name":"Steam","status":"available"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.p("catalog-ids.json"),
+        r#"{"steam":{"name":"Steam","status":"removed","statusReason":"Gone."},"moonlight":{"name":"Moonlight","status":"available"}}"#,
+    )
+    .unwrap();
     let Some(sys) = System::start(root, &[]).await else {
         return;
     };
@@ -664,6 +675,20 @@ async fn updates_are_verified() {
     assert_eq!(available["signer"], "release@hinteros");
     assert_eq!(available["security"], "high", "from c2's trailer");
     assert_eq!(available["commits"], 2);
+    assert_eq!(
+        available["new_apps"],
+        json!([{"id": "moonlight", "name": "Moonlight"}])
+    );
+    assert_eq!(
+        available["removed_apps"],
+        json!([{"id": "steam", "name": "Steam", "reason": "Gone."}])
+    );
+    assert!(
+        root.read("nix.log")
+            .contains(&format!("&rev={c3}#lib.catalogIds")),
+        "{}",
+        root.read("nix.log")
+    );
     let stages: Vec<&str> = events
         .iter()
         .filter(|(n, _)| n == "job_progress")
@@ -927,4 +952,213 @@ async fn interactive_authorization() {
         true,
         "nothing changed"
     );
+}
+
+const CATALOG: &str = r#"{"indexVersion": 2, "apps": [
+  {"id": "plex-htpc", "name": "Plex", "status": "available", "sizeMiB": 300,
+   "dataPaths": [".local/share/plex-htpc", ".cache/plex"],
+   "terms": {"title": "Plex Terms of Service", "version": "2025-10-30", "url": "https://www.plex.tv/x",
+             "retrieved": "2026-10-06", "file": "terms/plex-htpc-2025-10-30.txt"}},
+  {"id": "steam", "name": "Steam", "status": "available", "sizeMiB": 1000, "dataPaths": [".local/share/Steam", ".steam"]},
+  {"id": "firefox", "name": "Firefox", "status": "available", "sizeMiB": 10, "dataPaths": [".mozilla"]},
+  {"id": "youtube", "name": "YouTube", "status": "available", "sizeMiB": 1, "depends": ["firefox"],
+   "dataPaths": [".local/share/hinteros/firefox/youtube"]},
+  {"id": "kodi", "name": "Kodi", "status": "available", "sizeMiB": 200, "conflicts": ["steam"]},
+  {"id": "old", "name": "Old", "status": "retired", "statusReason": "Discontinued."}
+]}"#;
+
+/// apps.install / apps.remove against a catalog index in the fake generation: validation,
+/// dependencies, conflicts, terms (recorded and audited), the job, and data deletion in the
+/// (test) profile home without following symlinks.
+#[tokio::test(flavor = "multi_thread")]
+async fn store_install_and_remove() {
+    let root = Root::create();
+    std::fs::write(root.p("policy/catalog.json"), CATALOG).unwrap();
+    let Some(sys) = System::start(root, &[]).await else {
+        return;
+    };
+    let root = &sys.root;
+    let mut c = sys.subscriber().await;
+    let revision = || async {
+        let mut c = sys.client().await;
+        call(&mut c, "settings.get", json!({})).await.unwrap()["revision"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let rev = revision().await;
+
+    // Refusals, none of which start a job or touch state.json.
+    let cases = [
+        (
+            json!({"ids": ["nope"], "revision": rev}),
+            ErrorCode::NotFound,
+        ),
+        (
+            json!({"ids": ["old"], "revision": rev}),
+            ErrorCode::InvalidParams,
+        ),
+        (
+            json!({"ids": ["../x"], "revision": rev}),
+            ErrorCode::InvalidParams,
+        ),
+        (
+            json!({"ids": ["kodi"], "revision": rev}),
+            ErrorCode::AppConflict,
+        ),
+        (
+            json!({"ids": ["plex-htpc"], "revision": rev}),
+            ErrorCode::TermsRequired,
+        ),
+        (
+            json!({"ids": ["plex-htpc"], "revision": rev, "accepted_terms": {"plex-htpc": "2020-01-01"}}),
+            ErrorCode::TermsRequired,
+        ),
+        (
+            json!({"ids": ["youtube"], "revision": "0".repeat(64)}),
+            ErrorCode::StateConflict,
+        ),
+        (
+            json!({"ids": ["youtube"], "revision": rev, "path": "/nix/store/x"}),
+            ErrorCode::InvalidParams,
+        ),
+    ];
+    for (params, expected) in cases {
+        let e = call(&mut c, "apps.install", params.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(code(&e), expected.code(), "{params}: {e}");
+    }
+    let e = call(
+        &mut c,
+        "apps.install",
+        json!({"ids": ["kodi"], "revision": rev}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["data"], json!({"id": "kodi", "conflicts_with": "steam"}));
+    assert!(sys.fakes.lock().unwrap().units.is_empty());
+    assert_eq!(root.read("etc/hinteros/state.json"), STATE);
+    // Already installed: nothing to do.
+    let r = call(
+        &mut c,
+        "apps.install",
+        json!({"ids": ["steam"], "revision": rev}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r, json!({"job_id": null}));
+
+    // Install with a dependency and accepted terms.
+    let r = call(
+        &mut c,
+        "apps.install",
+        json!({"ids": ["youtube", "plex-htpc"], "revision": rev,
+               "accepted_terms": {"plex-htpc": "2025-10-30"}}),
+    )
+    .await
+    .unwrap();
+    let id = r["job_id"].as_str().unwrap().to_owned();
+    let events = until_finished(&mut c, &id).await;
+    assert_eq!(events[0].1["kind"], "apps_install");
+    assert_eq!(finished(&events)["ok"], true, "{}", sys.job_log(&id));
+    assert_eq!(
+        root.etc_state()["apps"],
+        json!(["steam", "youtube", "plex-htpc", "firefox"])
+    );
+    let settings = call(&mut c, "settings.get", json!({})).await.unwrap();
+    assert_eq!(
+        settings["settings"]["apps"],
+        json!(["steam", "youtube", "plex-htpc", "firefox"])
+    );
+    // The acceptance is recorded (root-only file) and audited.
+    let terms: Value =
+        serde_json::from_str(&root.read("var/lib/hinteros/terms-accepted.json")).unwrap();
+    let rec = &terms["plex-htpc"][0];
+    assert_eq!(rec["version"], "2025-10-30");
+    assert!(rec["accepted_at"].as_str().unwrap().ends_with('Z'));
+    assert!(!rec["by"].as_str().unwrap().is_empty());
+    assert_eq!(terms.as_object().unwrap().len(), 1);
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(root.p("var/lib/hinteros/terms-accepted.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let audit = sys.audit();
+    assert!(
+        audit.iter().any(
+            |m| m.get("HINTEROS_TERMS_ID").map(String::as_str) == Some("plex-htpc")
+                && m.get("HINTEROS_TERMS_VERSION").map(String::as_str) == Some("2025-10-30")
+                && m.get("HINTEROS_JOB_ID") == Some(&id)
+        ),
+        "{audit:?}"
+    );
+    assert!(
+        audit.iter().any(
+            |m| m.get("HINTEROS_METHOD").map(String::as_str) == Some("apps.install")
+                && m.get("HINTEROS_ACTION").map(String::as_str) == Some("org.hinteros.system.apps")
+                && m.get("HINTEROS_DECISION").map(String::as_str) == Some("allowed")
+        )
+    );
+
+    // Remove: firefox alone is still needed by youtube.
+    let rev = revision().await;
+    let e = call(
+        &mut c,
+        "apps.remove",
+        json!({"ids": ["firefox"], "revision": rev, "delete_data": false}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        e["data"],
+        json!({"id": "firefox", "conflicts_with": "youtube"})
+    );
+    let e = call(
+        &mut c,
+        "apps.remove",
+        json!({"ids": ["kodi"], "revision": rev, "delete_data": false}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(code(&e), ErrorCode::NotFound.code());
+
+    // Remove with data: the profile home's data paths go, a planted symlink's target stays.
+    let home = root.p("home");
+    std::fs::create_dir_all(home.join(".local/share/hinteros/firefox/youtube/cache")).unwrap();
+    std::fs::write(
+        home.join(".local/share/hinteros/firefox/youtube/cache/x"),
+        "x",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.p("precious")).unwrap();
+    std::fs::write(root.p("precious/file"), "keep").unwrap();
+    std::os::unix::fs::symlink(root.p("precious"), home.join(".mozilla")).unwrap();
+    std::fs::create_dir_all(home.join(".local/share/Steam")).unwrap();
+    let r = call(
+        &mut c,
+        "apps.remove",
+        json!({"ids": ["youtube", "firefox"], "revision": rev, "delete_data": true}),
+    )
+    .await
+    .unwrap();
+    let id = r["job_id"].as_str().unwrap().to_owned();
+    let events = until_finished(&mut c, &id).await;
+    assert_eq!(events[0].1["kind"], "apps_remove");
+    assert_eq!(finished(&events)["ok"], true, "{}", sys.job_log(&id));
+    assert_eq!(root.etc_state()["apps"], json!(["steam", "plex-htpc"]));
+    assert!(!home.join(".local/share/hinteros/firefox/youtube").exists());
+    assert!(home.join(".local/share/hinteros/firefox").exists());
+    assert!(std::fs::symlink_metadata(home.join(".mozilla")).is_err());
+    assert_eq!(root.read("precious/file"), "keep");
+    assert!(
+        home.join(".local/share/Steam").exists(),
+        "other apps' data stays"
+    );
+    let log = sys.job_log(&id);
+    assert!(log.contains("deleted app data"), "{log}");
 }

@@ -119,6 +119,10 @@ pub struct ServeArgs {
     /// the user to authenticate in the session daemon's agent
     #[arg(long, default_value_t = 300)]
     pub auth_timeout_s: u64,
+    /// Tests only: use this directory as the only profile home for `apps.remove {delete_data}`
+    /// instead of the homes from the user database (so a test never touches a real home)
+    #[arg(long, hide = true)]
+    pub test_profile_home: Option<PathBuf>,
     /// The running generation's App Store catalog index
     /// [default: <current-system>/sw/share/hinteros/catalog.json]
     #[arg(long)]

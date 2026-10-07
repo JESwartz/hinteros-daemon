@@ -12,13 +12,13 @@ use hinteros_api::common::{Peer as ApiPeer, Ping};
 use hinteros_api::jsonrpc;
 use hinteros_api::server::{self, Connection, Step, method_not_found};
 use hinteros_api::system::{
-    self, BaseSet, BaseSetParams, ChannelSet, ChannelSetParams, EventName, GenerationsList,
-    GenerationsListResult, HardwareRedetect, JobIdParams, JobKind, JobRef, JobsCancel, JobsGet,
-    JobsGetResult, JobsList, JobsListResult, Rebuild, Rollback, RollbackParams, Settings,
-    SettingsGet, SettingsGetResult, SettingsSet, SettingsSetParams, SshInfo, SshSet, SshSetParams,
-    SshSettings, Subscribe, SubscriptionParams, SubscriptionResult, SystemInfo, SystemInfoResult,
-    Unsubscribe, UpdateApply, UpdateApplyParams, UpdateCheck, UpdateCheckReply, UpdateCheckResult,
-    is_job_id, is_rev,
+    self, AppsInstall, AppsInstallParams, AppsRemove, AppsRemoveParams, BaseSet, BaseSetParams,
+    ChannelSet, ChannelSetParams, EventName, GenerationsList, GenerationsListResult,
+    HardwareRedetect, JobIdParams, JobKind, JobRef, JobsCancel, JobsGet, JobsGetResult, JobsList,
+    JobsListResult, Rebuild, Rollback, RollbackParams, Settings, SettingsGet, SettingsGetResult,
+    SettingsSet, SettingsSetParams, SshInfo, SshSet, SshSetParams, SshSettings, Subscribe,
+    SubscriptionParams, SubscriptionResult, SystemInfo, SystemInfoResult, Unsubscribe, UpdateApply,
+    UpdateApplyParams, UpdateCheck, UpdateCheckReply, UpdateCheckResult, is_job_id, is_rev,
 };
 use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde::de::DeserializeOwned;
@@ -38,6 +38,7 @@ use crate::job::{self, Action, Apply, ApplyUpdate, JobSpec, NotFastForward, Upda
 use crate::jobs::Jobs;
 use crate::peer::Peer;
 use crate::state::{self, State};
+use crate::store;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -474,6 +475,8 @@ pub(crate) enum Request {
     UpdateApply(UpdateApplyParams),
     ChannelSet(ChannelSetParams),
     BaseSet(BaseSetParams),
+    AppsInstall(AppsInstallParams),
+    AppsRemove(AppsRemoveParams),
     JobsCancel(JobIdParams),
 }
 
@@ -486,18 +489,7 @@ impl Request {
                     state::check_changes(changes)?;
                 }
                 let p: SettingsSetParams = decode::<SettingsSet>(params)?;
-                if p.revision.len() != 64
-                    || !p
-                        .revision
-                        .bytes()
-                        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-                {
-                    return Err(ErrorObject::invalid_field(
-                        "revision",
-                        "bad_format",
-                        "revision must be 64 hex digits",
-                    ));
-                }
+                check_revision(&p.revision)?;
                 Self::SettingsSet(p)
             }
             SshSet::NAME => Self::SshSet(decode::<SshSet>(params)?),
@@ -537,6 +529,19 @@ impl Request {
             }
             ChannelSet::NAME => Self::ChannelSet(decode::<ChannelSet>(params)?),
             BaseSet::NAME => Self::BaseSet(decode::<BaseSet>(params)?),
+            AppsInstall::NAME => {
+                let p: AppsInstallParams = decode::<AppsInstall>(params)?;
+                check_revision(&p.revision)?;
+                store::check_ids(&p.ids)?;
+                store::check_accepted_terms(&p.accepted_terms)?;
+                Self::AppsInstall(p)
+            }
+            AppsRemove::NAME => {
+                let p: AppsRemoveParams = decode::<AppsRemove>(params)?;
+                check_revision(&p.revision)?;
+                store::check_ids(&p.ids)?;
+                Self::AppsRemove(p)
+            }
             JobsCancel::NAME => {
                 let p: JobIdParams = decode::<JobsCancel>(params)?;
                 check_job_id(&p.job_id)?;
@@ -545,6 +550,29 @@ impl Request {
             _ => return Err(method_not_found(method)),
         })
     }
+}
+
+fn check_revision(revision: &str) -> Result<(), ErrorObject> {
+    if revision.len() != 64
+        || !revision
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(ErrorObject::invalid_field(
+            "revision",
+            "bad_format",
+            "revision must be 64 hex digits",
+        ));
+    }
+    Ok(())
+}
+
+fn state_conflict() -> ErrorObject {
+    ErrorObject::with_data(
+        ErrorCode::StateConflict,
+        "state.json changed since settings.get",
+        json!({ "reason": "revision" }),
+    )
 }
 
 fn job_ref(id: Option<String>) -> Result<Value, ErrorObject> {
@@ -602,6 +630,11 @@ impl Service {
 
     /// Memory and disk preflight for jobs that build.
     fn preflight(&self) -> Result<(), ErrorObject> {
+        self.preflight_with(0)
+    }
+
+    /// The preflight, with `extra_disk` bytes needed on top of the rebuild margin (new apps).
+    fn preflight_with(&self, extra_disk: u64) -> Result<(), ErrorObject> {
         let insufficient = |kind: &str, needed: u64, available: u64| {
             ErrorObject::with_data(
                 ErrorCode::InsufficientResources,
@@ -619,12 +652,13 @@ impl Service {
                 ));
             }
         }
-        if self.args.min_disk_bytes > 0 {
+        let needed = self.args.min_disk_bytes.saturating_add(extra_disk);
+        if needed > 0 {
             let available = rustix::fs::statvfs(&self.args.store_dir)
                 .map(|s| s.f_bavail.saturating_mul(s.f_frsize))
                 .unwrap_or(0);
-            if available < self.args.min_disk_bytes {
-                return Err(insufficient("disk", self.args.min_disk_bytes, available));
+            if available < needed {
+                return Err(insufficient("disk", needed, available));
             }
         }
         Ok(())
@@ -686,6 +720,7 @@ impl Service {
             channel,
             current_rev,
             allowed_signers: flake::allowed_signers(&self.policy_dir()),
+            catalog: None,
         })
     }
 
@@ -830,7 +865,15 @@ impl Service {
                     })
                     .map_err(internal);
                 }
-                let source = self.update_source(&table, channel, lock.rev.clone())?;
+                let mut source = self.update_source(&table, channel, lock.rev.clone())?;
+                let index = self.args.catalog_index();
+                source.catalog = Some(job::CatalogCheck {
+                    index: std::fs::canonicalize(&index).unwrap_or(index),
+                    installed: State::load(&self.paths.state_json())
+                        .map(|(s, _)| s.apps)
+                        .unwrap_or_default(),
+                    input_url: table.input_url(&source.branch, None),
+                });
                 let spec = self.spec(JobKind::UpdateCheck, uid, Action::UpdateCheck(source));
                 let id = self.start(spec).await?;
                 serde_json::to_value(UpdateCheckReply {
@@ -915,6 +958,97 @@ impl Service {
                 );
                 job_ref(Some(self.start(spec).await?))
             }
+            Request::AppsInstall(p) => {
+                let (mut state, revision) = self.load_state()?;
+                if p.revision != revision {
+                    return Err(state_conflict());
+                }
+                let index = self.catalog()?;
+                let plan = store::plan_install(&index, &state.apps, &p.ids, &p.accepted_terms)?;
+                if plan.new.is_empty() {
+                    return job_ref(None);
+                }
+                self.preflight_with(plan.size_mib.saturating_mul(1 << 20))?;
+                let who = user_of(uid);
+                let by = who
+                    .as_ref()
+                    .map_or_else(|| uid.to_string(), |u| u.0.clone());
+                let profile = state
+                    .profiles
+                    .iter()
+                    .find(|pr| Some(&pr.user) == who.as_ref().map(|u| &u.0))
+                    .map(|pr| pr.id.clone());
+                let now = job::now();
+                let terms: Vec<job::TermsRecord> = plan
+                    .terms
+                    .iter()
+                    .map(|(id, version)| job::TermsRecord {
+                        id: id.clone(),
+                        version: version.clone(),
+                        accepted_at: now,
+                        by: by.clone(),
+                    })
+                    .collect();
+                state.apps.extend(plan.new.iter().cloned());
+                let spec = self.spec(
+                    JobKind::AppsInstall,
+                    uid,
+                    Action::Apply(Apply {
+                        state: Some(state),
+                        terms: terms.clone(),
+                        ..Default::default()
+                    }),
+                );
+                let id = self.start(spec).await?;
+                for t in &terms {
+                    self.audit
+                        .terms_accepted(uid, &by, profile.as_deref(), &t.id, &t.version, &id);
+                }
+                info!(job = %id, apps = ?plan.new, "installing apps");
+                job_ref(Some(id))
+            }
+            Request::AppsRemove(p) => {
+                let (mut state, revision) = self.load_state()?;
+                if p.revision != revision {
+                    return Err(state_conflict());
+                }
+                // An index is needed for dependents and data paths; without one (a broken
+                // generation) removing is still possible, without data deletion.
+                let index = match self.catalog() {
+                    Ok(i) => Some(i),
+                    Err(e) if p.delete_data => return Err(e),
+                    Err(_) => None,
+                };
+                let removing = store::plan_remove(index.as_ref(), &state.apps, &p.ids)?;
+                state.apps.retain(|a| !removing.contains(a));
+                let delete_data = match (&index, p.delete_data) {
+                    (Some(index), true) => Some(job::DeleteData {
+                        homes: match &self.args.test_profile_home {
+                            Some(dir) => vec![job::Home {
+                                user: "test".into(),
+                                uid,
+                                dir: dir.clone(),
+                            }],
+                            None => profile_homes(uid, &state),
+                        },
+                        paths: store::data_paths(index, &removing),
+                    }),
+                    _ => None,
+                };
+                self.preflight()?;
+                let spec = self.spec(
+                    JobKind::AppsRemove,
+                    uid,
+                    Action::Apply(Apply {
+                        state: Some(state),
+                        delete_data,
+                        ..Default::default()
+                    }),
+                );
+                let id = self.start(spec).await?;
+                info!(job = %id, apps = ?removing, delete_data = p.delete_data, "removing apps");
+                job_ref(Some(id))
+            }
             Request::JobsCancel(p) => {
                 self.jobs.lock().unwrap().cancel(&p.job_id)?;
                 info!(job = %p.job_id, uid, "cancel requested");
@@ -922,6 +1056,50 @@ impl Service {
             }
         }
     }
+}
+
+impl Service {
+    /// The running generation's catalog index (resolved now, never the caller's copy).
+    fn catalog(&self) -> Result<hinteros_api::catalog::Index, ErrorObject> {
+        hinteros_api::catalog::Index::load(&self.args.catalog_index()).map_err(|e| {
+            warn!("catalog: {e}");
+            ErrorObject::new(
+                ErrorCode::InternalError,
+                format!("this system has no usable app catalog: {e}"),
+            )
+        })
+    }
+}
+
+/// The caller's user name and home, from the system's user database.
+fn user_of(uid: u32) -> Option<(String, std::path::PathBuf)> {
+    let u = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
+    Some((u.name, u.dir))
+}
+
+/// Every profile's home: today the caller's (the session user's), plus the users named in
+/// `state.json`'s profiles (M7). Never root's, never `/`, only absolute paths.
+fn profile_homes(uid: u32, state: &State) -> Vec<job::Home> {
+    let mut users: Vec<nix::unistd::User> = Vec::new();
+    if let Ok(Some(u)) = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)) {
+        users.push(u);
+    }
+    for p in &state.profiles {
+        if let Ok(Some(u)) = nix::unistd::User::from_name(&p.user)
+            && !users.iter().any(|x| x.uid == u.uid)
+        {
+            users.push(u);
+        }
+    }
+    users
+        .into_iter()
+        .filter(|u| !u.uid.is_root() && u.dir.is_absolute() && u.dir != Path::new("/"))
+        .map(|u| job::Home {
+            user: u.name,
+            uid: u.uid.as_raw(),
+            dir: u.dir,
+        })
+        .collect()
 }
 
 fn mem_available() -> Option<u64> {

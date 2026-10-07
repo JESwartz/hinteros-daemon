@@ -362,6 +362,10 @@ build)
   "$FAKE_ROOT/mkgen" "$out" "$dir"
   echo "$out"
   ;;
+eval)
+  [ -e "$FAKE_ROOT/catalog-ids.json" ] || { echo "error: cannot fetch" >&2; exit 1; }
+  cat "$FAKE_ROOT/catalog-ids.json"
+  ;;
 *) echo "fake nix: unexpected $*" >&2; exit 2 ;;
 esac
 "#;
@@ -478,6 +482,8 @@ impl Root {
             "ssh",
             "pkgs/a/bin",
             "pkgs/b/bin",
+            "home",
+            "policy/terms",
         ] {
             std::fs::create_dir_all(r.p(d)).unwrap();
         }
@@ -625,6 +631,11 @@ impl System {
             "0".into(),
             "--min-disk-bytes".into(),
             "0".into(),
+            "--catalog-index".into(),
+            r("policy/catalog.json"),
+            // Never a real home: data deletion only ever sees this directory.
+            "--test-profile-home".into(),
+            r("home"),
         ];
         // Generous rate limits unless the test sets its own (clap refuses a flag given twice).
         for (flag, value) in [("--rate-per-minute", "1000"), ("--rate-burst", "1000")] {

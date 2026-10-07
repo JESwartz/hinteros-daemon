@@ -69,6 +69,8 @@ pub struct JobSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// A spec is read once per job; the size difference does not matter.
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     /// Copy `/etc/hinteros` to staging, edit, build, switch, swap back.
@@ -88,6 +90,42 @@ pub struct Apply {
     pub facter: bool,
     /// Verify a revision and lock the hinteros input to it.
     pub update: Option<ApplyUpdate>,
+    /// Vendor terms accepted with this request (`apps.install`): recorded in
+    /// `terms-accepted.json` before anything is built.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<TermsRecord>,
+    /// App data to delete after a successful switch (`apps.remove {delete_data: true}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_data: Option<DeleteData>,
+}
+
+/// One accepted terms version, as `terms-accepted.json` records it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TermsRecord {
+    pub id: String,
+    pub version: String,
+    /// Unix seconds of the request.
+    pub accepted_at: i64,
+    /// The unix user who accepted (the caller).
+    pub by: String,
+}
+
+/// Data paths to delete in profile homes; homes and paths come from the service (passwd and
+/// the running generation's catalog), never from the client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteData {
+    pub homes: Vec<Home>,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Home {
+    pub user: String,
+    pub uid: u32,
+    pub dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +141,21 @@ pub struct UpdateSource {
     pub current_rev: Option<String>,
     /// From the running generation (resolved when the job was created).
     pub allowed_signers: PathBuf,
+    /// `update.check` only: compare the catalogs of the running and the target generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<CatalogCheck>,
+}
+
+/// What `update.check` needs to name the apps an update adds or removes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogCheck {
+    /// The running generation's index (resolved when the job was created).
+    pub index: PathBuf,
+    /// Installed apps (`state.json`).
+    pub installed: Vec<String>,
+    /// The hinteros input URL of the channel without a rev; the job adds the verified one.
+    pub input_url: String,
 }
 
 /// What happens when the target does not descend from the locked revision.

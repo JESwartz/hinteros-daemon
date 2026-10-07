@@ -11,6 +11,7 @@
 pub mod audit;
 pub mod authz;
 pub mod config;
+pub mod datadel;
 pub mod flake;
 pub mod fsutil;
 pub mod generations;
@@ -21,6 +22,7 @@ pub mod peer;
 pub mod runner;
 pub mod service;
 pub mod state;
+pub mod store;
 pub mod update;
 
 #[cfg(test)]

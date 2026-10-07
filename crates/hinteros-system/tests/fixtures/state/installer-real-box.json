@@ -1,0 +1,1 @@
+{"schemaVersion":1,"base":"unstable","stateVersion":"26.11","settings":{"hostname":"hinteros","ssh":{"enable":true},"admin":{"user":"james"}},"disk":{"layout":"gpt-esp-ext4"},"apps":["crunchyroll","firefox","jellyfin","moonlight","youtube"],"profiles":[]}

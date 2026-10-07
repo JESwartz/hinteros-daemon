@@ -79,13 +79,15 @@ proptest! {
         enable in any::<bool>(),
         stable in any::<bool>(),
         apps in prop::collection::vec("[a-z0-9][a-z0-9-]{0,31}", 0..5),
-        keys in prop::option::of(prop::collection::vec("ssh-ed25519 [A-Za-z0-9+/]{20}", 0..3)),
+        host in prop::option::of("[a-z][a-z0-9-]{0,10}"),
         users in prop::collection::vec(("[a-z0-9-]{1,8}", "[^\\p{Cc}]{1,20}", "[a-z_][a-z0-9_-]{0,10}"), 0..3),
     ) {
         let s = State {
             schema_version: state::SCHEMA_VERSION,
             base: if stable { Base::Stable } else { Base::Unstable },
-            settings: StateSettings { ssh: SshState { enable, authorized_keys: keys, allow_admin: None } },
+            state_version: host.clone().map(|_| "26.11".to_string()),
+            settings: StateSettings { hostname: host, ssh: SshState { enable }, admin: None },
+            disk: None,
             apps,
             profiles: users.into_iter().map(|(id, name, user)| Profile { id, name, user }).collect(),
         };

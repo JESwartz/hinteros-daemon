@@ -649,7 +649,7 @@ trust.
   rate_limited`), `_JOB_ID`, `_PARAMS` (summary), and for jobs `_OUTCOME`, `_REV_BEFORE/AFTER`,
   `_GENERATION_BEFORE/AFTER`. Denials are capped at 20 per minute and uid, then summarised.
 - **State** (`state.rs`): `state.json` is read into a typed `State` mirroring `state.nix`
-  (`schemaVersion`, `base`, `settings.ssh.{enable, authorizedKeys, allowAdmin}`, `apps`,
+  (`schemaVersion`, `base`, `stateVersion`, `settings.{hostname, ssh.enable, admin.user}`, `disk.layout`, `apps`,
   `profiles`; anything else refused) and written canonically from it, never from client JSON.
   `revision` is the SHA-256 of the file. `apps` (M8) and `profiles` (M7) round-trip untouched,
   ready for `apps.install/remove` and `profiles.*` to edit the same struct.

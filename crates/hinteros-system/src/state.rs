@@ -21,8 +21,14 @@ pub struct State {
     pub schema_version: u32,
     #[serde(default = "default_base")]
     pub base: Base,
+    /// NixOS `system.stateVersion`, installer-written; never settable through the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_version: Option<String>,
     #[serde(default)]
     pub settings: StateSettings,
+    /// Disk layout, installer-written; never settable through the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<DiskState>,
     /// Catalog app ids installed from the Store (M8: `apps.install`/`apps.remove`).
     #[serde(default)]
     pub apps: Vec<String>,
@@ -38,21 +44,33 @@ fn default_base() -> Base {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateSettings {
+    /// Installer-written; not settable through `settings.set`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     #[serde(default)]
     pub ssh: SshState,
+    /// The admin account (installer-written; not settable through `settings.set`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin: Option<AdminState>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct SshState {
     #[serde(default)]
     pub enable: bool,
-    /// Kept as found (key login moved to the backlog; no method writes it).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authorized_keys: Option<Vec<String>>,
-    /// Kept as found (dropped from the API; no method writes it).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_admin: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminState {
+    pub user: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiskState {
+    pub layout: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,10 +89,30 @@ pub enum StateError {
     Invalid(String),
 }
 
+/// Turn a serde error into [`StateError`]; an unknown field is logged by name, since it means the
+/// daemon and the system repo (`state.nix`) disagree about the schema.
+fn explain(e: serde_json::Error) -> StateError {
+    let msg = e.to_string();
+    let field = msg
+        .split_once("unknown field `")
+        .and_then(|(_, rest)| rest.split_once('`'))
+        .map(|(f, _)| printable(f));
+    if let Some(field) = field {
+        tracing::error!(
+            field = %field,
+            "state.json has a field this daemon does not know; the daemon and the system repo \
+             are out of sync (update the daemon, or the installer wrote a newer schema)"
+        );
+        return StateError::Invalid(format!(
+            "{msg} (daemon and system repo are out of sync: unknown field {field:?})"
+        ));
+    }
+    StateError::Invalid(msg)
+}
+
 impl State {
     pub fn parse(bytes: &[u8]) -> Result<Self, StateError> {
-        let state: State =
-            serde_json::from_slice(bytes).map_err(|e| StateError::Invalid(e.to_string()))?;
+        let state: State = serde_json::from_slice(bytes).map_err(explain)?;
         state.validate().map_err(StateError::Invalid)?;
         Ok(state)
     }
@@ -264,7 +302,7 @@ mod tests {
   "schemaVersion": 1,
   "base": "unstable",
   "settings": {
-    "ssh": { "enable": true, "authorizedKeys": [] }
+    "ssh": { "enable": true }
   },
   "apps": ["steam"],
   "profiles": [{ "id": "p1", "name": "Dev", "user": "hinteros" }]
@@ -274,18 +312,11 @@ mod tests {
     fn reads_the_real_schema_and_round_trips() {
         let s = State::parse(DEVBOX.as_bytes()).unwrap();
         assert!(s.settings.ssh.enable);
-        assert_eq!(s.settings.ssh.authorized_keys, Some(vec![]));
         assert_eq!(s.apps, ["steam"]);
         let out = s.to_canonical_json();
         let again = State::parse(&out).unwrap();
         assert_eq!(again, s);
         assert_eq!(again.to_canonical_json(), out, "canonical form is stable");
-        let v: Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(
-            v["settings"]["ssh"]["authorizedKeys"],
-            serde_json::json!([])
-        );
-        assert!(v["settings"]["ssh"].get("allowAdmin").is_none());
         // Minimal file: defaults.
         let s = State::parse(br#"{"schemaVersion":1}"#).unwrap();
         assert_eq!(s.base, Base::Unstable);
@@ -297,6 +328,9 @@ mod tests {
         for bad in [
             r#"{"schemaVersion":2}"#,
             r#"{"schemaVersion":1,"extra":1}"#,
+            r#"{"schemaVersion":1,"disk":{"layout":"x","size":1}}"#,
+            r#"{"schemaVersion":1,"settings":{"admin":{}}}"#,
+            r#"{"schemaVersion":1,"settings":{"ssh":{"authorizedKeys":[]}}}"#,
             r#"{"schemaVersion":1,"settings":{"nix":{}}}"#,
             r#"{"schemaVersion":1,"settings":{"ssh":{"enable":true,"port":22}}}"#,
             r#"{"schemaVersion":1,"base":"23.11"}"#,

@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "base": "unstable",
+  "settings": {
+    "ssh": { "enable": false }
+  },
+  "apps": ["jellyfin", "youtube", "crunchyroll", "firefox", "steam"],
+  "profiles": [{ "id": "p1", "name": "Dev", "user": "hinteros" }]
+}

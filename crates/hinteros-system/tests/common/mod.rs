@@ -129,6 +129,13 @@ pub struct FakeState {
     pub answers: HashMap<String, Answer>,
     /// (action, pid in the subject, whether a pidfd came along).
     pub polkit_calls: Vec<(String, Option<u32>, bool)>,
+    /// (action, flags, cancellation id) of every check.
+    pub polkit_flags: Vec<(String, u32, String)>,
+    /// How an interactive check (flags 1) ends, per action: what the agent conversation
+    /// gives and how long it takes. Without an entry, interactive checks answer like `answers`.
+    pub interactive: HashMap<String, Interactive>,
+    /// Cancellation ids of `CancelCheckAuthorization` calls.
+    pub cancelled: Vec<String>,
     /// Inhibitor modes taken.
     pub inhibits: Vec<String>,
     /// Started units.
@@ -140,6 +147,15 @@ pub struct FakeState {
 
 /// How the fake systemd runs a job: binary, run dir, extra environment.
 pub type JobCmd = (PathBuf, PathBuf, Vec<(String, String)>);
+
+/// The outcome of a fake agent conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interactive {
+    pub answer: Answer,
+    /// polkit.dismissed (the user cancelled).
+    pub dismissed: bool,
+    pub delay: Duration,
+}
 
 pub type Shared = Arc<Mutex<FakeState>>;
 
@@ -194,25 +210,43 @@ struct Authority(Shared);
 
 #[zbus::interface(name = "org.freedesktop.PolicyKit1.Authority")]
 impl Authority {
-    fn check_authorization(
+    async fn check_authorization(
         &self,
         subject: (String, HashMap<String, OwnedValue>),
         action_id: String,
         _details: HashMap<String, String>,
-        _flags: u32,
-        _cancellation_id: String,
+        flags: u32,
+        cancellation_id: String,
     ) -> (bool, bool, HashMap<String, String>) {
-        let mut s = self.0.lock().unwrap();
-        let pid = subject.1.get("pid").and_then(|v| u32::try_from(v).ok());
-        let has_pidfd = subject.1.contains_key("pidfd");
-        assert_eq!(subject.0, "unix-process");
-        s.polkit_calls.push((action_id.clone(), pid, has_pidfd));
-        let answer = s.answers.get(&action_id).copied().unwrap_or(Answer::Yes);
-        (
-            answer == Answer::Yes,
-            answer == Answer::Challenge,
-            HashMap::new(),
-        )
+        let (answer, extra) = {
+            let mut s = self.0.lock().unwrap();
+            let pid = subject.1.get("pid").and_then(|v| u32::try_from(v).ok());
+            let has_pidfd = subject.1.contains_key("pidfd");
+            assert_eq!(subject.0, "unix-process");
+            s.polkit_calls.push((action_id.clone(), pid, has_pidfd));
+            s.polkit_flags
+                .push((action_id.clone(), flags, cancellation_id.clone()));
+            let plain = s.answers.get(&action_id).copied().unwrap_or(Answer::Yes);
+            match s.interactive.get(&action_id).copied() {
+                Some(i) if flags & 1 == 1 => (i.answer, Some(i)),
+                _ => (plain, None),
+            }
+        };
+        let mut details = HashMap::new();
+        if let Some(i) = extra {
+            tokio::time::sleep(i.delay).await;
+            if self.0.lock().unwrap().cancelled.contains(&cancellation_id) {
+                return (false, false, details);
+            }
+            if i.dismissed {
+                details.insert("polkit.dismissed".into(), "true".into());
+            }
+        }
+        (answer == Answer::Yes, answer == Answer::Challenge, details)
+    }
+
+    fn cancel_check_authorization(&self, cancellation_id: String) {
+        self.0.lock().unwrap().cancelled.push(cancellation_id);
     }
 }
 

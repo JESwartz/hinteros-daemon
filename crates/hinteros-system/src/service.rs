@@ -42,6 +42,9 @@ use crate::state::{self, State};
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Mutating requests one connection may have in flight (an interactive polkit check can wait
+/// minutes for the user; the connection keeps serving other requests meanwhile).
+const MAX_IN_FLIGHT: usize = 4;
 
 type Broadcast = (EventName, Value);
 
@@ -52,6 +55,10 @@ pub struct Service {
     bus: Bus,
     audit: Audit,
     rate: RateLimit,
+    /// `update.check` has its own bucket: the launcher checks in the background (at startup,
+    /// relayed with the session user's uid), and that must never use up the budget of the
+    /// user's own actions. Its result is cached for 60 s anyway.
+    check_rate: RateLimit,
     jobs: Mutex<Jobs>,
     events: broadcast::Sender<Broadcast>,
     connections: Mutex<HashMap<u32, usize>>,
@@ -73,6 +80,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         bus: Bus::new(args.bus.clone()),
         audit: Audit::new(args.journal_socket.clone()),
         rate: RateLimit::new(args.rate_per_minute, args.rate_burst),
+        check_rate: RateLimit::new(args.rate_per_minute, args.rate_burst),
         jobs: Mutex::new(Jobs::load(paths.clone())),
         events,
         connections: Mutex::new(HashMap::new()),
@@ -172,7 +180,7 @@ impl Drop for Slot<'_> {
 }
 
 async fn handle(svc: Arc<Service>, stream: UnixStream) -> Result<()> {
-    let peer = Peer::of(&stream)?;
+    let peer = Arc::new(Peer::of(&stream)?);
     info!(
         uid = peer.uid,
         gid = peer.gid,
@@ -206,6 +214,10 @@ async fn handle(svc: Arc<Service>, stream: UnixStream) -> Result<()> {
     let mut conn = Connection::new(system::VERSION, ApiPeer::new(NAME, VERSION));
     let mut subscriptions: BTreeSet<EventName> = BTreeSet::new();
     let mut events = svc.events.subscribe();
+    // Answers of mutating requests, which run as tasks (responses may come out of order; JSON-RPC
+    // clients match them by id).
+    let (answers_tx, mut answers) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let in_flight = Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT));
     let hello_deadline = tokio::time::Instant::now() + HELLO_TIMEOUT;
 
     loop {
@@ -233,11 +245,26 @@ async fn handle(svc: Arc<Service>, stream: UnixStream) -> Result<()> {
                     Step::Ignore => {}
                     Step::Dispatch(req) => {
                         let id = req.id.expect("dispatched requests have an id");
-                        let outcome = dispatch(&svc, &peer, &req.method, req.params, &mut subscriptions).await;
-                        write_message(&mut w, &jsonrpc::response(&id, outcome)).await?;
+                        if system::MUTATING.contains(&req.method.as_str()) {
+                            let Ok(permit) = in_flight.clone().try_acquire_owned() else {
+                                let err = authz::rate_limited(Duration::from_secs(1));
+                                write_message(&mut w, &jsonrpc::response(&id, Err(err))).await?;
+                                continue;
+                            };
+                            let (svc, peer, tx) = (svc.clone(), peer.clone(), answers_tx.clone());
+                            tokio::spawn(async move {
+                                let outcome = mutating(&svc, &peer, &req.method, req.params).await;
+                                let _ = tx.send(jsonrpc::response(&id, outcome));
+                                drop(permit);
+                            });
+                        } else {
+                            let outcome = dispatch(&svc, &peer, &req.method, req.params, &mut subscriptions).await;
+                            write_message(&mut w, &jsonrpc::response(&id, outcome)).await?;
+                        }
                     }
                 }
             }
+            Some(answer) = answers.recv() => write_message(&mut w, &answer).await?,
             _ = tokio::time::sleep_until(hello_deadline), if !handshaken => {
                 debug!(uid = peer.uid, "no hello in time; closing");
                 break;
@@ -406,11 +433,19 @@ async fn mutating(
             return Err(e);
         }
     };
-    if let Err(retry) = svc.rate.take(peer.uid, Instant::now()) {
+    let bucket = if method == UpdateCheck::NAME {
+        &svc.check_rate
+    } else {
+        &svc.rate
+    };
+    if let Err(retry) = bucket.take(peer.uid, Instant::now()) {
         audit(Decision::RateLimited, None);
         return Err(authz::rate_limited(retry));
     }
-    if let Err(denial) = authz::authorize(&svc.bus, peer, action).await {
+    let interaction = system::INTERACTIVE_ACTIONS
+        .contains(&action)
+        .then(|| svc.args.auth_timeout());
+    if let Err(denial) = authz::authorize(&svc.bus, peer, action, interaction).await {
         audit(denial.decision(), None);
         return Err(denial.error(action));
     }

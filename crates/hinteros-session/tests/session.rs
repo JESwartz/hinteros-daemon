@@ -799,3 +799,20 @@ async fn apps_list_resolves_native_icons_from_desktop_files() {
     );
     assert!(list["apps"][2].get("icon").is_none());
 }
+
+#[tokio::test]
+async fn hello_params_are_closed() {
+    let d = Daemon::start();
+    let mut c = d.connect().await;
+    for params in [
+        json!({"api_version": session::VERSION, "client": {"name": "t", "version": "0"}, "x": 1}),
+        json!({"api_version": session::VERSION, "client": {"name": "t", "version": "0", "x": 1}}),
+    ] {
+        let e = rpc_error(c.call_raw("hello", params).await);
+        assert_eq!(e["code"], ErrorCode::InvalidParams.code());
+    }
+    // Still usable: a correct hello works on the same connection.
+    c.hello(session::VERSION, Peer::new("test", "0"))
+        .await
+        .unwrap();
+}

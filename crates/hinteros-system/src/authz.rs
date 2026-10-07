@@ -2,9 +2,13 @@
 //! 1. a pidfd for the peer, and the process still alive;
 //! 2. the caller's uid owns seat0's active logind session (or is root);
 //! 3. polkit `CheckAuthorization` for the method's action with a `unix-process` subject
-//!    built from the pidfd (plus pid, start time and uid for older polkit), no interaction.
-//!    A challenge (`auth_admin`) is refused as `authentication_required`, anything else that
-//!    is not a plain yes as `permission_denied`.
+//!    built from the pidfd (plus pid, start time and uid for older polkit). Without user
+//!    interaction, except for the actions in `INTERACTIVE_ACTIONS` (`auth_admin`): polkit then
+//!    asks the authentication agent registered for the caller (the session daemon registers one
+//!    for its own process) and the call waits for the user, at most `--auth-timeout-s`; a
+//!    timeout cancels the check (`CancelCheckAuthorization`). A challenge (no agent) or a
+//!    dismissed prompt is refused as `authentication_required`, anything else that is not a
+//!    yes as `permission_denied`.
 //!
 //! Plus a per-uid token bucket for mutating requests.
 
@@ -15,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde_json::json;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use zbus::zvariant::{Fd, OwnedObjectPath, OwnedValue, Value};
 
 use crate::audit::Decision;
@@ -105,8 +109,14 @@ impl Denial {
     }
 }
 
-/// Run all checks for `action` (the method's polkit action id).
-pub async fn authorize(bus: &Bus, peer: &Peer, action: &str) -> Result<(), Denial> {
+/// Run all checks for `action` (the method's polkit action id). `interaction`: let polkit ask
+/// the caller's authentication agent, waiting at most this long.
+pub async fn authorize(
+    bus: &Bus,
+    peer: &Peer,
+    action: &str,
+    interaction: Option<Duration>,
+) -> Result<(), Denial> {
     if peer.pidfd.is_none() || !peer.alive() {
         return Err(Denial::Peer);
     }
@@ -124,7 +134,7 @@ pub async fn authorize(bus: &Bus, peer: &Peer, action: &str) -> Result<(), Denia
             }
         }
     }
-    match check_polkit(bus, peer, action).await {
+    match check_polkit(bus, peer, action, interaction).await {
         Ok(PolkitAnswer::Yes) => Ok(()),
         Ok(PolkitAnswer::Challenge) => Err(Denial::AuthRequired),
         Ok(PolkitAnswer::No) => Err(Denial::Polkit),
@@ -189,7 +199,61 @@ pub enum PolkitAnswer {
     No,
 }
 
-pub async fn check_polkit(bus: &Bus, peer: &Peer, action: &str) -> zbus::Result<PolkitAnswer> {
+/// polkit's `CheckAuthorizationFlags.AllowUserInteraction`.
+const ALLOW_USER_INTERACTION: u32 = 1;
+
+/// Cancels a pending interactive check if the future waiting for it is dropped (the client
+/// went away, or the time ran out), so polkit closes the agent's prompt.
+struct CancelOnDrop {
+    conn: zbus::Connection,
+    id: String,
+    armed: bool,
+}
+
+impl CancelOnDrop {
+    async fn cancel(mut self) {
+        self.armed = false;
+        let _ = cancel_check(&self.conn, &self.id).await;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            let (conn, id) = (self.conn.clone(), std::mem::take(&mut self.id));
+            tokio::spawn(async move {
+                let _ = cancel_check(&conn, &id).await;
+            });
+        }
+    }
+}
+
+async fn cancel_check(conn: &zbus::Connection, id: &str) -> zbus::Result<()> {
+    debug!(id, "cancelling the polkit check");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        conn.call_method(
+            Some(POLKIT),
+            POLKIT_PATH,
+            Some(POLKIT_IFACE),
+            "CancelCheckAuthorization",
+            &(id,),
+        ),
+    )
+    .await
+    .map_err(|_| zbus::Error::Failure("timed out".into()))??;
+    Ok(())
+}
+
+/// Ask polkit. With `interaction`, polkit may ask the caller's authentication agent and the
+/// call waits for the user (at most that long; then the check is cancelled and counts as not
+/// authenticated).
+pub async fn check_polkit(
+    bus: &Bus,
+    peer: &Peer,
+    action: &str,
+    interaction: Option<Duration>,
+) -> zbus::Result<PolkitAnswer> {
     let conn = bus.get().await?;
     let pidfd = peer
         .pidfd
@@ -206,24 +270,63 @@ pub async fn check_polkit(bus: &Bus, peer: &Peer, action: &str) -> zbus::Result<
     details.insert("uid", Value::I32(i32::try_from(peer.uid).unwrap_or(-1)));
     let subject = ("unix-process", details);
     let no_details: HashMap<&str, &str> = HashMap::new();
-    let reply = conn
-        .call_method(
-            Some(POLKIT),
-            POLKIT_PATH,
-            Some(POLKIT_IFACE),
-            "CheckAuthorization",
-            &(subject, action, no_details, 0u32, ""),
-        )
-        .await?;
-    let (authorized, challenge, _details): (bool, bool, HashMap<String, String>) =
+    let (flags, cancellation_id) = match interaction {
+        Some(_) => (
+            ALLOW_USER_INTERACTION,
+            format!("hinteros-system-{}", crate::job::new_id()),
+        ),
+        None => (0, String::new()),
+    };
+    let args = (subject, action, no_details, flags, cancellation_id.as_str());
+    let call = conn.call_method(
+        Some(POLKIT),
+        POLKIT_PATH,
+        Some(POLKIT_IFACE),
+        "CheckAuthorization",
+        &args,
+    );
+    let reply = match interaction {
+        None => call.await?,
+        Some(limit) => {
+            info!(action, uid = peer.uid, pid = ?peer.pid, "asking polkit with user interaction");
+            let guard = CancelOnDrop {
+                conn: conn.clone(),
+                id: cancellation_id.clone(),
+                armed: true,
+            };
+            match tokio::time::timeout(limit, call).await {
+                Ok(reply) => {
+                    let mut guard = guard;
+                    guard.armed = false;
+                    reply?
+                }
+                Err(_) => {
+                    info!(action, "nobody authenticated in time; cancelling the check");
+                    guard.cancel().await;
+                    return Ok(PolkitAnswer::Challenge);
+                }
+            }
+        }
+    };
+    let (authorized, challenge, details): (bool, bool, HashMap<String, String>) =
         reply.body().deserialize()?;
-    Ok(if authorized {
+    Ok(answer(authorized, challenge, &details))
+}
+
+/// polkit's result as the service sees it. A prompt the user dismissed (or that the agent
+/// cancelled) leaves the action needing authentication, like having no agent at all.
+pub fn answer(
+    authorized: bool,
+    challenge: bool,
+    details: &HashMap<String, String>,
+) -> PolkitAnswer {
+    if authorized {
         PolkitAnswer::Yes
-    } else if challenge {
+    } else if challenge || details.get("polkit.dismissed").map(String::as_str) == Some("true") {
         PolkitAnswer::Challenge
     } else {
         PolkitAnswer::No
-    })
+    }
 }
 
 /// Token buckets per uid for mutating requests.
@@ -291,6 +394,16 @@ mod tests {
             rl.take(1000, later).unwrap();
         }
         assert!(rl.take(1000, later).is_err());
+    }
+
+    #[test]
+    fn polkit_answers() {
+        let none = HashMap::new();
+        assert_eq!(answer(true, false, &none), PolkitAnswer::Yes);
+        assert_eq!(answer(false, true, &none), PolkitAnswer::Challenge);
+        assert_eq!(answer(false, false, &none), PolkitAnswer::No);
+        let dismissed = HashMap::from([("polkit.dismissed".to_string(), "true".to_string())]);
+        assert_eq!(answer(false, false, &dismissed), PolkitAnswer::Challenge);
     }
 
     #[test]

@@ -115,6 +115,14 @@ pub struct ServeArgs {
     /// update.check returns the last result within this many seconds
     #[arg(long, default_value_t = 60, hide = true)]
     pub update_check_cache_s: u64,
+    /// How long an interactive polkit check (an `auth_admin` action such as SSH) may wait for
+    /// the user to authenticate in the session daemon's agent
+    #[arg(long, default_value_t = 300)]
+    pub auth_timeout_s: u64,
+    /// The running generation's App Store catalog index
+    /// [default: <current-system>/sw/share/hinteros/catalog.json]
+    #[arg(long)]
+    pub catalog_index: Option<PathBuf>,
 }
 
 impl ServeArgs {
@@ -148,6 +156,16 @@ impl ServeArgs {
     pub fn update_check_cache(&self) -> Duration {
         Duration::from_secs(self.update_check_cache_s)
     }
+
+    pub fn auth_timeout(&self) -> Duration {
+        Duration::from_secs(self.auth_timeout_s.max(1))
+    }
+
+    pub fn catalog_index(&self) -> PathBuf {
+        self.catalog_index
+            .clone()
+            .unwrap_or_else(|| self.current_system.join("sw/share/hinteros/catalog.json"))
+    }
 }
 
 /// Paths a job needs; part of its spec (the service's own configuration, never a client's).
@@ -174,6 +192,10 @@ impl Paths {
     }
     pub fn last_check(&self) -> PathBuf {
         self.state_dir.join("update-check.json")
+    }
+    /// Which vendor terms were accepted, when and by whom (written by apps.install jobs).
+    pub fn terms_accepted(&self) -> PathBuf {
+        self.state_dir.join("terms-accepted.json")
     }
     pub fn state_json(&self) -> PathBuf {
         self.config_dir.join("state.json")

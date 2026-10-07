@@ -20,10 +20,39 @@ impl Peer {
     }
 }
 
+/// `hello`'s params. Closed like every params object: unknown fields (here or in `client`) are
+/// `invalid_params`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StrictHello")]
 pub struct HelloParams {
     pub api_version: ApiVersion,
     pub client: Peer,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictPeer {
+    name: String,
+    version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictHello {
+    api_version: ApiVersion,
+    client: StrictPeer,
+}
+
+impl From<StrictHello> for HelloParams {
+    fn from(h: StrictHello) -> Self {
+        Self {
+            api_version: h.api_version,
+            client: Peer {
+                name: h.client.name,
+                version: h.client.version,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

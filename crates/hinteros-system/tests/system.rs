@@ -42,6 +42,21 @@ async fn handshake_and_ping() {
 
     let schema = ApiSchema::system();
     let mut c = Client::connect(&socket).await.unwrap();
+    // hello's params are closed like every other method's.
+    for params in [
+        json!({"api_version": system::VERSION, "client": {"name": "t", "version": "0"}, "uid": 0}),
+        json!({"api_version": system::VERSION, "client": {"name": "t", "version": "0", "pid": 1}}),
+    ] {
+        match c.call_raw("hello", params).await {
+            Err(ClientError::Rpc(e)) => {
+                assert_eq!(e.kind(), Some(ErrorCode::InvalidParams));
+                schema
+                    .check_error(&serde_json::to_value(&e).unwrap())
+                    .unwrap();
+            }
+            other => panic!("{other:?}"),
+        }
+    }
     // Before hello: handshake_required.
     match c.call_raw("system.info", json!({})).await {
         Err(ClientError::Rpc(e)) => assert_eq!(e.kind(), Some(ErrorCode::HandshakeRequired)),
@@ -270,6 +285,14 @@ async fn limits() {
     assert!(e["data"]["retry_after_ms"].as_u64().unwrap() > 1000);
     // Read-only methods are not rate limited.
     call(&mut c, "system.info", json!({})).await.unwrap();
+    // update.check has its own bucket: the launcher's background checks never use up the
+    // budget of the user's actions (and vice versa).
+    for _ in 0..2 {
+        let e = call(&mut c, "update.check", json!({})).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::PermissionDenied.code());
+    }
+    let e = call(&mut c, "update.check", json!({})).await.unwrap_err();
+    assert_eq!(code(&e), ErrorCode::RateLimited.code());
 
     // Messages over 64 KiB: parse error, connection closed.
     let mut big = sys.client().await;
@@ -762,4 +785,146 @@ async fn check_fails(c: &mut Client) -> Value {
     let done = finished(&until_finished(c, &id).await).clone();
     assert_eq!(done["ok"], false, "{done}");
     done["error"].clone()
+}
+
+/// `ssh.set` (auth_admin) is checked with polkit user interaction and waits for the agent
+/// conversation, while the same connection keeps serving; other actions never ask for
+/// interaction; a prompt that nobody answers in time is cancelled.
+#[tokio::test(flavor = "multi_thread")]
+async fn interactive_authorization() {
+    let Some(sys) = System::start(Root::create(), &["--auth-timeout-s", "2"]).await else {
+        return;
+    };
+    let mut c = sys.subscriber().await;
+    let ssh = "org.hinteros.system.ssh".to_string();
+
+    // The agent conversation succeeds after a while; meanwhile the connection answers reads.
+    sys.fakes.lock().unwrap().interactive.insert(
+        ssh.clone(),
+        Interactive {
+            answer: Answer::Yes,
+            dismissed: false,
+            delay: Duration::from_millis(1200),
+        },
+    );
+    sys.fakes
+        .lock()
+        .unwrap()
+        .answers
+        .insert(ssh.clone(), Answer::Challenge);
+    // Two requests on one connection: the mutating one waits, the read-only one answers.
+    let started = Instant::now();
+    let id1 = hinteros_api::jsonrpc::Id::Number(1001);
+    let id2 = hinteros_api::jsonrpc::Id::Number(1002);
+    let mut raw = Client::connect(&sys.socket).await.unwrap();
+    raw.hello(system::VERSION, Peer::new("raw", "0"))
+        .await
+        .unwrap();
+    raw.send_line(
+        &hinteros_api::jsonrpc::request(&id1, "ssh.set", json!({"enabled": true})).to_string(),
+    )
+    .await
+    .unwrap();
+    raw.send_line(&hinteros_api::jsonrpc::request(&id2, "settings.get", json!({})).to_string())
+        .await
+        .unwrap();
+    let first = timeout(TIMEOUT, raw.read_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(first["id"], 1002, "settings.get answers first: {first}");
+    assert!(started.elapsed() < Duration::from_millis(1000));
+    let second = timeout(TIMEOUT, raw.read_raw())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(second["id"], 1001);
+    assert!(
+        second["result"]["job_id"].is_string(),
+        "authorized after the conversation: {second}"
+    );
+    assert!(started.elapsed() >= Duration::from_millis(1200));
+    let id = second["result"]["job_id"].as_str().unwrap().to_owned();
+    let events = until_finished(&mut c, &id).await;
+    assert_eq!(finished(&events)["ok"], true);
+    {
+        let f = sys.fakes.lock().unwrap();
+        let (_, flags, cancel_id) = f
+            .polkit_flags
+            .iter()
+            .find(|(a, _, _)| *a == ssh)
+            .unwrap()
+            .clone();
+        assert_eq!(flags, 1, "AllowUserInteraction");
+        assert!(!cancel_id.is_empty(), "a cancellation id");
+    }
+
+    // Other actions never ask for interaction.
+    let r = call(&mut c, "rebuild", json!({})).await.unwrap();
+    until_finished(&mut c, r["job_id"].as_str().unwrap()).await;
+    assert!(
+        sys.fakes
+            .lock()
+            .unwrap()
+            .polkit_flags
+            .iter()
+            .any(|(a, f, id)| a == "org.hinteros.system.rebuild" && *f == 0 && id.is_empty())
+    );
+
+    // The user dismissed the prompt: authentication_required. Too many wrong passwords (the
+    // agent fails): permission_denied.
+    for (dismissed, answer, expected) in [
+        (true, Answer::No, ErrorCode::AuthenticationRequired),
+        (false, Answer::No, ErrorCode::PermissionDenied),
+        (false, Answer::Challenge, ErrorCode::AuthenticationRequired),
+    ] {
+        sys.fakes.lock().unwrap().interactive.insert(
+            ssh.clone(),
+            Interactive {
+                answer,
+                dismissed,
+                delay: Duration::from_millis(50),
+            },
+        );
+        let e = call(&mut c, "ssh.set", json!({"enabled": false}))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&e), expected.code(), "{dismissed} {answer:?}: {e}");
+    }
+
+    // Nobody answers within --auth-timeout-s: the check is cancelled.
+    sys.fakes.lock().unwrap().interactive.insert(
+        ssh.clone(),
+        Interactive {
+            answer: Answer::Yes,
+            dismissed: false,
+            delay: Duration::from_secs(8),
+        },
+    );
+    let started = Instant::now();
+    let e = call(&mut c, "ssh.set", json!({"enabled": false}))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), ErrorCode::AuthenticationRequired.code());
+    assert!(started.elapsed() < Duration::from_secs(6));
+    let last_id = sys
+        .fakes
+        .lock()
+        .unwrap()
+        .polkit_flags
+        .last()
+        .unwrap()
+        .2
+        .clone();
+    eventually("CancelCheckAuthorization", || {
+        sys.fakes.lock().unwrap().cancelled.contains(&last_id)
+    })
+    .await;
+    assert_eq!(
+        sys.root.etc_state()["settings"]["ssh"]["enable"],
+        true,
+        "nothing changed"
+    );
 }

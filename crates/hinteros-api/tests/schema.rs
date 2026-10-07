@@ -841,7 +841,7 @@ fn store_and_agent_schema_rejects_what_it_should() {
         format!(r#"{{"ids":["/nix/store/abc-steam"],"revision":"{rev}"}}"#),
         format!(r#"{{"ids":["Steam"],"revision":"{rev}"}}"#),
         format!(r#"{{"ids":["a","b","c","d","e","f","g","h","i"],"revision":"{rev}"}}"#),
-        format!(r#"{{"ids":["steam"],"revision":"x"}}"#),
+        r#"{"ids":["steam"],"revision":"x"}"#.to_string(),
         format!(r#"{{"ids":["steam"],"revision":"{rev}","accepted_terms":{{"../x":"1"}}}}"#),
         format!(r#"{{"ids":["steam"],"revision":"{rev}","accepted_terms":{{"steam":"1 2"}}}}"#),
         format!(r#"{{"ids":["steam"],"revision":"{rev}","path":"/"}}"#),

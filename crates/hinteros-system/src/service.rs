@@ -328,6 +328,7 @@ async fn dispatch(
                     ssh: SshSettings {
                         enabled: state.settings.ssh.enable,
                     },
+                    apps: state.apps.clone(),
                 },
             })
         }

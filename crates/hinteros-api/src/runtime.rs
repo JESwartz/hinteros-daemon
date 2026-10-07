@@ -39,6 +39,10 @@ pub enum Service {
     Audio,
     Display,
     Logind,
+    /// The App Store catalog index (`store.list`).
+    Catalog,
+    /// polkit: the authentication agent's helper (`auth.respond`).
+    Polkit,
 }
 
 impl Service {
@@ -48,6 +52,8 @@ impl Service {
         Service::Audio,
         Service::Display,
         Service::Logind,
+        Service::Catalog,
+        Service::Polkit,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -57,6 +63,8 @@ impl Service {
             Service::Audio => "audio",
             Service::Display => "display",
             Service::Logind => "logind",
+            Service::Catalog => "catalog",
+            Service::Polkit => "polkit",
         }
     }
 }

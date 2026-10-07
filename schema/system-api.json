@@ -1,8 +1,8 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.2",
-  "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (no interactive authorization), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
+  "version": "0.3",
+  "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
   "transport": {
     "protocol": "jsonrpc-2.0",
     "framing": "ndjson",
@@ -36,16 +36,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.2", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.2", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "0.3", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "0.3", "server": { "name": "hinteros-system", "version": "0.1.0" } }
         },
         {
           "name": "mismatch",
           "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 0.1, server 0.2",
-            "data": { "client_api_version": "0.1", "server_api_version": "0.2" }
+            "message": "API version mismatch: client 0.1, server 0.3",
+            "data": { "client_api_version": "0.1", "server_api_version": "0.3" }
           }
         }
       ]
@@ -150,10 +150,15 @@
           "revision": { "$ref": "#/$defs/Revision" },
           "settings": {
             "type": "object",
-            "required": ["base", "ssh"],
+            "required": ["base", "ssh", "apps"],
             "additionalProperties": false,
             "properties": {
               "base": { "$ref": "#/$defs/Base" },
+              "apps": {
+                "description": "Catalog app ids installed from the Store (state.json apps), in install order (since 0.3).",
+                "type": "array",
+                "items": { "$ref": "#/$defs/CatalogId" }
+              },
               "ssh": {
                 "type": "object",
                 "required": ["enabled"],
@@ -171,7 +176,7 @@
           "params": {},
           "result": {
             "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
-            "settings": { "base": "unstable", "ssh": { "enabled": false } }
+            "settings": { "base": "unstable", "ssh": { "enabled": false }, "apps": ["steam"] }
           }
         }
       ]
@@ -206,7 +211,7 @@
     },
     "ssh.set": {
       "summary": "Turn SSH (sshd) on or off (job). Action org.hinteros.system.ssh, which needs the admin password (auth_admin).",
-      "description": "Login over SSH is the admin account with its password; the system repo configures sshd. polkit's default for this action is auth_admin, so without an authorization the call gets authentication_required (the launcher will ask for the admin password once a polkit agent exists). Returns job_id null if SSH already is in that state.",
+      "description": "Login over SSH is the admin account with its password; the system repo configures sshd. polkit's default for this action is auth_admin. The service checks it with AllowUserInteraction (since 0.3): polkit asks the authentication agent registered for the calling process (the session daemon's, which shows the launcher a password prompt) and the call waits until the user answered (at most 5 minutes). Without an agent the call gets authentication_required; a cancelled or timed-out prompt also gives authentication_required, too many wrong passwords permission_denied (reason polkit). Returns job_id null if SSH already is in that state.",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -333,7 +338,9 @@
                 "summary": "Release 0.2.0",
                 "signer": "release@hinteros",
                 "security": "high",
-                "commits": 12
+                "commits": 12,
+                "new_apps": [{ "id": "moonlight", "name": "Moonlight" }],
+                "removed_apps": []
               },
               "checked_at": 1791300100
             }
@@ -400,6 +407,76 @@
         { "name": "to stable, acknowledged", "params": { "base": "stable", "acknowledge_downgrade": true }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
         { "name": "already there", "params": { "base": "unstable" }, "result": { "job_id": null } },
         { "name": "downgrade", "params": { "base": "stable" }, "error": { "code": 3011, "message": "unstable to stable is a downgrade" } }
+      ]
+    },
+    "apps.install": {
+      "summary": "Install Store apps (job). Action org.hinteros.system.apps.",
+      "description": "ids (1 to 8 catalog ids) must be in the running generation's catalog index (/run/current-system/sw/share/hinteros/catalog.json, never the caller's copy) with status available; their depends are added (transitively). Ids already installed are skipped; if nothing is left the result is job_id null. A conflict between a new app and an installed or requested one is app_conflict. Every new app with vendor terms needs accepted_terms[id] equal to the catalog's terms.version, else terms_required (the box records the acceptance: id, version, time, uid and profile, in the audit log and /var/lib/hinteros/terms-accepted.json). revision must be settings.get's (state_conflict otherwise). Free disk space must cover the new apps' sizeMiB plus the usual rebuild margin (insufficient_resources). The job writes state.json's apps from the service's typed state and runs the apply flow.",
+      "since": "0.3",
+      "params": {
+        "type": "object",
+        "required": ["ids", "revision"],
+        "additionalProperties": false,
+        "properties": {
+          "ids": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "$ref": "#/$defs/CatalogId" } },
+          "revision": { "$ref": "#/$defs/Revision" },
+          "accepted_terms": {
+            "description": "App id to the terms version the user accepted (after reading the full text).",
+            "type": "object",
+            "maxProperties": 8,
+            "propertyNames": { "$ref": "#/$defs/CatalogId" },
+            "additionalProperties": { "$ref": "#/$defs/TermsVersion" }
+          }
+        }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "state_conflict", "not_found", "app_conflict", "terms_required"],
+      "examples": [
+        {
+          "name": "install Steam, terms accepted",
+          "params": { "ids": ["steam"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "accepted_terms": { "steam": "2026-09-10" } },
+          "result": { "job_id": "3f9a0c2b7e4d1a65" }
+        },
+        { "name": "free app", "params": { "ids": ["moonlight"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "already installed", "params": { "ids": ["moonlight"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "result": { "job_id": null } },
+        {
+          "name": "terms not accepted",
+          "params": { "ids": ["plex-htpc"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" },
+          "error": { "code": 3014, "message": "plex-htpc needs its terms accepted (version 2025-10-30)", "data": { "id": "plex-htpc", "version": "2025-10-30" } }
+        },
+        {
+          "name": "conflict",
+          "params": { "ids": ["kodi"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" },
+          "error": { "code": 3013, "message": "kodi conflicts with jellyfin", "data": { "id": "kodi", "conflicts_with": "jellyfin" } }
+        },
+        { "name": "unknown app", "params": { "ids": ["nope"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "error": { "code": 3010, "message": "nope is not in this system's catalog" } }
+      ]
+    },
+    "apps.remove": {
+      "summary": "Remove installed Store apps (job), optionally with their data. Action org.hinteros.system.apps.",
+      "description": "ids (1 to 8) must be installed (not_found otherwise). An app that another installed app depends on cannot be removed alone (app_conflict, conflicts_with names the dependent). The job writes state.json without them and runs the apply flow. With delete_data, after a successful switch the job deletes each removed app's dataPaths (from the running generation's catalog) in every profile's home, as root without following symlinks (each path component is opened with O_NOFOLLOW relative to the home; nothing outside the home and no other filesystem is touched) and logs what it deleted. The launcher closes running apps first.",
+      "since": "0.3",
+      "params": {
+        "type": "object",
+        "required": ["ids", "revision", "delete_data"],
+        "additionalProperties": false,
+        "properties": {
+          "ids": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "$ref": "#/$defs/CatalogId" } },
+          "revision": { "$ref": "#/$defs/Revision" },
+          "delete_data": { "type": "boolean" }
+        }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "state_conflict", "not_found", "app_conflict"],
+      "examples": [
+        { "name": "remove, keep data", "params": { "ids": ["moonlight"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": false }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "remove with data", "params": { "ids": ["steam"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": true }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        {
+          "name": "needed by another app",
+          "params": { "ids": ["firefox"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": false },
+          "error": { "code": 3013, "message": "youtube depends on firefox", "data": { "id": "firefox", "conflicts_with": "youtube" } }
+        },
+        { "name": "not installed", "params": { "ids": ["plex-htpc"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": false }, "error": { "code": 3010, "message": "plex-htpc is not installed" } }
       ]
     },
     "jobs.get": {
@@ -728,17 +805,39 @@
         "properties": { "reason": { "enum": ["unsigned", "unknown_signer", "not_fast_forward"] } }
       }
     },
-    "not_found": { "code": 3010, "since": "0.2", "summary": "Unknown generation or job." },
+    "not_found": { "code": 3010, "since": "0.2", "summary": "Unknown generation or job; apps.install: an id that is not in the running generation's catalog; apps.remove: an id that is not installed." },
     "needs_acknowledgement": { "code": 3011, "since": "0.2", "summary": "A downgrading channel or base switch without acknowledge_downgrade: true." },
     "authentication_required": {
       "code": 3012,
       "since": "0.2",
-      "summary": "polkit would allow the action only after interactive authentication (auth_admin: the admin password). No agent is involved yet: the call is refused, and the launcher can ask for the password once one exists.",
+      "summary": "polkit would allow the action only after interactive authentication (auth_admin: the admin password), and it did not happen: no authentication agent is registered for the caller (no session daemon agent, or another client than the session daemon called), or the user cancelled the prompt or did not answer in time.",
       "data": {
         "type": "object",
         "required": ["action"],
         "additionalProperties": false,
         "properties": { "action": { "$ref": "#/$defs/PolkitAction" } }
+      }
+    },
+    "app_conflict": {
+      "code": 3013,
+      "since": "0.3",
+      "summary": "apps.install: id conflicts with conflicts_with (installed or also requested). apps.remove: conflicts_with, which stays installed, depends on id.",
+      "data": {
+        "type": "object",
+        "required": ["id", "conflicts_with"],
+        "additionalProperties": false,
+        "properties": { "id": { "$ref": "#/$defs/CatalogId" }, "conflicts_with": { "$ref": "#/$defs/CatalogId" } }
+      }
+    },
+    "terms_required": {
+      "code": 3014,
+      "since": "0.3",
+      "summary": "apps.install: app id has vendor terms and accepted_terms does not name their current version (show the terms, then retry with it).",
+      "data": {
+        "type": "object",
+        "required": ["id", "version"],
+        "additionalProperties": false,
+        "properties": { "id": { "$ref": "#/$defs/CatalogId" }, "version": { "$ref": "#/$defs/TermsVersion" } }
       }
     }
   },
@@ -777,7 +876,25 @@
     "PolkitAction": { "type": "string", "pattern": "^org\\.hinteros\\.system\\.[a-z.]+$" },
     "Channel": { "enum": ["stable", "beta"] },
     "Base": { "enum": ["stable", "unstable"] },
-    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base"] },
+    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove"] },
+    "CatalogId": { "description": "Catalog app id (state.json apps).", "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+    "TermsVersion": { "description": "A vendor terms version from the catalog.", "type": "string", "pattern": "^[A-Za-z0-9._-]{1,32}$" },
+    "CatalogApp": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": { "id": { "$ref": "#/$defs/CatalogId" }, "name": { "type": "string", "maxLength": 40 } }
+    },
+    "RemovedApp": {
+      "type": "object",
+      "required": ["id", "name", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/CatalogId" },
+        "name": { "type": "string", "maxLength": 40 },
+        "reason": { "description": "The catalog's statusReason.", "oneOf": [{ "type": "string", "maxLength": 200 }, { "type": "null" }] }
+      }
+    },
     "JobState": { "enum": ["running", "succeeded", "failed", "cancelled"] },
     "Stage": { "enum": ["preparing", "fetching", "verifying", "evaluating", "downloading", "building", "activating", "finishing"] },
     "Severity": { "enum": ["low", "medium", "high", "critical"] },
@@ -802,7 +919,7 @@
     },
     "AvailableUpdate": {
       "type": "object",
-      "required": ["rev", "date", "summary", "signer", "security", "commits"],
+      "required": ["rev", "date", "summary", "signer", "security", "commits", "new_apps", "removed_apps"],
       "additionalProperties": false,
       "properties": {
         "rev": { "$ref": "#/$defs/Rev" },
@@ -813,7 +930,15 @@
           "description": "Highest Security: trailer severity among the new commits; non-null means the launcher shows the full-screen security notice.",
           "oneOf": [{ "$ref": "#/$defs/Severity" }, { "type": "null" }]
         },
-        "commits": { "type": "integer", "minimum": 1 }
+        "commits": { "type": "integer", "minimum": 1 },
+        "new_apps": {
+          "description": "Apps the update makes installable (in the target's catalog, not available in the running one), by id; null if the target's catalog could not be read (since 0.3). The Store says 'More apps are available after the next update'.",
+          "oneOf": [{ "type": "array", "items": { "$ref": "#/$defs/CatalogApp" } }, { "type": "null" }]
+        },
+        "removed_apps": {
+          "description": "Installed apps the update takes away (removed from, or missing in, the target's catalog); null if unknown (since 0.3). The update screen names them with the reason.",
+          "oneOf": [{ "type": "array", "items": { "$ref": "#/$defs/RemovedApp" } }, { "type": "null" }]
+        }
       }
     },
     "UpdateCheckResult": {

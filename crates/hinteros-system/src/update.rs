@@ -436,6 +436,9 @@ impl Git {
             signer,
             security,
             commits: u32::try_from(commits.len().max(1)).unwrap_or(u32::MAX),
+            // Filled in by the job from the target revision's catalog (`runner`).
+            new_apps: None,
+            removed_apps: None,
         })
     }
 }

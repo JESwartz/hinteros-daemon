@@ -7,6 +7,7 @@
 //! Protocol: JSON-RPC 2.0, one JSON object per line (NDJSON) over a Unix stream socket. The first
 //! request on a connection must be `hello` (version handshake). See `hinteros-docs/design/api.md`.
 
+pub mod catalog;
 pub mod client;
 pub mod codec;
 pub mod common;

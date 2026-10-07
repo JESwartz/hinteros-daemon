@@ -5,12 +5,14 @@
 //! Every params type here rejects unknown fields: the service is a root process and its inputs
 //! are closed (a forged `uid` or a stray `path` is an error, not ignored).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, ErrorObject, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 2);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 3);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/system-api.json");
@@ -86,6 +88,8 @@ pub enum JobKind {
     Rollback,
     Channel,
     Base,
+    AppsInstall,
+    AppsRemove,
 }
 
 impl JobKind {
@@ -99,6 +103,8 @@ impl JobKind {
         JobKind::Rollback,
         JobKind::Channel,
         JobKind::Base,
+        JobKind::AppsInstall,
+        JobKind::AppsRemove,
     ];
 }
 
@@ -277,6 +283,8 @@ pub struct SshSettings {
 pub struct Settings {
     pub base: Base,
     pub ssh: SshSettings,
+    /// Catalog app ids installed from the Store (`state.json` `apps`), in install order.
+    pub apps: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,6 +406,30 @@ pub struct AvailableUpdate {
     pub security: Option<Severity>,
     /// Number of new commits.
     pub commits: u32,
+    /// Catalog apps the update makes installable (in the target's catalog, not available in the
+    /// running one), sorted by id; null if the target's catalog could not be read.
+    #[serde(default, deserialize_with = "nullable")]
+    pub new_apps: Option<Vec<CatalogApp>>,
+    /// Installed apps the update removes (tombstones or missing in the target's catalog); null
+    /// if the target's catalog could not be read.
+    #[serde(default, deserialize_with = "nullable")]
+    pub removed_apps: Option<Vec<RemovedApp>>,
+}
+
+/// A catalog app named in an update check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogApp {
+    pub id: String,
+    pub name: String,
+}
+
+/// An installed app that an update removes, with the catalog's reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedApp {
+    pub id: String,
+    pub name: String,
+    #[serde(deserialize_with = "nullable")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,6 +500,46 @@ pub struct BaseSet;
 impl Method for BaseSet {
     const NAME: &'static str = "base.set";
     type Params = BaseSetParams;
+    type Result = JobRef;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Store (M8)
+
+/// `apps.install`: catalog ids (1 to 8) to install, with their dependencies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppsInstallParams {
+    pub ids: Vec<String>,
+    /// `settings.get`'s revision.
+    pub revision: String,
+    /// The terms version the user accepted, per app id, for every app being installed that
+    /// has vendor terms (it must equal the catalog's `terms.version`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub accepted_terms: BTreeMap<String, String>,
+}
+
+pub struct AppsInstall;
+impl Method for AppsInstall {
+    const NAME: &'static str = "apps.install";
+    type Params = AppsInstallParams;
+    type Result = JobRef;
+}
+
+/// `apps.remove`: installed catalog ids (1 to 8) to remove.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppsRemoveParams {
+    pub ids: Vec<String>,
+    pub revision: String,
+    /// After the switch, also delete each app's `dataPaths` in every profile's home.
+    pub delete_data: bool,
+}
+
+pub struct AppsRemove;
+impl Method for AppsRemove {
+    const NAME: &'static str = "apps.remove";
+    type Params = AppsRemoveParams;
     type Result = JobRef;
 }
 
@@ -641,6 +713,8 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<UpdateApply>(),
         MethodInfo::of::<ChannelSet>(),
         MethodInfo::of::<BaseSet>(),
+        MethodInfo::of::<AppsInstall>(),
+        MethodInfo::of::<AppsRemove>(),
         MethodInfo::of::<JobsGet>(),
         MethodInfo::of::<JobsList>(),
         MethodInfo::of::<JobsCancel>(),
@@ -665,6 +739,8 @@ pub const MUTATING: &[&str] = &[
     UpdateApply::NAME,
     ChannelSet::NAME,
     BaseSet::NAME,
+    AppsInstall::NAME,
+    AppsRemove::NAME,
     JobsCancel::NAME,
 ];
 
@@ -679,6 +755,7 @@ pub fn polkit_action(method: &str) -> Option<&'static str> {
         Rollback::NAME => "org.hinteros.system.rollback",
         ChannelSet::NAME | BaseSet::NAME => "org.hinteros.system.channel",
         JobsCancel::NAME => "org.hinteros.system.jobs.cancel",
+        AppsInstall::NAME | AppsRemove::NAME => "org.hinteros.system.apps",
         _ => return None,
     })
 }
@@ -693,4 +770,10 @@ pub const POLKIT_ACTIONS: &[&str] = &[
     "org.hinteros.system.rollback",
     "org.hinteros.system.channel",
     "org.hinteros.system.jobs.cancel",
+    "org.hinteros.system.apps",
 ];
+
+/// Actions the service checks with polkit's `AllowUserInteraction`: their default is
+/// `auth_admin`, and polkit asks the caller's authentication agent (the session daemon's) for
+/// the admin password while the call waits. Every other action is checked without interaction.
+pub const INTERACTIVE_ACTIONS: &[&str] = &["org.hinteros.system.ssh"];

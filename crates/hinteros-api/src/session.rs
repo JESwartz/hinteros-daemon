@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 7);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 8);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -38,6 +38,9 @@ pub enum EventName {
     BluetoothChanged,
     BluetoothConfirm,
     AudioChanged,
+    AuthenticationRequested,
+    AuthenticationFinished,
+    StoreChanged,
 }
 
 impl EventName {
@@ -59,6 +62,9 @@ impl EventName {
         EventName::BluetoothChanged,
         EventName::BluetoothConfirm,
         EventName::AudioChanged,
+        EventName::AuthenticationRequested,
+        EventName::AuthenticationFinished,
+        EventName::StoreChanged,
     ];
 
     /// The event's wire name (its JSON-RPC notification method).
@@ -81,6 +87,9 @@ impl EventName {
             EventName::BluetoothChanged => BluetoothChanged::NAME,
             EventName::BluetoothConfirm => BluetoothConfirmEvent::NAME,
             EventName::AudioChanged => AudioChanged::NAME,
+            EventName::AuthenticationRequested => AuthenticationRequested::NAME,
+            EventName::AuthenticationFinished => AuthenticationFinished::NAME,
+            EventName::StoreChanged => StoreChanged::NAME,
         }
     }
 }
@@ -802,6 +811,8 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<RelayUpdateApply>(),
         MethodInfo::of::<RelayChannelSet>(),
         MethodInfo::of::<RelayBaseSet>(),
+        MethodInfo::of::<RelayAppsInstall>(),
+        MethodInfo::of::<RelayAppsRemove>(),
         MethodInfo::of::<RelayJobsGet>(),
         MethodInfo::of::<RelayJobsList>(),
         MethodInfo::of::<RelayJobsCancel>(),
@@ -832,6 +843,10 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<PowerSuspend>(),
         MethodInfo::of::<PowerReboot>(),
         MethodInfo::of::<PowerPoweroff>(),
+        MethodInfo::of::<AuthRespond>(),
+        MethodInfo::of::<AuthCancel>(),
+        MethodInfo::of::<SessionRestart>(),
+        MethodInfo::of::<StoreList>(),
     ],
     events: &[
         EventInfo::of::<HomePressed>(),
@@ -851,6 +866,9 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<BluetoothChanged>(),
         EventInfo::of::<BluetoothConfirmEvent>(),
         EventInfo::of::<AudioChanged>(),
+        EventInfo::of::<AuthenticationRequested>(),
+        EventInfo::of::<AuthenticationFinished>(),
+        EventInfo::of::<StoreChanged>(),
     ],
     errors: ErrorCode::ALL,
 };
@@ -898,6 +916,8 @@ relay! {
     RelayUpdateApply = "system.update.apply" => crate::system::UpdateApply;
     RelayChannelSet = "system.channel.set" => crate::system::ChannelSet;
     RelayBaseSet = "system.base.set" => crate::system::BaseSet;
+    RelayAppsInstall = "system.apps.install" => crate::system::AppsInstall;
+    RelayAppsRemove = "system.apps.remove" => crate::system::AppsRemove;
     RelayJobsGet = "system.jobs.get" => crate::system::JobsGet;
     RelayJobsList = "system.jobs.list" => crate::system::JobsList;
     RelayJobsCancel = "system.jobs.cancel" => crate::system::JobsCancel;
@@ -924,4 +944,273 @@ pub struct JobFinished;
 impl Event for JobFinished {
     const NAME: &'static str = "job_finished";
     type Params = crate::system::JobFinishedParams;
+}
+
+// ---------------------------------------------------------------------------------------------
+// polkit authentication agent (0.8)
+
+/// The `hello` client name of the launcher. Only connections with this name get
+/// `authentication_requested` and may answer it (`auth.respond`, `auth.cancel`).
+pub const LAUNCHER_CLIENT_NAME: &str = "hinteros-launcher";
+
+/// Longest password `auth.respond` takes, in bytes (PAM's `PAM_MAX_RESP_SIZE` less its NUL).
+pub const AUTH_PASSWORD_MAX_BYTES: usize = 511;
+
+/// A polkit cookie: what the agent got from polkit, `^[A-Za-z0-9._-]{1,128}$`.
+pub fn is_auth_cookie(s: &str) -> bool {
+    (1..=128).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// A user polkit accepts the authentication of (polkit's `unix-user` identity).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthIdentity {
+    pub uid: u32,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthenticationRequestedParams {
+    pub cookie: String,
+    /// The polkit action, e.g. `org.hinteros.system.ssh`.
+    pub action: String,
+    /// polkit's message for the action (from its `.policy` file).
+    pub message: String,
+    /// Whose password polkit accepts; the daemon authenticates as the first.
+    pub identities: Vec<AuthIdentity>,
+}
+
+pub struct AuthenticationRequested;
+impl Event for AuthenticationRequested {
+    const NAME: &'static str = "authentication_requested";
+    type Params = AuthenticationRequestedParams;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthOutcome {
+    /// The password was right; polkit authorizes the action.
+    Authorized,
+    /// Too many wrong passwords, or the helper failed.
+    Failed,
+    /// `auth.cancel`, polkit cancelled it, or nobody answered in time.
+    Cancelled,
+}
+
+impl AuthOutcome {
+    pub const ALL: &[AuthOutcome] = &[
+        AuthOutcome::Authorized,
+        AuthOutcome::Failed,
+        AuthOutcome::Cancelled,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthenticationFinishedParams {
+    pub cookie: String,
+    pub outcome: AuthOutcome,
+}
+
+pub struct AuthenticationFinished;
+impl Event for AuthenticationFinished {
+    const NAME: &'static str = "authentication_finished";
+    type Params = AuthenticationFinishedParams;
+}
+
+/// `auth.respond`. The password is never logged (`Debug` hides it).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthRespondParams {
+    pub cookie: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for AuthRespondParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthRespondParams")
+            .field("cookie", &self.cookie)
+            .field("password", &"<hidden>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthRespondResult {
+    /// The password was accepted.
+    pub ok: bool,
+    /// Tries left for this request (0: it has failed, `authentication_finished` follows).
+    pub attempts_left: u32,
+}
+
+pub struct AuthRespond;
+impl Method for AuthRespond {
+    const NAME: &'static str = "auth.respond";
+    type Params = AuthRespondParams;
+    type Result = AuthRespondResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthCancelParams {
+    pub cookie: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthCancelResult {}
+
+pub struct AuthCancel;
+impl Method for AuthCancel {
+    const NAME: &'static str = "auth.cancel";
+    type Params = AuthCancelParams;
+    type Result = AuthCancelResult;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Session restart (0.8)
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRestartParams {}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRestartResult {}
+
+pub struct SessionRestart;
+impl Method for SessionRestart {
+    const NAME: &'static str = "session.restart";
+    type Params = SessionRestartParams;
+    type Result = SessionRestartResult;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Store (0.8)
+
+/// Where an app is, as the Store shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreState {
+    /// Not installed; can be installed.
+    Available,
+    Installed,
+    /// An `apps.install` job for it is running.
+    Installing,
+    /// An `apps.remove` job for it is running.
+    Removing,
+    /// Installed, and retired in the catalog: keeps working, can be removed.
+    Retired,
+    /// Installed, and removed from the catalog: the next update takes it away.
+    Unavailable,
+}
+
+impl StoreState {
+    pub const ALL: &[StoreState] = &[
+        StoreState::Available,
+        StoreState::Installed,
+        StoreState::Installing,
+        StoreState::Removing,
+        StoreState::Retired,
+        StoreState::Unavailable,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogStatus {
+    Available,
+    Retired,
+    Removed,
+}
+
+impl CatalogStatus {
+    pub const ALL: &[CatalogStatus] = &[
+        CatalogStatus::Available,
+        CatalogStatus::Retired,
+        CatalogStatus::Removed,
+    ];
+}
+
+/// Where the session daemon finds the app's icon (the catalog's `icon`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreIcon {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
+    pub firefox_profile: bool,
+}
+
+/// The vendor's terms, shown in full before install.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreTerms {
+    pub title: String,
+    /// Pass it back in `system.apps.install`'s `accepted_terms`.
+    pub version: String,
+    pub url: String,
+    pub retrieved: String,
+    /// Absolute path of the full text on this box (plain UTF-8), readable offline.
+    pub file: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreApp {
+    pub id: String,
+    pub name: String,
+    pub summary: String,
+    pub description: String,
+    /// `games`, `video`, `music`, `photos`, `utilities`; anything else means "Other".
+    pub category: String,
+    pub homepage: String,
+    pub kind: AppKind,
+    pub size_mib: u64,
+    pub icon: StoreIcon,
+    pub requires: Vec<String>,
+    pub depends: Vec<String>,
+    pub conflicts: Vec<String>,
+    pub installer: bool,
+    pub on_iso: bool,
+    pub installer_default: bool,
+    /// What "also delete its data" deletes, relative to each profile's home.
+    pub data_paths: Vec<String>,
+    #[serde(deserialize_with = "nullable_terms")]
+    pub terms: Option<StoreTerms>,
+    pub builds_on_device: bool,
+    pub free: bool,
+    pub redistributable: bool,
+    pub status: CatalogStatus,
+    #[serde(deserialize_with = "nullable")]
+    pub status_reason: Option<String>,
+    pub state: StoreState,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreListParams {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreListResult {
+    /// The catalog index version the daemon read.
+    pub index_version: u32,
+    /// Available apps, and installed ones whatever their catalog status, by name.
+    pub apps: Vec<StoreApp>,
+    /// The last update check found apps that the next update makes installable.
+    pub more_after_update: bool,
+}
+
+pub struct StoreList;
+impl Method for StoreList {
+    const NAME: &'static str = "store.list";
+    type Params = StoreListParams;
+    type Result = StoreListResult;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreChangedParams {}
+
+pub struct StoreChanged;
+impl Event for StoreChanged {
+    const NAME: &'static str = "store_changed";
+    type Params = StoreChangedParams;
+}
+
+fn nullable_terms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<StoreTerms>, D::Error> {
+    Option::<StoreTerms>::deserialize(d)
 }

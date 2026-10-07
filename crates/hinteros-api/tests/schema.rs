@@ -809,3 +809,125 @@ fn bluetooth_addresses() {
         assert!(!valid_bt_address(bad), "{bad}");
     }
 }
+
+#[test]
+fn agent_and_store_enums_match() {
+    use hinteros_api::session::{AuthOutcome, CatalogStatus, StoreState};
+    let schema = ApiSchema::session();
+    assert_eq!(
+        schema_enum(&schema, "AuthOutcome"),
+        rust_enum(AuthOutcome::ALL)
+    );
+    assert_eq!(
+        schema_enum(&schema, "StoreState"),
+        rust_enum(StoreState::ALL)
+    );
+    assert_eq!(
+        schema_enum(&schema, "CatalogStatus"),
+        rust_enum(CatalogStatus::ALL)
+    );
+    // The system API's JobKind is relayed unchanged.
+    use hinteros_api::system::JobKind;
+    assert_eq!(schema_enum(&schema, "JobKind"), rust_enum(JobKind::ALL));
+}
+
+#[test]
+fn store_and_agent_schema_rejects_what_it_should() {
+    let system = ApiSchema::system();
+    let rev = "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d";
+    let bad = [
+        format!(r#"{{"ids":[],"revision":"{rev}"}}"#),
+        format!(r#"{{"ids":["../x"],"revision":"{rev}"}}"#),
+        format!(r#"{{"ids":["/nix/store/abc-steam"],"revision":"{rev}"}}"#),
+        format!(r#"{{"ids":["Steam"],"revision":"{rev}"}}"#),
+        format!(r#"{{"ids":["a","b","c","d","e","f","g","h","i"],"revision":"{rev}"}}"#),
+        format!(r#"{{"ids":["steam"],"revision":"x"}}"#),
+        format!(r#"{{"ids":["steam"],"revision":"{rev}","accepted_terms":{{"../x":"1"}}}}"#),
+        format!(r#"{{"ids":["steam"],"revision":"{rev}","accepted_terms":{{"steam":"1 2"}}}}"#),
+        format!(r#"{{"ids":["steam"],"revision":"{rev}","path":"/"}}"#),
+    ];
+    for instance in &bad {
+        let v: Value = serde_json::from_str(instance).unwrap();
+        assert!(
+            system.check("/methods/apps.install/params", &v).is_err(),
+            "apps.install accepted {instance}"
+        );
+    }
+    for instance in [
+        format!(r#"{{"ids":["steam"],"revision":"{rev}"}}"#),
+        format!(r#"{{"ids":["steam"],"revision":"{rev}","delete_data":"yes"}}"#),
+        format!(r#"{{"ids":["steam"],"revision":"{rev}","delete_data":true,"home":"/root"}}"#),
+    ] {
+        let v: Value = serde_json::from_str(&instance).unwrap();
+        assert!(
+            system.check("/methods/apps.remove/params", &v).is_err(),
+            "apps.remove accepted {instance}"
+        );
+    }
+    use hinteros_api::system::{AppsInstallParams, AppsRemoveParams};
+    assert!(
+        serde_json::from_str::<AppsInstallParams>(&format!(
+            r#"{{"ids":["a"],"revision":"{rev}","uid":0}}"#
+        ))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<AppsRemoveParams>(&format!(r#"{{"ids":["a"],"revision":"{rev}"}}"#))
+            .is_err(),
+        "delete_data is required"
+    );
+
+    let session = ApiSchema::session();
+    for (pointer, instance) in [
+        ("/methods/auth.respond/params", r#"{"cookie":"a"}"#),
+        (
+            "/methods/auth.respond/params",
+            r#"{"cookie":"a b","password":"x"}"#,
+        ),
+        (
+            "/methods/auth.respond/params",
+            r#"{"cookie":"a","password":"x","user":"root"}"#,
+        ),
+        ("/methods/auth.cancel/params", r#"{"cookie":""}"#),
+        ("/methods/session.restart/params", r#"{"now":true}"#),
+        (
+            "/events/authentication_finished/params",
+            r#"{"cookie":"a","outcome":"maybe"}"#,
+        ),
+    ] {
+        let v: Value = serde_json::from_str(instance).unwrap();
+        assert!(
+            session.check(pointer, &v).is_err(),
+            "{pointer} accepted {instance}"
+        );
+    }
+    let long = "x".repeat(512);
+    assert!(
+        session
+            .check(
+                "/methods/auth.respond/params",
+                &serde_json::json!({"cookie": "a", "password": long})
+            )
+            .is_err()
+    );
+    assert!(hinteros_api::session::is_auth_cookie(
+        "3-6f1c0e2a9b7d4c58-1-0a9f3e1d2c4b5a69"
+    ));
+    for bad in ["", "a b", "a\n", &"x".repeat(129), "../x/"] {
+        assert!(!hinteros_api::session::is_auth_cookie(bad), "{bad:?}");
+    }
+}
+
+#[test]
+fn auth_password_is_not_in_debug_output() {
+    use hinteros_api::session::AuthRespondParams;
+    let p = AuthRespondParams {
+        cookie: "1-a-1-b".into(),
+        password: "hunter2hunter2".into(),
+    };
+    let shown = format!("{p:?}");
+    assert!(
+        shown.contains("1-a-1-b") && !shown.contains("hunter2"),
+        "{shown}"
+    );
+}

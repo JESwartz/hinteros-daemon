@@ -95,7 +95,7 @@ async fn read_only_methods_and_denials() {
     let settings = call(&mut c, "settings.get", json!({})).await.unwrap();
     assert_eq!(
         settings["settings"],
-        json!({"base": "unstable", "ssh": {"enabled": false}})
+        json!({"base": "unstable", "ssh": {"enabled": false}, "apps": ["steam"]})
     );
     let gens = call(&mut c, "generations.list", json!({})).await.unwrap();
     assert_eq!(gens["generations"][0]["generation"], 1);

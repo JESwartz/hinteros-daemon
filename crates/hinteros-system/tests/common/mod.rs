@@ -465,12 +465,24 @@ impl Root {
         );
         // Generation 1, running and booted, built from the config above.
         std::fs::write(r.p("counter"), "1").unwrap();
-        let status = Command::new(r.p("mkgen"))
-            .arg(r.p("store/gen1"))
-            .arg(r.p("etc/hinteros"))
-            .env("FAKE_ROOT", r.path())
-            .status()
-            .unwrap();
+        // ETXTBSY: another test thread may be forking while it still holds the script's write
+        // descriptor (a fork inherits it until exec); retry briefly.
+        let status = (0..50)
+            .find_map(|_| {
+                match Command::new(r.p("mkgen"))
+                    .arg(r.p("store/gen1"))
+                    .arg(r.p("etc/hinteros"))
+                    .env("FAKE_ROOT", r.path())
+                    .status()
+                {
+                    Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                        std::thread::sleep(Duration::from_millis(20));
+                        None
+                    }
+                    other => Some(other.unwrap()),
+                }
+            })
+            .expect("mkgen stays busy");
         assert!(status.success());
         symlink(r.p("store/gen1"), r.p("profiles/system-1-link")).unwrap();
         symlink("system-1-link", r.p("profiles/system")).unwrap();

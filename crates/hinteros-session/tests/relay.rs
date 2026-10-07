@@ -59,6 +59,11 @@ fn fake_system(
                                     "rev": null, "generation": 3, "hostname": "box", "dev": false,
                                     "ssh": {"enabled": false, "host_key_fingerprints": []}
                                 })),
+                                "rebuild" => {
+                                    // Slow, like a call waiting for the admin password.
+                                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                                    Ok(json!({"job_id": null}))
+                                }
                                 "ssh.set" => Err(hinteros_api::ErrorObject::with_data(
                                     ErrorCode::AuthenticationRequired,
                                     "needs the admin password",
@@ -128,6 +133,31 @@ async fn relays_methods_errors_and_job_events() {
     assert!(methods.iter().any(|(m, _)| m == "subscribe"));
     assert!(methods.contains(&("ssh.set".to_string(), json!({"enabled": true}))));
     assert!(methods.iter().any(|(m, _)| m == "system.info"));
+
+    // A slow relayed call does not hold up the connection: the launcher can answer a password
+    // prompt (auth.respond) on it while system.ssh.set waits. Responses come by id.
+    let started = std::time::Instant::now();
+    c.send_line(
+        &jsonrpc::request(
+            &hinteros_api::jsonrpc::Id::Number(900),
+            "system.rebuild",
+            json!({}),
+        )
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    c.send_line(
+        &jsonrpc::request(&hinteros_api::jsonrpc::Id::Number(901), "ping", json!({})).to_string(),
+    )
+    .await
+    .unwrap();
+    let first = c.read_raw().await.unwrap().unwrap();
+    assert_eq!(first["id"], 901, "{first}");
+    assert!(started.elapsed() < std::time::Duration::from_millis(700));
+    let second = c.read_raw().await.unwrap().unwrap();
+    assert_eq!(second["id"], 900);
+    assert_eq!(second["result"], json!({"job_id": null}));
 
     // The service restarts speaking another version: version_mismatch.
     task.abort();

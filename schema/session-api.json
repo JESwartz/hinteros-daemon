@@ -3567,6 +3567,20 @@
               }
             ]
           },
+          "switch_to": {
+            "description": "A switch from a profile's session to this profile is pending (an unexpired hint whose fast path did not apply, e.g. a locked target): the picker goes straight to it (its PIN pad) instead of showing the tiles first. Absent or null: none.",
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "const": "guest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "appearance": {
             "type": "object",
             "required": [
@@ -3594,6 +3608,31 @@
         "unavailable"
       ],
       "examples": [
+        {
+          "name": "a pending switch to a locked profile",
+          "params": {},
+          "result": {
+            "profiles": [
+              {
+                "id": "p1",
+                "name": "James",
+                "color": "teal",
+                "locked": true,
+                "admin": true,
+                "locked_until": null
+              }
+            ],
+            "guest": true,
+            "first_boot": false,
+            "focus": "p1",
+            "switch_to": "p1",
+            "appearance": {
+              "text_scale": 1.0,
+              "high_contrast": false,
+              "reduce_motion": false
+            }
+          }
+        },
         {
           "name": "two profiles",
           "params": {},

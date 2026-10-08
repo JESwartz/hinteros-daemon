@@ -195,6 +195,7 @@ pub fn greet_main(args: &[String]) -> i32 {
     }
     let cli = crate::config::Cli {
         config: config_path,
+        greeter: true,
         ..Default::default()
     };
     let config = match crate::config::Config::load(&cli) {
@@ -416,12 +417,12 @@ impl Greeter {
 
     fn list(&self) -> GreeterListResult {
         let v = PublicView::load(&self.inner.public);
-        let focus = v
+        let switch_to = v
             .next
             .as_ref()
             .filter(|n| n.expires > now())
-            .map(|n| n.target.clone())
-            .or(v.last_used.clone());
+            .map(|n| n.target.clone());
+        let focus = switch_to.clone().or(v.last_used.clone());
         let a = v.appearance.clone().unwrap_or(Appearance {
             text_scale: 1.0,
             high_contrast: false,
@@ -443,6 +444,7 @@ impl Greeter {
             guest: v.guest.enabled,
             first_boot: v.first_boot,
             focus,
+            switch_to,
             appearance: GreeterAppearance {
                 text_scale: a.text_scale,
                 high_contrast: a.high_contrast,

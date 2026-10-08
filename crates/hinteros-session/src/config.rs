@@ -1074,7 +1074,13 @@ impl Config {
             None => Self::default(),
         };
         config.apply(cli);
-        let profile = cli.apps_profile.clone().or_else(|| config.apps_profile());
+        // The greeter (`--greeter`, `greet`) runs as hinteros-greeter, which has no apps (and
+        // cannot read anyone's app env): nothing to look up.
+        let profile = if cli.greeter {
+            None
+        } else {
+            cli.apps_profile.clone().or_else(|| config.apps_profile())
+        };
         if let Some(p) = &profile {
             config.icons.profile_share = Some(p.join("share"));
             config.load_profile_apps(p);
@@ -1085,6 +1091,9 @@ impl Config {
 
     /// The app env link to watch for changes (profile mode).
     pub fn watched_profile(cli: &Cli) -> Option<PathBuf> {
+        if cli.greeter {
+            return None;
+        }
         if let Some(p) = &cli.apps_profile {
             return Some(p.clone());
         }

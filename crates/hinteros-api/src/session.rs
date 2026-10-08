@@ -1380,6 +1380,9 @@ pub struct GreeterListResult {
     /// The profile to focus: the switch target, else the last used one.
     #[serde(deserialize_with = "nullable")]
     pub focus: Option<String>,
+    /// A pending switch to this profile (an unexpired hint): the picker goes straight to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_to: Option<String>,
     pub appearance: GreeterAppearance,
 }
 

@@ -4,8 +4,8 @@
 
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -61,6 +61,14 @@ x11rb::atom_manager! {
     }
 }
 
+/// The last connection to a display that is not gamescope's yet, kept open until one is.
+///
+/// gamescope starts its Xwaylands with `-terminate`: an Xwayland exits when its last client
+/// disconnects. Connecting before gamescope's own window manager has, finding no
+/// `GAMESCOPE_PID` and disconnecting again would end that Xwayland, and gamescope would wait
+/// for it forever (a black screen at boot). Holding the connection keeps it alive.
+static NOT_YET: Mutex<Option<RustConnection>> = Mutex::new(None);
+
 /// One connection to gamescope's Xwayland.
 struct Conn {
     conn: RustConnection,
@@ -77,8 +85,10 @@ impl Conn {
         let atoms = Atoms::new(&conn)?.reply()?;
         let c = Self { conn, root, atoms };
         if c.cardinals(c.atoms.GAMESCOPE_PID)?.is_empty() {
+            *NOT_YET.lock().unwrap_or_else(|e| e.into_inner()) = Some(c.conn);
             bail!("X display {display} is not gamescope's Xwayland (no GAMESCOPE_PID on the root)");
         }
+        NOT_YET.lock().unwrap_or_else(|e| e.into_inner()).take();
         Ok(c)
     }
 

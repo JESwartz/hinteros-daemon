@@ -37,7 +37,7 @@ pub enum Command {
         files: Vec<PathBuf>,
     },
     /// The PAM helper (`pam_exec`, as root, `PAM_USER` set): `unlocked`, `verify` (the PIN on
-    /// stdin), `end-others` or `splash` (the console splash on `PAM_TTY`; always exits 0)
+    /// stdin), `end-others` or `splash` (the handover splash on `PAM_TTY`; always exits 0)
     Pin {
         #[arg(value_enum)]
         verb: crate::pam::Verb,
@@ -46,7 +46,14 @@ pub enum Command {
         /// D-Bus address for logind and systemd [default: the system bus]
         #[arg(long)]
         bus: Option<String>,
+        /// `splash`: the typeface of the framebuffer splash (the launcher's; TTF/OTF). Without
+        /// it, or without a usable framebuffer, the splash is console text
+        #[arg(long)]
+        font: Option<PathBuf>,
     },
+    /// The framebuffer splash's painter (started by `pin splash`, not by hand)
+    #[command(hide = true)]
+    SplashPaint(crate::splash::PaintArgs),
     /// Forgotten PIN: remove a profile's PIN and its wrong-PIN wait (root only, from a terminal).
     /// Without a profile: list the profiles. The profile then enters without a PIN and is asked
     /// to set a new one when it starts.

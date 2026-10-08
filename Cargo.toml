@@ -10,6 +10,7 @@ repository = "https://justsomeshed.com/JSwartz/HinterOS/hinteros-daemon"
 
 [workspace.dependencies]
 hinteros-api = { path = "crates/hinteros-api" }
+ab_glyph = { version = "0.2", default-features = false, features = ["std"] }
 anyhow = "1"
 base64 = "0.22"
 bitflags = "2"

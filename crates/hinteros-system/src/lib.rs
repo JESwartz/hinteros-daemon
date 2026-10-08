@@ -11,7 +11,6 @@
 pub mod appreg;
 pub mod audit;
 pub mod authz;
-pub mod bigtext;
 pub mod config;
 pub mod datadel;
 pub mod flake;
@@ -29,11 +28,13 @@ pub mod resetpin;
 pub mod runner;
 pub mod service;
 pub mod splash;
+pub mod splashdraw;
 pub mod state;
 pub mod store;
 pub mod update;
 pub mod usage;
 pub mod users;
+pub mod vtio;
 
 #[cfg(test)]
 mod props;

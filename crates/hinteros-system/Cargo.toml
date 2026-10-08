@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ab_glyph.workspace = true
 anyhow.workspace = true
 argon2 = { version = "0.5", features = ["std"] }
 base64.workspace = true
@@ -30,5 +31,10 @@ proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
-[lints]
-workspace = true
+# The workspace's lints, but `unsafe_code` denied instead of forbidden: `vtio` (the
+# framebuffer and VT ioctls of the splash) is the one module allowed to use it.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

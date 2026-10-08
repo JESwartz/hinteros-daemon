@@ -59,7 +59,12 @@ fn main() -> ExitCode {
         .init();
     match cli.command {
         Some(Command::Job { run_dir, id }) => runner::main(&run_dir, &id),
-        Some(Command::Pin { verb, dirs, bus }) => {
+        Some(Command::Pin {
+            verb,
+            dirs,
+            bus,
+            font,
+        }) => {
             let paths = dirs.paths();
             hinteros_system::pam::main(
                 verb,
@@ -68,7 +73,12 @@ fn main() -> ExitCode {
                     paths,
                     bus,
                 },
+                font.as_deref(),
             )
+        }
+        Some(Command::SplashPaint(args)) => {
+            hinteros_system::splash::paint_main(&args);
+            ExitCode::SUCCESS
         }
         Some(Command::ResetPin {
             profile,

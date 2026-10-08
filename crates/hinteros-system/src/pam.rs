@@ -7,8 +7,9 @@
 //! - `verify`: the PIN from stdin, with the shared backoff. Wrong: `hinteros:wrong`; locked:
 //!   `hinteros:locked:<seconds>`.
 //! - `end-others`: ends every other `hinteros` account's processes before a session opens.
-//! - `splash`: paints "Loading <name>…" on the session's VT (`PAM_TTY`) during the handover
-//!   (see [`crate::splash`]); always exits 0.
+//! - `splash`: paints "Loading <name>…" on the session's VT (`PAM_TTY`) during the handover, on
+//!   the framebuffer in the launcher's typeface (`--font`) or as console text (see
+//!   [`crate::splash`]); always exits 0.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -335,14 +336,16 @@ fn touch_last_used(ctx: &Ctx, user: &str, now: i64) {
     }
 }
 
-pub fn main(verb: Verb, ctx: &Ctx) -> ExitCode {
+pub fn main(verb: Verb, ctx: &Ctx, font: Option<&Path>) -> ExitCode {
     let user = std::env::var("PAM_USER").unwrap_or_default();
     let now = crate::job::now();
     if verb == Verb::Splash {
         // Cosmetic: never fails a login, whatever happens.
         let tty = std::env::var("PAM_TTY").ok();
         let paths = &ctx.paths;
-        let _ = std::panic::catch_unwind(|| crate::splash::run(paths, &user, tty.as_deref(), now));
+        let _ = std::panic::catch_unwind(|| {
+            crate::splash::run(paths, &user, tty.as_deref(), font, now)
+        });
         return ExitCode::SUCCESS;
     }
     if user.is_empty() {

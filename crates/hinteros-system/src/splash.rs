@@ -1,36 +1,62 @@
-//! `hinteros-system pin splash`: the console splash on the session's VT while greetd hands over
-//! from the picker to a profile's session (or back). Between the last frame of one compositor and
-//! the first of the next the kernel console (fbcon) of greetd's VT is on screen, ~2 s on real
-//! hardware; this paints it in the launcher's colours with a centred "Loading <name>…" instead of
-//! a black (or stale) text screen, in block letters large enough to read from a couch
-//! ([`crate::bigtext`]).
+//! `hinteros-system pin splash`: the splash on the session's VT while greetd hands over from the
+//! picker to a profile's session (or back). Between the last frame of one compositor and the
+//! first of the next, the kernel's framebuffer console of greetd's VT is on screen (~2 s on real
+//! hardware). This paints the launcher's "Loading Sam…" page there instead ([`crate::splashdraw`]:
+//! the launcher's background, avatar and headline in its own typeface, anti-aliased), so the
+//! picker's loading page, the splash and the session's loading page read as one screen.
 //!
-//! Linux console escape sequences only (console_codes(4)): palette entries 0 (background) and 7/15
-//! (the default and bold foreground), reset attributes, clear, cursor home, cursor hidden, then
-//! the lines centred in the tty's size (TIOCGWINSZ, read when the splash runs: the console font is
-//! set in the initrd, so the size is final by then). The tty comes from `PAM_TTY` and must be
-//! `/dev/ttyN` or `ttyN` (a virtual console); it is opened without following symlinks and checked
-//! to be a VT character device. Nothing here ever fails a login: the verb always exits 0.
+//! How it stays on screen through the handover:
+//! - The helper (run by pam_exec as root, `session optional`) validates `PAM_TTY` (a virtual
+//!   console, opened without following symlinks), resolves the name and colour, clears the
+//!   console's text in the background colour (what fbcon shows if it ever repaints) and checks
+//!   that `/dev/fb0` is a 32-bit truecolour framebuffer and the font loads. Then it spawns the
+//!   painter (`hinteros-system splash-paint`, stdio on /dev/null, every other descriptor
+//!   close-on-exec, its own session) and exits 0 at once: PAM never waits for the painting.
+//! - The painter switches the VT to `KD_GRAPHICS` (fbcon stops drawing on it) and writes the
+//!   picture to `/dev/fb0` every 80 ms, while the VT is the foreground one. On the first login
+//!   after the picker the greeter's compositor may still own the display when the splash starts;
+//!   the kernel shows the framebuffer again once it lets go, and logind puts the VT back to text
+//!   mode when the greeter's session ends: the painter repaints and takes graphics mode again.
+//! - It stops when a session controller holds the VT again after it was free (logind's
+//!   `VT_PROCESS` mode: the next compositor took control; fbcon stays off and the picture stays
+//!   until that compositor's first frame), when a newer splash replaces it
+//!   (`/run/hinteros/splash-painter`), or after 5 s. If it set graphics mode and no session holds
+//!   the VT when it stops, it writes the line as console text and puts the VT back in text mode:
+//!   a console is never left blank.
+//!
+//! Without a usable framebuffer (or font) the fallback is console text: the line centred in the
+//! console's own font (Linux escape sequences, console_codes(4)). Nothing here ever fails a
+//! login: the verb always exits 0, and the painter only logs.
 
 use std::io::Write;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use tracing::info;
 
-use crate::bigtext;
 use crate::profiles::ProfilesFile;
+use crate::splashdraw::{self, Avatar, BACKGROUND, PixelFormat, Scene, TEXT, Typeface};
 use crate::state::{self, State};
-
-/// The launcher's standard theme (hinteros-launcher lib/src/theme/hinter_theme.dart).
-pub const BACKGROUND: [u8; 3] = [0x0E, 0x11, 0x18];
-pub const TEXT: [u8; 3] = [0xF4, 0xF6, 0xFB];
+use crate::vtio;
 
 /// The greeter session's user (its splash says just "HinterOS").
 pub const GREETER_USER: &str = "hinteros-greeter";
 
+/// The framebuffer of the console (DRM's fbdev emulation on the box: `i915drmfb`).
+pub const FB_PATH: &str = "/dev/fb0";
+
+/// The painter's claim: the pid of the newest one (an older one stops when it changes).
+pub const PAINTER_FILE: &str = "splash-painter";
+
 /// Longest name shown, in characters.
 const MAX_NAME: usize = 32;
+/// Longest font file read.
+const MAX_FONT: u64 = 16 << 20;
+/// How long the painter keeps the picture up, and how often it repaints.
+const PAINT_FOR: Duration = Duration::from_secs(5);
+const PAINT_EVERY: Duration = Duration::from_millis(80);
 
 /// `/dev/ttyN` for a `PAM_TTY` of `/dev/ttyN` or `ttyN` (N = 1..=63); anything else: None.
 pub fn tty_path(pam_tty: &str) -> Option<PathBuf> {
@@ -47,7 +73,7 @@ pub fn tty_path(pam_tty: &str) -> Option<PathBuf> {
         .then(|| PathBuf::from(format!("/dev/tty{num}")))
 }
 
-/// A name as the console may show it: printable characters only (no controls, no bidi or
+/// A name as the splash may show it: printable characters only (no controls, no bidi or
 /// zero-width format characters), whitespace runs as one space, at most [`MAX_NAME`] characters
 /// (then "…").
 pub fn sanitize(name: &str) -> String {
@@ -76,7 +102,7 @@ pub fn sanitize(name: &str) -> String {
     out
 }
 
-/// Unicode format characters a console would show as garbage or that reorder text.
+/// Unicode format characters that would show as garbage or reorder text.
 fn is_format(c: char) -> bool {
     matches!(c,
         '\u{00AD}'
@@ -88,7 +114,7 @@ fn is_format(c: char) -> bool {
     )
 }
 
-/// The text for `user`: "HinterOS" for the greeter, else "Loading <name>…".
+/// The text for a name: "HinterOS" for none (the greeter), else "Loading <name>…".
 pub fn text_for(name: Option<&str>) -> String {
     match name {
         None => "HinterOS".to_owned(),
@@ -103,13 +129,110 @@ pub fn text_for(name: Option<&str>) -> String {
     }
 }
 
-fn palette(out: &mut Vec<u8>, entry: char, rgb: [u8; 3]) {
+/// Who is being loaded.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Identity {
+    pub name: String,
+    /// The profile's colour (profiles.rs `COLORS`); None for the guest or unknown.
+    pub color: Option<String>,
+    pub guest: bool,
+}
+
+impl Identity {
+    fn guest() -> Identity {
+        Identity {
+            name: "Guest".into(),
+            color: None,
+            guest: true,
+        }
+    }
+}
+
+/// Who `user` is: the guest, a profile (name and colour), else None ("HinterOS": a spare in
+/// first-boot mode, anything unknown). The greeter shows the target of a switch it is about to
+/// enter without any UI (the public view's live `next` with `fast`), so the TV says
+/// "Loading Sam…" all the way; otherwise "HinterOS".
+pub fn identity_for(
+    state_json: &Path,
+    profiles_json: &Path,
+    public_json: &Path,
+    user: &str,
+    now: i64,
+) -> Option<Identity> {
+    if user == GREETER_USER {
+        return switch_target(public_json, now);
+    }
+    if user == state::GUEST_USER {
+        return Some(Identity::guest());
+    }
+    let state = State::load(state_json).ok().map(|(s, _)| s)?;
+    let account = state.accounts().into_iter().find(|a| a.user == user)?;
+    let file = ProfilesFile::load(profiles_json).ok()?;
+    file.profiles.get(&account.id).map(|m| Identity {
+        name: m.name.clone(),
+        color: Some(m.color.clone()),
+        guest: false,
+    })
+}
+
+/// A live fast switch target from the public view.
+fn switch_target(public_json: &Path, now: i64) -> Option<Identity> {
+    let v: crate::public::PublicView =
+        serde_json::from_slice(&std::fs::read(public_json).ok()?).ok()?;
+    let next = v.next.filter(|n| n.fast && n.expires > now)?;
+    if next.target == "guest" {
+        return Some(Identity::guest());
+    }
+    v.profiles
+        .into_iter()
+        .find(|p| p.id == next.target)
+        .map(|p| Identity {
+            name: p.name,
+            color: Some(p.color),
+            guest: false,
+        })
+}
+
+/// What the framebuffer splash shows for `who` with `face`: the line, and the avatar for a
+/// profile or the guest. A name the font cannot draw: "Loading…" (and a plain circle).
+pub fn scene_for(face: &Typeface<'_>, who: Option<&Identity>) -> Scene {
+    let Some(who) = who else {
+        return Scene {
+            text: text_for(None),
+            avatar: None,
+        };
+    };
+    let name = sanitize(&who.name);
+    let drawable = face.covers(&name);
+    let text = if drawable {
+        text_for(Some(&name))
+    } else {
+        text_for(Some(""))
+    };
+    // The launcher's initial: the name's first character, upper case; "H" without a name.
+    let initial: String = match name.chars().next() {
+        Some(c) => c.to_uppercase().collect(),
+        None => "H".into(),
+    };
+    let initial = face.covers(&initial).then_some(initial);
+    let avatar = if who.guest {
+        Avatar::guest(initial)
+    } else {
+        Avatar::profile(initial, who.color.as_deref())
+    };
+    Scene {
+        text,
+        avatar: Some(avatar),
+    }
+}
+
+fn palette(out: &mut Vec<u8>, entry: char, rgb: splashdraw::Rgb) {
     out.extend_from_slice(
-        format!("\x1b]P{entry}{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]).as_bytes(),
+        format!("\x1b]P{entry}{:02X}{:02X}{:02X}", rgb.0, rgb.1, rgb.2).as_bytes(),
     );
 }
 
-/// Palette, default attributes, blank screen, cursor home and hidden.
+/// Palette in the launcher's colours, default attributes, blank screen, cursor home and hidden.
 fn prelude(out: &mut Vec<u8>) {
     palette(out, '0', BACKGROUND);
     palette(out, '7', TEXT);
@@ -117,205 +240,403 @@ fn prelude(out: &mut Vec<u8>) {
     out.extend_from_slice(b"\x1b[0m\x1b[2J\x1b[H\x1b[?25l");
 }
 
-/// The lines the splash may show for `name` (see [`text_for`]), in order of preference at a
-/// given size: one line, else "Loading" above the name.
-fn layouts(name: Option<&str>) -> Vec<Vec<String>> {
-    let text = text_for(name);
-    let mut out = vec![vec![text.clone()]];
-    if let Some(rest) = text.strip_prefix("Loading ") {
-        out.push(vec!["Loading".to_owned(), rest.to_owned()]);
-    }
-    out
-}
-
-/// How the splash is drawn on a console of a given size.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Layout {
-    /// Block-letter scale (1-3); 0: the console font's own text (nothing larger fits).
-    pub scale: usize,
-    pub lines: Vec<String>,
-    /// Top row and each line's first column, 1-based (console cursor addresses).
-    pub top: usize,
-    pub cols: Vec<usize>,
-}
-
-/// The largest block-letter layout of the splash for `name` that fits a `cols` x `rows`
-/// console with a margin, centred; else the plain line in the middle. An unknown size (0)
-/// counts as 80x25.
-pub fn layout(name: Option<&str>, cols: u16, rows: u16) -> Layout {
+/// The console text fallback: `text` in bold, centred on a `cols` x `rows` console (an unknown
+/// size, 0, counts as 80x25), cut to the width.
+pub fn console_text(text: &str, cols: u16, rows: u16) -> Vec<u8> {
     let (cols, rows) = if cols == 0 || rows == 0 {
         (80usize, 25usize)
     } else {
         (cols as usize, rows as usize)
     };
-    for scale in (1..=3).rev() {
-        for lines in layouts(name) {
-            if !lines.iter().all(|l| bigtext::drawable(l)) {
-                continue;
-            }
-            let gap = scale;
-            let h = lines.len() * bigtext::height(scale) + (lines.len() - 1) * gap;
-            let widest = lines.iter().map(|l| bigtext::width(l, scale)).max();
-            if widest.is_some_and(|w| w + 4 <= cols) && h + 2 <= rows {
-                let top = (rows - h) / 2 + 1;
-                let cols = lines
-                    .iter()
-                    .map(|l| (cols - bigtext::width(l, scale)) / 2 + 1)
-                    .collect();
-                return Layout {
-                    scale,
-                    lines,
-                    top,
-                    cols,
-                };
-            }
-        }
-    }
-    // Never wider than the screen.
-    let text: String = text_for(name).chars().take(cols).collect();
+    let text: String = text.chars().take(cols).collect();
     let width = text.chars().count();
-    Layout {
-        scale: 0,
-        cols: vec![(cols - width) / 2 + 1],
-        top: rows / 2 + 1,
-        lines: vec![text],
-    }
-}
-
-/// The bytes that paint the splash for `name` (None: "HinterOS") on a `cols` x `rows` console.
-pub fn render(name: Option<&str>, cols: u16, rows: u16) -> Vec<u8> {
-    let l = layout(name, cols, rows);
     let mut out = Vec::new();
     prelude(&mut out);
-    if l.scale == 0 {
-        out.extend_from_slice(format!("\x1b[{};{}H", l.top, l.cols[0]).as_bytes());
-        out.extend_from_slice(b"\x1b[1m");
-        out.extend_from_slice(l.lines[0].as_bytes());
-        out.extend_from_slice(b"\x1b[0m");
-        return out;
-    }
-    let mut row = l.top;
-    for (line, col) in l.lines.iter().zip(&l.cols) {
-        for cells in bigtext::rows(line, l.scale) {
-            if !cells.is_empty() {
-                out.extend_from_slice(format!("\x1b[{row};{col}H").as_bytes());
-                out.extend_from_slice(cells.as_bytes());
-            }
-            row += 1;
-        }
-        row += l.scale;
-    }
+    out.extend_from_slice(
+        format!(
+            "\x1b[{};{}H\x1b[1m{text}\x1b[0m",
+            rows.div_ceil(2),
+            (cols - width) / 2 + 1
+        )
+        .as_bytes(),
+    );
     out
 }
 
-/// The name to show for `user`: "Guest" for the guest, the profile's name, else None
-/// ("HinterOS": a spare in first-boot mode, anything unknown). The greeter shows the target of
-/// a switch it is about to enter without any UI (the public view's live `next` with `fast`),
-/// so the TV says "Loading Sam…" all the way; otherwise "HinterOS".
-pub fn name_for(
-    state_json: &Path,
-    profiles_json: &Path,
-    public_json: &Path,
-    user: &str,
-    now: i64,
-) -> Option<String> {
-    if user == GREETER_USER {
-        return switch_target(public_json, now);
-    }
-    if user == state::GUEST_USER {
-        return Some("Guest".into());
-    }
-    let state = State::load(state_json).ok().map(|(s, _)| s)?;
-    let account = state.accounts().into_iter().find(|a| a.user == user)?;
-    let file = ProfilesFile::load(profiles_json).ok()?;
-    file.profiles.get(&account.id).map(|m| m.name.clone())
+/// Only the prelude: the console cleared in the background colour.
+fn console_blank() -> Vec<u8> {
+    let mut out = Vec::new();
+    prelude(&mut out);
+    out
 }
 
-/// The name of a live fast switch target from the public view.
-fn switch_target(public_json: &Path, now: i64) -> Option<String> {
-    let v: crate::public::PublicView =
-        serde_json::from_slice(&std::fs::read(public_json).ok()?).ok()?;
-    let next = v.next.filter(|n| n.fast && n.expires > now)?;
-    if next.target == "guest" {
-        return Some("Guest".into());
-    }
-    v.profiles
-        .into_iter()
-        .find(|p| p.id == next.target)
-        .map(|p| p.name)
-}
-
-/// Open `path` (a VT) for writing, never following a symlink, and check it is one.
-fn open_vt(path: &Path) -> std::io::Result<std::fs::File> {
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(libc_flags())
-        .open(path)?;
-    let m = f.metadata()?;
-    // Virtual consoles: character devices, major 4, minor 1..=63.
-    let rdev = m.rdev();
-    let (major, minor) = (
-        rustix::fs::major(rdev as rustix::fs::Dev),
-        rustix::fs::minor(rdev as rustix::fs::Dev),
-    );
-    if !m.file_type().is_char_device() || major != 4 || !(1..=63).contains(&minor) {
-        return Err(std::io::Error::other("not a virtual console"));
-    }
-    Ok(f)
-}
-
-fn libc_flags() -> i32 {
+fn nofollow() -> i32 {
     (rustix::fs::OFlags::NOCTTY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK)
         .bits() as i32
 }
 
-/// Paint the splash on `PAM_TTY` for `user`. Errors are logged, never returned.
-pub fn run(paths: &crate::config::Paths, user: &str, pam_tty: Option<&str>, now: i64) {
+/// Open `path` (a VT) for writing, never following a symlink, and check it is one; with its
+/// number.
+fn open_vt(path: &Path) -> std::io::Result<(std::fs::File, u16)> {
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(nofollow())
+        .open(path)?;
+    let m = f.metadata()?;
+    // Virtual consoles: character devices, major 4, minor 1..=63.
+    let rdev = m.rdev() as rustix::fs::Dev;
+    let (major, minor) = (rustix::fs::major(rdev), rustix::fs::minor(rdev));
+    if !m.file_type().is_char_device() || major != 4 || !(1..=63).contains(&minor) {
+        return Err(std::io::Error::other("not a virtual console"));
+    }
+    Ok((f, minor as u16))
+}
+
+/// The framebuffer, opened without following a symlink, if the splash can draw on it.
+pub struct Fb {
+    file: std::fs::File,
+    pub var: vtio::FbVar,
+    pub fix: vtio::FbFix,
+    pub format: PixelFormat,
+}
+
+impl Fb {
+    pub fn open(path: &Path) -> std::io::Result<Fb> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(nofollow())
+            .open(path)?;
+        let m = file.metadata()?;
+        // Framebuffers: character devices, major 29.
+        if !m.file_type().is_char_device() || rustix::fs::major(m.rdev() as rustix::fs::Dev) != 29 {
+            return Err(std::io::Error::other("not a framebuffer"));
+        }
+        let (var, fix) = vtio::fb_info(&file)?;
+        let format = PixelFormat::from_fb(&var, &fix).ok_or_else(|| {
+            std::io::Error::other(format!(
+                "{} bpp, visual {}: not 32-bit truecolour",
+                var.bits_per_pixel, fix.visual
+            ))
+        })?;
+        if var.xres == 0 || var.yres == 0 || frame_place(&var, &fix).is_none() {
+            return Err(std::io::Error::other("unusable geometry"));
+        }
+        Ok(Fb {
+            file,
+            var,
+            fix,
+            format,
+        })
+    }
+
+    fn describe(&self) -> String {
+        format!("{}x{} {:?}", self.var.xres, self.var.yres, self.format)
+    }
+}
+
+/// Where the visible screen starts in the framebuffer's memory and how long it is (bytes), if
+/// it fits in it.
+pub fn frame_place(var: &vtio::FbVar, fix: &vtio::FbFix) -> Option<(u64, usize)> {
+    let stride = fix.line_length as usize;
+    if stride < (var.xoffset as usize + var.xres as usize) * 4 {
+        return None;
+    }
+    let offset = var.yoffset as u64 * stride as u64;
+    let len = stride.checked_mul(var.yres as usize)?;
+    (fix.smem_len == 0 || offset + len as u64 <= fix.smem_len as u64).then_some((offset, len))
+}
+
+/// The font file, read whole (bounded).
+fn read_font(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_FONT)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn journal(message: &str, fields: &[(&str, &str)]) {
+    crate::audit::journal_note(
+        Path::new("/run/systemd/journal/socket"),
+        "hinteros-splash",
+        message,
+        fields,
+    );
+}
+
+/// Paint the splash on `PAM_TTY` for `user` (the framebuffer with `font`, else console text).
+/// Errors are logged, never returned.
+pub fn run(
+    paths: &crate::config::Paths,
+    user: &str,
+    pam_tty: Option<&str>,
+    font: Option<&Path>,
+    now: i64,
+) {
     let Some(path) = pam_tty.and_then(tty_path) else {
         info!("splash: no virtual console in PAM_TTY");
         return;
     };
-    let mut f = match open_vt(&path) {
+    let (mut tty, _) = match open_vt(&path) {
         Ok(f) => f,
         Err(e) => {
             info!("splash: {}: {e}", path.display());
             return;
         }
     };
-    let (cols, rows) = rustix::termios::tcgetwinsize(&f)
-        .map(|w| (w.ws_col, w.ws_row))
-        .unwrap_or((0, 0));
-    let name = name_for(
+    let who = identity_for(
         &paths.state_json(),
         &paths.profiles_json(),
         &paths.public_json(),
         user,
         now,
     );
-    let bytes = render(name.as_deref(), cols, rows);
-    if let Err(e) = f.write_all(&bytes) {
-        info!("splash: writing {}: {e}", path.display());
-        return;
+    let text = text_for(who.as_ref().map(|w| w.name.as_str()));
+    // The framebuffer if it can be drawn on; why not, else.
+    let fb = match font {
+        None => Err("no font given".to_owned()),
+        Some(font) => read_font(font)
+            .map_err(|e| format!("font {}: {e}", font.display()))
+            .and_then(|b| {
+                Typeface::parse(&b)
+                    .map(|_| ())
+                    .ok_or_else(|| format!("font {}: not a font", font.display()))
+            })
+            .and_then(|()| Fb::open(Path::new(FB_PATH)).map_err(|e| format!("{FB_PATH}: {e}")))
+            .and_then(|fb| {
+                spawn_painter(&path, font, &paths.run_dir, who.as_ref())
+                    .map(|()| fb.describe())
+                    .map_err(|e| format!("painter: {e}"))
+            }),
+    };
+    match fb {
+        Ok(desc) => {
+            // What fbcon shows if it repaints before the painter takes the VT.
+            let _ = tty.write_all(&console_blank());
+            journal(
+                &format!("splash on {}: {text} (framebuffer {desc})", path.display()),
+                &[
+                    ("SPLASH", &text),
+                    ("USER", user),
+                    ("SPLASH_MODE", "framebuffer"),
+                ],
+            );
+        }
+        Err(why) => {
+            let (cols, rows) = rustix::termios::tcgetwinsize(&tty)
+                .map(|w| (w.ws_col, w.ws_row))
+                .unwrap_or((0, 0));
+            if let Err(e) = tty.write_all(&console_text(&text, cols, rows)) {
+                info!("splash: writing {}: {e}", path.display());
+                return;
+            }
+            // pam_exec drops the helper's stderr: say what is on screen in the journal (the VM
+            // tests read it there).
+            journal(
+                &format!(
+                    "splash on {}: {text} (console text, {cols}x{rows} cells; {why})",
+                    path.display()
+                ),
+                &[
+                    ("SPLASH", &text),
+                    ("USER", user),
+                    ("SPLASH_MODE", "console"),
+                ],
+            );
+        }
     }
-    // pam_exec drops the helper's stderr: say what is on screen in the journal (and the VM tests
-    // read it there; the screen has block letters, not text).
-    let text = text_for(name.as_deref());
-    let l = layout(name.as_deref(), cols, rows);
-    crate::audit::journal_note(
-        Path::new("/run/systemd/journal/socket"),
-        "hinteros-splash",
-        &format!(
-            "splash on {}: {text} ({cols}x{rows} cells, scale {})",
-            path.display(),
-            l.scale
-        ),
-        &[("SPLASH", &text), ("USER", user)],
+}
+
+/// Start the painter for `tty` and return at once (see the module docs).
+fn spawn_painter(
+    tty: &Path,
+    font: &Path,
+    run_dir: &Path,
+    who: Option<&Identity>,
+) -> std::io::Result<()> {
+    vtio::cloexec_inherited();
+    let mut cmd = Command::new("/proc/self/exe");
+    cmd.arg("splash-paint")
+        .arg("--tty")
+        .arg(tty)
+        .arg("--font")
+        .arg(font)
+        .arg("--run-dir")
+        .arg(run_dir);
+    if let Some(w) = who {
+        // `--name=` so that a name starting with '-' is still the value.
+        cmd.arg(format!("--name={}", sanitize(&w.name)));
+        if let Some(c) = w.color.as_deref().filter(|c| crate::profiles::is_color(c)) {
+            cmd.arg(format!("--color={c}"));
+        }
+        if w.guest {
+            cmd.arg("--guest");
+        }
+    }
+    cmd.env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Not waited for: when this helper exits the painter is reparented (and reaped) by init.
+    cmd.spawn().map(drop)
+}
+
+/// The painter's arguments (`hinteros-system splash-paint`).
+#[derive(Debug, Clone, clap::Args)]
+pub struct PaintArgs {
+    /// The VT (`/dev/ttyN`)
+    #[arg(long)]
+    pub tty: PathBuf,
+    /// The typeface (TTF/OTF)
+    #[arg(long)]
+    pub font: PathBuf,
+    /// The profile's name (none: "HinterOS")
+    #[arg(long)]
+    pub name: Option<String>,
+    /// The profile's colour
+    #[arg(long)]
+    pub color: Option<String>,
+    /// The guest
+    #[arg(long)]
+    pub guest: bool,
+    #[arg(long, default_value = "/run/hinteros")]
+    pub run_dir: PathBuf,
+}
+
+/// Why the painter stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// A session controller holds the VT again.
+    Session,
+    /// A newer splash took over.
+    Replaced,
+    Timeout,
+}
+
+/// `hinteros-system splash-paint`: paint until the next compositor holds the VT, a newer
+/// splash replaces this one, or [`PAINT_FOR`] passed. Logs, never fails.
+pub fn paint_main(a: &PaintArgs) {
+    // Its own session: nothing of greetd's or PAM's process group or terminal.
+    let _ = rustix::process::setsid();
+    let started = Instant::now();
+    if let Err(e) = paint(a, started) {
+        journal(
+            &format!("splash painter on {}: {e}", a.tty.display()),
+            &[("SPLASH_MODE", "framebuffer")],
+        );
+    }
+}
+
+fn paint(a: &PaintArgs, started: Instant) -> std::io::Result<()> {
+    let tty_ok = a
+        .tty
+        .to_str()
+        .and_then(tty_path)
+        .is_some_and(|p| p == a.tty);
+    if !tty_ok {
+        return Err(std::io::Error::other("not a virtual console"));
+    }
+    let (mut tty, vt) = open_vt(&a.tty)?;
+    let fb = Fb::open(Path::new(FB_PATH))?;
+    let font = read_font(&a.font)?;
+    let face = Typeface::parse(&font).ok_or_else(|| std::io::Error::other("not a font"))?;
+    let who = a.name.as_ref().map(|n| Identity {
+        name: n.clone(),
+        color: a.color.clone(),
+        guest: a.guest,
+    });
+    let scene = scene_for(&face, who.as_ref());
+    let canvas = splashdraw::render(&face, &scene, fb.var.xres, fb.var.yres);
+    let (offset, len) =
+        frame_place(&fb.var, &fb.fix).ok_or_else(|| std::io::Error::other("unusable geometry"))?;
+    let frame = splashdraw::to_fb_bytes(
+        &canvas,
+        fb.format,
+        fb.fix.line_length as usize,
+        fb.var.xoffset as usize,
     );
+    debug_assert_eq!(frame.len(), len);
+
+    // The newest painter owns the screen.
+    let claim = a.run_dir.join(PAINTER_FILE);
+    let me = std::process::id().to_string();
+    let claimed = crate::fsutil::write_atomic(&claim, me.as_bytes(), 0o644).is_ok();
+    let replaced = || claimed && std::fs::read_to_string(&claim).is_ok_and(|s| s != me);
+
+    let (mut frames, mut released, mut set_graphics) = (0u32, false, false);
+    let stop = loop {
+        if replaced() {
+            break Stop::Replaced;
+        }
+        let controlled = vtio::vt_controlled(&tty).unwrap_or(false);
+        if !controlled {
+            released = true;
+        } else if released {
+            break Stop::Session;
+        }
+        if vtio::active_vt(&tty).ok() == Some(vt) {
+            if !controlled && vtio::kd_mode(&tty).ok() != Some(vtio::KD_GRAPHICS) {
+                set_graphics |= vtio::set_kd_mode(&tty, vtio::KD_GRAPHICS).is_ok();
+            }
+            if fb.file.write_all_at(&frame, offset).is_ok() {
+                frames += 1;
+            }
+        }
+        if started.elapsed() >= PAINT_FOR {
+            break Stop::Timeout;
+        }
+        std::thread::sleep(PAINT_EVERY);
+    };
+    // Never leave a VT nobody holds blank in graphics mode: the line as console text.
+    let mut restored = false;
+    if stop != Stop::Replaced
+        && set_graphics
+        && !vtio::vt_controlled(&tty).unwrap_or(true)
+        && vtio::kd_mode(&tty).ok() == Some(vtio::KD_GRAPHICS)
+    {
+        let (cols, rows) = rustix::termios::tcgetwinsize(&tty)
+            .map(|w| (w.ws_col, w.ws_row))
+            .unwrap_or((0, 0));
+        let _ = tty.write_all(&console_text(&scene.text, cols, rows));
+        restored = vtio::set_kd_mode(&tty, vtio::KD_TEXT).is_ok();
+    }
+    if claimed && !replaced() {
+        let _ = std::fs::remove_file(&claim);
+    }
+    let reason = match stop {
+        Stop::Session => "the session holds the console",
+        Stop::Replaced => "a newer splash took over",
+        Stop::Timeout => "time is up",
+    };
+    journal(
+        &format!(
+            "splash painter on {}: {} on the framebuffer ({}), {frames} frames in {} ms; {reason}{}",
+            a.tty.display(),
+            scene.text,
+            fb.describe(),
+            started.elapsed().as_millis(),
+            if restored {
+                "; console back in text mode"
+            } else {
+                ""
+            }
+        ),
+        &[
+            ("SPLASH_MODE", "framebuffer"),
+            ("SPLASH_FRAMES", &frames.to_string()),
+        ],
+    );
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FONT: &[u8] = include_bytes!("../fixtures/AtkinsonHyperlegible-Bold.otf");
 
     #[test]
     fn only_virtual_consoles() {
@@ -358,100 +679,102 @@ mod tests {
     }
 
     #[test]
-    fn renders_palette_clear_hidden_cursor_and_centred_block_letters() {
-        // Terminus 16x32 (console.font ter-v32b, set in the initrd) on a 1920x1080 TV: 120x33.
-        let out = String::from_utf8(render(Some("Sam"), 120, 33)).unwrap();
-        // Palette: background, foreground and bold foreground in the launcher's colours.
+    fn scenes() {
+        let face = Typeface::parse(FONT).unwrap();
+        let sam = Identity {
+            name: "sam".into(),
+            color: Some("orange".into()),
+            guest: false,
+        };
+        let s = scene_for(&face, Some(&sam));
+        assert_eq!(s.text, "Loading sam…");
+        let a = s.avatar.unwrap();
+        assert_eq!(a.initial.as_deref(), Some("S"));
+        assert_eq!(Some(a.fill), splashdraw::profile_color("orange"));
+        let g = scene_for(&face, Some(&Identity::guest()));
+        assert_eq!(g.text, "Loading Guest…");
+        assert!(g.avatar.unwrap().ring.is_some());
+        assert_eq!(
+            scene_for(&face, None),
+            Scene {
+                text: "HinterOS".into(),
+                avatar: None
+            }
+        );
+        // A name the typeface cannot draw: no tofu, just "Loading…" and a plain circle.
+        let yamada = Identity {
+            name: "山田".into(),
+            color: Some("teal".into()),
+            guest: false,
+        };
+        let y = scene_for(&face, Some(&yamada));
+        assert_eq!(y.text, "Loading…");
+        assert_eq!(y.avatar.unwrap().initial, None);
+        // Control characters never reach the picture.
+        let evil = Identity {
+            name: "\u{202E}Sam\x1b[2J".into(),
+            color: None,
+            guest: false,
+        };
+        assert_eq!(scene_for(&face, Some(&evil)).text, "Loading Sam[2J…");
+    }
+
+    #[test]
+    fn console_fallback_is_normal_text_centred() {
+        let out = String::from_utf8(console_text("Loading Sam…", 120, 33)).unwrap();
         assert!(
             out.starts_with("\x1b]P00E1118\x1b]P7F4F6FB\x1b]PFF4F6FB"),
             "{out:?}"
         );
         let clear = out.find("\x1b[2J").unwrap();
         let hide = out.find("\x1b[?25l").unwrap();
-        // "Loading" over "Sam…" at scale 2: 82 and 46 cells wide, 8 rows each and a 2-row gap
-        // (18 rows): top row (33 - 18) / 2 + 1 = 8, columns (120 - 82) / 2 + 1 = 20 and
-        // (120 - 46) / 2 + 1 = 38.
-        let l = layout(Some("Sam"), 120, 33);
-        assert_eq!(l.scale, 2);
-        assert_eq!(l.lines, ["Loading", "Sam…"]);
-        assert_eq!((l.top, l.cols.clone()), (8, vec![20, 38]));
-        let first = out.find("\x1b[8;20H").unwrap();
-        assert!(clear < first && hide < first, "{out:?}");
-        assert!(out.contains("\x1b[18;38H"), "{out:?}");
-        // Only escape sequences, block characters and spaces: no other control characters.
+        // 12 characters: column (120 - 12) / 2 + 1 = 55, row 17 of 33.
+        let at = out.find("\x1b[17;55H\x1b[1mLoading Sam…\x1b[0m").unwrap();
+        assert!(clear < at && hide < at, "{out:?}");
+        // No block letters any more, no other control characters.
+        assert!(!out.chars().any(|c| "█▀▄".contains(c)));
         assert!(
-            !out.chars()
-                .any(|c| c.is_control() && c != '\x1b' && c != '\u{7}'),
+            !out.chars().any(|c| c.is_control() && c != '\x1b'),
             "{out:?}"
         );
+        // Unknown size: 80x25; too narrow: cut, column 1.
         assert!(
-            out.chars().any(|c| "█▀▄".contains(c)),
-            "drawn in block characters"
+            String::from_utf8(console_text("HinterOS", 0, 0))
+                .unwrap()
+                .contains("\x1b[13;37H")
+        );
+        let narrow = String::from_utf8(console_text("Loading Samantha…", 7, 3)).unwrap();
+        assert!(
+            narrow.contains("\x1b[2;1H\x1b[1mLoading\x1b[0m"),
+            "{narrow:?}"
         );
     }
 
     #[test]
-    fn centred_for_the_console_sizes_of_a_tv() {
-        // (cols, rows) → the brand's scale, top row, column; every layout inside the screen
-        // with its margin, the same distance from the left and the right edge (±1), and from
-        // the top and the bottom.
-        let sizes = [
-            (120, 33, 2, 13, 14), // ter-v32b at 1920x1080 (the box)
-            (240, 67, 3, 28, 50), // ter-v32b at 3840x2160, or 8x16 at 1920x1080
-            (80, 25, 1, 11, 17),  // unknown size
-            (160, 45, 3, 17, 10), // 8x16 at 1280x720
-        ];
-        for (cols, rows, scale, top, col) in sizes {
-            let l = layout(None, cols, rows);
-            assert_eq!(l.lines, ["HinterOS"]);
-            assert_eq!(
-                (l.scale, l.top, l.cols[0]),
-                (scale, top, col),
-                "{cols}x{rows}"
-            );
-        }
-        for (cols, rows, ..) in sizes {
-            for name in [
-                None,
-                Some("Sam"),
-                Some("James"),
-                Some("Guest"),
-                Some("Alexandria"),
-            ] {
-                let l = layout(name, cols, rows);
-                assert!(l.scale >= 1, "{name:?} {cols}x{rows}");
-                let h = l.lines.len() * bigtext::height(l.scale) + (l.lines.len() - 1) * l.scale;
-                let (above, below) = (l.top - 1, rows as usize - (l.top - 1 + h));
-                assert!(above.abs_diff(below) <= 1, "{name:?} {cols}x{rows}: {l:?}");
-                for (line, c) in l.lines.iter().zip(&l.cols) {
-                    let w = bigtext::width(line, l.scale);
-                    let (left, right) = (c - 1, cols as usize - (c - 1 + w));
-                    assert!(left >= 2 && right >= 2, "{name:?} {cols}x{rows}: {l:?}");
-                    assert!(left.abs_diff(right) <= 1, "{name:?} {cols}x{rows}: {l:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn small_or_unknown_sizes() {
-        // 80x25 fallback: block letters at scale 1.
-        assert_eq!(layout(None, 0, 0), layout(None, 80, 25));
-        // Too small for any block letters: the plain line, cut to the width, column 1.
-        let out = String::from_utf8(render(Some("Samantha"), 7, 3)).unwrap();
-        assert!(out.contains("\x1b[2;1H\x1b[1mLoading\x1b[0m"), "{out:?}");
-        // A name the block font cannot draw: the plain line, centred.
-        let l = layout(Some("山田"), 120, 33);
-        assert_eq!(
-            (l.scale, l.lines.clone()),
-            (0, vec!["Loading 山田…".to_owned()])
-        );
-        assert_eq!((l.top, l.cols[0]), (17, 55));
-        // A long name: still big, on two lines, or plain if even that does not fit.
-        let l = layout(Some(&"W".repeat(32)), 120, 33);
-        assert_eq!(l.scale, 0);
-        let l = layout(Some("Christopher"), 120, 33);
-        assert_eq!((l.scale, l.lines.len()), (1, 2));
+    fn frame_placement() {
+        let var = vtio::FbVar {
+            xres: 1920,
+            yres: 1080,
+            yoffset: 1080,
+            ..Default::default()
+        };
+        let fix = vtio::FbFix {
+            line_length: 7680,
+            smem_len: 7680 * 2160,
+            ..Default::default()
+        };
+        assert_eq!(frame_place(&var, &fix), Some((7680 * 1080, 7680 * 1080)));
+        // Past the end of the memory, or a stride too short for the width.
+        let small = vtio::FbFix {
+            smem_len: 7680 * 2000,
+            ..fix
+        };
+        assert_eq!(frame_place(&var, &small), None);
+        let narrow = vtio::FbFix {
+            line_length: 4000,
+            ..fix
+        };
+        assert_eq!(frame_place(&var, &narrow), None);
     }
 
     #[test]
@@ -473,9 +796,14 @@ mod tests {
                "appearance":{"text_scale":1.0,"high_contrast":false,"reduce_motion":false}}}}"#,
         )
         .unwrap();
-        let name = |user: &str, now: i64| name_for(&state, &profiles, &public, user, now);
-        assert_eq!(name("hinteros", 0).as_deref(), Some("James"));
-        assert_eq!(name("hinteros-guest", 0).as_deref(), Some("Guest"));
+        let who = |user: &str, now: i64| identity_for(&state, &profiles, &public, user, now);
+        let name = |user: &str, now: i64| who(user, now).map(|i| i.name);
+        let james = who("hinteros", 0).unwrap();
+        assert_eq!(
+            (james.name.as_str(), james.color.as_deref(), james.guest),
+            ("James", Some("teal"), false)
+        );
+        assert_eq!(who("hinteros-guest", 0), Some(Identity::guest()));
         // The greeter without a switch it enters by itself: "HinterOS".
         assert_eq!(name("hinteros-greeter", 0), None);
         // A spare: no profile yet.
@@ -492,23 +820,41 @@ mod tests {
             )
         };
         std::fs::write(&public, view("p1", true)).unwrap();
-        assert_eq!(name("hinteros-greeter", 50).as_deref(), Some("James"));
+        assert_eq!(who("hinteros-greeter", 50), Some(james));
         assert_eq!(name("hinteros-greeter", 150), None, "expired");
         std::fs::write(&public, view("guest", true)).unwrap();
-        assert_eq!(name("hinteros-greeter", 50).as_deref(), Some("Guest"));
+        assert_eq!(who("hinteros-greeter", 50), Some(Identity::guest()));
         std::fs::write(&public, view("p1", false)).unwrap();
         assert_eq!(name("hinteros-greeter", 50), None, "the picker will ask");
     }
 
     #[test]
-    fn refuses_what_is_not_a_vt() {
+    fn refuses_what_is_not_a_vt_or_a_framebuffer() {
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("tty1");
         std::fs::write(&f, "").unwrap();
         assert!(open_vt(&f).is_err());
+        assert!(Fb::open(&f).is_err());
         let l = d.path().join("link");
         std::os::unix::fs::symlink("/dev/null", &l).unwrap();
         assert!(open_vt(&l).is_err());
+        assert!(Fb::open(&l).is_err());
         assert!(open_vt(Path::new("/dev/null")).is_err());
+        assert!(Fb::open(Path::new("/dev/null")).is_err());
+    }
+
+    #[test]
+    fn the_painter_refuses_a_bad_tty_without_touching_anything() {
+        let d = tempfile::tempdir().unwrap();
+        let a = PaintArgs {
+            tty: "/dev/pts/0".into(),
+            font: d.path().join("none.otf"),
+            name: None,
+            color: None,
+            guest: false,
+            run_dir: d.path().to_owned(),
+        };
+        assert!(paint(&a, Instant::now()).is_err());
+        assert!(!d.path().join(PAINTER_FILE).exists());
     }
 }

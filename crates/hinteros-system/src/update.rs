@@ -5,7 +5,9 @@
 //! `gpg.format=ssh`, which runs `ssh-keygen -Y verify`), and must descend from the locked
 //! revision (fast-forward only within a channel). `update.apply` locks the verified commit id.
 //! A `Security: <low|medium|high|critical>` trailer on any new commit marks the update as a
-//! security update (the tip's signature covers its whole history).
+//! security update (the tip's signature covers its whole history); the newest
+//! `Security-Summary:` trailer is the notice's one-line summary. The tip's `release/version`
+//! file names the release (falling back to the short revision).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -167,6 +169,78 @@ pub fn security_severity(message: &str) -> Option<Severity> {
             }
         })
         .max()
+}
+
+/// Longest release version accepted from `release/version` (bytes).
+pub const MAX_VERSION_LEN: usize = 32;
+/// Longest `Security-Summary:` returned (characters).
+pub const MAX_SECURITY_SUMMARY: usize = 120;
+/// Length of the short revision reported when a release has no valid version.
+pub const SHORT_REV: usize = 12;
+/// Largest `release/version` file read (bytes).
+const MAX_VERSION_FILE: u64 = 256;
+
+/// The release version in a `release/version` file: its only non-empty line, trimmed, if it
+/// matches `^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$` and is at most [`MAX_VERSION_LEN`] bytes.
+pub fn parse_version(raw: &str) -> Option<String> {
+    let mut lines = raw.lines().map(str::trim).filter(|l| !l.is_empty());
+    let v = lines.next()?;
+    if lines.next().is_some() || v.len() > MAX_VERSION_LEN {
+        return None;
+    }
+    let (core, pre) = match v.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (v, None),
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    let numeric = parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    let pre_ok = pre.is_none_or(|p| {
+        !p.is_empty()
+            && p.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    });
+    (numeric && pre_ok).then(|| v.to_owned())
+}
+
+/// The version an update reports: the parsed `release/version`, or the short revision.
+pub fn version_or_short_rev(raw: Option<&str>, rev: &str) -> String {
+    raw.and_then(parse_version)
+        .unwrap_or_else(|| rev.chars().take(SHORT_REV).collect())
+}
+
+/// The last `Security-Summary:` trailer of a message, made safe to show on one line: control
+/// and invisible formatting characters removed, whitespace runs collapsed, at most
+/// [`MAX_SECURITY_SUMMARY`] characters. None if there is none or it is empty.
+pub fn security_summary(message: &str) -> Option<String> {
+    let (_, raw) = trailers(message)
+        .into_iter()
+        .rev()
+        .find(|(k, _)| k.eq_ignore_ascii_case("security-summary"))?;
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !c.is_control() && !is_format_char(*c))
+        .collect();
+    let line: String = cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_SECURITY_SUMMARY)
+        .collect();
+    let line = line.trim_end();
+    (!line.is_empty()).then(|| line.to_owned())
+}
+
+/// Invisible formatting characters that could reorder or hide text (bidi controls, zero-width).
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+    )
 }
 
 /// The principal from `git verify-commit`'s (ssh-keygen's) output:
@@ -341,6 +415,24 @@ impl Git {
         }
     }
 
+    /// The `release/version` file of `rev`, if it exists and is small.
+    pub fn release_version(&self, rev: &str) -> Option<String> {
+        if !is_rev(rev) {
+            return None;
+        }
+        let object = format!("{rev}:release/version");
+        let size: u64 = self
+            .ok(&["cat-file", "-s", &object])
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        if size > MAX_VERSION_FILE {
+            return None;
+        }
+        self.ok(&["cat-file", "blob", &object]).ok()
+    }
+
     /// Whether `ancestor` is an ancestor of (or equal to) `rev`.
     pub fn is_ancestor(&self, ancestor: &str, rev: &str) -> Result<bool, GitError> {
         if !self.has_commit(ancestor) {
@@ -421,6 +513,8 @@ impl Git {
         let tip = self.commit(rev)?;
         let commits = self.new_commits(current, rev)?;
         let mut security = None;
+        let mut summary = None;
+        // Newest first: the first `Security-Summary:` found is the newest.
         for c in &commits {
             let msg = if c == rev {
                 tip.message.clone()
@@ -428,7 +522,11 @@ impl Git {
                 self.commit(c)?.message
             };
             security = security.max(security_severity(&msg));
+            if summary.is_none() {
+                summary = security_summary(&msg);
+            }
         }
+        let version = version_or_short_rev(self.release_version(rev).as_deref(), rev);
         Ok(AvailableUpdate {
             rev: rev.to_owned(),
             date: tip.committer_time.unwrap_or(0),
@@ -439,6 +537,8 @@ impl Git {
             // Filled in by the job from the target revision's catalog (`runner`).
             new_apps: None,
             removed_apps: None,
+            version: Some(version),
+            security_summary: summary,
         })
     }
 }
@@ -527,6 +627,79 @@ mod tests {
             security_severity("S\n\nsecurity: low\nSECURITY: critical\n"),
             Some(Severity::Critical)
         );
+    }
+
+    #[test]
+    fn versions() {
+        for ok in [
+            "0.6.1",
+            "10.20.30",
+            "0.6.1-rc.1",
+            "1.0.0-beta-2",
+            "0.6.1\n",
+            " 0.6.1 \n\n",
+        ] {
+            assert_eq!(parse_version(ok).as_deref(), Some(ok.trim()), "{ok:?}");
+        }
+        for bad in [
+            "",
+            "\n",
+            "0.6",
+            "0.6.1.2",
+            "v0.6.1",
+            "0.6.1-",
+            "0.6.1+build",
+            "0.6.1-rc 1",
+            "0..1",
+            "a.b.c",
+            "0.6.1\n0.6.2",
+            "0.6.1-ü",
+        ] {
+            assert_eq!(parse_version(bad), None, "{bad:?}");
+        }
+        // 32 bytes is the limit.
+        let max = format!("1.2.3-{}", "a".repeat(MAX_VERSION_LEN - 6));
+        assert_eq!(parse_version(&max).as_deref(), Some(max.as_str()));
+        assert_eq!(parse_version(&format!("{max}a")), None);
+        let rev = "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5";
+        assert_eq!(version_or_short_rev(Some("0.6.1\n"), rev), "0.6.1");
+        assert_eq!(version_or_short_rev(Some("garbage"), rev), "9a8b7c6d5e4f");
+        assert_eq!(version_or_short_rev(None, rev), "9a8b7c6d5e4f");
+    }
+
+    #[test]
+    fn security_summaries() {
+        let m = "HinterOS 0.6.3\n\nFirefox 131.0.3.\n\nSecurity: high\n\
+                 Security-Summary: A website could take over the browser in a profile.\n";
+        assert_eq!(
+            security_summary(m).as_deref(),
+            Some("A website could take over the browser in a profile.")
+        );
+        // None, empty, or not in the trailer block.
+        assert_eq!(security_summary("S\n\nSecurity: high\n"), None);
+        assert_eq!(security_summary("S\n\nSecurity-Summary:   \n"), None);
+        assert_eq!(
+            security_summary("S\n\nSecurity-Summary: x\n\nThe end.\n"),
+            None
+        );
+        // The last one in a message wins; case-insensitive key.
+        assert_eq!(
+            security_summary("S\n\nsecurity-summary: one\nSECURITY-SUMMARY: two\n").as_deref(),
+            Some("two")
+        );
+        // Continuation lines are joined; whitespace collapsed; control and bidi chars removed.
+        assert_eq!(
+            security_summary("S\n\nSecurity-Summary: a\tb\x07c \u{202E}d\n  e\n").as_deref(),
+            Some("a bc d e")
+        );
+        // Truncated to 120 characters.
+        let long = "é".repeat(200);
+        let s = security_summary(&format!("S\n\nSecurity-Summary: {long}\n")).unwrap();
+        assert_eq!(s.chars().count(), MAX_SECURITY_SUMMARY);
+        // No trailing space left by truncation.
+        let words = "ab ".repeat(60);
+        let s = security_summary(&format!("S\n\nSecurity-Summary: {words}x\n")).unwrap();
+        assert!(!s.ends_with(' ') && s.chars().count() <= MAX_SECURITY_SUMMARY);
     }
 
     #[test]

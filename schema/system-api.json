@@ -345,7 +345,9 @@
                 "security": "high",
                 "commits": 12,
                 "new_apps": [{ "id": "moonlight", "name": "Moonlight" }],
-                "removed_apps": []
+                "removed_apps": [],
+                "version": "0.2.0",
+                "security_summary": "A website could take over the browser in a profile."
               },
               "checked_at": 1791300100
             }
@@ -2152,6 +2154,14 @@
         "removed_apps": {
           "description": "Installed apps the update takes away (removed from, or missing in, the target's catalog); null if unknown (since 0.3). The update screen names them with the reason.",
           "oneOf": [{ "type": "array", "items": { "$ref": "#/$defs/RemovedApp" } }, { "type": "null" }]
+        },
+        "version": {
+          "description": "(Session API 0.11; optional in system API 0.3.) The release rev carries: its release/version file if that matches ^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$ (at most 32 characters), otherwise the first 12 hex digits of rev. The launcher shows 'HinterOS <version>'. Absent from older services: show the short rev.",
+          "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 32 }, { "type": "null" }]
+        },
+        "security_summary": {
+          "description": "(Session API 0.11; optional in system API 0.3.) The newest Security-Summary: trailer among the new commits: one line (control characters removed), at most 120 characters; the security notice shows it under the severity. Null if none; absent from older services.",
+          "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 120 }, { "type": "null" }]
         }
       }
     },

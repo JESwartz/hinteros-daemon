@@ -628,9 +628,11 @@ async fn updates_are_verified() {
     up.push(&c1, "stable");
     root.set_lock("stable", &c1);
     let c2 = up.commit(
-        "Release 0.2\n\nFixes a hole.\n\nSecurity: high",
+        "Release 0.2\n\nFixes a hole.\n\nSecurity: high\nSecurity-Summary: Closes a hole.",
         Some("release"),
     );
+    std::fs::create_dir_all(up.work.join("release")).unwrap();
+    std::fs::write(up.work.join("release/version"), "0.2.1\n").unwrap();
     let c3 = up.commit("Release 0.2.1", Some("release"));
     up.push(&c3, "stable");
     // The running catalog and the target's lib.catalogIds (what the fake `nix eval` prints).
@@ -675,6 +677,8 @@ async fn updates_are_verified() {
     assert_eq!(available["signer"], "release@hinteros");
     assert_eq!(available["security"], "high", "from c2's trailer");
     assert_eq!(available["commits"], 2);
+    assert_eq!(available["version"], "0.2.1", "from c3's release/version");
+    assert_eq!(available["security_summary"], "Closes a hole.");
     assert_eq!(
         available["new_apps"],
         json!([{"id": "moonlight", "name": "Moonlight"}])

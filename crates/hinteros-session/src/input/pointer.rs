@@ -125,7 +125,9 @@ pub fn default_profile_yaml() -> String {
 }
 
 /// The pointer profile: the default mappings, the right stick as mouse motion at `speed_pps`
-/// pixels per second at full deflection (InputPlumber applies a fixed 0.20 deadzone, linear),
+/// pixels per second at full deflection (InputPlumber applies a fixed 0.20 deadzone, then a
+/// response curve speed = speed_pps * m^k on the rescaled deflection m; k is the system's
+/// `hinteros.input.pointerCurve`, default 2.5, so full speed is unchanged),
 /// and right-stick activity as [`ACTIVITY_EVENT`] beyond `activity_deadzone`.
 pub fn profile_yaml(speed_pps: u32, activity_deadzone: f64) -> String {
     let mut y = format!(

@@ -684,8 +684,9 @@ impl Default for OskConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct PointerConfig {
     pub enable: bool,
-    /// Pointer speed at full deflection, pixels per second (InputPlumber: linear, fixed 0.20
-    /// deadzone).
+    /// Pointer speed at full deflection, pixels per second (InputPlumber: fixed 0.20 deadzone,
+    /// then speed_pps * m^k on the rescaled deflection m; k is the NixOS option
+    /// `hinteros.input.pointerCurve`, so slow movements are slower, full speed is unchanged).
     pub speed_pps: u32,
     /// How far the right stick must move to count as "using the pointer" (0..1).
     pub activity_deadzone: f64,

@@ -288,6 +288,34 @@ pub fn clear_stale_x(tmp: &Path, proc_dir: &Path) {
     }
 }
 
+/// The switch hint has done its job once its target's session opens: drop it (and whatever is
+/// left of its token), so a session that ends soon after (End guest session, a crash) goes to
+/// the picker instead of straight back in.
+pub fn fulfil_hint(ctx: &Ctx, user: &str, now: i64) {
+    let path = ctx.paths.switch_json();
+    let Some(hint) = public::SwitchHint::load(&path) else {
+        return;
+    };
+    let Some(state) = ctx.state() else { return };
+    let target_user = if hint.target == "guest" {
+        Some(state::GUEST_USER.to_owned())
+    } else {
+        state
+            .accounts()
+            .into_iter()
+            .find(|a| a.id == hint.target)
+            .map(|a| a.user)
+    };
+    if target_user.as_deref() != Some(user) {
+        return;
+    }
+    if let Err(e) = std::fs::remove_file(&path) {
+        warn!("cannot drop the switch hint: {e}");
+        return;
+    }
+    crate::public::publish(&ctx.paths, &state, &ctx.file(), now);
+}
+
 /// Mark `user`'s profile as used now (the picker focuses the last-used profile).
 fn touch_last_used(ctx: &Ctx, user: &str, now: i64) {
     let Some(state) = ctx.state() else { return };
@@ -348,6 +376,7 @@ pub fn main(verb: Verb, ctx: &Ctx) -> ExitCode {
             clear_stale_x(Path::new("/tmp"), Path::new("/proc"));
             if user != "hinteros-greeter" {
                 touch_last_used(ctx, &user, now);
+                fulfil_hint(ctx, &user, now);
             }
             ExitCode::SUCCESS
         }
@@ -439,6 +468,14 @@ mod tests {
         public::grant_token(&c.paths, "p2", "hinteros-p2", 0).unwrap();
         assert!(unlocked(&c, "hinteros-p2", 1));
         assert!(!unlocked(&c, "hinteros-p2", 1));
+        // The hint is dropped once its target's session opens (and only then).
+        fulfil_hint(&c, "hinteros", 1);
+        assert!(c.paths.switch_json().exists());
+        fulfil_hint(&c, "hinteros-p2", 1);
+        assert!(!c.paths.switch_json().exists());
+        public::grant_token(&c.paths, "guest", "hinteros-guest", 0).unwrap();
+        fulfil_hint(&c, "hinteros-guest", 1);
+        assert!(!c.paths.switch_json().exists());
 
         // verify: right, wrong, then the lock message.
         assert_eq!(verify(&c, "hinteros-p2", "2468", 10), (true, None));

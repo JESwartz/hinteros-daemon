@@ -216,6 +216,26 @@ impl Audit {
     }
 }
 
+/// A plain journal entry (not an audit record) from a helper whose stderr goes nowhere (the PAM
+/// helper under pam_exec): `MESSAGE`, `SYSLOG_IDENTIFIER` and `HINTEROS_<key>` fields. Best effort.
+pub fn journal_note(
+    socket: &std::path::Path,
+    identifier: &str,
+    message: &str,
+    fields: &[(&str, &str)],
+) {
+    let mut datagram = Vec::new();
+    field(&mut datagram, "MESSAGE", message);
+    field(&mut datagram, "PRIORITY", "6");
+    field(&mut datagram, "SYSLOG_IDENTIFIER", identifier);
+    for (k, v) in fields {
+        field(&mut datagram, &format!("HINTEROS_{k}"), v);
+    }
+    if socket.exists() {
+        let _ = send_datagram(socket, &datagram);
+    }
+}
+
 /// Send without ever blocking the service for long: a full journal queue gets a few short retries,
 /// then the entry is reported as lost (it is still in the service's own log above).
 fn send_datagram(socket: &std::path::Path, datagram: &[u8]) -> std::io::Result<()> {

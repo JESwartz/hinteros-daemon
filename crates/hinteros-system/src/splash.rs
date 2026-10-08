@@ -295,7 +295,22 @@ pub fn run(paths: &crate::config::Paths, user: &str, pam_tty: Option<&str>, now:
     let bytes = render(name.as_deref(), cols, rows);
     if let Err(e) = f.write_all(&bytes) {
         info!("splash: writing {}: {e}", path.display());
+        return;
     }
+    // pam_exec drops the helper's stderr: say what is on screen in the journal (and the VM tests
+    // read it there; the screen has block letters, not text).
+    let text = text_for(name.as_deref());
+    let l = layout(name.as_deref(), cols, rows);
+    crate::audit::journal_note(
+        Path::new("/run/systemd/journal/socket"),
+        "hinteros-splash",
+        &format!(
+            "splash on {}: {text} ({cols}x{rows} cells, scale {})",
+            path.display(),
+            l.scale
+        ),
+        &[("SPLASH", &text), ("USER", user)],
+    );
 }
 
 #[cfg(test)]

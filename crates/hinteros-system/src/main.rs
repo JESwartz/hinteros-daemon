@@ -70,6 +70,11 @@ fn main() -> ExitCode {
                 },
             )
         }
+        Some(Command::ResetPin {
+            profile,
+            dirs,
+            journal_socket,
+        }) => hinteros_system::resetpin::main(&dirs.paths(), profile.as_deref(), &journal_socket),
         Some(Command::Usage { dirs }) => hinteros_system::usage::main(&dirs.paths()),
         Some(Command::CheckState { .. }) => unreachable!("handled above"),
         None => {

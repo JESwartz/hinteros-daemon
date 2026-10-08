@@ -170,6 +170,33 @@ impl Audit {
         );
     }
 
+    /// `hinteros-system reset-pin` (root, from a terminal): which profile's PIN was removed.
+    pub fn pin_reset_by_root(&self, id: &str, had_pin: bool, sudo_user: Option<&str>) {
+        self.send(
+            &format!(
+                "reset-pin by root{}: the PIN of profile {id} {}",
+                sudo_user
+                    .map(|u| format!(" (sudo by {u})"))
+                    .unwrap_or_default(),
+                if had_pin {
+                    "was removed"
+                } else {
+                    "was not set"
+                }
+            ),
+            &[
+                ("UID", "0".into()),
+                ("METHOD", "reset-pin".into()),
+                ("PROFILE", id.to_owned()),
+                ("SUDO_USER", sudo_user.unwrap_or("").to_owned()),
+                (
+                    "PIN_OUTCOME",
+                    if had_pin { "removed" } else { "not_set" }.into(),
+                ),
+            ],
+        );
+    }
+
     fn send(&self, message: &str, fields: &[(&str, String)]) {
         info!(target: "audit", "{message}");
         let mut datagram = Vec::new();

@@ -1227,8 +1227,23 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
 - `greeter.sock` (`--greeter-socket`, group `--greeter-group`, 0660): `hello`, `ping`,
   `subscribe`, `settings.get`, `jobs.get`, `profiles.create` (a create from it grants the new
   account a token).
-- `hinteros-system pin unlocked|verify|end-others` (`pam.rs`): the PAM helper (`PAM_USER`; the
-  PIN on stdin; prints only `hinteros:wrong` / `hinteros:locked:<s>`).
+- `hinteros-system pin unlocked|verify|end-others|splash` (`pam.rs`): the PAM helper (`PAM_USER`;
+  the PIN on stdin; prints only `hinteros:wrong` / `hinteros:locked:<s>`). `splash`
+  (`splash.rs`) paints the session's VT (`PAM_TTY`, only `/dev/ttyN`/`ttyN`, opened without
+  following links and checked to be a VT) during greetd's handover: console escape sequences only
+  (palette background/foreground = the launcher's `#0E1118`/`#F4F6FB`, clear, cursor hidden) and
+  a centred "Loading <name>…" (the profile's name from profiles.json, "Guest"; just "HinterOS"
+  for the greeter), names sanitised to printable characters and cut at 32. Always exits 0.
+- **Forgotten PIN:** `sudo hinteros-system reset-pin [<id or exact name>]` (`resetpin.rs`, root
+  only; no argument lists the profiles with their ids). Removes the profile's PIN and clears its
+  wrong-PIN wait under the backoff file's `flock` (no race with a check in the service or the
+  PAM helper), writes an audit entry (`HINTEROS_METHOD=reset-pin`, the profile, `SUDO_USER`;
+  never a PIN) and republishes `profiles-public.json`. The service needs no signal: it reads
+  `pins/` and `profiles.json` on every request. The profile is then entered from the picker
+  without a PIN (also when locked), its launcher shows "Set your PIN" (`pin_set` false), and
+  `profiles.set_pin` needs no current PIN until one is set. There is no in-UI recovery of a
+  forgotten PIN on purpose (the owner: reset from the terminal by root); `profiles.reset_pin`
+  (another profile's PIN, with the admin PIN) stays.
 
 ### Session daemon
 
@@ -1244,7 +1259,8 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   `display.keep` and `audio.set_output` also save the mode/output for every profile.
 - `hinteros-session greet [--config FILE] -- <picker…>` and `hinteros-session --greeter`
   (`greeter.list/login/pin/cancel/create`, `greeter_prompt`, `greeter_result`; `[greeter] public,
-  socket, session_command`).
+  socket, session_command`). `greeter.list.switch_to`: an unexpired switch hint's target (the
+  picker goes straight to its PIN pad). The greeter never reads an `[apps] profile` env.
 
 Verified here against fakes (`crates/hinteros-system/tests/{apps,profiles}.rs`,
 `crates/hinteros-session/tests/{reload,profiles,greeter}.rs`). Needs the system repo's VM tests

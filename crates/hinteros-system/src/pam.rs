@@ -7,6 +7,8 @@
 //! - `verify`: the PIN from stdin, with the shared backoff. Wrong: `hinteros:wrong`; locked:
 //!   `hinteros:locked:<seconds>`.
 //! - `end-others`: ends every other `hinteros` account's processes before a session opens.
+//! - `splash`: paints "Loading <name>…" on the session's VT (`PAM_TTY`) during the handover
+//!   (see [`crate::splash`]); always exits 0.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -27,6 +29,7 @@ pub enum Verb {
     Unlocked,
     Verify,
     EndOthers,
+    Splash,
 }
 
 /// What the helper needs to know about the box.
@@ -305,6 +308,20 @@ fn touch_last_used(ctx: &Ctx, user: &str, now: i64) {
 pub fn main(verb: Verb, ctx: &Ctx) -> ExitCode {
     let user = std::env::var("PAM_USER").unwrap_or_default();
     let now = crate::job::now();
+    if verb == Verb::Splash {
+        // Cosmetic: never fails a login, whatever happens.
+        let tty = std::env::var("PAM_TTY").ok();
+        let paths = &ctx.paths;
+        let _ = std::panic::catch_unwind(|| {
+            crate::splash::run(
+                &paths.state_json(),
+                &paths.profiles_json(),
+                &user,
+                tty.as_deref(),
+            )
+        });
+        return ExitCode::SUCCESS;
+    }
     if user.is_empty() {
         return ExitCode::FAILURE;
     }
@@ -330,6 +347,7 @@ pub fn main(verb: Verb, ctx: &Ctx) -> ExitCode {
                 ExitCode::FAILURE
             }
         }
+        Verb::Splash => ExitCode::SUCCESS,
         Verb::EndOthers => {
             end_others(ctx, &user, Path::new("/proc"));
             clear_stale_x(Path::new("/tmp"), Path::new("/proc"));

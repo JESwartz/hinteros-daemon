@@ -37,7 +37,7 @@ pub enum Command {
         files: Vec<PathBuf>,
     },
     /// The PAM helper (`pam_exec`, as root, `PAM_USER` set): `unlocked`, `verify` (the PIN on
-    /// stdin) or `end-others`
+    /// stdin), `end-others` or `splash` (the console splash on `PAM_TTY`; always exits 0)
     Pin {
         #[arg(value_enum)]
         verb: crate::pam::Verb,
@@ -46,6 +46,18 @@ pub enum Command {
         /// D-Bus address for logind and systemd [default: the system bus]
         #[arg(long)]
         bus: Option<String>,
+    },
+    /// Forgotten PIN: remove a profile's PIN and its wrong-PIN wait (root only, from a terminal).
+    /// Without a profile: list the profiles. The profile then enters without a PIN and is asked
+    /// to set a new one when it starts.
+    ResetPin {
+        /// The profile's id (`p2`) or its exact name
+        profile: Option<String>,
+        #[command(flatten)]
+        dirs: HelperDirs,
+        /// journald's native socket (the audit entry)
+        #[arg(long, default_value = "/run/systemd/journal/socket")]
+        journal_socket: PathBuf,
     },
     /// Measure every profile's disk use into usage.json (`hinteros-usage.service`)
     Usage {

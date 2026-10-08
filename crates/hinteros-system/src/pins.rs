@@ -140,6 +140,21 @@ impl Pins {
         self.set_hash(id, &phc)
     }
 
+    /// Remove `id`'s PIN and clear its backoff, under the same `flock` the checks take (so a
+    /// check running now finishes first, and none sees a half-done reset). Whether a PIN was set.
+    pub fn clear(&self, id: &str) -> std::io::Result<bool> {
+        let mut removed: std::io::Result<bool> = Ok(false);
+        self.with_state(id, |_| {
+            removed = match fs::remove_file(self.hash_path(id)) {
+                Ok(()) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(e),
+            };
+            Backoff::default()
+        })?;
+        removed
+    }
+
     pub fn remove(&self, id: &str) {
         let _ = fs::remove_file(self.hash_path(id));
         let _ = fs::remove_file(self.state_path(id));

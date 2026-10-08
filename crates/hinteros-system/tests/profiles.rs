@@ -605,3 +605,139 @@ fn pam_helper_verbs() {
     let pf: Value = serde_json::from_str(&root.read("var/lib/hinteros/profiles.json")).unwrap();
     assert!(pf["profiles"]["p1"]["last_used_at"].is_i64());
 }
+
+/// Run the PAM helper as pam_exec would (exit status only).
+fn pam_ok(root: &Root, verb: &str, user: &str) -> bool {
+    Command::new(env!("CARGO_BIN_EXE_hinteros-system"))
+        .args(["pin", verb])
+        .arg("--state-dir")
+        .arg(root.p("var/lib/hinteros"))
+        .arg("--run-dir")
+        .arg(root.p("run"))
+        .arg("--config-dir")
+        .arg(root.p("etc/hinteros"))
+        .arg("--passwd-file")
+        .arg(root.p("passwd"))
+        .arg("--group-file")
+        .arg(root.p("group"))
+        .env_clear()
+        .env("PAM_USER", user)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// A forgotten PIN: `sudo hinteros-system reset-pin <profile>` (the CLI's code path, as root
+/// would run it) removes the PIN and the wait while the service runs; the picker then lets the
+/// profile in without a PIN (even though it is locked), its session sees `pin_set: false`, and
+/// `set_pin` without the current PIN sets the new one.
+#[tokio::test(flavor = "multi_thread")]
+async fn reset_pin_from_the_terminal() {
+    let Some(sys) = System::start(root_with(Some(PROFILES)), &[]).await else {
+        return;
+    };
+    let root = &sys.root;
+    settled(&sys).await;
+    let mut c = sys.client().await;
+    let pins = hinteros_system::pins::Pins::new(root.p("var/lib/hinteros/pins"));
+
+    // p1 locked with its PIN, then wrong PINs until the wait starts.
+    call(
+        &mut c,
+        "profiles.set_locked",
+        json!({"locked": true, "pin": ADMIN_PIN}),
+    )
+    .await
+    .unwrap();
+    for _ in 0..4 {
+        let e = call(
+            &mut c,
+            "profiles.set_locked",
+            json!({"locked": true, "pin": "0000"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{e}");
+    }
+    assert_eq!(pins.backoff("p1").failures, 4);
+    assert!(pins.backoff("p1").locked_until > 0);
+    assert!(!pam_ok(root, "unlocked", "hinteros"));
+
+    // Not root: the binary refuses (and changes nothing).
+    if !rustix::process::geteuid().is_root() {
+        let out = Command::new(env!("CARGO_BIN_EXE_hinteros-system"))
+            .args(["reset-pin", "p1", "--state-dir"])
+            .arg(root.p("var/lib/hinteros"))
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("must be run as root"));
+        assert!(pins.is_set("p1"));
+    }
+
+    // The reset, by name; unknown names are refused.
+    let paths = hinteros_system::pam::paths(
+        root.p("var/lib/hinteros"),
+        root.p("run"),
+        root.p("etc/hinteros"),
+        hinteros_system::users::Users {
+            passwd: Some(root.p("passwd")),
+            group: Some(root.p("group")),
+        },
+    );
+    let audit = hinteros_system::audit::Audit::new(root.p("journal.sock"));
+    assert!(hinteros_system::resetpin::reset(&paths, "Nobody", &audit, None, 0).is_err());
+    let listed = hinteros_system::resetpin::list(&paths).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].pin_set && listed[0].locked && listed[0].admin);
+    let done = hinteros_system::resetpin::reset(&paths, "James", &audit, Some("admin"), 0).unwrap();
+    assert_eq!((done.id.as_str(), done.had_pin), ("p1", true));
+    assert!(!pins.is_set("p1"));
+    assert_eq!(
+        pins.backoff("p1"),
+        hinteros_system::pins::Backoff::default()
+    );
+    // The public view no longer shows a wait; the audit names the profile, never a PIN.
+    assert!(public(root)["profiles"][0]["locked_until"].is_null());
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    loop {
+        let found = sys
+            .journal
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m.get("HINTEROS_METHOD").map(String::as_str) == Some("reset-pin"));
+        if found {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "no audit entry");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    for m in sys.journal.lock().unwrap().iter() {
+        assert!(!m.values().any(|v| v.contains(ADMIN_PIN)), "{m:?}");
+    }
+
+    // The picker: enterable without a PIN although still locked.
+    assert!(pam_ok(root, "unlocked", "hinteros"));
+    // The session: "Set your PIN" (pin_set false); set_pin needs no current PIN.
+    let l = call(&mut c, "profiles.list", json!({})).await.unwrap();
+    assert_eq!(l["profiles"][0]["pin_set"], false);
+    assert_eq!(l["profiles"][0]["locked"], true);
+    call(&mut c, "profiles.set_pin", json!({"pin": "8642"}))
+        .await
+        .unwrap();
+    let l = call(&mut c, "profiles.list", json!({})).await.unwrap();
+    assert_eq!(l["profiles"][0]["pin_set"], true);
+    // From now on the new PIN is the one, and the picker asks for it again.
+    assert!(!pam_ok(root, "unlocked", "hinteros"));
+    call(
+        &mut c,
+        "profiles.set_locked",
+        json!({"locked": true, "pin": "8642"}),
+    )
+    .await
+    .unwrap();
+}

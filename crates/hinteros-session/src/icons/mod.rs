@@ -506,6 +506,11 @@ impl Icons {
             dirs.data.clone_from(only);
             dirs.icon_roots.clear();
         }
+        if let Some(share) = &cfg.profile_share
+            && !dirs.data.contains(share)
+        {
+            dirs.data.insert(0, share.clone());
+        }
         let cache = cfg
             .cache_dir
             .clone()

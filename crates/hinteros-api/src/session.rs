@@ -140,6 +140,9 @@ pub struct App {
     pub kind: AppKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// 0.12: vendor terms this profile has not accepted yet (an app from the starter set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_terms: Option<StoreTerms>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

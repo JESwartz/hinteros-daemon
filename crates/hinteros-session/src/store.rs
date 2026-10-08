@@ -40,7 +40,15 @@ struct Inner {
     icons: IconStore,
     events: broadcast::Sender<Broadcast>,
     state: Mutex<State>,
+    /// Look at the profile's unaccepted terms again (an `apps.accept_terms` went through).
+    terms_wake: tokio::sync::Notify,
 }
+
+/// Unaccepted vendor terms of the profile's apps, by app id.
+pub type NeedsTerms = std::collections::BTreeMap<String, hinteros_api::session::StoreTerms>;
+
+/// Called once with the first known [`NeedsTerms`] (Steam's autostart waits for it).
+pub type FirstTerms = Box<dyn FnOnce(&NeedsTerms) + Send>;
 
 /// Handle to the Store; cheap to clone.
 #[derive(Clone)]
@@ -57,6 +65,7 @@ impl Store {
                 icons,
                 events: events.clone(),
                 state: Mutex::new(State::default()),
+                terms_wake: tokio::sync::Notify::new(),
             }),
         };
         let rx = events.subscribe();
@@ -81,6 +90,10 @@ impl Store {
             {
                 self.update_checked(&r);
             }
+            return;
+        }
+        if target == Some(system::AppsAcceptTerms::NAME) {
+            self.inner.terms_wake.notify_one();
             return;
         }
         let install = match target {
@@ -141,18 +154,108 @@ impl Store {
         }
     }
 
+    /// The profile's apps whose vendor terms it has not accepted (`system.apps.list`'s
+    /// `needs_terms` with the catalog's terms). Empty on a schema-1 box; `Err` while the system
+    /// service cannot say.
+    pub async fn needs_terms(&self, relay: &Relay) -> Result<NeedsTerms, ErrorObject> {
+        let list = match relay.call(system::AppsList::NAME, None).await {
+            Ok(l) => l,
+            Err(e) if e.kind() == Some(ErrorCode::Unavailable) => return Ok(NeedsTerms::new()),
+            Err(e) => return Err(e),
+        };
+        let ids = strings(&list["needs_terms"]);
+        if ids.is_empty() {
+            return Ok(NeedsTerms::new());
+        }
+        let index = Index::load(&self.inner.index).map_err(catalog_unavailable)?;
+        Ok(ids
+            .into_iter()
+            .filter_map(|id| {
+                let t = index.get(&id)?.terms.as_ref()?;
+                Some((
+                    id,
+                    hinteros_api::session::StoreTerms {
+                        title: t.title.clone(),
+                        version: t.version.clone(),
+                        url: t.url.clone(),
+                        retrieved: t.retrieved.clone(),
+                        file: index.terms_file(t).to_string_lossy().into_owned(),
+                    },
+                ))
+            })
+            .collect())
+    }
+
+    /// Keep the shell's unaccepted terms current: at start (retrying until the system service
+    /// answers), after any job, after `apps.accept_terms`, and every minute. `first` runs once,
+    /// with the first answer (or with none after 15 s without one).
+    pub fn spawn_terms(
+        &self,
+        relay: Relay,
+        shell: tokio::sync::mpsc::UnboundedSender<crate::shell::Msg>,
+        first: FirstTerms,
+    ) {
+        let store = self.clone();
+        tokio::spawn(async move {
+            let mut first = Some(first);
+            let mut rx = store.inner.events.subscribe();
+            let mut last: Option<NeedsTerms> = None;
+            let started = std::time::Instant::now();
+            loop {
+                match store.needs_terms(&relay).await {
+                    Ok(map) => {
+                        if last.as_ref() != Some(&map) {
+                            let _ = shell.send(crate::shell::Msg::SetNeedsTerms(map.clone()));
+                            if last.is_some() || !map.is_empty() {
+                                let _ = store.inner.events.send((
+                                    EventName::AppsChanged,
+                                    json!({}),
+                                    Audience::All,
+                                ));
+                            }
+                            last = Some(map);
+                        }
+                        if let (Some(f), Some(map)) = (first.take(), &last) {
+                            f(map);
+                        }
+                    }
+                    Err(e) => {
+                        debug!("unaccepted terms unknown: {}", e.message);
+                        if started.elapsed() > std::time::Duration::from_secs(15)
+                            && let Some(f) = first.take()
+                        {
+                            f(&NeedsTerms::new());
+                        }
+                    }
+                }
+                let wait = std::time::Duration::from_secs(if last.is_none() { 2 } else { 60 });
+                let sleep = tokio::time::sleep(wait);
+                tokio::pin!(sleep);
+                loop {
+                    tokio::select! {
+                        () = store.inner.terms_wake.notified() => break,
+                        () = &mut sleep => break,
+                        ev = rx.recv() => match ev {
+                            Ok((EventName::JobFinished, ..)) => break,
+                            Ok(_) => {}
+                            Err(broadcast::error::RecvError::Lagged(_)) => break,
+                            Err(broadcast::error::RecvError::Closed) => return,
+                        },
+                    }
+                }
+            }
+        });
+    }
+
     /// `store.list`.
     pub async fn list(&self, relay: &Relay) -> Result<Value, ErrorObject> {
         let index = Index::load(&self.inner.index).map_err(catalog_unavailable)?;
         let settings = relay.call(system::SettingsGet::NAME, None).await?;
-        let installed: Vec<String> = settings["settings"]["apps"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Schema 1: the box-wide apps; schema 2: the caller's own profile's.
+        let installed: Vec<String> = match settings["settings"].get("apps") {
+            Some(apps) => strings(apps),
+            None => strings(&relay.call(system::AppsList::NAME, None).await?["ids"]),
+        };
         let (installing, removing, more) = {
             let s = self.inner.state.lock().unwrap();
             let mut ins = BTreeSet::new();
@@ -195,6 +298,16 @@ fn catalog_unavailable(e: IndexError) -> ErrorObject {
     )
 }
 
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The Store's view: available apps, and installed ones whatever their status, by name.
 pub fn merge(
     index: &Index,
@@ -205,6 +318,10 @@ pub fn merge(
 ) -> Vec<StoreApp> {
     let mut out: Vec<StoreApp> = Vec::new();
     for e in index.apps.values() {
+        // Services are box-wide and live in the Server section (M10), not in the Store.
+        if e.entry_kind != hinteros_api::catalog::EntryKind::App {
+            continue;
+        }
         let is_installed = installed.contains(&e.id);
         if e.status != Status::Available && !is_installed {
             continue;

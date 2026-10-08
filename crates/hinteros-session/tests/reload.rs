@@ -80,6 +80,11 @@ impl Site {
 
 /// A fake system service that only answers `settings.get` with no installed apps.
 fn fake_system(path: &Path) -> tokio::task::JoinHandle<()> {
+    fake_system_with(path, |_| None)
+}
+
+/// Like [`fake_system`], with more answers from `more` (by system method name).
+fn fake_system_with(path: &Path, more: fn(&str) -> Option<Value>) -> tokio::task::JoinHandle<()> {
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path).unwrap();
     tokio::spawn(async move {
@@ -98,6 +103,7 @@ fn fake_system(path: &Path) -> tokio::task::JoinHandle<()> {
                         Step::Ignore => continue,
                         Step::Dispatch(req) => {
                             let outcome = match req.method.as_str() {
+                                m if more(m).is_some() => Ok(more(m).unwrap()),
                                 "subscribe" => Ok(req.params.clone().unwrap_or(json!({}))),
                                 "settings.get" => Ok(json!({
                                     "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
@@ -360,4 +366,181 @@ async fn the_steam_app_appears_when_steam_is_installed() {
     let list = call(&mut c, "apps.list", json!({})).await.unwrap();
     assert_eq!(ids(&list), ["steam", "one"]);
     assert!(d.log().contains("Steam found"));
+}
+
+/// An app env as `appEnv.build` makes it: a manifest, and the apps' desktop files and icons.
+fn app_env(dir: &Path, name: &str, apps: Value, steam: bool) -> std::path::PathBuf {
+    let env = dir.join("store").join(name);
+    let share = env.join("share");
+    std::fs::create_dir_all(share.join("hinteros")).unwrap();
+    std::fs::create_dir_all(share.join("applications")).unwrap();
+    std::fs::create_dir_all(share.join("icons/hicolor/256x256/apps")).unwrap();
+    std::fs::create_dir_all(env.join("bin")).unwrap();
+    for a in apps.as_array().unwrap() {
+        if let Some(d) = a.get("desktop_id").and_then(Value::as_str) {
+            std::fs::write(
+                share.join(format!("icons/hicolor/256x256/apps/{d}.png")),
+                PNG,
+            )
+            .unwrap();
+            std::fs::write(
+                share.join(format!("applications/{d}.desktop")),
+                format!("[Desktop Entry]\nName={d}\nIcon={d}\n"),
+            )
+            .unwrap();
+        }
+    }
+    let steam = if steam {
+        script(&env.join("bin/steam"), "exit 0");
+        json!({"path": env.join("bin/steam")})
+    } else {
+        Value::Null
+    };
+    let ids: Vec<Value> = apps
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].clone())
+        .collect();
+    std::fs::write(
+        share.join("hinteros/apps.json"),
+        json!({"version": 1, "system_rev": null, "ids": ids, "apps": apps, "steam": steam, "box": []})
+            .to_string(),
+    )
+    .unwrap();
+    env
+}
+
+/// Point the Nix profile `dir/profiles/apps` at `env` as generation `n` (as nix-env does).
+fn set_generation(dir: &Path, n: u32, env: &Path) {
+    let link = dir.join(format!("profiles/apps-{n}-link"));
+    std::os::unix::fs::symlink(env, &link).unwrap();
+    let tmp = dir.join("profiles/apps.new");
+    let _ = std::fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(format!("apps-{n}-link"), &tmp).unwrap();
+    std::fs::rename(&tmp, dir.join("profiles/apps")).unwrap();
+}
+
+/// Profile mode (`[apps] profile`): the apps, Steam and icons come from the profile's app env,
+/// and switching the Nix profile's generation reloads them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_switched_profile_env_reloads_the_app_list() {
+    let d = Daemon::start_env(
+        |dir| {
+            let one = app_env(
+                dir,
+                "env-one",
+                json!([{"id": "one", "name": "One", "command": ["sleep", "30"]}]),
+                false,
+            );
+            std::fs::create_dir_all(dir.join("profiles")).unwrap();
+            std::fs::create_dir_all(dir.join("run")).unwrap();
+            set_generation(dir, 1, &one);
+            // /run/hinteros/apps/<user> → the Nix profile.
+            std::os::unix::fs::symlink(dir.join("profiles/apps"), dir.join("run/tester")).unwrap();
+            std::fs::write(
+                dir.join("session.toml"),
+                format!("[apps]\nprofile = \"{}/run/%u\"\n", dir.display()),
+            )
+            .unwrap();
+            vec![
+                "--config".into(),
+                dir.join("session.toml").into(),
+                "--no-icon-fetch".into(),
+            ]
+        },
+        |_| vec![("USER".into(), "tester".into())],
+    );
+    let dir = d.dir.path();
+    let task = fake_system(&dir.join("system.sock"));
+    let mut c = d.client().await;
+    call(&mut c, "subscribe", json!({"events": ["apps_changed"]}))
+        .await
+        .unwrap();
+    // No Steam in this env (HINTEROS_STEAM is ignored in profile mode), no stand-in apps.
+    let list = call(&mut c, "apps.list", json!({})).await.unwrap();
+    assert_eq!(ids(&list), ["one"], "{}", d.log());
+
+    let two = app_env(
+        dir,
+        "env-two",
+        json!([{"id": "two", "name": "Two", "command": ["sleep", "30"], "desktop_id": "org.example.Two"}]),
+        true,
+    );
+    set_generation(dir, 2, &two);
+    let list = eventually("the new env", async || {
+        let list = call(&mut c, "apps.list", json!({})).await.ok()?;
+        (ids(&list) == ["steam", "two"] && by_id(&list, "two").get("icon").is_some())
+            .then_some(list)
+    })
+    .await;
+    assert_eq!(
+        by_id(&list, "two")["icon"],
+        json!(dir.join("run/tester/share/icons/hicolor/256x256/apps/org.example.Two.png"))
+    );
+    // Gone again: back to an env without apps.
+    let none = app_env(dir, "env-none", json!([]), false);
+    set_generation(dir, 3, &none);
+    eventually("the empty env", async || {
+        let list = call(&mut c, "apps.list", json!({})).await.ok()?;
+        ids(&list).is_empty().then_some(())
+    })
+    .await;
+    task.abort();
+}
+
+/// Starter-set apps with vendor terms: needs_terms on the entry, and apps.launch refuses them
+/// until the profile accepts.
+#[tokio::test(flavor = "multi_thread")]
+async fn unaccepted_terms_block_the_launch() {
+    let d = Daemon::start_env(
+        |dir| {
+            let env = app_env(
+                dir,
+                "env-plex",
+                json!([{"id": "plex", "name": "Plex", "command": ["sleep", "30"]}]),
+                false,
+            );
+            let mut e = entry("plex", json!({}));
+            e["terms"] = json!({"title": "Plex Terms", "version": "2025-10-30",
+                "url": "https://www.plex.tv/x", "retrieved": "2026-10-06",
+                "file": "terms/plex-2025-10-30.txt"});
+            std::fs::write(
+                dir.join("catalog.json"),
+                json!({"indexVersion": 2, "apps": [e]}).to_string(),
+            )
+            .unwrap();
+            vec![
+                "--apps-profile".into(),
+                env.into(),
+                "--no-icon-fetch".into(),
+            ]
+        },
+        |_| Vec::new(),
+    );
+    let dir = d.dir.path();
+    let task = fake_system_with(&dir.join("system.sock"), |m| {
+        (m == "apps.list").then(|| {
+            json!({"revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
+                   "generation": 1, "ids": ["plex"], "needs_terms": ["plex"], "box": []})
+        })
+    });
+    let mut c = d.client().await;
+    let list = eventually("needs_terms", async || {
+        let list = call(&mut c, "apps.list", json!({})).await.ok()?;
+        by_id(&list, "plex")
+            .get("needs_terms")
+            .is_some()
+            .then_some(list)
+    })
+    .await;
+    let t = &by_id(&list, "plex")["needs_terms"];
+    assert_eq!(t["version"], "2025-10-30");
+    assert_eq!(t["file"], json!(dir.join("terms/plex-2025-10-30.txt")));
+    let e = call(&mut c, "apps.launch", json!({"id": "plex"}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["code"], 3014);
+    assert_eq!(e["data"], json!({"id": "plex", "version": "2025-10-30"}));
+    task.abort();
 }

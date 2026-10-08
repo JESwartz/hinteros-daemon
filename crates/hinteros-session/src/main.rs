@@ -298,9 +298,12 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
             children.clone(),
         ));
     }
-    if config.steam.autostart {
-        start_steam(&config.steam.path, &env);
-    }
+    // Steam's autostart waits for the profile's unaccepted terms (a starter-set Steam asks on
+    // first launch, so it does not start by itself before that).
+    let autostart = config
+        .steam
+        .autostart
+        .then(|| (config.steam.path.clone(), env.clone()));
     if config.osk.enable && !config.osk.command.is_empty() {
         // The OSK connects to the same socket.
         let mut osk_env = env.clone();
@@ -324,17 +327,31 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         hinteros_session::system::Relay::disabled()
     };
 
+    let store = hinteros_session::store::Store::spawn(
+        config.store.index.clone(),
+        icon_store.clone(),
+        events.clone(),
+    );
+    store.spawn_terms(
+        relay.clone(),
+        shell_tx.clone(),
+        Box::new(move |terms| {
+            if let Some((path, env)) = autostart {
+                if terms.contains_key(session::STEAM_CLIENT_APP_ID) {
+                    info!("not starting Steam: its terms are not accepted in this profile yet");
+                } else {
+                    start_steam(&path, &env);
+                }
+            }
+        }),
+    );
     let runtime =
         hinteros_session::runtime::Runtime::spawn(&config, events.clone(), osk_pid.clone());
     let services = server::Services {
         relay,
         runtime,
         auth: hinteros_session::auth::Auth::spawn(config.auth.clone(), events.clone()),
-        store: hinteros_session::store::Store::spawn(
-            config.store.index.clone(),
-            icon_store.clone(),
-            events.clone(),
-        ),
+        store,
         restarter: hinteros_session::restart::Restarter::new(
             config.session.clone(),
             config.runtime.bus.clone(),

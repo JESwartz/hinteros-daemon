@@ -284,7 +284,7 @@
           "app": { "$ref": "#/$defs/RunningApp" }
         }
       },
-      "errors": ["app_not_found", "app_launch_failed"],
+      "errors": ["app_not_found", "app_launch_failed", "terms_required"],
       "examples": [
         {
           "name": "steam game",
@@ -2897,7 +2897,20 @@
         "id": { "description": "Stable identifier, used by apps.launch.", "$ref": "#/$defs/AppId" },
         "name": { "description": "Display name.", "type": "string", "minLength": 1 },
         "kind": { "$ref": "#/$defs/AppKind" },
-        "icon": { "description": "Absolute path to a local icon image file (PNG, SVG, ICO, JPEG, WebP), if any. Resolved by the daemon at runtime: an explicit path from the config, else the icon the app's .desktop file names, found in the installed icon themes, else (web apps) a cached download of the site's own icon. It may appear later (see apps_changed) or change. Absent: draw a placeholder, e.g. the first letter of the name.", "type": "string" }
+        "icon": { "description": "Absolute path to a local icon image file (PNG, SVG, ICO, JPEG, WebP), if any. Resolved by the daemon at runtime: an explicit path from the config, else the icon the app's .desktop file names, found in the installed icon themes, else (web apps) a cached download of the site's own icon. It may appear later (see apps_changed) or change. Absent: draw a placeholder, e.g. the first letter of the name.", "type": "string" },
+        "needs_terms": {
+          "description": "0.12: the app came with the starter set and this profile has not accepted its vendor terms yet. Show the full text (file) on first launch; accept with system.apps.accept_terms {id, version}, decline leaves it installed and unlaunched (offer Remove). apps.launch refuses it with terms_required meanwhile.",
+          "type": "object",
+          "required": ["title", "version", "url", "retrieved", "file"],
+          "additionalProperties": false,
+          "properties": {
+            "title": { "type": "string", "maxLength": 80 },
+            "version": { "$ref": "#/$defs/TermsVersion" },
+            "url": { "type": "string", "maxLength": 300 },
+            "retrieved": { "type": "string", "maxLength": 10 },
+            "file": { "description": "Absolute path of the full text on this box.", "type": "string" }
+          }
+        }
       }
     },
     "InstallState": {

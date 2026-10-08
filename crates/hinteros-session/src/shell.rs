@@ -88,6 +88,8 @@ pub enum Msg {
     SetApps(Vec<AppConfig>),
     /// The usable Steam binary changed (`None`: Steam is not installed).
     SetSteam(Option<PathBuf>),
+    /// Apps whose vendor terms this profile has not accepted (from `system.apps.list`).
+    SetNeedsTerms(std::collections::BTreeMap<String, hinteros_api::session::StoreTerms>),
     /// A text field in a web app gained or lost focus (see [`crate::textfocus`]); `pid` is the
     /// reporting process (Firefox's native-messaging host, or Firefox itself for its own
     /// toolbar fields), `reporter` the connection it came on (one Firefox has two: page fields
@@ -180,6 +182,10 @@ pub struct ShellConfig {
     pub icons: IconStore,
     /// Told when an app exits (re-reads its Firefox favicon).
     pub icon_refresh: Refresher,
+    /// Profile mode (`[apps] profile`): no stand-in apps when the profile has none.
+    pub profile_mode: bool,
+    /// Apps whose vendor terms this profile has not accepted.
+    pub needs_terms: std::collections::BTreeMap<String, hinteros_api::session::StoreTerms>,
 }
 
 impl From<&Config> for ShellConfig {
@@ -203,6 +209,8 @@ impl From<&Config> for ShellConfig {
             osk_summon: c.osk.summon_button().ok().flatten(),
             icons: IconStore::default(),
             icon_refresh: Refresher::default(),
+            profile_mode: c.icons.profile_share.is_some(),
+            needs_terms: Default::default(),
         }
     }
 }
@@ -420,6 +428,7 @@ impl Shell {
             Msg::ChildExit(exit) => self.child_exit(exit),
             Msg::SetApps(apps) => self.cfg.apps = apps,
             Msg::SetSteam(path) => self.set_steam(path),
+            Msg::SetNeedsTerms(map) => self.cfg.needs_terms = map,
             Msg::TextFocus {
                 pid,
                 reporter,
@@ -550,8 +559,9 @@ impl Shell {
             name: "Steam".into(),
             kind: AppKind::Native,
             icon: self.icon_path(STEAM_CLIENT_APP_ID, None),
+            needs_terms: self.cfg.needs_terms.get(STEAM_CLIENT_APP_ID).cloned(),
         });
-        if self.cfg.apps.is_empty() {
+        if self.cfg.apps.is_empty() && !self.cfg.profile_mode {
             let mut list = stub_apps();
             if let Some(steam) = steam {
                 list.apps.insert(0, steam);
@@ -566,6 +576,7 @@ impl Shell {
                     name: a.name.clone(),
                     kind: a.kind,
                     icon: self.icon_path(&a.id, a.icon.as_deref()),
+                    needs_terms: self.cfg.needs_terms.get(&a.id).cloned(),
                 }))
                 .collect(),
         }
@@ -616,6 +627,16 @@ impl Shell {
         let request = p
             .request()
             .map_err(|e| ErrorObject::new(ErrorCode::InvalidParams, e))?;
+        if let LaunchRequest::Id(id) = &request
+            && let Some(t) = self.cfg.needs_terms.get(id)
+            && !self.apps.contains_key(id)
+        {
+            return Err(ErrorObject::with_data(
+                ErrorCode::TermsRequired,
+                format!("{id} needs its terms accepted (version {})", t.version),
+                serde_json::json!({ "id": id, "version": t.version }),
+            ));
+        }
         let configured = match &request {
             LaunchRequest::Id(id) => self.cfg.apps.iter().find(|a| &a.id == id),
             _ => None,
@@ -1977,6 +1998,7 @@ pub fn stub_apps() -> AppsListResult {
         name: name.into(),
         kind,
         icon: None,
+        needs_terms: None,
     };
     AppsListResult {
         apps: vec![
@@ -2266,6 +2288,8 @@ mod tests {
                 osk_summon: None,
                 icons: IconStore::default(),
                 icon_refresh: Refresher::default(),
+                profile_mode: false,
+                needs_terms: Default::default(),
             };
             f(&mut cfg);
             let log = Log::default();

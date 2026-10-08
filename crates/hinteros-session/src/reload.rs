@@ -124,9 +124,14 @@ async fn run(opts: Options, mut rx: mpsc::UnboundedReceiver<()>) {
     let mut tick = tokio::time::interval(opts.poll.max(Duration::from_millis(50)));
     tick.tick().await;
     loop {
+        // Profile mode: the app env link's whole chain too (/run/hinteros/apps/<user> → the
+        // Nix profile → its generation link → the env).
+        let profile = Config::watched_profile(&opts.cli)
+            .map(|p| p.join(hinteros_api::manifest::MANIFEST_PATH));
         let wanted: BTreeSet<PathBuf> = Config::config_path(&opts.cli)
             .iter()
             .chain(std::iter::once(&opts.index))
+            .chain(profile.iter())
             .flat_map(|p| watch_dirs(p))
             .collect();
         if wanted != dirs {

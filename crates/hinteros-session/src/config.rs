@@ -88,6 +88,15 @@
 //! name = "Portal 2"
 //! steam_app_id = 620
 //! ```
+//!
+//! Per-profile apps (M7, state.json schema 2): instead of `[[apps]]`, the `apps` key is a
+//! table naming the profile's app env; its manifest (`share/hinteros/apps.json`) holds the
+//! entries (the same keys as `[[apps]]`) and Steam's path:
+//!
+//! ```toml
+//! [apps]
+//! profile = "/run/hinteros/apps/%u"   # %u: this daemon's user
+//! ```
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -223,6 +232,10 @@ pub struct Cli {
     /// The App Store catalog index
     #[arg(long, env = "HINTEROS_CATALOG_INDEX")]
     pub catalog_index: Option<PathBuf>,
+
+    /// Read the apps from this app env (link) instead of the config's `[apps] profile`
+    #[arg(long, env = "HINTEROS_APPS_PROFILE", hide = true)]
+    pub apps_profile: Option<PathBuf>,
 }
 
 fn flag(on: bool, off: bool) -> Option<bool> {
@@ -254,7 +267,66 @@ pub struct Config {
     pub audio: AudioConfig,
     pub display: DisplayConfig,
     pub bluetooth: BluetoothConfig,
+    /// `[[apps]]` (a list) or `[apps] profile = "…"` (a table).
+    #[serde(rename = "apps", deserialize_with = "apps_key")]
+    pub apps_key: AppsKey,
+    /// The app list: `[[apps]]`, or the profile manifest's entries (filled by [`Config::load`]).
+    #[serde(skip)]
     pub apps: Vec<AppConfig>,
+}
+
+/// The `apps` key of session.toml.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AppsKey {
+    /// `[[apps]]` entries (schema-1 boxes and development).
+    List(Vec<AppConfig>),
+    /// `[apps] profile = "…"`: the app env (link) whose manifest has the apps; `%u` is the
+    /// daemon's user name.
+    Profile(String),
+    /// No `apps` key.
+    #[default]
+    None,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppsTable {
+    profile: String,
+}
+
+fn apps_key<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<AppsKey, D::Error> {
+    use serde::de::Error;
+    let v = toml::Value::deserialize(d)?;
+    match v {
+        toml::Value::Array(_) => Vec::<AppConfig>::deserialize(v)
+            .map(AppsKey::List)
+            .map_err(D::Error::custom),
+        toml::Value::Table(_) => AppsTable::deserialize(v)
+            .map(|t| AppsKey::Profile(t.profile))
+            .map_err(D::Error::custom),
+        _ => Err(D::Error::custom(
+            "apps must be [[apps]] entries or an [apps] table with profile",
+        )),
+    }
+}
+
+/// This process's user name (`$USER`, else the user database).
+pub fn own_user() -> Option<String> {
+    std::env::var("USER")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .or_else(|| {
+            nix::unistd::User::from_uid(nix::unistd::getuid())
+                .ok()
+                .flatten()
+                .map(|u| u.name)
+        })
+}
+
+/// The profile app env with `%u` replaced.
+pub fn expand_profile(template: &str) -> Option<PathBuf> {
+    let user = own_user()?;
+    Some(PathBuf::from(template.replace("%u", &user)))
 }
 
 /// Runtime settings: Wi-Fi (NetworkManager), Bluetooth (BlueZ), power (logind), all over D-Bus.
@@ -577,6 +649,10 @@ pub struct IconsConfig {
     /// Accept http:// icon URLs (tests only; `--icon-allow-http`).
     #[serde(skip)]
     pub allow_http: bool,
+    /// The profile app env's `share` (desktop files and icons of the profile's apps), searched
+    /// first.
+    #[serde(skip)]
+    pub profile_share: Option<PathBuf>,
 }
 
 impl Default for IconsConfig {
@@ -588,6 +664,7 @@ impl Default for IconsConfig {
             theme: None,
             data_dirs: None,
             allow_http: false,
+            profile_share: None,
         }
     }
 }
@@ -862,9 +939,61 @@ pub fn valid_app_id(id: &str) -> bool {
 
 impl Config {
     pub fn parse(text: &str) -> Result<Self> {
-        let config: Config = toml::from_str(text)?;
+        let mut config: Config = toml::from_str(text)?;
+        if let AppsKey::List(list) = &config.apps_key {
+            config.apps = list.clone();
+        }
         config.validate()?;
         Ok(config)
+    }
+
+    /// The app env this config reads its apps from (`[apps] profile` or `--apps-profile`).
+    pub fn apps_profile(&self) -> Option<PathBuf> {
+        match &self.apps_key {
+            AppsKey::Profile(t) => expand_profile(t),
+            _ => None,
+        }
+    }
+
+    /// Profile mode: the apps and Steam come from the env's manifest. A missing or broken
+    /// manifest means no apps and no Steam (logged); the session keeps running.
+    pub fn load_profile_apps(&mut self, profile: &Path) {
+        self.apps.clear();
+        // No Steam unless the manifest has it; autostart only with it.
+        self.steam.path = PathBuf::new();
+        let manifest = match hinteros_api::manifest::Manifest::load(profile) {
+            Ok(m) => m,
+            Err(hinteros_api::manifest::ManifestError::Missing(p)) => {
+                tracing::debug!(manifest = %p.display(), "no app env yet");
+                self.steam.autostart = false;
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("ignoring the app env: {e}");
+                self.steam.autostart = false;
+                return;
+            }
+        };
+        let mut apps = Vec::new();
+        for v in manifest.apps {
+            match serde_json::from_value::<AppConfig>(v) {
+                Ok(a) => apps.push(a),
+                Err(e) => tracing::warn!("ignoring an app of the manifest: {e}"),
+            }
+        }
+        let probe = Config {
+            apps,
+            ..Config::default()
+        };
+        match probe.validate() {
+            Ok(()) => self.apps = probe.apps,
+            Err(e) => tracing::warn!("ignoring the app env's apps: {e:#}"),
+        }
+        match manifest.steam {
+            Some(s) => self.steam.path = s.path,
+            None => self.steam.autostart = false,
+        }
+        self.icons.profile_share = Some(profile.join("share"));
     }
 
     /// The config file: the one named on the command line, else the default location (which
@@ -891,8 +1020,23 @@ impl Config {
             None => Self::default(),
         };
         config.apply(cli);
+        let profile = cli.apps_profile.clone().or_else(|| config.apps_profile());
+        if let Some(p) = &profile {
+            config.icons.profile_share = Some(p.join("share"));
+            config.load_profile_apps(p);
+        }
         config.validate()?;
         Ok(config)
+    }
+
+    /// The app env link to watch for changes (profile mode).
+    pub fn watched_profile(cli: &Cli) -> Option<PathBuf> {
+        if let Some(p) = &cli.apps_profile {
+            return Some(p.clone());
+        }
+        let path = Self::config_path(cli).filter(|p| cli.config.is_some() || p.exists())?;
+        let text = std::fs::read_to_string(path).ok()?;
+        Self::parse(&text).ok()?.apps_profile()
     }
 
     pub fn apply(&mut self, cli: &Cli) {
@@ -1089,6 +1233,43 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apps_key_is_a_list_or_a_profile() {
+        let c = Config::parse("[apps]\nprofile = \"/run/hinteros/apps/%u\"\n").unwrap();
+        assert_eq!(c.apps_key, AppsKey::Profile("/run/hinteros/apps/%u".into()));
+        assert!(c.apps.is_empty());
+        for bad in [
+            "[apps]\nprofile = \"/x\"\nextra = 1\n",
+            "[apps]\n",
+            "apps = 3\n",
+            "[apps]\nprofile = \"/x\"\n[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"a\"]\n",
+        ] {
+            assert!(Config::parse(bad).is_err(), "{bad}");
+        }
+        // A manifest: entries with the [[apps]] keys, Steam's path; broken entries are skipped.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("share/hinteros")).unwrap();
+        std::fs::write(
+            d.path().join("share/hinteros/apps.json"),
+            r#"{"version":1,"ids":["a","b"],"box":[],"steam":{"path":"/nix/store/x-steam/bin/steam"},
+                "apps":[{"id":"a","name":"A","kind":"web","command":["ff"],"input":"keyboard"},
+                        {"id":"b","name":"B","bogus":1}]}"#,
+        )
+        .unwrap();
+        let mut c = Config::parse("[steam]\nautostart = true\n").unwrap();
+        c.load_profile_apps(d.path());
+        assert_eq!(c.apps.len(), 1);
+        assert_eq!(c.apps[0].input, InputProfile::Keyboard);
+        assert_eq!(c.steam.path, PathBuf::from("/nix/store/x-steam/bin/steam"));
+        assert!(c.steam.autostart);
+        assert_eq!(c.icons.profile_share, Some(d.path().join("share")));
+        // No env yet: no apps, no Steam, no autostart.
+        let mut c = Config::parse("[steam]\nautostart = true\n").unwrap();
+        c.load_profile_apps(&d.path().join("nowhere"));
+        assert!(c.apps.is_empty() && !c.steam.autostart);
+        assert_eq!(c.steam.path, PathBuf::new());
+    }
 
     #[test]
     fn defaults_without_a_file() {

@@ -4,6 +4,7 @@
 //! method characters more slowly (`ime_delay`, one character per commit like Steam's keyboard).
 //! The input method connection is opened on first use and reopened after errors.
 
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -140,27 +141,79 @@ impl Worker {
     }
 }
 
+/// A navigation tap that could not start within this long after it was asked for is
+/// dropped: the user has moved on, and replaying it later is the "queue of moves" bug.
+pub const STALE_NAV: Duration = Duration::from_millis(150);
+
+/// Something for the worker thread to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Job {
+    pub ops: Vec<KeyOp>,
+    /// A direction tap: superseded by any newer one, dropped when stale.
+    pub nav: bool,
+    pub queued: Instant,
+}
+
+/// Take the next job to run from `pending` (in order), dropping navigation taps that a newer
+/// navigation tap supersedes or that are older than [`STALE_NAV`] at `now`. Text and other
+/// jobs are never dropped and keep their order.
+pub fn next_job(pending: &mut VecDeque<Job>, now: Instant) -> Option<Job> {
+    let newest_nav = pending.iter().rposition(|j| j.nav);
+    let mut i = 0;
+    pending.retain(|j| {
+        let keep = !j.nav || (Some(i) == newest_nav && now.duration_since(j.queued) <= STALE_NAV);
+        if !keep {
+            debug!("dropping a stale navigation key");
+        }
+        i += 1;
+        keep
+    });
+    pending.pop_front()
+}
+
 /// [`KeyInjector`] backed by a [`Worker`] on its own thread.
 pub struct ThreadInjector {
     caps: KeyCaps,
-    tx: mpsc::Sender<Vec<KeyOp>>,
+    tx: mpsc::Sender<Job>,
 }
 
 impl ThreadInjector {
     pub fn spawn(mut worker: Worker) -> Self {
         let caps = worker.caps();
-        let (tx, rx) = mpsc::channel::<Vec<KeyOp>>();
+        let (tx, rx) = mpsc::channel::<Job>();
         thread::Builder::new()
             .name("keys".into())
             .spawn(move || {
-                while let Ok(ops) = rx.recv() {
-                    for op in &ops {
-                        worker.run(op);
+                let mut pending = VecDeque::new();
+                loop {
+                    if pending.is_empty() {
+                        match rx.recv() {
+                            Ok(job) => pending.push_back(job),
+                            Err(_) => return,
+                        }
+                    }
+                    // Look at everything that arrived meanwhile before choosing.
+                    pending.extend(rx.try_iter());
+                    if let Some(job) = next_job(&mut pending, Instant::now()) {
+                        for op in &job.ops {
+                            worker.run(op);
+                        }
                     }
                 }
             })
             .expect("spawning the key injection thread");
         Self { caps, tx }
+    }
+
+    fn queue(&mut self, ops: Vec<KeyOp>, nav: bool) {
+        let job = Job {
+            ops,
+            nav,
+            queued: Instant::now(),
+        };
+        if !job.ops.is_empty() && self.tx.send(job).is_err() {
+            warn!("key injection thread is gone");
+        }
     }
 }
 
@@ -170,9 +223,11 @@ impl KeyInjector for ThreadInjector {
     }
 
     fn send(&mut self, ops: Vec<KeyOp>) {
-        if !ops.is_empty() && self.tx.send(ops).is_err() {
-            warn!("key injection thread is gone");
-        }
+        self.queue(ops, false);
+    }
+
+    fn send_nav(&mut self, op: KeyOp) {
+        self.queue(vec![op], true);
     }
 }
 
@@ -312,6 +367,42 @@ pub(crate) mod tests {
         w.run(&KeyOp::Ime("a".into()));
         w.run(&KeyOp::Ime("b".into()));
         assert_eq!(*tries.lock().unwrap(), 1, "no retry within 5 s");
+    }
+
+    #[test]
+    fn navigation_taps_never_queue() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let job = |code: u16, nav: bool, at: Duration| Job {
+            ops: vec![KeyOp::Tap { code, mods: vec![] }],
+            nav,
+            queued: t0 + at,
+        };
+        // Left, right, left, right arrived while a long text was being typed: only the newest
+        // direction is left, text keeps its place and order.
+        let mut pending = VecDeque::from([
+            job(KEY_LEFT, true, ms(0)),
+            job(30, false, ms(1)),
+            job(KEY_RIGHT, true, ms(2)),
+            job(31, false, ms(3)),
+            job(KEY_LEFT, true, ms(4)),
+            job(KEY_RIGHT, true, ms(5)),
+        ]);
+        let mut ran = vec![];
+        while let Some(j) = next_job(&mut pending, t0 + ms(10)) {
+            ran.push(j.ops);
+        }
+        let tap = |code| vec![KeyOp::Tap { code, mods: vec![] }];
+        assert_eq!(ran, [tap(30), tap(31), tap(KEY_RIGHT)]);
+
+        // A direction that waited too long is dropped; a fresh one runs.
+        let mut pending = VecDeque::from([job(KEY_UP, true, ms(0))]);
+        assert_eq!(next_job(&mut pending, t0 + STALE_NAV + ms(1)), None);
+        let mut pending = VecDeque::from([job(KEY_UP, true, ms(0))]);
+        assert!(next_job(&mut pending, t0 + STALE_NAV).is_some());
+        // Non-navigation jobs are never stale.
+        let mut pending = VecDeque::from([job(KEY_ENTER, false, ms(0))]);
+        assert!(next_job(&mut pending, t0 + Duration::from_secs(60)).is_some());
     }
 
     #[test]

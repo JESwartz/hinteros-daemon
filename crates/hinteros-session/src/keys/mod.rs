@@ -410,7 +410,14 @@ pub fn default_keymap(back: KeyCombo) -> Keymap {
 /// Performs [`KeyOp`]s, in order, without blocking the caller.
 pub trait KeyInjector: Send {
     fn caps(&self) -> KeyCaps;
+    /// Perform `ops` in order; never dropped (typed text, Enter, shortcuts).
     fn send(&mut self, ops: Vec<KeyOp>);
+    /// One tap for a controller direction (a held or repeating D-pad/stick). Never queued
+    /// behind other navigation: dropped if a newer navigation tap is waiting or if it waited
+    /// too long ([`worker::STALE_NAV`]).
+    fn send_nav(&mut self, op: KeyOp) {
+        self.send(vec![op]);
+    }
 }
 
 /// No keyboard at all.

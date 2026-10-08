@@ -36,10 +36,38 @@ impl Manager {
     }
 }
 
+/// What a fake composite device was asked to do: profiles loaded (their `name:`), mouse
+/// button events, and how often its `DbusDevices` property was read.
+#[derive(Clone, Default)]
+struct Calls {
+    log: Arc<std::sync::Mutex<Vec<String>>>,
+    dbus_reads: Arc<AtomicU32>,
+}
+
+impl Calls {
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut self.log.lock().unwrap())
+    }
+}
+
 struct Composite {
     mode: Arc<AtomicU32>,
     name: String,
     targets: Vec<String>,
+    profile: String,
+    calls: Calls,
+}
+
+impl Composite {
+    fn new(mode: Arc<AtomicU32>, name: &str, targets: Vec<String>, calls: Calls) -> Self {
+        Self {
+            mode,
+            name: name.into(),
+            targets,
+            profile: "Default".into(),
+            calls,
+        }
+    }
 }
 
 #[zbus::interface(name = "org.shadowblip.Input.CompositeDevice")]
@@ -56,14 +84,46 @@ impl Composite {
     fn name(&self) -> String {
         self.name.clone()
     }
-    // Named like InputPlumber's: zbus derives `DbusDevices` from `dbus_devices`.
+    // Named like InputPlumber's (zbus derives `DbusDevices` from `dbus_devices`).
     #[zbus(property)]
     fn dbus_devices(&self) -> Vec<String> {
+        self.calls.dbus_reads.fetch_add(1, Ordering::SeqCst);
         self.targets.clone()
     }
     #[zbus(property)]
     fn source_device_paths(&self) -> Vec<String> {
         vec!["/dev/input/event99".into()]
+    }
+    #[zbus(property)]
+    fn profile_name(&self) -> String {
+        self.profile.clone()
+    }
+    fn get_profile_yaml(&self) -> String {
+        format!(
+            "version: 1\nkind: DeviceProfile\nname: {}\nmapping: []\n",
+            self.profile
+        )
+    }
+    fn load_profile_from_yaml(&mut self, yaml: String) {
+        let name = yaml
+            .lines()
+            .find_map(|l| l.strip_prefix("name: "))
+            .unwrap_or("?")
+            .to_string();
+        self.calls
+            .log
+            .lock()
+            .unwrap()
+            .push(format!("profile {name}"));
+        self.profile = name;
+    }
+    fn send_event(&self, event: String, value: zbus::zvariant::Value<'_>) {
+        let pressed = matches!(value, zbus::zvariant::Value::Bool(true));
+        self.calls
+            .log
+            .lock()
+            .unwrap()
+            .push(format!("{event} {pressed}"));
     }
 }
 
@@ -82,6 +142,8 @@ struct Fake {
     conn: zbus::Connection,
     manage_all: Arc<AtomicBool>,
     modes: Vec<Arc<AtomicU32>>,
+    /// Device 0's.
+    calls: Calls,
 }
 
 impl Fake {
@@ -91,6 +153,7 @@ impl Fake {
 
     async fn start_named(address: &str, name: &str) -> Self {
         let manage_all = Arc::new(AtomicBool::new(false));
+        let calls = Calls::default();
         let mode = Arc::new(AtomicU32::new(0));
         let conn = zbus::connection::Builder::address(address)
             .unwrap()
@@ -100,11 +163,7 @@ impl Fake {
             .unwrap()
             .serve_at(
                 device(0),
-                Composite {
-                    mode: mode.clone(),
-                    name: name.into(),
-                    targets: vec![TARGET.into()],
-                },
+                Composite::new(mode.clone(), name, vec![TARGET.into()], calls.clone()),
             )
             .unwrap()
             .serve_at(TARGET, DBusDevice)
@@ -118,6 +177,7 @@ impl Fake {
             conn,
             manage_all,
             modes: vec![mode],
+            calls,
         }
     }
 
@@ -133,11 +193,7 @@ impl Fake {
             .object_server()
             .at(
                 path,
-                Composite {
-                    mode: mode.clone(),
-                    name: "Generic Gamepad".into(),
-                    targets: vec![],
-                },
+                Composite::new(mode.clone(), "Generic Gamepad", vec![], Calls::default()),
             )
             .await
             .unwrap();
@@ -157,11 +213,7 @@ impl Fake {
             .object_server()
             .at(
                 path,
-                Composite {
-                    mode: mode.clone(),
-                    name: name.into(),
-                    targets: vec![target.into()],
-                },
+                Composite::new(mode.clone(), name, vec![target.into()], Calls::default()),
             )
             .await
             .unwrap();
@@ -365,7 +417,9 @@ context = "ctrl+l"
         json!({ "app": "youtube" })
     );
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert_eq!(fake.mode(0), 2);
+    // The right stick becomes a pointer: our profile, then GAMEPAD_ONLY (3).
+    assert_eq!(fake.mode(0), 3);
+    assert_eq!(fake.calls.take(), ["profile HinterOS pointer"]);
     for (event, value) in [
         ("ui_accept", 0.0),
         ("ui_down", 1.0),
@@ -538,6 +592,23 @@ async fn xbox_pad_labels_are_swapped_per_device() {
         event_named(&mut c, "osk_visibility").await,
         json!({ "visible": true })
     );
+    // The target-to-pad lookup is done once, not per event (each read is a polkit check in
+    // InputPlumber): a burst of input reads the property no more.
+    call(&mut c, "osk.hide", json!({})).await.unwrap();
+    assert_eq!(
+        event_named(&mut c, "osk_visibility").await,
+        json!({ "visible": false })
+    );
+    let reads = fake.calls.dbus_reads.load(Ordering::SeqCst);
+    assert!((1..=4).contains(&reads), "{reads} DbusDevices reads");
+    for _ in 0..50 {
+        fake.press("ui_l1", 1.0).await;
+        fake.press("ui_l1", 0.0).await;
+    }
+    for _ in 0..100 {
+        nav(&mut c).await;
+    }
+    assert_eq!(fake.calls.dbus_reads.load(Ordering::SeqCst), reads);
     let log = d.log();
     assert!(
         log.contains(
@@ -549,4 +620,123 @@ async fn xbox_pad_labels_are_swapped_per_device() {
         !log.contains("Xbox layout: swapping ui_action/ui_context labels for Sony"),
         "{log}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn text_field_accept_back_and_pointer() {
+    let Some(bus) = Bus::start() else { return };
+    let address = bus.address.clone();
+    let keys_file = Arc::new(std::sync::Mutex::new(std::path::PathBuf::new()));
+    let kf = keys_file.clone();
+    let d = Daemon::start_with(|dir| {
+        // "Firefox": runs the native-messaging host like Firefox does and reports a focused
+        // text field (32-bit native-endian length 16, then the JSON).
+        let host = dir.join("hinteros-osk-native-host");
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_hinteros-session"), &host).unwrap();
+        script(
+            &dir.join("firefox"),
+            &format!(
+                r#"{{ printf '\020\000\000\000{{"focus":"text"}}'; sleep 30; }} |
+  "{host}" "{dir}/hinteros_osk.json" hinteros-osk@hinteros > /dev/null"#,
+                host = host.display(),
+                dir = dir.display(),
+            ),
+        );
+        let config = dir.join("session.toml");
+        std::fs::write(
+            &config,
+            format!(
+                r#"
+[keys]
+key_delay_ms = 0
+[[apps]]
+id = "youtube"
+name = "YouTube"
+kind = "web"
+command = ["{}"]
+input = "keyboard"
+"#,
+                dir.join("firefox").display()
+            ),
+        )
+        .unwrap();
+        let log = dir.join("keys.log");
+        *kf.lock().unwrap() = log.clone();
+        vec![
+            "--config".into(),
+            config.into(),
+            "--inputplumber".into(),
+            "--inputplumber-bus".into(),
+            address.into(),
+            "--fake-keyboard".into(),
+            log.into(),
+        ]
+    });
+    let keys_file = keys_file.lock().unwrap().clone();
+    let fake = Fake::start(&bus.address).await;
+    ready(&fake, 0, 2).await;
+    let mut c = d.client().await;
+    call(
+        &mut c,
+        "subscribe",
+        json!({ "events": ["osk_visibility", "focus_changed"] }),
+    )
+    .await
+    .unwrap();
+    call(&mut c, "apps.launch", json!({ "id": "youtube" }))
+        .await
+        .unwrap();
+    ready(&fake, 0, 3).await;
+    assert_eq!(fake.calls.take(), ["profile HinterOS pointer"]);
+    eventually("the text field report", async || {
+        d.log().contains("focus=Text").then_some(())
+    })
+    .await;
+
+    // A on the focused field: the on-screen keyboard, and no Enter.
+    fake.press("ui_accept", 1.0).await;
+    fake.press("ui_accept", 0.0).await;
+    assert_eq!(
+        event_named(&mut c, "osk_visibility").await,
+        json!({ "visible": true })
+    );
+    ready(&fake, 0, 2).await;
+    // B closes it (and is no key either).
+    fake.press("ui_back", 1.0).await;
+    fake.press("ui_back", 0.0).await;
+    assert_eq!(
+        event_named(&mut c, "osk_visibility").await,
+        json!({ "visible": false })
+    );
+    ready(&fake, 0, 3).await;
+
+    // The right stick moved: A is a click on the pointer, not Enter.
+    fake.press("ui_quick2", 1.0).await;
+    fake.press("ui_quick2", 0.0).await;
+    fake.press("ui_accept", 1.0).await;
+    fake.press("ui_accept", 0.0).await;
+    eventually("the click", async || {
+        let calls = fake.calls.log.lock().unwrap().clone();
+        (calls == ["Mouse:Button:Left true", "Mouse:Button:Left false"]).then_some(())
+    })
+    .await;
+    fake.calls.take();
+    // The D-pad is still arrow keys.
+    fake.press("ui_down", 1.0).await;
+    fake.press("ui_down", 0.0).await;
+    eventually("the down key", async || {
+        (key_log(&keys_file) == taps(&[108])).then_some(())
+    })
+    .await;
+
+    // Home: the stock profile back, then ALL.
+    fake.press("ui_guide", 1.0).await;
+    fake.press("ui_guide", 0.0).await;
+    ready(&fake, 0, 2).await;
+    eventually("the profile restored", async || {
+        let calls = fake.calls.log.lock().unwrap().clone();
+        (calls == ["profile Default"]).then_some(())
+    })
+    .await;
+    assert_eq!(key_log(&keys_file), taps(&[108]), "never an Enter");
 }

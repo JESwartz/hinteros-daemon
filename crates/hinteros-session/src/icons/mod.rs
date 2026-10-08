@@ -881,6 +881,8 @@ mod tests {
             input: Default::default(),
             back_key: None,
             keymap: Default::default(),
+            address_bar: false,
+            pointer: None,
         };
         let (tx, rx) = mpsc::channel();
         let store = IconStore::default();

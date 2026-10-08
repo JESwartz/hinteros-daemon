@@ -36,6 +36,8 @@ async fn a_text_field_in_firefox_shows_the_keyboard() {
                 kind = "web"
                 command = ["{}"]
                 input = "keyboard"
+                [osk]
+                auto_show = true
                 "#,
                 dir.join("firefox").display()
             ),

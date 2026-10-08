@@ -1,10 +1,17 @@
 //! InputPlumber over D-Bus (zbus): makes it manage all pads, sets every composite device's
-//! intercept mode, and forwards `InputEvent` signals.
+//! intercept mode and device profile (the right-stick pointer, [`super::pointer`]), presses
+//! mouse buttons, and forwards `InputEvent` signals.
 //!
-//! InputPlumber forgets `ManageAllDevices` and the modes when it restarts, so both are
-//! re-applied whenever its bus name gets a new owner, and the mode is applied to every
-//! composite device that appears later (one per pad). If there is no bus or no InputPlumber,
-//! this logs and waits; the rest of the daemon works without it.
+//! InputPlumber forgets `ManageAllDevices`, the modes and loaded profiles when it restarts, so
+//! all are re-applied whenever its bus name gets a new owner, and applied to every composite
+//! device that appears later (one per pad). If there is no bus or no InputPlumber, this logs
+//! and waits; the rest of the daemon works without it.
+//!
+//! Every InputPlumber method and property read goes through polkit, so nothing here may cost a
+//! D-Bus round trip per input event: the signal loop forwards events at once, and the mapping
+//! from a D-Bus target to its pad is looked up once per target and cached (also when the
+//! lookup finds nothing). Proxies never cache properties (a caching proxy fetches *all*
+//! properties, each one a polkit check, on first use).
 
 use std::collections::HashMap;
 
@@ -15,9 +22,11 @@ use tracing::{debug, info, warn};
 use zbus::fdo::{DBusProxy, ObjectManagerProxy};
 use zbus::message::Type as MessageType;
 use zbus::names::BusName;
-use zbus::zvariant::{ObjectPath, OwnedObjectPath};
+use zbus::proxy::CacheProperties;
+use zbus::zvariant::{ObjectPath, OwnedObjectPath, Value};
 use zbus::{Connection, MatchRule, MessageStream, Proxy};
 
+use super::pointer::{self, MouseButton};
 use super::{InputControl, InterceptMode, LabelSwap, RawInput, swap_xbox_label, xbox_layout};
 
 pub const SERVICE: &str = "org.shadowblip.InputPlumber";
@@ -27,16 +36,63 @@ pub const MANAGER_PATH: &str = "/org/shadowblip/InputPlumber/Manager";
 pub const MANAGER_IFACE: &str = "org.shadowblip.InputManager";
 pub const COMPOSITE_IFACE: &str = "org.shadowblip.Input.CompositeDevice";
 pub const DBUS_DEVICE_IFACE: &str = "org.shadowblip.Input.DBusDevice";
+/// The composite device property listing its D-Bus targets. zbus derives the name from
+/// InputPlumber's `fn dbus_devices` (`src/dbus/interface/composite_device.rs:575`), so it is
+/// `DbusDevices`, not `DBusDevices`.
+pub const DBUS_DEVICES_PROPERTY: &str = "DbusDevices";
 
-/// [`InputControl`] backed by the InputPlumber task: the latest mode wins.
+/// Where input should go: the intercept mode, and whether the pointer profile is loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Routing {
+    pub mode: InterceptMode,
+    pub pointer: bool,
+}
+
+/// The pointer profile settings.
+#[derive(Debug, Clone)]
+pub struct PointerProfile {
+    /// The profile YAML ([`pointer::profile_yaml`]).
+    pub yaml: String,
+}
+
+enum Command {
+    Button {
+        source: String,
+        button: MouseButton,
+        pressed: bool,
+    },
+}
+
+/// [`InputControl`] backed by the InputPlumber task: the latest routing wins; mouse buttons
+/// are sent in order.
 pub struct InputPlumber {
-    mode: watch::Sender<InterceptMode>,
+    routing: watch::Sender<Routing>,
+    commands: mpsc::UnboundedSender<Command>,
 }
 
 impl InputControl for InputPlumber {
     fn set_mode(&mut self, mode: InterceptMode) {
-        self.mode
-            .send_if_modified(|m| std::mem::replace(m, mode) != mode);
+        self.routing.send_if_modified(|r| {
+            let changed = r.mode != mode;
+            r.mode = mode;
+            changed
+        });
+    }
+
+    fn set_pointer(&mut self, on: bool) {
+        self.routing.send_if_modified(|r| {
+            let changed = r.pointer != on;
+            r.pointer = on;
+            changed
+        });
+    }
+
+    fn mouse_button(&mut self, source: &str, button: MouseButton, pressed: bool) {
+        let _ = self.commands.send(Command::Button {
+            source: source.into(),
+            button,
+            pressed,
+        });
     }
 }
 
@@ -45,15 +101,23 @@ pub fn spawn(
     bus: Option<String>,
     initial: InterceptMode,
     swap: LabelSwap,
+    profile: PointerProfile,
     events: mpsc::UnboundedSender<RawInput>,
 ) -> InputPlumber {
-    let (tx, rx) = watch::channel(initial);
+    let (tx, rx) = watch::channel(Routing {
+        mode: initial,
+        pointer: false,
+    });
+    let (ctx, crx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
-        if let Err(e) = run(bus, rx, swap, events).await {
+        if let Err(e) = run(bus, rx, crx, swap, profile, events).await {
             warn!("InputPlumber integration stopped: {e:#}");
         }
     });
-    InputPlumber { mode: tx }
+    InputPlumber {
+        routing: tx,
+        commands: ctx,
+    }
 }
 
 async fn connect(bus: Option<&str>) -> zbus::Result<Connection> {
@@ -63,10 +127,36 @@ async fn connect(bus: Option<&str>) -> zbus::Result<Connection> {
     }
 }
 
+/// What we know about one composite device (pad).
+#[derive(Debug, Default)]
+struct Device {
+    /// Its `ui_action`/`ui_context` labels get swapped.
+    swap: bool,
+    /// Our pointer profile is loaded.
+    pointer: bool,
+    /// The profile that was loaded before ours (YAML), to put back.
+    previous_profile: Option<String>,
+}
+
+type Devices = HashMap<OwnedObjectPath, Device>;
+
+/// D-Bus target path -> the composite device it belongs to (`None`: nobody claimed it).
+type Targets = HashMap<String, Option<OwnedObjectPath>>;
+
+struct Task {
+    conn: Connection,
+    swap: LabelSwap,
+    profile: PointerProfile,
+    devices: Devices,
+    targets: Targets,
+}
+
 async fn run(
     bus: Option<String>,
-    mut mode: watch::Receiver<InterceptMode>,
+    mut routing: watch::Receiver<Routing>,
+    mut commands: mpsc::UnboundedReceiver<Command>,
     swap: LabelSwap,
+    profile: PointerProfile,
     events: mpsc::UnboundedSender<RawInput>,
 ) -> Result<()> {
     let conn = match connect(bus.as_deref()).await {
@@ -83,6 +173,7 @@ async fn run(
     let objects = ObjectManagerProxy::builder(&conn)
         .destination(SERVICE)?
         .path(ROOT)?
+        .cache_properties(CacheProperties::No)
         .build()
         .await?;
     let mut added = objects.receive_interfaces_added().await?;
@@ -95,55 +186,32 @@ async fn run(
         .build();
     let mut inputs = MessageStream::for_match_rule(rule, &conn, Some(256)).await?;
 
-    let mut devices: Devices = HashMap::new();
-    let mut targets: HashMap<String, bool> = HashMap::new();
+    let mut task = Task {
+        conn,
+        swap,
+        profile,
+        devices: HashMap::new(),
+        targets: HashMap::new(),
+    };
     let service = BusName::try_from(SERVICE)?;
     if dbus.name_has_owner(service).await? {
-        let m = *mode.borrow_and_update();
-        setup(&conn, &objects, &mut devices, m, swap).await;
+        let r = *routing.borrow_and_update();
+        task.setup(&objects, r).await;
     } else {
         info!("waiting for InputPlumber ({SERVICE}) to appear on D-Bus");
     }
 
     loop {
         tokio::select! {
-            Some(change) = owner_changes.next() => {
-                devices.clear();
-                targets.clear();
-                if change.args()?.new_owner().is_some() {
-                    info!("InputPlumber appeared");
-                    let m = *mode.borrow_and_update();
-                    setup(&conn, &objects, &mut devices, m, swap).await;
-                } else {
-                    warn!("InputPlumber went away; waiting for it to come back");
-                }
-            }
-            Some(signal) = added.next() => {
-                let args = signal.args()?;
-                if args.interfaces_and_properties().keys().any(|i| i.as_str() == COMPOSITE_IFACE) {
-                    let path: OwnedObjectPath = args.object_path().clone().into();
-                    info!(device = %path, "new controller");
-                    let m = *mode.borrow();
-                    apply(&conn, &path, m).await;
-                    devices.insert(path.clone(), classify(&conn, &path, swap).await);
-                    targets.clear();
-                }
-            }
-            Some(signal) = removed.next() => {
-                let args = signal.args()?;
-                if args.interfaces().iter().any(|i| i.as_str() == COMPOSITE_IFACE) {
-                    info!(device = %args.object_path(), "controller gone");
-                    devices.remove(&OwnedObjectPath::from(args.object_path().clone()));
-                    targets.clear();
-                }
-            }
+            // Input first: nothing else may hold it up.
+            biased;
             Some(msg) = inputs.next() => {
                 let msg = msg?;
                 let source = msg.header().path().map(ToString::to_string).unwrap_or_default();
                 match msg.body().deserialize::<(String, f64)>() {
                     Ok((event, value)) => {
                         debug!(%source, %event, value, "input");
-                        let event = if swaps(&conn, &devices, &mut targets, &source).await {
+                        let event = if task.swaps(&source).await {
                             swap_xbox_label(&event).to_string()
                         } else {
                             event
@@ -155,95 +223,257 @@ async fn run(
                     Err(e) => debug!("ignoring malformed InputEvent: {e}"),
                 }
             }
-            changed = mode.changed() => {
+            Some(command) = commands.recv() => match command {
+                Command::Button { source, button, pressed } => {
+                    task.button(&source, button, pressed).await;
+                }
+            },
+            Some(change) = owner_changes.next() => {
+                task.devices.clear();
+                task.targets.clear();
+                if change.args()?.new_owner().is_some() {
+                    info!("InputPlumber appeared");
+                    let r = *routing.borrow_and_update();
+                    task.setup(&objects, r).await;
+                } else {
+                    warn!("InputPlumber went away; waiting for it to come back");
+                }
+            }
+            Some(signal) = added.next() => {
+                let args = signal.args()?;
+                if args.interfaces_and_properties().keys().any(|i| i.as_str() == COMPOSITE_IFACE) {
+                    let path: OwnedObjectPath = args.object_path().clone().into();
+                    info!(device = %path, "new controller");
+                    let r = *routing.borrow();
+                    task.add(path, r).await;
+                }
+            }
+            Some(signal) = removed.next() => {
+                let args = signal.args()?;
+                if args.interfaces().iter().any(|i| i.as_str() == COMPOSITE_IFACE) {
+                    info!(device = %args.object_path(), "controller gone");
+                    task.devices.remove(&OwnedObjectPath::from(args.object_path().clone()));
+                    task.targets.clear();
+                }
+            }
+            changed = routing.changed() => {
                 if changed.is_err() {
                     return Ok(());
                 }
-                let m = *mode.borrow_and_update();
-                debug!(mode = ?m, devices = devices.len(), "intercept mode");
-                for path in devices.keys() {
-                    apply(&conn, path, m).await;
+                let r = *routing.borrow_and_update();
+                debug!(routing = ?r, devices = task.devices.len(), "routing");
+                let paths: Vec<OwnedObjectPath> = task.devices.keys().cloned().collect();
+                for path in paths {
+                    task.apply(&path, r).await;
                 }
             }
         }
     }
 }
 
-/// (Re)initialize after InputPlumber (re)started: manage all pads, find the composite devices
-/// and apply `mode` to them. Errors are logged; new devices still arrive via InterfacesAdded.
-async fn setup(
-    conn: &Connection,
-    objects: &ObjectManagerProxy<'_>,
-    devices: &mut Devices,
-    mode: InterceptMode,
-    swap: LabelSwap,
-) {
-    let result: Result<()> = async {
-        let manager = Proxy::new(conn, SERVICE, MANAGER_PATH, MANAGER_IFACE).await?;
-        manager
-            .set_property("ManageAllDevices", true)
-            .await
-            .context("setting ManageAllDevices (is the user in the 'inputplumber' group, with polkit running?)")?;
-        for (path, interfaces) in objects.get_managed_objects().await? {
-            if interfaces.keys().any(|i| i.as_str() == COMPOSITE_IFACE) {
-                apply(conn, &path, mode).await;
-                let label_swap = classify(conn, &path, swap).await;
-                devices.insert(path, label_swap);
+/// A composite device proxy that never caches properties.
+async fn device_proxy<'a>(conn: &Connection, path: &ObjectPath<'_>) -> zbus::Result<Proxy<'a>> {
+    zbus::proxy::Builder::new(conn)
+        .destination(SERVICE)?
+        .path(path.to_owned())?
+        .interface(COMPOSITE_IFACE)?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await
+}
+
+impl Task {
+    /// (Re)initialize after InputPlumber (re)started: manage all pads, find the composite
+    /// devices and apply the routing to them. Errors are logged; new devices still arrive via
+    /// InterfacesAdded.
+    async fn setup(&mut self, objects: &ObjectManagerProxy<'_>, routing: Routing) {
+        let result: Result<Vec<OwnedObjectPath>> = async {
+            let manager = Proxy::new(&self.conn, SERVICE, MANAGER_PATH, MANAGER_IFACE).await?;
+            manager
+                .set_property("ManageAllDevices", true)
+                .await
+                .context("setting ManageAllDevices (is the user in the 'inputplumber' group, with polkit running?)")?;
+            Ok(objects
+                .get_managed_objects()
+                .await?
+                .into_iter()
+                .filter(|(_, interfaces)| interfaces.keys().any(|i| i.as_str() == COMPOSITE_IFACE))
+                .map(|(path, _)| path)
+                .collect())
+        }
+        .await;
+        match result {
+            Ok(paths) => {
+                for path in paths {
+                    self.add(path, routing).await;
+                }
+                info!(
+                    controllers = self.devices.len(),
+                    ?routing,
+                    "InputPlumber ready"
+                );
+            }
+            Err(e) => warn!("setting up InputPlumber: {e:#}"),
+        }
+    }
+
+    /// A composite device appeared: classify it and apply the routing.
+    async fn add(&mut self, path: OwnedObjectPath, routing: Routing) {
+        let device = self.classify(&path).await;
+        self.devices.insert(path.clone(), device);
+        self.targets.clear();
+        self.apply(&path, routing).await;
+    }
+
+    /// Load the wanted profile, then set the mode (a mouse mapping must be in place before
+    /// `GAMEPAD_ONLY` lets it through, and gone before a game gets the pad).
+    async fn apply(&mut self, path: &OwnedObjectPath, routing: Routing) {
+        let Some(device) = self.devices.get_mut(path) else {
+            return;
+        };
+        let proxy = match device_proxy(&self.conn, path).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(device = %path, "InputPlumber device: {e}");
+                return;
+            }
+        };
+        if routing.pointer != device.pointer {
+            let result: zbus::Result<()> = async {
+                if routing.pointer {
+                    if device.previous_profile.is_none() {
+                        device.previous_profile =
+                            proxy.call::<_, _, String>("GetProfileYaml", &()).await.ok();
+                    }
+                    proxy
+                        .call::<_, _, ()>("LoadProfileFromYaml", &(self.profile.yaml.as_str(),))
+                        .await
+                } else {
+                    let previous = device
+                        .previous_profile
+                        .take()
+                        .unwrap_or_else(pointer::default_profile_yaml);
+                    proxy
+                        .call::<_, _, ()>("LoadProfileFromYaml", &(previous.as_str(),))
+                        .await
+                }
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    info!(device = %path, pointer = routing.pointer, "pointer profile");
+                    device.pointer = routing.pointer;
+                }
+                Err(e) => warn!(device = %path, "loading the device profile: {e}"),
             }
         }
-        Ok(())
-    }
-    .await;
-    match result {
-        Ok(()) => info!(controllers = devices.len(), mode = ?mode, "InputPlumber ready"),
-        Err(e) => warn!("setting up InputPlumber: {e:#}"),
-    }
-}
-
-async fn apply(conn: &Connection, path: &ObjectPath<'_>, mode: InterceptMode) {
-    let result: zbus::Result<()> = async {
-        let device = Proxy::new(conn, SERVICE, path.to_owned(), COMPOSITE_IFACE).await?;
-        device.set_property("InterceptMode", mode as u32).await?;
-        Ok(())
-    }
-    .await;
-    if let Err(e) = result {
-        warn!(device = %path, ?mode, "setting InterceptMode: {e}");
-    }
-}
-
-/// Per composite device: whether its `ui_action`/`ui_context` labels get swapped.
-type Devices = HashMap<OwnedObjectPath, bool>;
-
-/// Decide (and log) the Xbox label swap for a composite device.
-async fn classify(conn: &Connection, path: &ObjectPath<'_>, swap: LabelSwap) -> bool {
-    let proxy = Proxy::new(conn, SERVICE, path.to_owned(), COMPOSITE_IFACE).await;
-    let name: String = match &proxy {
-        Ok(p) => p.get_property("Name").await.unwrap_or_default(),
-        Err(_) => String::new(),
-    };
-    let sources: Vec<String> = match &proxy {
-        Ok(p) => p
-            .get_property("SourceDevicePaths")
+        if let Err(e) = proxy
+            .set_property("InterceptMode", routing.mode as u32)
             .await
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
-    let drivers: Vec<String> = sources.iter().filter_map(|s| source_driver(s)).collect();
-    let (swapped, why) = match swap {
-        LabelSwap::Off => (false, "disabled"),
-        LabelSwap::On => (true, "forced"),
-        LabelSwap::Auto => match xbox_layout(&name, &drivers) {
-            Some(why) => (true, why),
-            None => (false, "not an Xbox layout"),
-        },
-    };
-    if swapped {
-        info!(%why, ?drivers, "Xbox layout: swapping ui_action/ui_context labels for {name}");
-    } else {
-        info!(%why, ?drivers, "not swapping ui_action/ui_context labels for {name}");
+        {
+            warn!(device = %path, mode = ?routing.mode, "setting InterceptMode: {e}");
+        }
     }
-    swapped
+
+    /// Decide (and log) the Xbox label swap for a composite device, and whether our pointer
+    /// profile is still loaded on it (the daemon restarted while it was).
+    async fn classify(&self, path: &ObjectPath<'_>) -> Device {
+        let (mut name, mut sources, mut profile) =
+            (String::new(), Vec::<String>::new(), String::new());
+        if let Ok(p) = device_proxy(&self.conn, path).await {
+            name = p.get_property("Name").await.unwrap_or_default();
+            sources = p
+                .get_property("SourceDevicePaths")
+                .await
+                .unwrap_or_default();
+            profile = p.get_property("ProfileName").await.unwrap_or_default();
+        }
+        let drivers: Vec<String> = sources.iter().filter_map(|s| source_driver(s)).collect();
+        let (swapped, why) = match self.swap {
+            LabelSwap::Off => (false, "disabled"),
+            LabelSwap::On => (true, "forced"),
+            LabelSwap::Auto => match xbox_layout(&name, &drivers) {
+                Some(why) => (true, why),
+                None => (false, "not an Xbox layout"),
+            },
+        };
+        if swapped {
+            info!(%why, ?drivers, "Xbox layout: swapping ui_action/ui_context labels for {name}");
+        } else {
+            info!(%why, ?drivers, "not swapping ui_action/ui_context labels for {name}");
+        }
+        Device {
+            swap: swapped,
+            // Ours from before a restart: restore the default when the pointer is off.
+            pointer: profile == pointer::PROFILE_NAME,
+            previous_profile: None,
+        }
+    }
+
+    /// The composite device a D-Bus target belongs to, through the `DbusDevices` property.
+    /// Looked up once per target (also when nobody claims it); the cache is cleared when pads
+    /// come or go. A target nobody claims belongs to the only pad when there is exactly one.
+    async fn device_of(&mut self, source: &str) -> Option<OwnedObjectPath> {
+        if !self.targets.contains_key(source) {
+            for path in self.devices.keys() {
+                let Ok(proxy) = device_proxy(&self.conn, path).await else {
+                    continue;
+                };
+                match proxy
+                    .get_property::<Vec<String>>(DBUS_DEVICES_PROPERTY)
+                    .await
+                {
+                    Ok(paths) => {
+                        for t in paths {
+                            self.targets.insert(t, Some(path.clone()));
+                        }
+                    }
+                    Err(e) => debug!(device = %path, "reading {DBUS_DEVICES_PROPERTY}: {e}"),
+                }
+            }
+            if !self.targets.contains_key(source) {
+                let only = (self.devices.len() == 1)
+                    .then(|| self.devices.keys().next().cloned())
+                    .flatten();
+                debug!(%source, device = ?only, "D-Bus target claimed by no pad");
+                self.targets.insert(source.to_string(), only);
+            }
+        }
+        self.targets.get(source).cloned().flatten()
+    }
+
+    /// Whether events from the D-Bus target `source` get their labels swapped.
+    async fn swaps(&mut self, source: &str) -> bool {
+        if !self.devices.values().any(|d| d.swap) {
+            return false;
+        }
+        match self.device_of(source).await {
+            Some(path) => self.devices.get(&path).is_some_and(|d| d.swap),
+            None => false,
+        }
+    }
+
+    /// Press or release a mouse button on the pad behind `source` (the first pad if unknown).
+    async fn button(&mut self, source: &str, button: MouseButton, pressed: bool) {
+        let path = match self.device_of(source).await {
+            Some(p) => p,
+            None => match self.devices.keys().next() {
+                Some(p) => p.clone(),
+                None => return,
+            },
+        };
+        let result: zbus::Result<()> = async {
+            let proxy = device_proxy(&self.conn, &path).await?;
+            proxy
+                .call::<_, _, ()>("SendEvent", &(button.capability(), Value::Bool(pressed)))
+                .await
+        }
+        .await;
+        match result {
+            Ok(()) => debug!(device = %path, ?button, pressed, "mouse button"),
+            Err(e) => warn!(device = %path, ?button, pressed, "mouse button: {e}"),
+        }
+    }
 }
 
 /// The kernel driver bound to an input (`/dev/input/eventN`) or hidraw source device.
@@ -259,49 +489,4 @@ fn source_driver(dev: &str) -> Option<String> {
     };
     let target = std::fs::read_link(link).ok()?;
     Some(target.file_name()?.to_str()?.to_string())
-}
-
-/// Whether events from the D-Bus target `source` get their labels swapped: maps the target
-/// back to its composite device through the `DbusDevices` property (zbus's name for
-/// InputPlumber's `dbus_devices`). Looked up once per target and cached, also when nobody
-/// claims it (then it follows the only pad when there is exactly one): every InputPlumber
-/// property read is a polkit check, and this runs in the signal loop. The cache is cleared when
-/// pads come or go.
-async fn swaps(
-    conn: &Connection,
-    devices: &Devices,
-    targets: &mut HashMap<String, bool>,
-    source: &str,
-) -> bool {
-    if !devices.values().any(|&s| s) {
-        return false;
-    }
-    if !targets.contains_key(source) {
-        for (path, &swapped) in devices {
-            // No property cache: a caching proxy fetches every property (each a polkit check).
-            let proxy = zbus::proxy::Builder::<Proxy>::new(conn)
-                .destination(SERVICE)
-                .and_then(|b| b.path(path.to_owned()))
-                .and_then(|b| b.interface(COMPOSITE_IFACE))
-                .map(|b| b.cache_properties(zbus::proxy::CacheProperties::No));
-            let Ok(proxy) = proxy else { continue };
-            let Ok(proxy) = proxy.build().await else {
-                continue;
-            };
-            match proxy.get_property::<Vec<String>>("DbusDevices").await {
-                Ok(paths) => {
-                    for t in paths {
-                        targets.insert(t, swapped);
-                    }
-                }
-                Err(e) => debug!(device = %path, "reading DbusDevices: {e}"),
-            }
-        }
-        if !targets.contains_key(source) {
-            let only = devices.len() == 1 && devices.values().all(|&s| s);
-            debug!(%source, "D-Bus target claimed by no pad");
-            targets.insert(source.to_string(), only);
-        }
-    }
-    targets.get(source).copied().unwrap_or(false)
 }

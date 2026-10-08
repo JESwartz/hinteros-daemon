@@ -21,7 +21,9 @@ use hinteros_session::config::{Cli, Config};
 use hinteros_session::focus::gamescope::{GamescopeFocus, WatchOptions, spawn_watcher};
 use hinteros_session::focus::{FocusControl, NoFocus};
 use hinteros_session::icons::{self, Icons};
-use hinteros_session::input::{InputControl, InterceptMode, NoInput, devpad, inputplumber};
+use hinteros_session::input::{
+    InputControl, InterceptMode, NoInput, devpad, inputplumber, pointer,
+};
 use hinteros_session::keys::ime::GamescopeIme;
 use hinteros_session::keys::uinput::UinputKeyboard;
 use hinteros_session::keys::worker::{
@@ -102,7 +104,9 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
 
     // Text field focus from Firefox's native-messaging host (not part of the session API).
     let osk_socket = textfocus::socket_beside(&path);
-    let osk_listener = if config.osk.enable && config.osk.auto_show {
+    let field_reports = config.osk.auto_show
+        || config.osk.field_summon == hinteros_session::config::FieldSummon::Accept;
+    let osk_listener = if config.osk.enable && field_reports {
         match api_server::bind_unix(&osk_socket, 0o600, 0o700) {
             Ok(l) => Some(l),
             Err(e) => {
@@ -164,6 +168,12 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
             config.inputplumber.bus.clone(),
             InterceptMode::All,
             config.input.xbox_label_swap,
+            inputplumber::PointerProfile {
+                yaml: pointer::profile_yaml(
+                    config.pointer.speed_pps,
+                    config.pointer.activity_deadzone,
+                ),
+            },
             tx,
         ))
     } else {
@@ -215,6 +225,16 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         Box::new(Procs),
         events.clone(),
     );
+    // gamescope's pointer is only ours to hide under gamescope.
+    let shell = if config.gamescope.enable {
+        shell.with_cursor(Box::new(pointer::CommandCursor {
+            hide: config.pointer.hide_command.clone(),
+            show: config.pointer.show_command.clone(),
+            env: env.clone(),
+        }))
+    } else {
+        shell
+    };
     tokio::spawn(shell::run(shell, shell_rx));
     if let Some(listener) = osk_listener {
         info!(socket = %osk_socket.display(), "listening for text field focus (Firefox extension)");

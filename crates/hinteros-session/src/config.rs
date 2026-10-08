@@ -33,6 +33,7 @@
 //! repeat_interval_ms = 100
 //! xbox_label_swap = "auto"     # "auto" | "on" | "off": swap ui_action/ui_context on Xbox (xpad) pads
 //! dev_gamepad = false          # development only: read pads via evdev, no InputPlumber
+//! direction_debounce_ms = 40   # a direction re-pressed this soon after its release is stick chatter
 //!
 //! [icons]
 //! fetch = true                 # download web app icons (https only)
@@ -49,7 +50,16 @@
 //! enable = true
 //! command = ["hinteros-osk"]   # started (and restarted) by the daemon if it is on PATH
 //! summon = "guide+context"     # hold Guide and press Y; or "none"
-//! auto_show = true             # show it when a text field gets focus (Firefox extension)
+//! field_summon = "accept"      # A on a focused text field shows it (no Enter); or "none"
+//! auto_show = false            # show it as soon as a text field gets focus (Firefox extension)
+//!
+//! [pointer]                    # right stick = mouse pointer in keyboard-profile apps
+//! enable = true
+//! speed_pps = 1000             # pixels per second at full deflection
+//! activity_deadzone = 0.25     # stick movement that counts as using the pointer
+//! idle_ms = 3000               # A clicks while the stick moved this recently (= gamescope --hide-cursor-delay)
+//! hide_command = ["gamescopectl", "paint_cursor_plane", "0"]  # on D-pad/left stick use
+//! show_command = ["gamescopectl", "paint_cursor_plane", "1"]
 //!
 //! [[apps]]                     # apps.list entries; launchable with apps.launch {id}
 //! id = "jellyfin"
@@ -66,6 +76,8 @@
 //! # firefox_profile = "~/.local/share/hinteros/firefox/youtube"  # fallback: the favicon Firefox stored
 //! input = "keyboard"           # controller -> key presses (default "gamepad": the pad itself)
 //! back_key = "escape"          # what B sends [default: escape]
+//! pointer = true               # right stick moves a pointer [default: true]
+//! # address_bar = true         # plain Firefox: View = Ctrl+L + on-screen keyboard
 //! [apps.keymap]                # more (or other) actions -> keys
 //! context = "f"
 //!
@@ -231,6 +243,7 @@ pub struct Config {
     pub close: CloseConfig,
     pub keys: KeysConfig,
     pub osk: OskConfig,
+    pub pointer: PointerConfig,
     pub system: SystemConfig,
     pub runtime: RuntimeConfig,
     pub auth: AuthConfig,
@@ -511,6 +524,9 @@ pub struct InputConfig {
     /// Development only: read gamepads directly through evdev (see `input::devpad`). Ignored
     /// while InputPlumber is enabled.
     pub dev_gamepad: bool,
+    /// A direction pressed again within this long after its release is stick chatter and
+    /// ignored (InputPlumber has no hysteresis at its stick threshold); 0: off.
+    pub direction_debounce_ms: u64,
 }
 
 impl Default for InputConfig {
@@ -520,6 +536,7 @@ impl Default for InputConfig {
             repeat_interval_ms: 100,
             xbox_label_swap: Default::default(),
             dev_gamepad: false,
+            direction_debounce_ms: 40,
         }
     }
 }
@@ -611,10 +628,24 @@ pub struct OskConfig {
     /// Controller chord that shows/hides it: `guide+<action>` (hold Guide, press the button) or
     /// `none`.
     pub summon: String,
-    /// Show it when a text field gets focus in a keyboard-profile app (Firefox, through the
-    /// HinterOS extension and its native-messaging host), and hide it when the field loses
-    /// focus.
+    /// Show it as soon as a text field gets focus in a keyboard-profile app (Firefox, through
+    /// the HinterOS extension and its native-messaging host), and hide it when the field loses
+    /// focus. Off by default: `field_summon` waits for A instead.
     pub auto_show: bool,
+    /// What summons it on a focused text field in a keyboard-profile app: `accept` (A, which
+    /// then does not send Enter) or `none`.
+    pub field_summon: FieldSummon,
+}
+
+/// `[osk] field_summon`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FieldSummon {
+    /// A (accept) on a focused text field shows the keyboard instead of pressing Enter.
+    #[default]
+    #[serde(alias = "accept-on-field")]
+    Accept,
+    None,
 }
 
 impl Default for OskConfig {
@@ -623,8 +654,52 @@ impl Default for OskConfig {
             enable: true,
             command: vec!["hinteros-osk".into()],
             summon: "guide+context".into(),
-            auto_show: true,
+            auto_show: false,
+            field_summon: FieldSummon::Accept,
         }
+    }
+}
+
+/// `[pointer]`: the right stick as a mouse pointer in keyboard-profile apps (see
+/// `input::pointer`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PointerConfig {
+    pub enable: bool,
+    /// Pointer speed at full deflection, pixels per second (InputPlumber: linear, fixed 0.20
+    /// deadzone).
+    pub speed_pps: u32,
+    /// How far the right stick must move to count as "using the pointer" (0..1).
+    pub activity_deadzone: f64,
+    /// The pointer stays "in use" (A clicks) this long after the right stick last moved. Keep
+    /// it equal to gamescope's `--hide-cursor-delay`.
+    pub idle_ms: u64,
+    /// Run to hide the pointer at once when the D-pad or left stick is used.
+    pub hide_command: Vec<String>,
+    /// Run to show it again.
+    pub show_command: Vec<String>,
+}
+
+impl Default for PointerConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            speed_pps: 1000,
+            activity_deadzone: 0.25,
+            idle_ms: 3000,
+            hide_command: ["gamescopectl", "paint_cursor_plane", "0"]
+                .map(String::from)
+                .into(),
+            show_command: ["gamescopectl", "paint_cursor_plane", "1"]
+                .map(String::from)
+                .into(),
+        }
+    }
+}
+
+impl PointerConfig {
+    pub fn idle(&self) -> Duration {
+        Duration::from_millis(self.idle_ms)
     }
 }
 
@@ -674,6 +749,9 @@ impl InputConfig {
     pub fn repeat_interval(&self) -> Duration {
         Duration::from_millis(self.repeat_interval_ms)
     }
+    pub fn direction_debounce(&self) -> Duration {
+        Duration::from_millis(self.direction_debounce_ms)
+    }
 }
 
 /// An `apps.list` entry. Exactly one of `command` and `steam_app_id`.
@@ -705,6 +783,13 @@ pub struct AppConfig {
     /// Controller action -> key (`"ctrl+l"`, `"none"` to unmap), on top of the defaults.
     #[serde(default)]
     pub keymap: BTreeMap<String, String>,
+    /// Keyboard profile, a browser with an address bar (plain Firefox, not a kiosk): View
+    /// focuses the address bar (Ctrl+L) and shows the on-screen keyboard, unless the keymap
+    /// maps `view` itself.
+    #[serde(default)]
+    pub address_bar: bool,
+    /// Keyboard profile: the right stick moves a mouse pointer ([pointer]) [default: true].
+    pub pointer: Option<bool>,
 }
 
 fn native() -> AppKind {
@@ -875,6 +960,14 @@ impl Config {
             ensure!(!cmd.is_empty(), "launcher.command is empty");
         }
         self.osk.summon_button()?;
+        ensure!(
+            (0.0..1.0).contains(&self.pointer.activity_deadzone),
+            "pointer.activity_deadzone must be in [0, 1)"
+        );
+        ensure!(
+            self.pointer.speed_pps > 0,
+            "pointer.speed_pps must be positive"
+        );
         let mut seen = BTreeSet::new();
         for app in &self.apps {
             ensure!(valid_app_id(&app.id), "invalid app id '{}'", app.id);
@@ -899,8 +992,11 @@ impl Config {
             );
             if app.input == InputProfile::Gamepad {
                 ensure!(
-                    app.back_key.is_none() && app.keymap.is_empty(),
-                    "app '{}': back_key and keymap need input = \"keyboard\"",
+                    app.back_key.is_none()
+                        && app.keymap.is_empty()
+                        && !app.address_bar
+                        && app.pointer.is_none(),
+                    "app '{}': back_key, keymap, address_bar and pointer need input = \"keyboard\"",
                     app.id
                 );
             }
@@ -1151,6 +1247,63 @@ mod tests {
         ] {
             let text = format!("{app}{bad}\n");
             assert!(Config::parse(&text).is_err(), "accepted: {text}");
+        }
+    }
+
+    #[test]
+    fn field_summon_pointer_and_address_bar() {
+        let c = Config::default();
+        assert!(!c.osk.auto_show);
+        assert_eq!(c.osk.field_summon, FieldSummon::Accept);
+        assert!(c.pointer.enable);
+        assert_eq!(c.pointer.idle(), Duration::from_secs(3));
+        assert_eq!(
+            c.pointer.hide_command,
+            ["gamescopectl", "paint_cursor_plane", "0"]
+        );
+        assert_eq!(c.input.direction_debounce(), Duration::from_millis(40));
+        let c = Config::parse(
+            r#"
+            [osk]
+            field_summon = "none"
+            auto_show = true
+            [pointer]
+            enable = false
+            speed_pps = 1500
+            idle_ms = 1500
+            hide_command = []
+            [input]
+            direction_debounce_ms = 0
+            [[apps]]
+            id = "firefox"
+            name = "Firefox"
+            command = ["firefox"]
+            input = "keyboard"
+            address_bar = true
+            pointer = false
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.osk.field_summon, FieldSummon::None);
+        assert!(c.osk.auto_show && !c.pointer.enable);
+        assert_eq!((c.pointer.speed_pps, c.pointer.idle_ms), (1500, 1500));
+        assert!(c.pointer.hide_command.is_empty());
+        assert!(c.apps[0].address_bar);
+        assert_eq!(c.apps[0].pointer, Some(false));
+        assert_eq!(
+            Config::parse("[osk]\nfield_summon = \"accept-on-field\"\n")
+                .unwrap()
+                .osk
+                .field_summon,
+            FieldSummon::Accept
+        );
+        for bad in [
+            "[osk]\nfield_summon = \"focus\"\n",
+            "[pointer]\nactivity_deadzone = 1.5\n",
+            "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"a\"]\naddress_bar = true\n",
+            "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"a\"]\npointer = true\n",
+        ] {
+            assert!(Config::parse(bad).is_err(), "{bad}");
         }
     }
 

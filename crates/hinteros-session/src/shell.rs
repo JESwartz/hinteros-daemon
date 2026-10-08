@@ -46,10 +46,13 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::apps::{ChildExit, Spawner};
-use crate::config::{AppConfig, Config};
+use crate::config::{AppConfig, Config, FieldSummon};
 use crate::focus::{FocusControl, GamescopeEvent, GamescopeState, baselayer_for};
 use crate::icons::{IconStore, Refresher};
-use crate::input::{InputControl, Intent, InterceptMode, RawInput, Repeat, translate};
+use crate::input::pointer::{CursorChange, CursorControl, NoCursor, PointerState};
+use crate::input::{
+    Debounce, InputControl, Intent, InterceptMode, MouseButton, RawInput, Repeat, translate,
+};
 use crate::keys::{KeyCombo, KeyInjector, KeyOp, Keymap, plan_action, plan_text};
 use crate::procs::{ProcessControl, Sig};
 use crate::steam::library;
@@ -142,6 +145,14 @@ pub struct ShellConfig {
     pub osk_enabled: bool,
     /// Show the on-screen keyboard when a text field gets focus in a keyboard-profile app.
     pub osk_auto_show: bool,
+    /// A on a focused text field (keyboard-profile app) shows the on-screen keyboard.
+    pub osk_field_accept: bool,
+    /// The right stick moves a pointer in keyboard-profile apps (InputPlumber profile).
+    pub pointer_enabled: bool,
+    /// How long after the right stick last moved A still clicks.
+    pub pointer_idle: Duration,
+    /// Stick chatter filter for directions (0: off).
+    pub direction_debounce: Duration,
     /// The button that, pressed while Guide is held, shows/hides the on-screen keyboard.
     pub osk_summon: Option<NavAction>,
     /// Resolved app icons (filled in by `icons::start`, possibly later).
@@ -165,6 +176,10 @@ impl From<&Config> for ShellConfig {
             apps: c.apps.clone(),
             osk_enabled: c.osk.enable,
             osk_auto_show: c.osk.auto_show,
+            osk_field_accept: c.osk.field_summon == FieldSummon::Accept,
+            pointer_enabled: c.pointer.enable,
+            pointer_idle: c.pointer.idle(),
+            direction_debounce: c.input.direction_debounce(),
             osk_summon: c.osk.summon_button().ok().flatten(),
             icons: IconStore::default(),
             icon_refresh: Refresher::default(),
@@ -191,8 +206,20 @@ struct Running {
     /// Tracked by its windows: since when they are gone (exit after the debounce).
     gone_since: Option<Instant>,
     closing: Option<Closing>,
+    /// A browser with an address bar: View is Ctrl+L and the on-screen keyboard.
+    address_bar: bool,
+    /// The right stick is a pointer (keyboard profile).
+    pointer: bool,
     /// The keyboard input profile's keymap (`None`: gamepad).
     keymap: Option<Keymap>,
+}
+
+/// How an app takes controller input (from its config).
+#[derive(Debug, Default)]
+struct AppInput {
+    keymap: Option<Keymap>,
+    address_bar: bool,
+    pointer: bool,
 }
 
 /// Whether an app's lifetime is its windows (Steam games and Steam itself), rather than a
@@ -258,6 +285,18 @@ pub struct Shell {
     raw_names: BTreeMap<NavAction, String>,
     /// Buttons pressed while Guide was held that made no chord (raw `ui_*` names, for the log).
     guide_others: Vec<String>,
+    /// What has focus in each keyboard-profile app's page (from the Firefox extension).
+    text_fields: BTreeMap<String, FieldFocus>,
+    /// Stick chatter filter for directions.
+    debounce: Debounce,
+    /// The right-stick pointer: in use or not, hidden by us or not.
+    pointer: PointerState,
+    /// The pointer profile is loaded in InputPlumber (as far as we told it).
+    pointer_profile: bool,
+    /// Shows and hides gamescope's pointer.
+    cursor: Box<dyn CursorControl>,
+    /// Buttons held down as mouse buttons, with the pad they came from.
+    clicking: BTreeMap<NavAction, String>,
 }
 
 impl Shell {
@@ -271,7 +310,15 @@ impl Shell {
         events: broadcast::Sender<Broadcast>,
     ) -> Self {
         let repeat = Repeat::new(cfg.repeat_delay, cfg.repeat_interval);
+        let debounce = Debounce::new(cfg.direction_debounce);
+        let pointer = PointerState::new(cfg.pointer_idle);
         Self {
+            text_fields: BTreeMap::new(),
+            debounce,
+            pointer,
+            pointer_profile: false,
+            cursor: Box::new(NoCursor),
+            clicking: BTreeMap::new(),
             cfg,
             focus,
             input,
@@ -300,6 +347,12 @@ impl Shell {
             raw_names: BTreeMap::new(),
             guide_others: Vec::new(),
         }
+    }
+
+    /// Use `cursor` to hide and show gamescope's pointer (default: nothing).
+    pub fn with_cursor(mut self, cursor: Box<dyn CursorControl>) -> Self {
+        self.cursor = cursor;
+        self
     }
 
     /// Apply the initial focus (the launcher) and hide the on-screen keyboard. Call once at
@@ -524,16 +577,17 @@ impl Shell {
         let request = p
             .request()
             .map_err(|e| ErrorObject::new(ErrorCode::InvalidParams, e))?;
-        let keymap = match &request {
-            LaunchRequest::Id(id) => self
-                .cfg
-                .apps
-                .iter()
-                .find(|a| &a.id == id)
-                .and_then(|a| a.keymap().ok().flatten()),
+        let configured = match &request {
+            LaunchRequest::Id(id) => self.cfg.apps.iter().find(|a| &a.id == id),
             _ => None,
         };
-        if keymap.is_some() && !self.keys.caps().keys {
+        let keymap = configured.and_then(|a| a.keymap().ok().flatten());
+        let input = AppInput {
+            address_bar: configured.is_some_and(|a| a.address_bar),
+            pointer: keymap.is_some() && configured.is_some_and(|a| a.pointer.unwrap_or(true)),
+            keymap,
+        };
+        if input.keymap.is_some() && !self.keys.caps().keys {
             warn!("no virtual keyboard: this app gets the gamepad instead of key presses");
         }
         // Resolve to (key, name, what to run).
@@ -668,13 +722,13 @@ impl Shell {
             }
         };
         info!(app = %info.id, gamescope_app_id = info.gamescope_app_id, "launched");
-        self.track(info.clone(), keymap, now);
+        self.track(info.clone(), input, now);
         self.set_focus(Some(key));
         Ok(AppsLaunchResult { app: info })
     }
 
     /// Start tracking a running app and announce it.
-    fn track(&mut self, info: RunningApp, keymap: Option<Keymap>, now: Instant) {
+    fn track(&mut self, info: RunningApp, input: AppInput, now: Instant) {
         self.apps.insert(
             info.id.clone(),
             Running {
@@ -684,7 +738,9 @@ impl Shell {
                 seen_focused: false,
                 gone_since: None,
                 closing: None,
-                keymap,
+                keymap: input.keymap,
+                address_bar: input.address_bar,
+                pointer: input.pointer,
             },
         );
         self.emit(EventName::AppStarted, AppStartedParams { app: info });
@@ -826,7 +882,7 @@ impl Shell {
             ));
         }
         if !self.apps.contains_key(STEAM_CLIENT_APP_ID) {
-            self.track(steam_client_app(), None, now);
+            self.track(steam_client_app(), AppInput::default(), now);
         }
         let previous = self.focused.clone();
         if previous.as_deref() != Some(STEAM_CLIENT_APP_ID) {
@@ -899,11 +955,37 @@ impl Shell {
                 self.focus_retry_at = Some(Instant::now() + FOCUS_RETRY);
             }
         }
+        self.apply_input();
+    }
+
+    /// Tell InputPlumber the pointer profile and intercept mode for the current focus and
+    /// on-screen keyboard (the profile first: see `input::inputplumber`).
+    fn apply_input(&mut self) {
+        let pointer = self.pointer_app();
+        if pointer != self.pointer_profile {
+            self.pointer_profile = pointer;
+            self.input.set_pointer(pointer);
+        }
+        if !pointer {
+            let change = self.pointer.reset();
+            self.cursor_change(change);
+        }
         self.input.set_mode(self.intercept_mode());
     }
 
     fn focused_app(&self) -> Option<&Running> {
         self.focused.as_ref().and_then(|id| self.apps.get(id))
+    }
+
+    /// The focused app takes key presses (keyboard profile, and there is a virtual keyboard).
+    fn keys_app(&self) -> Option<&Running> {
+        self.focused_app()
+            .filter(|app| app.keymap.is_some() && self.keys.caps().keys)
+    }
+
+    /// The focused app has the right-stick pointer.
+    fn pointer_app(&self) -> bool {
+        self.cfg.pointer_enabled && self.keys_app().is_some_and(|app| app.pointer)
     }
 
     fn route(&self) -> Route {
@@ -912,16 +994,26 @@ impl Shell {
         }
         match self.focused_app() {
             None => Route::Launcher,
-            Some(app) if app.keymap.is_some() && self.keys.caps().keys => Route::Keys,
+            Some(_) if self.keys_app().is_some() => Route::Keys,
             Some(_) => Route::App,
         }
     }
 
-    /// The InputPlumber mode for the current focus and on-screen keyboard.
+    /// The InputPlumber mode for the current focus and on-screen keyboard. With the pointer,
+    /// `GamepadOnly`: the right stick's mouse events still reach the pointer.
     fn intercept_mode(&self) -> InterceptMode {
         match self.route() {
             Route::App => InterceptMode::Pass,
+            Route::Keys if self.pointer_app() => InterceptMode::GamepadOnly,
             Route::Launcher | Route::Osk | Route::Keys => InterceptMode::All,
+        }
+    }
+
+    fn cursor_change(&mut self, change: Option<CursorChange>) {
+        match change {
+            Some(CursorChange::Show) => self.cursor.set_visible(true),
+            Some(CursorChange::Hide) => self.cursor.set_visible(false),
+            None => {}
         }
     }
 
@@ -954,33 +1046,49 @@ impl Shell {
         }
     }
 
-    /// A text field in a web app gained or lost focus. Shows the keyboard when the focused
-    /// app has the keyboard input profile and the report comes from inside its process tree;
-    /// hides it again (after [`OSK_AUTO_HIDE_DELAY`]) only if it was shown this way.
+    /// A text field in a web app gained or lost focus (reported by the Firefox extension's
+    /// host, `pid`). Remembered per keyboard-profile app whose process tree the host is in (an
+    /// unknown pid counts for the focused app), for A ([`Self::field_accept`]). With
+    /// `auto_show`, also shows the keyboard right away when that app has focus; a keyboard
+    /// shown for a field (either way) hides again [`OSK_AUTO_HIDE_DELAY`] after the field
+    /// loses focus.
     fn text_focus(&mut self, pid: Option<u32>, focus: FieldFocus, now: Instant) {
-        if !self.cfg.osk_enabled || !self.cfg.osk_auto_show {
-            debug!(?focus, "text field focus: automatic keyboard off");
-            return;
-        }
-        let Some(app) = self.focused_app() else {
-            debug!(?focus, "text field focus, but the launcher has focus");
+        let keyboard_apps: Vec<(String, Option<u32>)> = self
+            .apps
+            .values()
+            .filter(|a| a.keymap.is_some())
+            .map(|a| (a.info.id.clone(), a.info.pid))
+            .collect();
+        let owner = match pid {
+            None => self
+                .focused
+                .clone()
+                .filter(|id| keyboard_apps.iter().any(|(a, _)| a == id)),
+            Some(pid) => keyboard_apps
+                .iter()
+                .find(|(_, root)| {
+                    root.is_some_and(|root| {
+                        root == pid || self.procs.descendants(root).contains(&pid)
+                    })
+                })
+                .map(|(id, _)| id.clone()),
+        };
+        let Some(id) = owner else {
+            debug!(
+                ?pid,
+                ?focus,
+                "text field focus from no keyboard-profile app; ignored"
+            );
             return;
         };
-        if app.keymap.is_none() {
-            debug!(app = %app.info.id, ?focus, "text field focus in an app without the keyboard profile");
-            return;
-        }
-        let (id, root) = (app.info.id.clone(), app.info.pid);
-        if let (Some(pid), Some(root)) = (pid, root)
-            && pid != root
-            && !self.procs.descendants(root).contains(&pid)
-        {
-            debug!(pid, app = %id, ?focus, "text field focus from another app; ignored");
+        self.text_fields.insert(id.clone(), focus);
+        if self.focused.as_deref() != Some(id.as_str()) || !self.cfg.osk_enabled {
+            debug!(app = %id, ?focus, "text field focus in the background");
             return;
         }
         if focus.editable() {
             self.osk_auto_hide_at = None;
-            if !self.osk_visible {
+            if self.cfg.osk_auto_show && !self.osk_visible {
                 info!(app = %id, ?focus, "text field focused → on-screen keyboard");
                 self.set_osk(true, true);
                 self.osk_auto = true;
@@ -989,6 +1097,18 @@ impl Shell {
             debug!(app = %id, "text field lost focus; hiding the keyboard soon");
             self.osk_auto_hide_at = Some(now + OSK_AUTO_HIDE_DELAY);
         }
+    }
+
+    /// A in a keyboard-profile app: whether a text field has focus there, so that A shows the
+    /// on-screen keyboard instead of pressing Enter.
+    fn field_focused(&self) -> bool {
+        self.cfg.osk_enabled
+            && self.cfg.osk_field_accept
+            && self
+                .focused
+                .as_ref()
+                .and_then(|id| self.text_fields.get(id))
+                .is_some_and(|f| f.editable())
     }
 
     /// Show or hide the on-screen keyboard; with `apply_mode`, switch InputPlumber to match.
@@ -1004,7 +1124,7 @@ impl Shell {
             warn!("showing/hiding the on-screen keyboard: {e:#}");
         }
         if apply_mode {
-            self.input.set_mode(self.intercept_mode());
+            self.apply_input();
         }
         self.emit(EventName::OskVisibility, OskState { visible });
     }
@@ -1182,8 +1302,22 @@ impl Shell {
         let pressed = input.pressed();
         let action = match intent {
             Intent::Home => return self.guide(pressed, now),
+            Intent::Pointer => {
+                if pressed && self.pointer_app() {
+                    let change = self.pointer.motion(now);
+                    self.cursor_change(change);
+                }
+                return;
+            }
             Intent::Nav(action) => action,
         };
+        if self
+            .debounce
+            .drop_event(action, &input.source, pressed, now)
+        {
+            debug!(?action, pressed, "stick chatter dropped");
+            return;
+        }
         if pressed {
             let guide_held = self
                 .guide
@@ -1204,11 +1338,30 @@ impl Shell {
             self.raw_names.insert(action, input.event.clone());
         } else {
             self.held.remove(&action);
+            if let Some(source) = self.clicking.remove(&action) {
+                self.input.mouse_button(&source, MouseButton::Left, false);
+                return;
+            }
             if self.swallow.remove(&action) {
                 return;
             }
         }
         let route = self.route();
+        // B closes the on-screen keyboard, whoever has focus (the keyboard never sees it).
+        if route == Route::Osk && action == NavAction::Back {
+            if pressed {
+                info!("back → on-screen keyboard hidden");
+                self.swallow.insert(action);
+                self.hide_osk();
+            }
+            return;
+        }
+        if route == Route::Keys && pressed && self.keys_button(action, &input.source, now) {
+            if !self.clicking.contains_key(&action) {
+                self.swallow.insert(action);
+            }
+            return;
+        }
         // The keyboard button in a keyboard-profile app summons the on-screen keyboard.
         if action == NavAction::Keyboard && route == Route::Keys {
             if pressed {
@@ -1239,6 +1392,59 @@ impl Shell {
         }
     }
 
+    /// A button pressed in a keyboard-profile app that means more than its key: a click with
+    /// the pointer, the on-screen keyboard for a text field, the address bar. Returns whether
+    /// it was handled (its release is then dropped, or ends the click).
+    fn keys_button(&mut self, action: NavAction, source: &str, now: Instant) -> bool {
+        let pointer = self.pointer_app();
+        if pointer && action.is_direction() {
+            // D-pad or left stick: the pointer is done.
+            let change = self.pointer.navigated(now);
+            self.cursor_change(change);
+            return false;
+        }
+        let Some(app) = self.keys_app() else {
+            return false;
+        };
+        let mapped = |a: NavAction| app.keymap.as_ref().is_some_and(|m| m.contains_key(&a));
+        let (rt_mapped, view_mapped) = (mapped(NavAction::TriggerRight), mapped(NavAction::View));
+        let address_bar = app.address_bar;
+        // A while the pointer is in use, RT whenever there is a pointer (unless mapped).
+        let click = pointer
+            && match action {
+                NavAction::Accept => self.pointer.active(now),
+                NavAction::TriggerRight => !rt_mapped,
+                _ => false,
+            };
+        if click {
+            debug!(?action, "click");
+            let change = self.pointer.motion(now);
+            self.cursor_change(change);
+            self.input.mouse_button(source, MouseButton::Left, true);
+            self.clicking.insert(action, source.to_string());
+            // Its release ends the click (see `clicking`).
+            return true;
+        }
+        if action == NavAction::Accept && self.field_focused() {
+            info!(app = ?self.focused, "accept on a text field → on-screen keyboard");
+            if !self.osk_visible {
+                self.set_osk(true, true);
+                self.osk_auto = true;
+            }
+            return true;
+        }
+        if action == NavAction::View && address_bar && !view_mapped {
+            info!(app = ?self.focused, "view → address bar and on-screen keyboard");
+            self.keys
+                .send(vec![KeyOp::tap(&"ctrl+l".parse().expect("valid combo"))]);
+            if self.cfg.osk_enabled && !self.osk_visible {
+                self.set_osk(true, true);
+            }
+            return true;
+        }
+        false
+    }
+
     /// `input_nav` to the launcher or the on-screen keyboard.
     fn nav(&self, action: NavAction, phase: NavPhase, route: Route) {
         let audience = if route == Route::Osk {
@@ -1262,7 +1468,12 @@ impl Shell {
             .cloned();
         if let Some(combo) = combo {
             debug!(?action, key = %combo, "key");
-            self.keys.send(vec![KeyOp::tap(&combo)]);
+            if action.is_direction() {
+                // Held or repeating: never queued behind other navigation.
+                self.keys.send_nav(KeyOp::tap(&combo));
+            } else {
+                self.keys.send(vec![KeyOp::tap(&combo)]);
+            }
         }
     }
 
@@ -1293,6 +1504,7 @@ impl Shell {
 
     /// An app ended (`closed` instead of `reason` if apps.close asked it to).
     fn exited(&mut self, id: &str, reason: ExitReason, exit_code: Option<i32>) {
+        self.text_fields.remove(id);
         let Some(app) = self.apps.remove(id) else {
             return;
         };
@@ -1563,6 +1775,9 @@ mod tests {
         Signal(u32, Sig),
         Osk(bool),
         Keys(Vec<KeyOp>),
+        Pointer(bool),
+        Click(bool),
+        Cursor(bool),
     }
 
     #[derive(Clone, Default)]
@@ -1616,6 +1831,20 @@ mod tests {
     impl InputControl for MockInput {
         fn set_mode(&mut self, mode: InterceptMode) {
             self.0.push(Call::Mode(mode));
+        }
+        fn set_pointer(&mut self, on: bool) {
+            self.0.push(Call::Pointer(on));
+        }
+        fn mouse_button(&mut self, _source: &str, button: MouseButton, pressed: bool) {
+            assert_eq!(button, MouseButton::Left);
+            self.0.push(Call::Click(pressed));
+        }
+    }
+
+    struct MockCursor(Log);
+    impl CursorControl for MockCursor {
+        fn set_visible(&mut self, visible: bool) {
+            self.0.push(Call::Cursor(visible));
         }
     }
 
@@ -1704,6 +1933,8 @@ mod tests {
             input: InputProfile::Gamepad,
             back_key: None,
             keymap: BTreeMap::new(),
+            address_bar: false,
+            pointer: None,
         }
     }
 
@@ -1751,7 +1982,11 @@ mod tests {
                     },
                 ],
                 osk_enabled: true,
-                osk_auto_show: true,
+                osk_auto_show: false,
+                osk_field_accept: true,
+                pointer_enabled: true,
+                pointer_idle: MS(3000),
+                direction_debounce: MS(40),
                 osk_summon: None,
                 icons: IconStore::default(),
                 icon_refresh: Refresher::default(),
@@ -1778,7 +2013,8 @@ mod tests {
                     table: procs.clone(),
                 }),
                 tx,
-            );
+            )
+            .with_cursor(Box::new(MockCursor(log.clone())));
             shell.start();
             assert_eq!(
                 log.take(),
@@ -2763,12 +2999,14 @@ mod tests {
     fn keyboard_profile_turns_the_pad_into_keys() {
         let mut t = T::new();
         let app = t.launch(json!({"id": "youtube"}));
-        // InputPlumber stays in All: the daemon translates.
+        // InputPlumber intercepts the pad (the daemon translates), except for the right
+        // stick, which the pointer profile turns into mouse motion (GamepadOnly).
         assert_eq!(
             t.log.take()[1..],
             [
                 Call::FocusApp(app.gamescope_app_id),
-                Call::Mode(InterceptMode::All)
+                Call::Pointer(true),
+                Call::Mode(InterceptMode::GamepadOnly)
             ]
         );
         t.events();
@@ -2798,6 +3036,7 @@ mod tests {
         t.input("ui_guide", 1.0);
         assert_eq!(t.shell.focused(), None);
         t.events();
+        t.advance(MS(100)); // not stick chatter
         t.input("ui_down", 1.0);
         assert_eq!(
             t.events_to(),
@@ -3012,6 +3251,11 @@ mod tests {
 
     /// The keyboard-profile app `youtube` (Firefox) running with a native-messaging host (pid
     /// 555) in its process tree.
+    /// `[osk] auto_show = true` (off by default).
+    fn auto_show(c: &mut ShellConfig) {
+        c.osk_auto_show = true;
+    }
+
     fn firefox_with_host(f: impl FnOnce(&mut ShellConfig)) -> T {
         let mut t = T::with(f);
         let app = t.launch(json!({"id": "youtube"}));
@@ -3028,7 +3272,7 @@ mod tests {
 
     #[test]
     fn text_field_focus_shows_and_hides_the_keyboard() {
-        let mut t = firefox_with_host(|_| {});
+        let mut t = firefox_with_host(auto_show);
         t.text_focus(555, FieldFocus::Text);
         assert!(t.shell.osk_visible());
         assert_eq!(
@@ -3055,7 +3299,7 @@ mod tests {
         assert!(!t.shell.osk_visible());
         assert_eq!(
             t.log.take(),
-            [Call::Osk(false), Call::Mode(InterceptMode::All)]
+            [Call::Osk(false), Call::Mode(InterceptMode::GamepadOnly)]
         );
         assert_eq!(
             t.events(),
@@ -3066,7 +3310,7 @@ mod tests {
 
     #[test]
     fn text_field_focus_leaves_a_keyboard_someone_asked_for() {
-        let mut t = firefox_with_host(|_| {});
+        let mut t = firefox_with_host(auto_show);
         // Shown by hand, then a field comes and goes: it stays.
         t.call("osk.show", json!({})).unwrap();
         t.text_focus(555, FieldFocus::Text);
@@ -3102,7 +3346,7 @@ mod tests {
     #[test]
     fn text_field_focus_needs_the_focused_keyboard_app() {
         // A gamepad-profile app (Jellyfin) gets no automatic keyboard.
-        let mut t = T::new();
+        let mut t = T::with(auto_show);
         let app = t.launch(json!({"id": "jellyfin"}));
         t.procs
             .lock()
@@ -3113,7 +3357,7 @@ mod tests {
         assert!(!t.shell.osk_visible());
 
         // A host outside the focused app's process tree (another Firefox) is ignored.
-        let mut t = firefox_with_host(|_| {});
+        let mut t = firefox_with_host(auto_show);
         t.text_focus(999, FieldFocus::Text);
         assert!(!t.shell.osk_visible());
         // An unknown pid is believed (the socket only takes the session user).
@@ -3129,7 +3373,10 @@ mod tests {
         // Turned off, or no keyboard at all.
         for f in [
             (|c: &mut ShellConfig| c.osk_auto_show = false) as fn(&mut ShellConfig),
-            |c: &mut ShellConfig| c.osk_enabled = false,
+            |c: &mut ShellConfig| {
+                c.osk_auto_show = true;
+                c.osk_enabled = false;
+            },
         ] {
             let mut t = firefox_with_host(f);
             t.text_focus(555, FieldFocus::Text);
@@ -3263,5 +3510,308 @@ mod tests {
             );
         }
         assert!(t.log.take().is_empty());
+    }
+
+    /// Key taps in the log (other calls dropped).
+    fn key_calls(log: Vec<Call>) -> Vec<Call> {
+        log.into_iter()
+            .filter(|c| matches!(c, Call::Keys(_)))
+            .collect()
+    }
+
+    /// The stick swept left and right a few times, crossing InputPlumber's threshold with
+    /// chatter each time (press/release bursts a few ms apart), 120 ms per sweep.
+    fn sweep(t: &mut T, sweeps: usize) {
+        for i in 0..sweeps {
+            let dir = if i % 2 == 0 { "ui_left" } else { "ui_right" };
+            for _ in 0..3 {
+                t.input(dir, 1.0);
+                t.advance(MS(4));
+                t.input(dir, 0.0);
+                t.advance(MS(4));
+            }
+            t.input(dir, 1.0);
+            t.advance(MS(90));
+            t.input(dir, 0.0);
+            t.advance(MS(6));
+        }
+    }
+
+    #[test]
+    fn rapid_back_and_forth_never_queues_moves() {
+        // Keyboard-profile app: one key per sweep, none after the last release.
+        let mut t = T::new();
+        t.launch(json!({"id": "youtube"}));
+        t.log.take();
+        sweep(&mut t, 10);
+        let keys = key_calls(t.log.take());
+        assert_eq!(keys.len(), 10, "{keys:?}");
+        for (i, k) in keys.iter().enumerate() {
+            let want = if i % 2 == 0 { "left" } else { "right" };
+            assert_eq!(k, &super::tests::keys(&[want]));
+        }
+        assert_eq!(t.shell.deadline(), None, "no repeat pending");
+        t.advance(Duration::from_secs(3));
+        assert!(t.log.take().is_empty(), "nothing after the last release");
+
+        // The on-screen keyboard (input_nav): one press and one release per sweep, no repeat.
+        t.call("osk.show", json!({})).unwrap();
+        t.events();
+        t.advance(MS(100));
+        sweep(&mut t, 10);
+        let nav: Vec<(String, String)> = t
+            .events()
+            .into_iter()
+            .filter(|(n, _)| *n == EventName::InputNav)
+            .map(|(_, p)| {
+                (
+                    p["action"].as_str().unwrap().to_string(),
+                    p["phase"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(nav.len(), 20, "{nav:?}");
+        assert!(nav.iter().all(|(_, phase)| phase != "repeat"));
+        t.advance(Duration::from_secs(3));
+        assert!(t.events().is_empty());
+
+        // Held: repeats; a new direction takes over at once; a release stops it at once.
+        t.input("ui_down", 1.0);
+        t.advance(MS(450));
+        t.input("ui_down", 0.0);
+        t.input("ui_up", 1.0);
+        t.advance(MS(50));
+        t.input("ui_up", 0.0);
+        t.advance(Duration::from_secs(2));
+        let phases: Vec<String> = t
+            .events()
+            .into_iter()
+            .map(|(_, p)| {
+                format!(
+                    "{} {}",
+                    p["action"].as_str().unwrap(),
+                    p["phase"].as_str().unwrap()
+                )
+            })
+            .collect();
+        assert_eq!(
+            phases,
+            [
+                "down press",
+                "down repeat",
+                "down release",
+                "up press",
+                "up release"
+            ]
+        );
+    }
+
+    #[test]
+    fn accept_on_a_text_field_summons_the_osk_and_back_closes_it() {
+        let mut t = firefox_with_host(|_| {});
+        // Focus alone does nothing (auto_show is off).
+        t.text_focus(555, FieldFocus::Text);
+        assert!(!t.shell.osk_visible());
+        assert!(t.log.take().is_empty());
+
+        // A: the keyboard, no Enter.
+        t.input("ui_accept", 1.0);
+        assert!(t.shell.osk_visible());
+        t.input("ui_accept", 0.0);
+        assert_eq!(
+            t.log.take(),
+            [Call::Osk(true), Call::Mode(InterceptMode::All)]
+        );
+        let to_osk = t.events_to();
+        assert_eq!(
+            to_osk,
+            [(
+                EventName::OskVisibility,
+                json!({"visible": true}),
+                Audience::All
+            )],
+            "the A release is not passed to the keyboard"
+        );
+
+        // B closes it; neither the keyboard nor the app sees B.
+        t.input("ui_back", 1.0);
+        assert!(!t.shell.osk_visible());
+        t.input("ui_back", 0.0);
+        assert_eq!(
+            t.log.take(),
+            [Call::Osk(false), Call::Mode(InterceptMode::GamepadOnly)]
+        );
+        assert_eq!(
+            t.events(),
+            [ev(EventName::OskVisibility, json!({"visible": false}))]
+        );
+
+        // The field is left: A is Enter again.
+        t.text_focus(555, FieldFocus::None);
+        t.input("ui_accept", 1.0);
+        t.input("ui_accept", 0.0);
+        assert_eq!(t.log.take(), [keys(&["enter"])]);
+
+        // A field of a background app does not count; neither with field_summon = none.
+        t.text_focus(555, FieldFocus::Password);
+        t.call("apps.launch", json!({"id": "jellyfin"})).unwrap();
+        t.call("apps.launch", json!({"id": "youtube"})).unwrap();
+        t.log.take();
+        t.input("ui_accept", 1.0);
+        assert!(t.shell.osk_visible(), "remembered for the app");
+        let mut t = firefox_with_host(|c| c.osk_field_accept = false);
+        t.text_focus(555, FieldFocus::Text);
+        t.input("ui_accept", 1.0);
+        assert!(!t.shell.osk_visible());
+        assert_eq!(t.log.take(), [keys(&["enter"])]);
+    }
+
+    #[test]
+    fn back_closes_the_osk_over_anything() {
+        // Over a game: the game gets the pad back.
+        let mut t = T::new();
+        t.launch(json!({"id": "portal"}));
+        t.call("osk.show", json!({})).unwrap();
+        t.log.take();
+        t.events();
+        t.input("ui_back", 1.0);
+        t.input("ui_back", 0.0);
+        assert!(!t.shell.osk_visible());
+        assert_eq!(
+            t.log.take(),
+            [Call::Osk(false), Call::Mode(InterceptMode::Pass)]
+        );
+        assert_eq!(
+            t.events(),
+            [ev(EventName::OskVisibility, json!({"visible": false}))]
+        );
+        // Over the launcher: B after that goes to the launcher as usual.
+        let mut t = T::new();
+        t.call("osk.show", json!({})).unwrap();
+        t.events();
+        t.input("ui_back", 1.0);
+        t.input("ui_back", 0.0);
+        assert!(!t.shell.osk_visible());
+        t.input("ui_back", 1.0);
+        assert_eq!(
+            t.events_to()[1..],
+            [(
+                EventName::InputNav,
+                json!({"action": "back", "phase": "press"}),
+                Audience::Launcher
+            )]
+        );
+        // Other buttons still reach the keyboard (X, Y: its Backspace and Shift).
+        t.call("osk.show", json!({})).unwrap();
+        t.events();
+        t.input("ui_action", 1.0);
+        t.input("ui_context", 1.0);
+        assert_eq!(
+            t.events_to()
+                .iter()
+                .filter(|e| e.2 == Audience::Osk)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn view_opens_the_address_bar_with_the_osk() {
+        let browser = AppConfig {
+            input: InputProfile::Keyboard,
+            address_bar: true,
+            pointer: Some(false),
+            ..app_config("browser", Some("firefox"), None)
+        };
+        let mut t = T::with(|c| c.apps.push(browser));
+        t.launch(json!({"id": "browser"}));
+        assert_eq!(
+            t.log.take().last(),
+            Some(&Call::Mode(InterceptMode::All)),
+            "no pointer for this app"
+        );
+        t.input("ui_select", 1.0);
+        t.input("ui_select", 0.0);
+        assert!(t.shell.osk_visible());
+        assert_eq!(
+            t.log.take(),
+            [
+                keys(&["ctrl+l"]),
+                Call::Osk(true),
+                Call::Mode(InterceptMode::All)
+            ]
+        );
+        // Kiosk apps (no address bar) leave View alone (unmapped).
+        let mut t = T::new();
+        t.launch(json!({"id": "youtube"}));
+        t.log.take();
+        t.input("ui_select", 1.0);
+        assert!(!t.shell.osk_visible());
+        assert!(t.log.take().is_empty());
+    }
+
+    #[test]
+    fn right_stick_pointer_clicks_and_hides() {
+        let mut t = T::new();
+        t.launch(json!({"id": "youtube"}));
+        t.log.take();
+        // A without the pointer in use: Enter.
+        t.input("ui_accept", 1.0);
+        t.input("ui_accept", 0.0);
+        assert_eq!(t.log.take(), [keys(&["enter"])]);
+
+        // The right stick moves (activity events): A clicks, press and release.
+        t.input("ui_quick2", 1.0);
+        t.input("ui_quick2", 0.0);
+        t.advance(MS(500));
+        t.input("ui_accept", 1.0);
+        t.advance(MS(80));
+        t.input("ui_accept", 0.0);
+        assert_eq!(t.log.take(), [Call::Click(true), Call::Click(false)]);
+
+        // The D-pad: the pointer hides at once and the arrow key goes to the app.
+        t.input("ui_down", 1.0);
+        t.input("ui_down", 0.0);
+        assert_eq!(t.log.take(), [Call::Cursor(false), keys(&["down"])]);
+        t.input("ui_accept", 1.0);
+        t.input("ui_accept", 0.0);
+        assert_eq!(t.log.take(), [keys(&["enter"])]);
+        // Moving the stick again shows it.
+        t.input("ui_quick2", 1.0);
+        assert_eq!(t.log.take(), [Call::Cursor(true)]);
+        // Idle for longer than pointer_idle: A is Enter again.
+        t.advance(MS(3100));
+        t.input("ui_accept", 1.0);
+        t.input("ui_accept", 0.0);
+        assert_eq!(t.log.take(), [keys(&["enter"])]);
+        // RT clicks whenever there is a pointer.
+        t.input("ui_r2", 1.0);
+        t.input("ui_r2", 0.0);
+        assert_eq!(t.log.take(), [Call::Click(true), Call::Click(false)]);
+
+        // Hidden by the D-pad, then Home: the pointer is given back, the profile unloaded.
+        t.input("ui_quick2", 1.0);
+        t.advance(MS(100));
+        t.input("ui_left", 1.0);
+        t.input("ui_left", 0.0);
+        t.log.take();
+        t.input("ui_guide", 1.0);
+        let log = t.log.take();
+        assert!(log.contains(&Call::Pointer(false)), "{log:?}");
+        assert!(log.contains(&Call::Cursor(true)), "{log:?}");
+        assert_eq!(log.last(), Some(&Call::Mode(InterceptMode::All)));
+
+        // Games: no pointer, no profile, the pad as it is.
+        t.launch(json!({"id": "portal"}));
+        let log = t.log.take();
+        assert!(!log.iter().any(|c| matches!(c, Call::Pointer(_))));
+        assert_eq!(log.last(), Some(&Call::Mode(InterceptMode::Pass)));
+        // Pointer off in the config: All, no profile.
+        let mut t = T::with(|c| c.pointer_enabled = false);
+        t.launch(json!({"id": "youtube"}));
+        assert_eq!(t.log.take().last(), Some(&Call::Mode(InterceptMode::All)));
+        t.input("ui_quick2", 1.0);
+        t.input("ui_accept", 1.0);
+        assert_eq!(t.log.take(), [keys(&["enter"])]);
     }
 }

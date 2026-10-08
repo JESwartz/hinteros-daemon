@@ -10,10 +10,13 @@
 
 pub mod devpad;
 pub mod inputplumber;
+pub mod pointer;
 
 use std::time::{Duration, Instant};
 
 use hinteros_api::session::NavAction;
+
+pub use pointer::MouseButton;
 
 /// InputPlumber's `InterceptMode` property values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +36,11 @@ pub enum InterceptMode {
 /// Switches where controller input goes.
 pub trait InputControl: Send {
     fn set_mode(&mut self, mode: InterceptMode);
+    /// Load the right-stick pointer profile on every pad (or put the previous profile back).
+    /// Applied before the next mode.
+    fn set_pointer(&mut self, _on: bool) {}
+    /// Press or release a mouse button on the pointer of the pad `source` (a D-Bus target).
+    fn mouse_button(&mut self, _source: &str, _button: MouseButton, _pressed: bool) {}
 }
 
 /// Input control when InputPlumber integration is off: does nothing.
@@ -63,6 +71,8 @@ impl RawInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intent {
     Home,
+    /// The right stick moved (pointer profile, [`pointer::ACTIVITY_EVENT`]).
+    Pointer,
     Nav(NavAction),
 }
 
@@ -72,6 +82,7 @@ pub fn translate(event: &str) -> Option<Intent> {
     use NavAction::*;
     let nav = match event {
         "ui_guide" => return Some(Intent::Home),
+        pointer::ACTIVITY_EVENT => return Some(Intent::Pointer),
         "ui_up" => Up,
         "ui_down" => Down,
         "ui_left" => Left,
@@ -201,6 +212,59 @@ impl Repeat {
     }
 }
 
+/// Drops the chatter of a stick held near InputPlumber's direction threshold.
+///
+/// InputPlumber (0.81, `src/input/target/dbus.rs:31,87-170`) turns the left stick into
+/// `ui_left`/`ui_right`/`ui_up`/`ui_down` at one threshold (0.60) for both press and release,
+/// without hysteresis, so a stick resting near it, or swept through it, sends a burst of
+/// press/release pairs. A press of a direction that comes within `window` of its own release
+/// (same pad) is taken as chatter: it and its release are dropped. Releases always go through
+/// at once, so a release still stops a repeat immediately. Nobody presses the same D-pad
+/// direction twice within a few tens of milliseconds.
+#[derive(Debug)]
+pub struct Debounce {
+    window: Duration,
+    last_release: std::collections::HashMap<(NavAction, String), Instant>,
+    suppressed: std::collections::HashSet<(NavAction, String)>,
+}
+
+impl Debounce {
+    pub fn new(window: Duration) -> Self {
+        Self {
+            window,
+            last_release: Default::default(),
+            suppressed: Default::default(),
+        }
+    }
+
+    /// Whether to drop this event.
+    pub fn drop_event(
+        &mut self,
+        action: NavAction,
+        source: &str,
+        pressed: bool,
+        now: Instant,
+    ) -> bool {
+        if !action.is_direction() || self.window.is_zero() {
+            return false;
+        }
+        let key = (action, source.to_string());
+        if pressed {
+            let chatter = self
+                .last_release
+                .get(&key)
+                .is_some_and(|&t| now.duration_since(t) < self.window);
+            if chatter {
+                self.suppressed.insert(key);
+            }
+            chatter
+        } else {
+            self.last_release.insert(key.clone(), now);
+            self.suppressed.remove(&key)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +331,37 @@ mod tests {
         assert_eq!(swap_xbox_label("ui_action"), "ui_context");
         assert_eq!(swap_xbox_label("ui_context"), "ui_action");
         assert_eq!(swap_xbox_label("ui_accept"), "ui_accept");
+    }
+
+    #[test]
+    fn debounce_drops_stick_chatter() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut d = Debounce::new(ms(40));
+        let (l, r) = (NavAction::Left, NavAction::Right);
+        assert!(!d.drop_event(l, "p", true, t0));
+        assert!(!d.drop_event(l, "p", false, t0 + ms(100)));
+        // Chatter: re-pressed 8 ms after the release, again and again; all dropped.
+        let mut t = t0 + ms(100);
+        for _ in 0..10 {
+            t += ms(8);
+            assert!(d.drop_event(l, "p", true, t));
+            t += ms(8);
+            assert!(d.drop_event(l, "p", false, t));
+        }
+        // Calm for a moment, then a real press.
+        assert!(!d.drop_event(l, "p", true, t + ms(40)));
+        assert!(!d.drop_event(l, "p", false, t + ms(200)));
+        // Another direction, another pad, or a button: not affected.
+        assert!(!d.drop_event(r, "p", true, t + ms(201)));
+        assert!(!d.drop_event(l, "q", true, t + ms(201)));
+        assert!(!d.drop_event(NavAction::Accept, "p", true, t + ms(201)));
+        assert!(!d.drop_event(NavAction::Accept, "p", false, t + ms(202)));
+        assert!(!d.drop_event(NavAction::Accept, "p", true, t + ms(203)));
+        // Off.
+        let mut off = Debounce::new(Duration::ZERO);
+        assert!(!off.drop_event(l, "p", false, t0));
+        assert!(!off.drop_event(l, "p", true, t0));
     }
 
     #[test]

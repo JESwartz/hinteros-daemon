@@ -450,7 +450,7 @@ async fn first_boot_and_the_greeter_socket() {
     settled(&sys).await;
     // The greeter socket serves only its few methods.
     let mut g = sys.greeter_client().await;
-    let e = call(&mut g, "settings.get", json!({})).await.unwrap_err();
+    let e = call(&mut g, "rebuild", json!({})).await.unwrap_err();
     assert_eq!(code(&e), ErrorCode::MethodNotFound.code());
     let e = call(&mut g, "profiles.list", json!({})).await.unwrap_err();
     assert_eq!(code(&e), ErrorCode::MethodNotFound.code());
@@ -461,7 +461,8 @@ async fn first_boot_and_the_greeter_socket() {
     )
     .await
     .unwrap();
-    let rev = revision(&mut c).await;
+    // settings.get is there for profiles.create's revision.
+    let rev = revision(&mut g).await;
     let r = call(
         &mut g,
         "profiles.create",

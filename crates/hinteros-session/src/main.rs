@@ -55,6 +55,17 @@ fn main() -> ExitCode {
     if args.get(1).map(String::as_str) == Some(textfocus::HOST_SUBCOMMAND) {
         return ExitCode::from(u8::try_from(textfocus::run_host(&args[2..])).unwrap_or(1));
     }
+    if args.get(1).map(String::as_str) == Some("greet") {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info".into()),
+            )
+            .with_writer(std::io::stderr)
+            .init();
+        let code = hinteros_session::greeter::greet_main(&args[2..]);
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -64,7 +75,18 @@ fn main() -> ExitCode {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
     let cli = Cli::parse();
-    let result = Config::load(&cli).and_then(|config| {
+    let result = Config::load(&cli).and_then(|mut config| {
+        if cli.greeter {
+            // The picker: no apps, no Steam, no system relay, no agent, no OSK of our own.
+            info!("greeter mode");
+            config.apps.clear();
+            config.steam.path = PathBuf::new();
+            config.steam.autostart = false;
+            config.system.enable = false;
+            config.auth.enable = false;
+            config.osk.enable = false;
+            config.launcher.command = None;
+        }
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
@@ -210,6 +232,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         )
     };
     let mut shell_config = ShellConfig::from(&config);
+    shell_config.profile_mode |= cli.greeter;
     shell_config.icons = icon_store.clone();
     shell_config.icon_refresh = icons.refresher();
     let steam = shell_config.steam_path.clone();
@@ -340,7 +363,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
             end_session: !cli.test_no_session_end,
         },
     );
-    if config.runtime.enable {
+    if config.runtime.enable && !cli.greeter {
         profiles.spawn_sleep_watch();
     }
     let store = hinteros_session::store::Store::spawn(
@@ -369,6 +392,9 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         auth: hinteros_session::auth::Auth::spawn(config.auth.clone(), events.clone()),
         store,
         profiles,
+        greeter: cli
+            .greeter
+            .then(|| hinteros_session::greeter::Greeter::new(&config.greeter, events.clone())),
         restarter: hinteros_session::restart::Restarter::new(
             config.session.clone(),
             config.runtime.bus.clone(),

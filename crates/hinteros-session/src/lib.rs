@@ -10,6 +10,8 @@ pub mod apps;
 pub mod auth;
 pub mod config;
 pub mod focus;
+pub mod greetd;
+pub mod greeter;
 pub mod icons;
 pub mod input;
 pub mod keys;

@@ -31,6 +31,8 @@ pub struct Services {
     pub store: Store,
     pub restarter: Restarter,
     pub profiles: crate::profile::Profiles,
+    /// Greeter mode only.
+    pub greeter: Option<crate::greeter::Greeter>,
 }
 
 /// Methods answered by a task of their own, so a slow one (a relayed call waiting for the admin
@@ -39,6 +41,7 @@ pub struct Services {
 fn concurrent(method: &str) -> bool {
     session::relay_target(method).is_some()
         || crate::profile::METHODS.contains(&method)
+        || crate::greeter::METHODS.contains(&method)
         || matches!(
             method,
             "auth.respond" | "auth.cancel" | "store.list" | "session.restart"
@@ -219,6 +222,14 @@ async fn slow(
             s.restarter.restart(params).await
         }
         m if crate::profile::METHODS.contains(&m) => s.profiles.call(m, params).await,
+        m if crate::greeter::METHODS.contains(&m) => match &s.greeter {
+            Some(g) => g.call(m, params, client).await,
+            None => Err(ErrorObject::with_data(
+                ErrorCode::Unavailable,
+                "not in greeter mode",
+                serde_json::json!({"service": "logind", "reason": "not_greeter"}),
+            )),
+        },
         _ => Err(method_not_found(method)),
     }
 }

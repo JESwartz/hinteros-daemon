@@ -3484,6 +3484,321 @@
         }
       ]
     },
+    "greeter.list": {
+      "summary": "The picker's profiles (the service's public view). Greeter mode only (hinteros-session --greeter); only the hinteros-launcher connection may call it (else not_authorized).",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": [
+          "profiles",
+          "guest",
+          "first_boot",
+          "focus",
+          "appearance"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "profiles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "name",
+                "color",
+                "locked",
+                "admin",
+                "locked_until"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/ProfileId"
+                },
+                "name": {
+                  "$ref": "#/$defs/ProfileName"
+                },
+                "color": {
+                  "$ref": "#/$defs/ProfileColor"
+                },
+                "locked": {
+                  "type": "boolean"
+                },
+                "admin": {
+                  "type": "boolean"
+                },
+                "locked_until": {
+                  "oneOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "guest": {
+            "type": "boolean"
+          },
+          "first_boot": {
+            "type": "boolean"
+          },
+          "focus": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "const": "guest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "appearance": {
+            "type": "object",
+            "required": [
+              "text_scale",
+              "high_contrast",
+              "reduce_motion"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "text_scale": {
+                "type": "number"
+              },
+              "high_contrast": {
+                "type": "boolean"
+              },
+              "reduce_motion": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "errors": [
+        "not_authorized",
+        "unavailable"
+      ],
+      "examples": [
+        {
+          "name": "two profiles",
+          "params": {},
+          "result": {
+            "profiles": [
+              {
+                "id": "p1",
+                "name": "James",
+                "color": "teal",
+                "locked": false,
+                "admin": true,
+                "locked_until": null
+              },
+              {
+                "id": "p3",
+                "name": "Sam",
+                "color": "orange",
+                "locked": true,
+                "admin": false,
+                "locked_until": null
+              }
+            ],
+            "guest": true,
+            "first_boot": false,
+            "focus": "p1",
+            "appearance": {
+              "text_scale": 1.0,
+              "high_contrast": false,
+              "reduce_motion": false
+            }
+          }
+        }
+      ]
+    },
+    "greeter.login": {
+      "summary": "Enter a profile (or the guest) through greetd. An unlocked one starts at once (greeter_result {ok: true}); a locked one asks for its PIN (greeter_prompt {kind: pin}). Greeter mode only (hinteros-session --greeter); only the hinteros-launcher connection may call it (else not_authorized).",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "const": "guest"
+              }
+            ]
+          }
+        }
+      },
+      "result": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": [
+        "not_authorized",
+        "not_found",
+        "unavailable"
+      ],
+      "examples": [
+        {
+          "name": "Sam",
+          "params": {
+            "id": "p3"
+          },
+          "result": {}
+        }
+      ]
+    },
+    "greeter.pin": {
+      "summary": "Answer the PIN prompt. greeter_result follows: ok, or not ok with locked_seconds during the backoff (the greetd conversation is then over; log in again). Greeter mode only (hinteros-session --greeter); only the hinteros-launcher connection may call it (else not_authorized).",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [
+          "pin"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "pin": {
+            "$ref": "#/$defs/Pin"
+          }
+        }
+      },
+      "result": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": [
+        "not_authorized",
+        "unavailable"
+      ],
+      "examples": [
+        {
+          "name": "PIN",
+          "params": {
+            "pin": "2468"
+          },
+          "result": {}
+        }
+      ]
+    },
+    "greeter.cancel": {
+      "summary": "Back from the PIN pad: cancel the greetd conversation. Greeter mode only (hinteros-session --greeter); only the hinteros-launcher connection may call it (else not_authorized).",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": [
+        "not_authorized"
+      ],
+      "examples": [
+        {
+          "name": "back",
+          "params": {},
+          "result": {}
+        }
+      ]
+    },
+    "greeter.create": {
+      "summary": "Add profile from the picker (system profiles.create over greeter.sock; a rebuild of about a minute). Job events follow; on success call greeter.login {id} (a one-time token: no PIN prompt). Greeter mode only (hinteros-session --greeter); only the hinteros-launcher connection may call it (else not_authorized).",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [
+          "name",
+          "pin",
+          "locked"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "$ref": "#/$defs/ProfileName"
+          },
+          "color": {
+            "$ref": "#/$defs/ProfileColor"
+          },
+          "pin": {
+            "$ref": "#/$defs/Pin"
+          },
+          "locked": {
+            "type": "boolean"
+          }
+        }
+      },
+      "result": {
+        "type": "object",
+        "required": [
+          "job_id",
+          "id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "$ref": "#/$defs/JobId"
+          },
+          "id": {
+            "$ref": "#/$defs/ProfileId"
+          }
+        }
+      },
+      "errors": [
+        "not_authorized",
+        "unavailable",
+        "system_unavailable",
+        "permission_denied",
+        "rate_limited",
+        "job_busy",
+        "insufficient_resources",
+        "state_conflict",
+        "profile_limit"
+      ],
+      "examples": [
+        {
+          "name": "Sam",
+          "params": {
+            "name": "Sam",
+            "color": "orange",
+            "pin": "1357",
+            "locked": true
+          },
+          "result": {
+            "job_id": "3f9a0c2b7e4d1a65",
+            "id": "p3"
+          }
+        }
+      ]
+    },
     "session.restart": {
       "summary": "Restart the TV session: the compositor, the launcher and everything started in it, and the session daemon itself.",
       "description": "For job_finished {session_restart_required: true} (and system_unavailable {reason: version_mismatch}). The daemon answers first, then asks logind to terminate the user's graphical session on seat0 (a greetd session: greetd's default_session starts it again at once, with the new generation's programs), then asks the user's systemd to restart the session daemon's own unit. Apps the daemon started end with it. Only a session started by greetd is ever terminated (never a desktop session). unavailable {service: logind}: no such session, or logind cannot be reached.",
@@ -4097,6 +4412,67 @@
         }
       ]
     },
+    "greeter_prompt": {
+      "summary": "Greeter mode: greetd asks for the profile's PIN; show the PIN pad.",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "pin"
+            ]
+          }
+        }
+      },
+      "examples": [
+        {
+          "name": "PIN",
+          "params": {
+            "kind": "pin"
+          }
+        }
+      ]
+    },
+    "greeter_result": {
+      "summary": "Greeter mode: the login ended: ok (the session starts, the greeter goes away) or not (wrong PIN; locked_seconds during the backoff: 'Too many tries. Try again in N seconds').",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "locked_seconds": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "examples": [
+        {
+          "name": "in",
+          "params": {
+            "ok": true
+          }
+        },
+        {
+          "name": "wait",
+          "params": {
+            "ok": false,
+            "locked_seconds": 30
+          }
+        }
+      ]
+    },
     "profiles_changed": {
       "summary": "0.12: the profiles changed (a profile job, a rename, a PIN, lock or appearance change); profiles as system.profiles.list's.",
       "since": "0.12",
@@ -4487,7 +4863,7 @@
     },
     "EventName": {
       "type": "string",
-      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_visibility", "job_started", "job_progress", "job_finished", "network_changed", "wifi_list_changed", "bluetooth_changed", "bluetooth_confirm", "audio_changed", "authentication_requested", "authentication_finished", "store_changed", "switch_progress", "switch_blocked", "lock_state", "profiles_changed"]
+      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_visibility", "job_started", "job_progress", "job_finished", "network_changed", "wifi_list_changed", "bluetooth_changed", "bluetooth_confirm", "audio_changed", "authentication_requested", "authentication_finished", "store_changed", "switch_progress", "switch_blocked", "lock_state", "profiles_changed", "greeter_prompt", "greeter_result"]
     },
     "AppId": {
       "description": "App identifier: an apps.list id, or for running apps started by command or Steam URL 'cmd-<n>' / 'steam-<appid>'. 'steam' is Steam itself (Big Picture and its other windows).",

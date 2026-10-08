@@ -45,6 +45,8 @@ pub enum EventName {
     SwitchBlocked,
     LockState,
     ProfilesChanged,
+    GreeterPrompt,
+    GreeterResult,
 }
 
 impl EventName {
@@ -73,6 +75,8 @@ impl EventName {
         EventName::SwitchBlocked,
         EventName::LockState,
         EventName::ProfilesChanged,
+        EventName::GreeterPrompt,
+        EventName::GreeterResult,
     ];
 
     /// The event's wire name (its JSON-RPC notification method).
@@ -102,6 +106,8 @@ impl EventName {
             EventName::SwitchBlocked => SwitchBlocked::NAME,
             EventName::LockState => LockState::NAME,
             EventName::ProfilesChanged => ProfilesChanged::NAME,
+            EventName::GreeterPrompt => GreeterPrompt::NAME,
+            EventName::GreeterResult => GreeterResult::NAME,
         }
     }
 }
@@ -893,6 +899,11 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<SessionLockState>(),
         MethodInfo::of::<SessionUnlock>(),
         MethodInfo::of::<SessionEndGuest>(),
+        MethodInfo::of::<GreeterList>(),
+        MethodInfo::of::<GreeterLogin>(),
+        MethodInfo::of::<GreeterPin>(),
+        MethodInfo::of::<GreeterCancel>(),
+        MethodInfo::of::<GreeterCreate>(),
         MethodInfo::of::<StoreList>(),
     ],
     events: &[
@@ -920,6 +931,8 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<SwitchBlocked>(),
         EventInfo::of::<LockState>(),
         EventInfo::of::<ProfilesChanged>(),
+        EventInfo::of::<GreeterPrompt>(),
+        EventInfo::of::<GreeterResult>(),
     ],
     errors: ErrorCode::ALL,
 };
@@ -1335,6 +1348,122 @@ pub struct ProfilesChanged;
 impl Event for ProfilesChanged {
     const NAME: &'static str = "profiles_changed";
     type Params = ProfilesChangedParams;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Greeter mode (0.12): the picker
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GreeterProfile {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub locked: bool,
+    pub admin: bool,
+    #[serde(deserialize_with = "nullable_i64")]
+    pub locked_until: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GreeterAppearance {
+    pub text_scale: f64,
+    pub high_contrast: bool,
+    pub reduce_motion: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GreeterListResult {
+    pub profiles: Vec<GreeterProfile>,
+    /// The guest is on.
+    pub guest: bool,
+    pub first_boot: bool,
+    /// The profile to focus: the switch target, else the last used one.
+    #[serde(deserialize_with = "nullable")]
+    pub focus: Option<String>,
+    pub appearance: GreeterAppearance,
+}
+
+pub struct GreeterList;
+impl Method for GreeterList {
+    const NAME: &'static str = "greeter.list";
+    type Params = ProfileNoParams;
+    type Result = GreeterListResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GreeterLoginParams {
+    /// A profile id or `guest`.
+    pub id: String,
+}
+
+pub struct GreeterLogin;
+impl Method for GreeterLogin {
+    const NAME: &'static str = "greeter.login";
+    type Params = GreeterLoginParams;
+    type Result = ProfileEmpty;
+}
+
+pub struct GreeterPin;
+impl Method for GreeterPin {
+    const NAME: &'static str = "greeter.pin";
+    type Params = SessionUnlockParams;
+    type Result = ProfileEmpty;
+}
+
+pub struct GreeterCancel;
+impl Method for GreeterCancel {
+    const NAME: &'static str = "greeter.cancel";
+    type Params = ProfileNoParams;
+    type Result = ProfileEmpty;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GreeterCreateParams {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    pub pin: String,
+    pub locked: bool,
+}
+
+pub struct GreeterCreate;
+impl Method for GreeterCreate {
+    const NAME: &'static str = "greeter.create";
+    type Params = GreeterCreateParams;
+    type Result = crate::system::ProfilesCreateResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GreeterPromptParams {
+    /// `pin`: show the PIN pad for the profile being entered.
+    pub kind: String,
+}
+
+pub struct GreeterPrompt;
+impl Event for GreeterPrompt {
+    const NAME: &'static str = "greeter_prompt";
+    type Params = GreeterPromptParams;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GreeterResultParams {
+    /// true: the session starts and the greeter ends.
+    pub ok: bool,
+    /// The PIN backoff: wait this long.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locked_seconds: Option<u32>,
+}
+
+pub struct GreeterResult;
+impl Event for GreeterResult {
+    const NAME: &'static str = "greeter_result";
+    type Params = GreeterResultParams;
+}
+
+fn nullable_i64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    Option::<i64>::deserialize(d)
 }
 
 // ---------------------------------------------------------------------------------------------

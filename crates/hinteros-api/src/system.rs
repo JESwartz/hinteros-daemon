@@ -1253,6 +1253,8 @@ pub const MUTATING: &[&str] = &[
 /// What `greeter.sock` serves (besides `hello`): the greeter's own needs only.
 pub const GREETER_METHODS: &[&str] = &[
     crate::common::Ping::NAME,
+    // For profiles.create's revision.
+    SettingsGet::NAME,
     Subscribe::NAME,
     Unsubscribe::NAME,
     JobsGet::NAME,

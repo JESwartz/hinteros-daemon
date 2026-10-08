@@ -5249,7 +5249,21 @@
         },
         "booted": {
           "type": "boolean"
+        },
+        "profiles": {
+          "description": "The accounts in that generation's state.json with their current names (null: no longer a profile); absent if its state.json cannot be read (since 0.4). The rollback screen lists the profiles a rollback would drop or bring back empty.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/GenerationProfile" }
         }
+      }
+    },
+    "GenerationProfile": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/ProfileId" },
+        "name": { "oneOf": [{ "$ref": "#/$defs/ProfileName" }, { "type": "null" }] }
       }
     },
     "AvailableUpdate": {

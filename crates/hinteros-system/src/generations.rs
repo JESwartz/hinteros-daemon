@@ -3,9 +3,11 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use hinteros_api::system::Generation;
+use hinteros_api::system::{Generation, GenerationProfile};
 
 use crate::flake;
+use crate::profiles::ProfilesFile;
+use crate::state::State;
 
 /// One generation link and the toplevel it points to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,10 +63,16 @@ pub fn current_generation(profile: &Path) -> Option<u32> {
         .ok()
 }
 
-/// `generations.list`.
-pub fn list(profile: &Path, current_system: &Path, booted_system: &Path) -> Vec<Generation> {
+/// `generations.list`. `profiles_json` gives the profiles' current names.
+pub fn list(
+    profile: &Path,
+    current_system: &Path,
+    booted_system: &Path,
+    profiles_json: &Path,
+) -> Vec<Generation> {
     let current = std::fs::canonicalize(current_system).ok();
     let booted = std::fs::canonicalize(booted_system).ok();
+    let names = ProfilesFile::load(profiles_json).unwrap_or_default();
     links(profile)
         .into_iter()
         .map(|l| {
@@ -79,6 +87,20 @@ pub fn list(profile: &Path, current_system: &Path, booted_system: &Path) -> Vec<
                 rev,
                 current: l.toplevel.is_some() && l.toplevel == current,
                 booted: l.toplevel.is_some() && l.toplevel == booted,
+                profiles: l
+                    .toplevel
+                    .as_ref()
+                    .and_then(|t| State::load(&t.join("hinteros/state.json")).ok())
+                    .map(|(state, _)| {
+                        state
+                            .accounts()
+                            .into_iter()
+                            .map(|a| GenerationProfile {
+                                name: names.profiles.get(&a.id).map(|m| m.name.clone()),
+                                id: a.id,
+                            })
+                            .collect()
+                    }),
             }
         })
         .collect()
@@ -114,12 +136,35 @@ mod tests {
 
         let profile = d.join("profiles/system");
         assert_eq!(current_generation(&profile), Some(2));
-        let gens = list(&profile, &d.join("current"), &d.join("booted"));
+        std::fs::write(
+            d.join("store/gen2/hinteros/state.json"),
+            r#"{"schemaVersion":2,"base":"stable","settings":{"ssh":{"enable":false}},"requirements":[],"services":[],"profiles":[{"id":"p1","user":"hinteros"},{"id":"p2","user":"hinteros-p2"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("profiles.json"),
+            r#"{"version":1,"next":3,"profiles":{"p1":{"name":"Sam","color":"teal","admin":true}}}"#,
+        )
+        .unwrap();
+        let gens = list(
+            &profile,
+            &d.join("current"),
+            &d.join("booted"),
+            &d.join("profiles.json"),
+        );
         let nums: Vec<u32> = gens.iter().map(|g| g.generation).collect();
         assert_eq!(nums, [10, 2, 1]);
         assert!(gens[1].current && !gens[1].booted);
         assert_eq!(gens[1].rev.as_deref(), Some(rev));
         assert!(gens[2].booted && !gens[2].current);
         assert_eq!(gens[0].rev, None);
+        let p2 = gens[1].profiles.as_ref().unwrap();
+        assert_eq!(p2.len(), 2);
+        assert_eq!(
+            (p2[0].id.as_str(), p2[0].name.as_deref()),
+            ("p1", Some("Sam"))
+        );
+        assert_eq!((p2[1].id.as_str(), p2[1].name.as_deref()), ("p2", None));
+        assert_eq!(gens[0].profiles, None);
     }
 }

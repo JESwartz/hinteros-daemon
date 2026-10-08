@@ -453,7 +453,12 @@ async fn dispatch(
             decode::<GenerationsList>(params)?;
             let p = &svc.paths;
             encode::<GenerationsList>(GenerationsListResult {
-                generations: generations::list(&p.profile, &p.current_system, &p.booted_system),
+                generations: generations::list(
+                    &p.profile,
+                    &p.current_system,
+                    &p.booted_system,
+                    &p.profiles_json(),
+                ),
             })
         }
         JobsGet::NAME => {
@@ -1053,6 +1058,7 @@ impl Service {
                     &self.paths.profile,
                     &self.paths.current_system,
                     &self.paths.booted_system,
+                    &self.paths.profiles_json(),
                 );
                 let current = generations::current_generation(&self.paths.profile);
                 let target = match p.generation {

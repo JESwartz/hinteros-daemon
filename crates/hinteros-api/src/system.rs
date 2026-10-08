@@ -344,6 +344,18 @@ pub struct Generation {
     pub rev: Option<String>,
     pub current: bool,
     pub booted: bool,
+    /// The accounts in that generation's `state.json` (0.4); `None` when it cannot be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profiles: Option<Vec<GenerationProfile>>,
+}
+
+/// A profile of a generation's `state.json`, with its current name (`None`: not a profile now).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationProfile {
+    pub id: String,
+    #[serde(deserialize_with = "nullable")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

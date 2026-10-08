@@ -824,6 +824,22 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<RelayAppsGenerations>(),
         MethodInfo::of::<RelayAppsRollback>(),
         MethodInfo::of::<RelayAppsAcceptTerms>(),
+        MethodInfo::of::<RelayProfilesList>(),
+        MethodInfo::of::<RelayProfilesCreate>(),
+        MethodInfo::of::<RelayProfilesSetupAdmin>(),
+        MethodInfo::of::<RelayProfilesRename>(),
+        MethodInfo::of::<RelayProfilesSetAppearance>(),
+        MethodInfo::of::<RelayProfilesSetPin>(),
+        MethodInfo::of::<RelayProfilesSetLocked>(),
+        MethodInfo::of::<RelayProfilesResetPin>(),
+        MethodInfo::of::<RelayProfilesRemove>(),
+        MethodInfo::of::<RelayProfilesSwitch>(),
+        MethodInfo::of::<RelayProfilesUnlock>(),
+        MethodInfo::of::<RelayGuestSet>(),
+        MethodInfo::of::<RelayDisplaySaveMode>(),
+        MethodInfo::of::<RelayAudioSaveOutput>(),
+        MethodInfo::of::<RelayStarterSetGet>(),
+        MethodInfo::of::<RelayStarterSetSet>(),
         MethodInfo::of::<RelayJobsGet>(),
         MethodInfo::of::<RelayJobsList>(),
         MethodInfo::of::<RelayJobsCancel>(),
@@ -933,6 +949,22 @@ relay! {
     RelayAppsGenerations = "system.apps.generations" => crate::system::AppsGenerations;
     RelayAppsRollback = "system.apps.rollback" => crate::system::AppsRollback;
     RelayAppsAcceptTerms = "system.apps.accept_terms" => crate::system::AppsAcceptTerms;
+    RelayProfilesList = "system.profiles.list" => crate::system::ProfilesList;
+    RelayProfilesCreate = "system.profiles.create" => crate::system::ProfilesCreate;
+    RelayProfilesSetupAdmin = "system.profiles.setup_admin" => crate::system::ProfilesSetupAdmin;
+    RelayProfilesRename = "system.profiles.rename" => crate::system::ProfilesRename;
+    RelayProfilesSetAppearance = "system.profiles.set_appearance" => crate::system::ProfilesSetAppearance;
+    RelayProfilesSetPin = "system.profiles.set_pin" => crate::system::ProfilesSetPin;
+    RelayProfilesSetLocked = "system.profiles.set_locked" => crate::system::ProfilesSetLocked;
+    RelayProfilesResetPin = "system.profiles.reset_pin" => crate::system::ProfilesResetPin;
+    RelayProfilesRemove = "system.profiles.remove" => crate::system::ProfilesRemove;
+    RelayProfilesSwitch = "system.profiles.switch" => crate::system::ProfilesSwitch;
+    RelayProfilesUnlock = "system.profiles.unlock" => crate::system::ProfilesUnlock;
+    RelayGuestSet = "system.guest.set" => crate::system::GuestSet;
+    RelayDisplaySaveMode = "system.display.save_mode" => crate::system::DisplaySaveMode;
+    RelayAudioSaveOutput = "system.audio.save_output" => crate::system::AudioSaveOutput;
+    RelayStarterSetGet = "system.starter_set.get" => crate::system::StarterSetGet;
+    RelayStarterSetSet = "system.starter_set.set" => crate::system::StarterSetSet;
     RelayJobsGet = "system.jobs.get" => crate::system::JobsGet;
     RelayJobsList = "system.jobs.list" => crate::system::JobsList;
     RelayJobsCancel = "system.jobs.cancel" => crate::system::JobsCancel;

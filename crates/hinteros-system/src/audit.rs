@@ -157,6 +157,19 @@ impl Audit {
         );
     }
 
+    /// Which PIN a method checked, and the outcome (never the PIN).
+    pub fn pin_check(&self, uid: u32, method: &str, which: &str, outcome: &str) {
+        self.send(
+            &format!("{method} by uid {uid}: {which} PIN {outcome}"),
+            &[
+                ("UID", uid.to_string()),
+                ("METHOD", method.to_owned()),
+                ("PIN_CHECK", which.to_owned()),
+                ("PIN_OUTCOME", outcome.to_owned()),
+            ],
+        );
+    }
+
     fn send(&self, message: &str, fields: &[(&str, String)]) {
         info!(target: "audit", "{message}");
         let mut datagram = Vec::new();

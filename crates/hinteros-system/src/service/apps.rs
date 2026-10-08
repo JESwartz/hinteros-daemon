@@ -73,7 +73,7 @@ impl Service {
 
     /// The `box` stage's state when `wanted` features are not all on: requirements become every
     /// needed feature plus `wanted`.
-    fn box_state(&self, state: &State, wanted: &[String]) -> Option<State> {
+    pub(super) fn box_state(&self, state: &State, wanted: &[String]) -> Option<State> {
         let enabled: BTreeSet<&String> = state.requirements().iter().collect();
         if wanted.iter().all(|f| enabled.contains(f)) {
             return None;

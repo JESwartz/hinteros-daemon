@@ -36,6 +36,53 @@ pub enum Command {
         #[arg(required = true, value_name = "FILE")]
         files: Vec<PathBuf>,
     },
+    /// The PAM helper (`pam_exec`, as root, `PAM_USER` set): `unlocked`, `verify` (the PIN on
+    /// stdin) or `end-others`
+    Pin {
+        #[arg(value_enum)]
+        verb: crate::pam::Verb,
+        #[command(flatten)]
+        dirs: HelperDirs,
+        /// D-Bus address for logind and systemd [default: the system bus]
+        #[arg(long)]
+        bus: Option<String>,
+    },
+    /// Measure every profile's disk use into usage.json (`hinteros-usage.service`)
+    Usage {
+        #[command(flatten)]
+        dirs: HelperDirs,
+    },
+}
+
+/// Paths of the helper subcommands (defaults: the box's).
+#[derive(Args, Debug, Clone)]
+pub struct HelperDirs {
+    #[arg(long, default_value = "/var/lib/hinteros")]
+    pub state_dir: PathBuf,
+    #[arg(long, default_value = "/run/hinteros")]
+    pub run_dir: PathBuf,
+    #[arg(long, default_value = "/etc/hinteros")]
+    pub config_dir: PathBuf,
+    /// Tests only: a passwd-format file instead of the system's user database
+    #[arg(long, hide = true)]
+    pub passwd_file: Option<PathBuf>,
+    /// Tests only: a group-format file instead of the system's group database
+    #[arg(long, hide = true)]
+    pub group_file: Option<PathBuf>,
+}
+
+impl HelperDirs {
+    pub fn paths(&self) -> Paths {
+        crate::pam::paths(
+            self.state_dir.clone(),
+            self.run_dir.clone(),
+            self.config_dir.clone(),
+            crate::users::Users {
+                passwd: self.passwd_file.clone(),
+                group: self.group_file.clone(),
+            },
+        )
+    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -104,6 +151,13 @@ pub struct ServeArgs {
     #[arg(long, default_value = "nix-store")]
     pub nix_store: String,
 
+    /// The greeter's socket (`profiles.create` from the picker) [none: no greeter socket]
+    #[arg(long, default_value = "/run/hinteros/greeter.sock")]
+    pub greeter_socket: Option<PathBuf>,
+    /// The group that may connect to the greeter socket
+    #[arg(long, default_value = "hinteros-greeter")]
+    pub greeter_group: String,
+
     /// Root of the per-profile app Nix profiles (`apps/<user>`, `starter`)
     #[arg(long, default_value = "/nix/var/nix/profiles/hinteros")]
     pub apps_profiles_dir: PathBuf,
@@ -113,6 +167,9 @@ pub struct ServeArgs {
     /// Tests only: a group-format file instead of the system's group database
     #[arg(long, hide = true)]
     pub group_file: Option<PathBuf>,
+    /// Tests only: look for a removed profile's processes here instead of /proc
+    #[arg(long, hide = true)]
+    pub test_proc_dir: Option<PathBuf>,
 
     /// Free memory a rebuild needs (MemAvailable)
     #[arg(long, default_value_t = 2 << 30)]
@@ -168,6 +225,7 @@ impl ServeArgs {
             apps_profiles: self.apps_profiles_dir.clone(),
             catalog_index: self.catalog_index.clone(),
             users: self.users(),
+            proc_dir: self.test_proc_dir.clone().unwrap_or_else(default_proc),
         }
     }
 
@@ -221,6 +279,13 @@ pub struct Paths {
     /// Where users come from.
     #[serde(default)]
     pub users: crate::users::Users,
+    /// Where processes are looked up (and killed, for a removed profile).
+    #[serde(default = "default_proc")]
+    pub proc_dir: PathBuf,
+}
+
+fn default_proc() -> PathBuf {
+    "/proc".into()
 }
 
 fn default_apps_profiles() -> PathBuf {

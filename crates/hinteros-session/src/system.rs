@@ -309,7 +309,11 @@ mod tests {
 
     #[test]
     fn maps_events_and_errors() {
-        for e in system::EventName::ALL {
+        // profiles_changed is not forwarded as it is: the session re-queries (profile.rs).
+        for e in system::EventName::ALL
+            .iter()
+            .filter(|e| **e != system::EventName::ProfilesChanged)
+        {
             let s = session_event(e.wire_name()).unwrap();
             assert_eq!(s.wire_name(), e.wire_name());
         }

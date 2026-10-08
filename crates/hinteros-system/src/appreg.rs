@@ -359,6 +359,7 @@ mod tests {
             apps_profiles: root.join("nixprofiles"),
             catalog_index: None,
             users: Users::default(),
+            proc_dir: "/proc".into(),
         }
     }
 

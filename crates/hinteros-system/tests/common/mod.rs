@@ -571,9 +571,13 @@ impl Root {
         .unwrap();
         std::fs::write(
             r.p("group"),
-            "hinteros:x:990:hinteros,hinteros-p2,hinteros-guest\n",
+            format!(
+                "hinteros:x:990:hinteros,hinteros-p2,hinteros-guest\nhinteros-greeter:x:{}:\n",
+                rustix::process::getgid().as_raw()
+            ),
         )
         .unwrap();
+        std::fs::create_dir_all(r.p("proc")).unwrap();
         script(
             &r.p("bin/nixos-facter"),
             r#"echo "$@" >> "$FAKE_ROOT/facter.log"; echo '{"version":1,"fake":true}' > "$2""#,
@@ -710,6 +714,11 @@ impl System {
             r("passwd"),
             "--group-file".into(),
             r("group"),
+            "--greeter-socket".into(),
+            r("run/greeter.sock"),
+            // Never this machine's processes: a removed profile's are looked up here.
+            "--test-proc-dir".into(),
+            r("proc"),
             "--min-memory-bytes".into(),
             "0".into(),
             "--min-disk-bytes".into(),
@@ -759,6 +768,17 @@ impl System {
             .unwrap();
         ApiSchema::system()
             .check_result("hello", &serde_json::to_value(&hello).unwrap())
+            .unwrap();
+        c
+    }
+
+    /// A client of the greeter socket.
+    pub async fn greeter_client(&self) -> Client {
+        let mut c = Client::connect(&self.root.p("run/greeter.sock"))
+            .await
+            .unwrap();
+        c.hello(system::VERSION, Peer::new("greeter", "0"))
+            .await
             .unwrap();
         c
     }

@@ -19,13 +19,17 @@ pub mod generations;
 pub mod job;
 pub mod jobs;
 pub mod nixlog;
+pub mod pam;
 pub mod peer;
+pub mod pins;
 pub mod profiles;
+pub mod public;
 pub mod runner;
 pub mod service;
 pub mod state;
 pub mod store;
 pub mod update;
+pub mod usage;
 pub mod users;
 
 #[cfg(test)]

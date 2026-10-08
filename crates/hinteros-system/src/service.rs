@@ -42,6 +42,7 @@ use crate::state::{self, State};
 use crate::store;
 
 mod apps;
+mod profiles;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -67,6 +68,8 @@ pub struct Service {
     events: broadcast::Sender<Broadcast>,
     connections: Mutex<HashMap<u32, usize>>,
     users: crate::users::Users,
+    /// Owners `ensure_envs` already gave the starter env to (once per service run).
+    env_tried: Mutex<BTreeSet<String>>,
 }
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
@@ -75,6 +78,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     let mut int = signal(SignalKind::interrupt())?;
     // 0660: only root and the socket's group (set by the unit) can connect at all.
     startup(&args);
+    profiles::republish_runtime(&args.paths());
     let listener = server::bind_unix(&args.socket, 0o660, 0o755)
         .with_context(|| format!("binding {}", args.socket.display()))?;
     info!(socket = %args.socket.display(), api_version = %system::VERSION, "listening");
@@ -91,12 +95,39 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         events,
         connections: Mutex::new(HashMap::new()),
         users: args.users(),
+        env_tried: Mutex::new(BTreeSet::new()),
         paths,
         args,
     });
+    let greeter = match bind_greeter(&svc.args) {
+        Ok(l) => l,
+        Err(e) => {
+            warn!("no greeter socket: {e:#}");
+            None
+        }
+    };
+    if let Some(l) = greeter {
+        let svc = svc.clone();
+        tokio::spawn(async move {
+            loop {
+                match l.accept().await {
+                    Ok((stream, _)) => {
+                        let svc = svc.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle(svc, stream, true).await {
+                                debug!("greeter connection ended: {e:#}");
+                            }
+                        });
+                    }
+                    Err(e) => warn!("greeter accept failed: {e}"),
+                }
+            }
+        });
+    }
     if let Some(id) = svc.jobs.lock().unwrap().busy() {
         info!(job = id, "re-attached to a running job");
     }
+    svc.profiles_changed();
     tokio::spawn(monitor(svc.clone()));
 
     loop {
@@ -105,7 +136,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
                 Ok((stream, _)) => {
                     let svc = svc.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle(svc, stream).await {
+                        if let Err(e) = handle(svc, stream, false).await {
                             debug!("connection ended: {e:#}");
                         }
                     });
@@ -142,12 +173,25 @@ async fn monitor(svc: Arc<Service>) {
         if n.is_multiple_of(20) {
             svc.maybe_migrate().await;
         }
+        if n.is_multiple_of(4) {
+            svc.ensure_envs().await;
+        }
         n += 1;
         let (events, finished) = svc.jobs.lock().unwrap().poll();
         for e in events {
             let _ = svc.events.send(e);
         }
         if let Some(f) = finished {
+            if matches!(
+                f.job.kind,
+                JobKind::ProfilesCreate
+                    | JobKind::ProfilesRemove
+                    | JobKind::GuestSet
+                    | JobKind::MigrateApps
+                    | JobKind::Rollback
+            ) {
+                svc.profiles_changed();
+            }
             let outcome = serde_json::to_value(f.job.state)
                 .ok()
                 .and_then(|v| v.as_str().map(str::to_owned))
@@ -203,7 +247,24 @@ impl Drop for Slot<'_> {
     }
 }
 
-async fn handle(svc: Arc<Service>, stream: UnixStream) -> Result<()> {
+/// `greeter.sock` (0660, group `hinteros-greeter`): the greeter's own few methods.
+fn bind_greeter(args: &ServeArgs) -> Result<Option<tokio::net::UnixListener>> {
+    let Some(path) = &args.greeter_socket else {
+        return Ok(None);
+    };
+    let Some(gid) = args.users().group_gid(&args.greeter_group) else {
+        info!(group = %args.greeter_group, "no greeter group; no greeter socket");
+        return Ok(None);
+    };
+    let l = server::bind_unix(path, 0o660, 0o755)
+        .with_context(|| format!("binding {}", path.display()))?;
+    rustix::fs::chown(path, None, Some(rustix::fs::Gid::from_raw(gid)))
+        .with_context(|| format!("giving {} to group {gid}", path.display()))?;
+    info!(socket = %path.display(), "listening for the greeter");
+    Ok(Some(l))
+}
+
+async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<()> {
     let peer = Arc::new(Peer::of(&stream)?);
     info!(
         uid = peer.uid,
@@ -269,6 +330,10 @@ async fn handle(svc: Arc<Service>, stream: UnixStream) -> Result<()> {
                     Step::Ignore => {}
                     Step::Dispatch(req) => {
                         let id = req.id.expect("dispatched requests have an id");
+                        if greeter && !system::GREETER_METHODS.contains(&req.method.as_str()) {
+                            write_message(&mut w, &jsonrpc::response(&id, Err(method_not_found(&req.method)))).await?;
+                            continue;
+                        }
                         if system::MUTATING.contains(&req.method.as_str()) {
                             let Ok(permit) = in_flight.clone().try_acquire_owned() else {
                                 let err = authz::rate_limited(Duration::from_secs(1));
@@ -277,7 +342,7 @@ async fn handle(svc: Arc<Service>, stream: UnixStream) -> Result<()> {
                             };
                             let (svc, peer, tx) = (svc.clone(), peer.clone(), answers_tx.clone());
                             tokio::spawn(async move {
-                                let outcome = mutating(&svc, &peer, &req.method, req.params).await;
+                                let outcome = mutating(&svc, &peer, &req.method, req.params, greeter).await;
                                 let _ = tx.send(jsonrpc::response(&id, outcome));
                                 drop(permit);
                             });
@@ -345,7 +410,7 @@ async fn dispatch(
     subs: &mut BTreeSet<EventName>,
 ) -> Result<Value, ErrorObject> {
     if system::MUTATING.contains(&method) {
-        return mutating(svc, peer, method, params).await;
+        return mutating(svc, peer, method, params, false).await;
     }
     match method {
         Ping::NAME => server::call::<Ping>(params, server::ping),
@@ -411,6 +476,14 @@ async fn dispatch(
             decode::<AppsGenerations>(params)?;
             encode::<AppsGenerations>(svc.apps_generations(peer)?)
         }
+        system::ProfilesList::NAME => {
+            decode::<system::ProfilesList>(params)?;
+            encode::<system::ProfilesList>(svc.profiles_list(peer).await?)
+        }
+        system::StarterSetGet::NAME => {
+            decode::<system::StarterSetGet>(params)?;
+            encode::<system::StarterSetGet>(svc.starter_get()?)
+        }
         _ => Err(method_not_found(method)),
     }
 }
@@ -427,12 +500,21 @@ fn check_job_id(id: &str) -> Result<(), ErrorObject> {
     }
 }
 
-/// A short, safe summary of the params for the audit log.
+/// A short, safe summary of the params for the audit log: PINs are replaced by `***`.
 fn summarize(params: &Option<Value>) -> String {
-    let text = params
-        .as_ref()
-        .map(Value::to_string)
-        .unwrap_or_else(|| "{}".into());
+    let text = match params {
+        Some(Value::Object(map)) => {
+            let mut map = map.clone();
+            for f in system::PIN_FIELDS {
+                if let Some(v) = map.get_mut(*f) {
+                    *v = Value::String("***".into());
+                }
+            }
+            Value::Object(map).to_string()
+        }
+        Some(_) => "(not an object)".into(),
+        None => "{}".into(),
+    };
     text.chars().take(300).collect()
 }
 
@@ -443,6 +525,7 @@ async fn mutating(
     peer: &Peer,
     method: &str,
     params: Option<Value>,
+    greeter: bool,
 ) -> Result<Value, ErrorObject> {
     let action = system::polkit_action(method).expect("every mutating method has an action");
     let summary = summarize(&params);
@@ -482,7 +565,7 @@ async fn mutating(
         audit(denial.decision(), None);
         return Err(denial.error(action));
     }
-    match svc.handle(peer, request).await {
+    match svc.handle(peer, request, greeter).await {
         Ok(value) => {
             let job = value.get("job_id").and_then(Value::as_str);
             audit(Decision::Allowed, job);
@@ -511,6 +594,7 @@ pub(crate) enum Request {
     AppsRemove(AppsRemoveParams),
     AppsRollback(AppsRollbackParams),
     AppsAcceptTerms(AppsAcceptTermsParams),
+    Profiles(profiles::ProfilesRequest),
     JobsCancel(JobIdParams),
 }
 
@@ -610,12 +694,59 @@ impl Request {
                 check_job_id(&p.job_id)?;
                 Self::JobsCancel(p)
             }
-            _ => return Err(method_not_found(method)),
+            m => {
+                use profiles::ProfilesRequest as P;
+                let r = match m {
+                    system::ProfilesCreate::NAME => {
+                        P::Create(decode::<system::ProfilesCreate>(params)?)
+                    }
+                    system::ProfilesSetupAdmin::NAME => {
+                        P::SetupAdmin(decode::<system::ProfilesSetupAdmin>(params)?)
+                    }
+                    system::ProfilesRename::NAME => {
+                        P::Rename(decode::<system::ProfilesRename>(params)?)
+                    }
+                    system::ProfilesSetAppearance::NAME => {
+                        P::SetAppearance(decode::<system::ProfilesSetAppearance>(params)?)
+                    }
+                    system::ProfilesSetPin::NAME => {
+                        P::SetPin(decode::<system::ProfilesSetPin>(params)?)
+                    }
+                    system::ProfilesSetLocked::NAME => {
+                        P::SetLocked(decode::<system::ProfilesSetLocked>(params)?)
+                    }
+                    system::ProfilesResetPin::NAME => {
+                        P::ResetPin(decode::<system::ProfilesResetPin>(params)?)
+                    }
+                    system::ProfilesRemove::NAME => {
+                        P::Remove(decode::<system::ProfilesRemove>(params)?)
+                    }
+                    system::ProfilesSwitch::NAME => {
+                        P::Switch(decode::<system::ProfilesSwitch>(params)?)
+                    }
+                    system::ProfilesUnlock::NAME => {
+                        P::Unlock(decode::<system::ProfilesUnlock>(params)?)
+                    }
+                    system::GuestSet::NAME => P::GuestSet(decode::<system::GuestSet>(params)?),
+                    system::DisplaySaveMode::NAME => {
+                        P::SaveMode(decode::<system::DisplaySaveMode>(params)?)
+                    }
+                    system::AudioSaveOutput::NAME => {
+                        P::SaveOutput(decode::<system::AudioSaveOutput>(params)?)
+                    }
+                    system::StarterSetSet::NAME => {
+                        P::StarterSet(decode::<system::StarterSetSet>(params)?)
+                    }
+                    _ => return Err(method_not_found(method)),
+                };
+                r.validate()?;
+                Self::Profiles(r)
+            }
         })
     }
 }
 
-fn check_revision(revision: &str) -> Result<(), ErrorObject> {
+pub(crate) fn check_revision(revision: &str) -> Result<(), ErrorObject> {
     if revision.len() != 64
         || !revision
             .bytes()
@@ -636,6 +767,26 @@ fn state_conflict() -> ErrorObject {
         "state.json changed since settings.get",
         json!({ "reason": "revision" }),
     )
+}
+
+fn profiles_method_name(r: &profiles::ProfilesRequest) -> &'static str {
+    use profiles::ProfilesRequest as P;
+    match r {
+        P::Create(_) => system::ProfilesCreate::NAME,
+        P::SetupAdmin(_) => system::ProfilesSetupAdmin::NAME,
+        P::Rename(_) => system::ProfilesRename::NAME,
+        P::SetAppearance(_) => system::ProfilesSetAppearance::NAME,
+        P::SetPin(_) => system::ProfilesSetPin::NAME,
+        P::SetLocked(_) => system::ProfilesSetLocked::NAME,
+        P::ResetPin(_) => system::ProfilesResetPin::NAME,
+        P::Remove(_) => system::ProfilesRemove::NAME,
+        P::Switch(_) => system::ProfilesSwitch::NAME,
+        P::Unlock(_) => system::ProfilesUnlock::NAME,
+        P::GuestSet(_) => system::GuestSet::NAME,
+        P::SaveMode(_) => system::DisplaySaveMode::NAME,
+        P::SaveOutput(_) => system::AudioSaveOutput::NAME,
+        P::StarterSet(_) => system::StarterSetSet::NAME,
+    }
 }
 
 fn job_ref(id: Option<String>) -> Result<Value, ErrorObject> {
@@ -793,9 +944,18 @@ impl Service {
         (r.channel == channel && r.current_rev.as_deref() == rev).then_some(r)
     }
 
-    async fn handle(&self, peer: &Peer, request: Request) -> Result<Value, ErrorObject> {
+    async fn handle(
+        &self,
+        peer: &Peer,
+        request: Request,
+        greeter: bool,
+    ) -> Result<Value, ErrorObject> {
         let uid = peer.uid;
         match request {
+            Request::Profiles(r) => {
+                let method = profiles_method_name(&r);
+                self.profiles_request(peer, method, r, greeter).await
+            }
             Request::SettingsSet(p) => {
                 let (state, revision) = self.load_state()?;
                 if p.revision != revision {

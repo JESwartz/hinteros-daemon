@@ -90,6 +90,37 @@ pub enum Action {
     /// The v1 → v2 migration (apps.md): per-profile envs from the box-wide apps, then
     /// `state.json` schema 2 through the apply flow.
     MigrateApps(MigrateJob),
+    /// A new account (apply flow), then its metadata, PIN hash and starter env.
+    ProfileCreate(ProfileCreateJob),
+    /// An account's processes ended, the apply flow without it, then its home, PIN, metadata
+    /// and app links deleted.
+    ProfileRemove(ProfileRemoveJob),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileCreateJob {
+    /// The state with the new account.
+    pub state: State,
+    pub id: String,
+    pub user: String,
+    pub meta: crate::profiles::Meta,
+    /// The PIN's argon2id PHC string (the PIN itself never reaches a file).
+    pub pin_hash: String,
+    /// Created from the greeter: a one-time token lets the greeter enter it.
+    pub token: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRemoveJob {
+    /// The state without the account.
+    pub state: State,
+    pub id: String,
+    pub user: String,
+    /// From the user database before the switch.
+    pub uid: Option<u32>,
+    pub home: Option<PathBuf>,
 }
 
 /// What an apps job does to its owner's env.

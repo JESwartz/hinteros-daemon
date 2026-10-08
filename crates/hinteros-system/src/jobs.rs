@@ -427,6 +427,7 @@ mod tests {
             apps_profiles: d.join("nixprofiles"),
             catalog_index: None,
             users: Default::default(),
+            proc_dir: "/proc".into(),
         }
     }
 

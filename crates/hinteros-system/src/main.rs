@@ -59,6 +59,18 @@ fn main() -> ExitCode {
         .init();
     match cli.command {
         Some(Command::Job { run_dir, id }) => runner::main(&run_dir, &id),
+        Some(Command::Pin { verb, dirs, bus }) => {
+            let paths = dirs.paths();
+            hinteros_system::pam::main(
+                verb,
+                &hinteros_system::pam::Ctx {
+                    users: paths.users.clone(),
+                    paths,
+                    bus,
+                },
+            )
+        }
+        Some(Command::Usage { dirs }) => hinteros_system::usage::main(&dirs.paths()),
         Some(Command::CheckState { .. }) => unreachable!("handled above"),
         None => {
             let result = tokio::runtime::Builder::new_current_thread()

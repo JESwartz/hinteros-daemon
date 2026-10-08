@@ -34,6 +34,10 @@ pub enum ErrorCode {
     AuthenticationRequired,
     AppConflict,
     TermsRequired,
+    /// 0.4: `profiles.create` with 8 profiles.
+    ProfileLimit,
+    /// 0.4: a PIN is missing or wrong.
+    PinRequired,
     Unavailable,
     DeviceFailed,
     WrongPassword,
@@ -70,6 +74,8 @@ impl ErrorCode {
         Self::AuthenticationRequired,
         Self::AppConflict,
         Self::TermsRequired,
+        Self::ProfileLimit,
+        Self::PinRequired,
         Self::Unavailable,
         Self::DeviceFailed,
         Self::WrongPassword,
@@ -113,6 +119,8 @@ impl ErrorCode {
         Self::AuthenticationRequired,
         Self::AppConflict,
         Self::TermsRequired,
+        Self::ProfileLimit,
+        Self::PinRequired,
         Self::Unavailable,
     ];
 
@@ -145,6 +153,8 @@ impl ErrorCode {
             Self::AuthenticationRequired => 3012,
             Self::AppConflict => 3013,
             Self::TermsRequired => 3014,
+            Self::ProfileLimit => 3015,
+            Self::PinRequired => 3016,
             Self::Unavailable => 4001,
             Self::DeviceFailed => 4002,
             Self::WrongPassword => 4003,
@@ -183,6 +193,8 @@ impl ErrorCode {
             Self::AuthenticationRequired => "authentication_required",
             Self::AppConflict => "app_conflict",
             Self::TermsRequired => "terms_required",
+            Self::ProfileLimit => "profile_limit",
+            Self::PinRequired => "pin_required",
             Self::Unavailable => "unavailable",
             Self::DeviceFailed => "device_failed",
             Self::WrongPassword => "wrong_password",

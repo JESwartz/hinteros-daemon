@@ -34,6 +34,7 @@ use crate::nixlog;
 use crate::update::{Git, GitError, Rejection};
 
 mod apps;
+mod profiles;
 
 /// Files of a config dir that belong to a generation (the snapshot; device-config.nix).
 pub const MANAGED: &[&str] = &["flake.nix", "flake.lock", "state.json"];
@@ -94,6 +95,8 @@ fn run(dir: &Path) -> anyhow::Result<()> {
         Action::UpdateCheck(_) => r.update_check(),
         Action::Apps(j) => r.apps_job(&j),
         Action::MigrateApps(m) => r.migrate(&m),
+        Action::ProfileCreate(j) => r.profile_create(&j),
+        Action::ProfileRemove(j) => r.profile_remove(&j),
     };
     let staging = r.spec.paths.staging();
     let status = match outcome {

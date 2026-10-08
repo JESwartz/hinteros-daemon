@@ -203,6 +203,8 @@ pub enum EventName {
     JobStarted,
     JobProgress,
     JobFinished,
+    /// 0.4: profiles changed (a job, a rename, a PIN, lock or appearance change): re-query.
+    ProfilesChanged,
 }
 
 impl EventName {
@@ -210,6 +212,7 @@ impl EventName {
         EventName::JobStarted,
         EventName::JobProgress,
         EventName::JobFinished,
+        EventName::ProfilesChanged,
     ];
 
     pub const fn wire_name(self) -> &'static str {
@@ -217,6 +220,7 @@ impl EventName {
             EventName::JobStarted => JobStarted::NAME,
             EventName::JobProgress => JobProgress::NAME,
             EventName::JobFinished => JobFinished::NAME,
+            EventName::ProfilesChanged => ProfilesChanged::NAME,
         }
     }
 }
@@ -660,6 +664,340 @@ impl Method for AppsAcceptTerms {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Profiles (0.4, profiles.md)
+
+/// `^p[1-9][0-9]{0,2}$`.
+pub fn is_profile_id(s: &str) -> bool {
+    let b = s.as_bytes();
+    (2..=4).contains(&b.len())
+        && b[0] == b'p'
+        && (b'1'..=b'9').contains(&b[1])
+        && b[2..].iter().all(u8::is_ascii_digit)
+}
+
+/// Disk use of one profile's home (`usage.json`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileUsage {
+    pub total_bytes: u64,
+    pub steam_games_bytes: u64,
+    /// When it was measured (Unix seconds).
+    pub at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileInfo {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub user: String,
+    pub admin: bool,
+    pub locked: bool,
+    /// The PIN backoff lock (Unix seconds), while it is on.
+    #[serde(deserialize_with = "nullable")]
+    pub locked_until: Option<i64>,
+    /// Its session is the one on screen.
+    pub active: bool,
+    #[serde(deserialize_with = "nullable")]
+    pub last_used_at: Option<i64>,
+    #[serde(deserialize_with = "nullable")]
+    pub usage: Option<ProfileUsage>,
+    /// false: a migrated profile without a PIN yet ("Set your PIN").
+    pub pin_set: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestInfo {
+    pub enabled: bool,
+    #[serde(deserialize_with = "nullable")]
+    pub usage: Option<ProfileUsage>,
+}
+
+/// Who called.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallerInfo {
+    /// The caller's profile (or spare account) id.
+    #[serde(deserialize_with = "nullable")]
+    pub id: Option<String>,
+    pub user: String,
+    pub guest: bool,
+    /// An account without a profile (first-boot mode creates the admin profile on it).
+    pub spare: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfilesListResult {
+    pub profiles: Vec<ProfileInfo>,
+    pub guest: GuestInfo,
+    pub max: u32,
+    pub first_boot: bool,
+    pub caller: CallerInfo,
+}
+
+pub struct ProfilesList;
+impl Method for ProfilesList {
+    const NAME: &'static str = "profiles.list";
+    type Params = NoParams;
+    type Result = ProfilesListResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilesCreateParams {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    pub pin: String,
+    pub locked: bool,
+    /// `settings.get`'s revision (the account is a state.json change).
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfilesCreateResult {
+    pub job_id: String,
+    pub id: String,
+}
+
+pub struct ProfilesCreate;
+impl Method for ProfilesCreate {
+    const NAME: &'static str = "profiles.create";
+    type Params = ProfilesCreateParams;
+    type Result = ProfilesCreateResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilesSetupAdminParams {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    pub pin: String,
+    pub locked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileIdResult {
+    pub id: String,
+}
+
+pub struct ProfilesSetupAdmin;
+impl Method for ProfilesSetupAdmin {
+    const NAME: &'static str = "profiles.setup_admin";
+    type Params = ProfilesSetupAdminParams;
+    type Result = ProfileIdResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilesRenameParams {
+    pub id: String,
+    pub name: String,
+    /// The admin PIN, for another profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
+}
+
+pub struct ProfilesRename;
+impl Method for ProfilesRename {
+    const NAME: &'static str = "profiles.rename";
+    type Params = ProfilesRenameParams;
+    type Result = Empty;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilesSetAppearanceParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_scale: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub high_contrast: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduce_motion: Option<bool>,
+}
+
+pub struct ProfilesSetAppearance;
+impl Method for ProfilesSetAppearance {
+    const NAME: &'static str = "profiles.set_appearance";
+    type Params = ProfilesSetAppearanceParams;
+    type Result = Empty;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilesSetPinParams {
+    pub pin: String,
+    /// Required once a PIN is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_pin: Option<String>,
+}
+
+pub struct ProfilesSetPin;
+impl Method for ProfilesSetPin {
+    const NAME: &'static str = "profiles.set_pin";
+    type Params = ProfilesSetPinParams;
+    type Result = Empty;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilesSetLockedParams {
+    pub locked: bool,
+    pub pin: String,
+}
+
+pub struct ProfilesSetLocked;
+impl Method for ProfilesSetLocked {
+    const NAME: &'static str = "profiles.set_locked";
+    type Params = ProfilesSetLockedParams;
+    type Result = Empty;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilesResetPinParams {
+    pub id: String,
+    pub new_pin: String,
+    /// The admin PIN (not for the admin profile itself: the admin account's password then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
+}
+
+pub struct ProfilesResetPin;
+impl Method for ProfilesResetPin {
+    const NAME: &'static str = "profiles.reset_pin";
+    type Params = ProfilesResetPinParams;
+    type Result = Empty;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilesRemoveParams {
+    pub id: String,
+    pub confirm_id: String,
+    pub pin: String,
+    pub revision: String,
+}
+
+pub struct ProfilesRemove;
+impl Method for ProfilesRemove {
+    const NAME: &'static str = "profiles.remove";
+    type Params = ProfilesRemoveParams;
+    type Result = JobRef;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilesSwitchParams {
+    /// A profile id or `guest`.
+    pub id: String,
+}
+
+pub struct ProfilesSwitch;
+impl Method for ProfilesSwitch {
+    const NAME: &'static str = "profiles.switch";
+    type Params = ProfilesSwitchParams;
+    type Result = Empty;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinParams {
+    pub pin: String,
+}
+
+pub struct ProfilesUnlock;
+impl Method for ProfilesUnlock {
+    const NAME: &'static str = "profiles.unlock";
+    type Params = PinParams;
+    type Result = Empty;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestSetParams {
+    pub enabled: bool,
+    pub admin_pin: String,
+}
+
+pub struct GuestSet;
+impl Method for GuestSet {
+    const NAME: &'static str = "guest.set";
+    type Params = GuestSetParams;
+    type Result = JobRef;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplaySaveModeParams {
+    /// The display as gamescope names it in its mode save file (`<make> <model>`).
+    pub display: String,
+    pub width: u32,
+    pub height: u32,
+    pub refresh: u32,
+}
+
+pub struct DisplaySaveMode;
+impl Method for DisplaySaveMode {
+    const NAME: &'static str = "display.save_mode";
+    type Params = DisplaySaveModeParams;
+    type Result = Empty;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioSaveOutputParams {
+    /// A PipeWire node name, `^[A-Za-z0-9._:-]{1,128}$`.
+    pub node: String,
+}
+
+pub struct AudioSaveOutput;
+impl Method for AudioSaveOutput {
+    const NAME: &'static str = "audio.save_output";
+    type Params = AudioSaveOutputParams;
+    type Result = Empty;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StarterSetGetResult {
+    pub ids: Vec<String>,
+    #[serde(deserialize_with = "nullable")]
+    pub updated_at: Option<i64>,
+}
+
+pub struct StarterSetGet;
+impl Method for StarterSetGet {
+    const NAME: &'static str = "starter_set.get";
+    type Params = NoParams;
+    type Result = StarterSetGetResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StarterSetSetParams {
+    pub ids: Vec<String>,
+    /// The admin PIN.
+    pub pin: String,
+}
+
+pub struct StarterSetSet;
+impl Method for StarterSetSet {
+    const NAME: &'static str = "starter_set.set";
+    type Params = StarterSetSetParams;
+    type Result = JobRef;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfilesChangedParams {}
+
+pub struct ProfilesChanged;
+impl Event for ProfilesChanged {
+    const NAME: &'static str = "profiles_changed";
+    type Params = ProfilesChangedParams;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Jobs
 
 /// Result of a job that changed the system.
@@ -850,6 +1188,22 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<AppsGenerations>(),
         MethodInfo::of::<AppsRollback>(),
         MethodInfo::of::<AppsAcceptTerms>(),
+        MethodInfo::of::<ProfilesList>(),
+        MethodInfo::of::<ProfilesCreate>(),
+        MethodInfo::of::<ProfilesSetupAdmin>(),
+        MethodInfo::of::<ProfilesRename>(),
+        MethodInfo::of::<ProfilesSetAppearance>(),
+        MethodInfo::of::<ProfilesSetPin>(),
+        MethodInfo::of::<ProfilesSetLocked>(),
+        MethodInfo::of::<ProfilesResetPin>(),
+        MethodInfo::of::<ProfilesRemove>(),
+        MethodInfo::of::<ProfilesSwitch>(),
+        MethodInfo::of::<ProfilesUnlock>(),
+        MethodInfo::of::<GuestSet>(),
+        MethodInfo::of::<DisplaySaveMode>(),
+        MethodInfo::of::<AudioSaveOutput>(),
+        MethodInfo::of::<StarterSetGet>(),
+        MethodInfo::of::<StarterSetSet>(),
         MethodInfo::of::<JobsGet>(),
         MethodInfo::of::<JobsList>(),
         MethodInfo::of::<JobsCancel>(),
@@ -858,6 +1212,7 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<JobStarted>(),
         EventInfo::of::<JobProgress>(),
         EventInfo::of::<JobFinished>(),
+        EventInfo::of::<ProfilesChanged>(),
     ],
     errors: ErrorCode::SYSTEM,
 };
@@ -878,8 +1233,34 @@ pub const MUTATING: &[&str] = &[
     AppsRemove::NAME,
     AppsRollback::NAME,
     AppsAcceptTerms::NAME,
+    ProfilesCreate::NAME,
+    ProfilesSetupAdmin::NAME,
+    ProfilesRename::NAME,
+    ProfilesSetAppearance::NAME,
+    ProfilesSetPin::NAME,
+    ProfilesSetLocked::NAME,
+    ProfilesResetPin::NAME,
+    ProfilesRemove::NAME,
+    ProfilesSwitch::NAME,
+    ProfilesUnlock::NAME,
+    GuestSet::NAME,
+    DisplaySaveMode::NAME,
+    AudioSaveOutput::NAME,
+    StarterSetSet::NAME,
     JobsCancel::NAME,
 ];
+
+/// What `greeter.sock` serves (besides `hello`): the greeter's own needs only.
+pub const GREETER_METHODS: &[&str] = &[
+    crate::common::Ping::NAME,
+    Subscribe::NAME,
+    Unsubscribe::NAME,
+    JobsGet::NAME,
+    ProfilesCreate::NAME,
+];
+
+/// Methods whose params carry PINs (never logged; the audit summary redacts them).
+pub const PIN_FIELDS: &[&str] = &["pin", "current_pin", "new_pin", "admin_pin"];
 
 /// The polkit action that guards a mutating method.
 pub fn polkit_action(method: &str) -> Option<&'static str> {
@@ -895,6 +1276,18 @@ pub fn polkit_action(method: &str) -> Option<&'static str> {
         AppsInstall::NAME | AppsRemove::NAME | AppsRollback::NAME | AppsAcceptTerms::NAME => {
             "org.hinteros.system.apps"
         }
+        ProfilesCreate::NAME => "org.hinteros.system.profiles.create",
+        ProfilesSetupAdmin::NAME
+        | ProfilesRename::NAME
+        | ProfilesSetAppearance::NAME
+        | ProfilesSetPin::NAME
+        | ProfilesSetLocked::NAME
+        | ProfilesResetPin::NAME
+        | ProfilesRemove::NAME
+        | ProfilesSwitch::NAME
+        | ProfilesUnlock::NAME => "org.hinteros.system.profiles",
+        GuestSet::NAME | StarterSetSet::NAME => "org.hinteros.system.starter",
+        DisplaySaveMode::NAME | AudioSaveOutput::NAME => "org.hinteros.system.settings",
         _ => return None,
     })
 }
@@ -910,9 +1303,17 @@ pub const POLKIT_ACTIONS: &[&str] = &[
     "org.hinteros.system.channel",
     "org.hinteros.system.jobs.cancel",
     "org.hinteros.system.apps",
+    "org.hinteros.system.profiles",
+    "org.hinteros.system.profiles.create",
+    "org.hinteros.system.profiles.recover",
+    "org.hinteros.system.starter",
+    "org.hinteros.system.services",
 ];
 
 /// Actions the service checks with polkit's `AllowUserInteraction`: their default is
 /// `auth_admin`, and polkit asks the caller's authentication agent (the session daemon's) for
 /// the admin password while the call waits. Every other action is checked without interaction.
-pub const INTERACTIVE_ACTIONS: &[&str] = &["org.hinteros.system.ssh"];
+pub const INTERACTIVE_ACTIONS: &[&str] = &[
+    "org.hinteros.system.ssh",
+    "org.hinteros.system.profiles.recover",
+];

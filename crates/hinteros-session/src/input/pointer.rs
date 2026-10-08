@@ -22,7 +22,9 @@
 //! Showing and hiding the pointer ([`PointerState`]): never on inactivity (the system runs
 //! gamescope with a `--hide-cursor-delay` too long to matter); the D-pad or left stick hides it
 //! at once with gamescope's `paint_cursor_plane` convar (`gamescopectl paint_cursor_plane 0`),
-//! the right stick (or RT) shows it again; see [`CursorControl`].
+//! the right stick (or RT) shows it again. As gamescope never hides it either, going Home from a
+//! pointer app hides it (no stray pointer on the launcher) and the next app shows it again; see
+//! [`PointerState`] and [`CursorControl`].
 
 use std::time::Duration;
 
@@ -208,12 +210,19 @@ impl CursorControl for CommandCursor {
     }
 }
 
-/// Whether gamescope's pointer is shown in a pointer app. It is never hidden for inactivity:
-/// the D-pad or left stick (arrow keys) hides it, the right stick shows it again.
+/// Whether gamescope's pointer is shown. In a pointer app it is never hidden for inactivity:
+/// the D-pad or left stick (arrow keys) hides it, the right stick shows it again. gamescope
+/// itself never hides it either (the system gives it a `--hide-cursor-delay` too long to
+/// matter), so going from a pointer app to the launcher (pad only) hides it, and the next app
+/// gets it back.
 #[derive(Debug, Default)]
 pub struct PointerState {
     /// We hid the pointer (and must show it again before anyone else needs it).
     hidden: bool,
+    /// A pointer app had focus since we last hid it: the pointer may be on screen.
+    used: bool,
+    /// The focus the pointer was last set for: (a pointer app, any app). The launcher at start.
+    focus: (bool, bool),
 }
 
 /// What the caller should do with gamescope's pointer.
@@ -248,9 +257,26 @@ impl PointerState {
         }
     }
 
-    /// The pointer mode ends (focus moved away): give the pointer back to gamescope's rules.
-    pub fn reset(&mut self) -> Option<CursorChange> {
-        std::mem::take(&mut self.hidden).then_some(CursorChange::Show)
+    /// The focus changed (or may have): `pointer_app` has the right-stick pointer, `app` is any
+    /// app (not the launcher). Entering an app shows a pointer we hid (in a pointer app until
+    /// the D-pad; elsewhere gamescope's own rules, for a real mouse); going from a pointer app
+    /// to the launcher hides it, so no pointer left over from a web app sits on the home
+    /// screen. Nothing happens between the launcher and other apps.
+    pub fn focus(&mut self, pointer_app: bool, app: bool) -> Option<CursorChange> {
+        if self.focus == (pointer_app, app) {
+            return None;
+        }
+        self.focus = (pointer_app, app);
+        if pointer_app {
+            self.used = true;
+        }
+        if app || pointer_app {
+            self.motion()
+        } else if std::mem::take(&mut self.used) {
+            self.navigated()
+        } else {
+            None
+        }
     }
 }
 
@@ -273,18 +299,36 @@ mod tests {
     #[test]
     fn pointer_state() {
         let mut p = PointerState::new();
-        // Shown until the D-pad or left stick is used, however long nothing happens.
+        // The launcher at start: nothing to do.
+        assert_eq!(p.focus(false, false), None);
+        // A pointer app: shown until the D-pad or left stick is used, however long nothing
+        // happens.
+        assert_eq!(p.focus(true, true), None);
         assert!(!p.hidden());
         assert_eq!(p.motion(), None);
         // D-pad: hide once; the next motion shows it again.
         assert_eq!(p.navigated(), Some(CursorChange::Hide));
         assert!(p.hidden());
         assert_eq!(p.navigated(), None);
+        // The same focus again (e.g. the on-screen keyboard came and went): still hidden.
+        assert_eq!(p.focus(true, true), None);
         assert_eq!(p.motion(), Some(CursorChange::Show));
         assert_eq!(p.motion(), None);
-        // Leaving pointer mode while hidden restores it.
+        // Home: hidden on the launcher; any app shows it again.
+        assert_eq!(p.focus(false, false), Some(CursorChange::Hide));
+        assert_eq!(p.focus(false, false), None);
+        assert_eq!(p.focus(false, true), Some(CursorChange::Show));
+        // A game and the launcher alone never touch it.
+        assert_eq!(p.focus(false, false), None);
+        assert_eq!(p.focus(false, true), None);
+        assert_eq!(p.focus(false, false), None);
+        // Launcher to pointer app and back.
+        assert_eq!(p.focus(true, true), None);
+        assert_eq!(p.focus(false, false), Some(CursorChange::Hide));
+        assert_eq!(p.focus(true, true), Some(CursorChange::Show));
+        // Hidden by the D-pad, then Home (stays hidden), then a game: shown for the game.
         assert_eq!(p.navigated(), Some(CursorChange::Hide));
-        assert_eq!(p.reset(), Some(CursorChange::Show));
-        assert_eq!(p.reset(), None);
+        assert_eq!(p.focus(false, false), None);
+        assert_eq!(p.focus(false, true), Some(CursorChange::Show));
     }
 }

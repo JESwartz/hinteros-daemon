@@ -1069,10 +1069,8 @@ impl Shell {
             self.pointer_profile = pointer;
             self.input.set_pointer(pointer);
         }
-        if !pointer {
-            let change = self.pointer.reset();
-            self.cursor_change(change);
-        }
+        let change = self.pointer.focus(pointer, self.focused_app().is_some());
+        self.cursor_change(change);
         self.input.set_mode(self.intercept_mode());
     }
 
@@ -3977,22 +3975,28 @@ mod tests {
             [Call::Cursor(true), Call::Click(true), Call::Click(false)]
         );
 
-        // Hidden by the D-pad, then Home: the pointer is given back, the profile unloaded.
+        // Shown, then Home: the profile unloaded, and the pointer hidden on the launcher.
         t.input("ui_quick2", 1.0);
-        t.advance(MS(100));
-        t.input("ui_left", 1.0);
-        t.input("ui_left", 0.0);
         t.log.take();
         t.input("ui_guide", 1.0);
         let log = t.log.take();
         assert!(log.contains(&Call::Pointer(false)), "{log:?}");
-        assert!(log.contains(&Call::Cursor(true)), "{log:?}");
+        assert!(log.contains(&Call::Cursor(false)), "{log:?}");
         assert_eq!(log.last(), Some(&Call::Mode(InterceptMode::All)));
+        // Back in the app: shown again. Hidden by the D-pad, then Home: it stays hidden.
+        t.launch(json!({"id": "youtube"}));
+        assert!(t.log.take().contains(&Call::Cursor(true)));
+        t.input("ui_left", 1.0);
+        t.input("ui_left", 0.0);
+        assert_eq!(t.log.take(), [Call::Cursor(false), keys(&["left"])]);
+        t.input("ui_guide", 1.0);
+        assert!(!t.log.take().iter().any(|c| matches!(c, Call::Cursor(_))));
 
-        // Games: no pointer, no profile, the pad as it is.
+        // Games: no pointer, no profile, the pad as it is; gamescope's pointer back (a mouse).
         t.launch(json!({"id": "portal"}));
         let log = t.log.take();
         assert!(!log.iter().any(|c| matches!(c, Call::Pointer(_))));
+        assert!(log.contains(&Call::Cursor(true)), "{log:?}");
         assert_eq!(log.last(), Some(&Call::Mode(InterceptMode::Pass)));
         // Pointer off in the config: All, no profile.
         let mut t = T::with(|c| c.pointer_enabled = false);

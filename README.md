@@ -138,8 +138,10 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   Clicks go through `CompositeDevice.SendEvent("Mouse:Button:Left", b)` (in the pad's worker,
   see "Robustness" above). The pointer **never hides on inactivity**: the D-pad or left stick
   (arrow keys) hides it at once (`hide_command`, default `gamescopectl paint_cursor_plane 0`),
-  the right stick or RT shows it again (`show_command`, also when the app loses focus); the
-  system runs gamescope with a `--hide-cursor-delay` too long to matter. Leaving the app puts
+  the right stick or RT shows it again (`show_command`); the system runs gamescope with a
+  `--hide-cursor-delay` too long to matter, so going Home from a pointer app hides it too (no
+  stray pointer on the launcher) and the next app (a game: gamescope's own rules, for a real
+  mouse) shows it again. Launcher and games alone never touch it. Leaving the app puts
   the profile that was loaded before back (or InputPlumber's default) before the next mode, so
   games never get a mouse on the right stick. Profiles and modes are re-applied when
   InputPlumber restarts, a pad appears, or the watchdog finds them changed.

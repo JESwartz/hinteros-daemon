@@ -816,7 +816,10 @@ trust.
   `gpg.ssh.allowedSignersFile` = the running generation's `allowed_signers`, i.e.
   `ssh-keygen -Y verify`), requires it to descend from the locked revision, and reports the
   highest `Security: low|medium|high|critical` trailer among the new commits (unknown values
-  count as `high`). git runs with no config files, no prompts, and only the channel's transport
+  count as `high`), the newest `Security-Summary:` trailer as `security_summary` (one line,
+  control characters removed, at most 120 characters), and the tip's `release/version` as
+  `version` (if it is a semantic version of at most 32 characters, else the 12-digit short rev).
+  git runs with no config files, no prompts, and only the channel's transport
   (`https`, or `file` for tests). Results are cached for 60 s; failures are
   `update_unreachable {host}` or `update_verification_failed {reason}` in `job_finished`.
   `update.apply {rev}` only accepts the last verified result for the current channel and
@@ -1135,9 +1138,9 @@ server, `--icon-allow-http`, a hidden test flag).
   input in `system-escalation` (`../x`, store paths, unknown ids, terms for other apps, a symlinked
   data path pointing out of the home).
 
-### What the launcher must do (session API 0.10)
+### What the launcher must do (session API 0.11)
 
-Say hello with 0.10 (client name `hinteros-launcher`), match responses by id (they may come out of
+Say hello with 0.11 (client name `hinteros-launcher`), match responses by id (they may come out of
 order), and:
 
 - Subscribe to `authentication_requested`/`authentication_finished`. On a request show the admin
@@ -1155,6 +1158,9 @@ order), and:
   the job events; "More apps after the next update" when `more_after_update`.
 - On-screen keyboard (0.10): mask the typed-text preview only while `osk_visibility.password` is
   true; show it plainly otherwise (also when no field was reported).
+- Updates (0.11): show `available.version` ("HinterOS 0.6.1") on the update screen and banner
+  (the short rev when it is absent), and `available.security_summary`, when non-null, under the
+  severity on the security notice and the update screen.
 
 ## Development
 
@@ -1169,7 +1175,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.10","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.11","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

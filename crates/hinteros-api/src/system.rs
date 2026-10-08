@@ -414,6 +414,14 @@ pub struct AvailableUpdate {
     /// if the target's catalog could not be read.
     #[serde(default, deserialize_with = "nullable")]
     pub removed_apps: Option<Vec<RemovedApp>>,
+    /// The release `rev` carries: its `release/version` file if that is a semantic version,
+    /// otherwise the first 12 hex digits of `rev`. Absent from services before M6.
+    #[serde(default, deserialize_with = "nullable")]
+    pub version: Option<String>,
+    /// The newest `Security-Summary:` trailer among the new commits (one line, at most 120
+    /// characters), or null.
+    #[serde(default, deserialize_with = "nullable")]
+    pub security_summary: Option<String>,
 }
 
 /// A catalog app named in an update check.

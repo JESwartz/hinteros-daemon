@@ -2,8 +2,9 @@
 // the result to the session daemon through the native-messaging host.
 //
 // The host ("hinteros_osk", installed with the session daemon) forwards
-// {focus: "text" | "password" | "none"} to the daemon, which shows the on-screen keyboard
-// while a text field has focus in the app the TV shows, and hides it afterwards.
+// {focus: "text" | "password" | "none"} to the daemon, which shows the on-screen keyboard when
+// A is pressed on a focused text field in the app the TV shows, and hides it when B is pressed
+// or the field loses focus.
 "use strict";
 
 const HOST = "hinteros_osk";

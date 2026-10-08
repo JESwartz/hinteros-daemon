@@ -403,7 +403,7 @@
     },
     "osk.show": {
       "summary": "Show the on-screen keyboard over whatever has focus.",
-      "description": "The on-screen keyboard is a separate client (hinteros-osk) whose window the daemon shows as a gamescope overlay; it never takes focus, so typed keys reach the focused app. While it is visible, InputPlumber is in intercept mode ALL and input_nav goes only to the connection whose hello client name is 'hinteros-osk' (not to the launcher). osk_visibility follows if the visibility changed. Showing it again does nothing. The user can also summon it with the controller (Guide + Y by default).",
+      "description": "The on-screen keyboard is a separate client (hinteros-osk) whose window the daemon shows as a gamescope overlay; it never takes focus, so typed keys reach the focused app. While it is visible, InputPlumber is in intercept mode ALL and input_nav goes only to the connection whose hello client name is 'hinteros-osk' (not to the launcher). osk_visibility follows if the visibility changed. Showing it again does nothing. The user can also summon it with the controller (Guide + Y by default, or A on a focused text field in a keyboard-profile Firefox app), and B hides it whatever has focus (the keyboard client never receives back while visible).",
       "since": "0.4",
       "params": {
         "type": "object",
@@ -2047,7 +2047,7 @@
     },
     "input_nav": {
       "summary": "A controller navigation intent, sent to the launcher while it has focus, or only to the on-screen keyboard while it is visible.",
-      "description": "Directions repeat while held (phase 'repeat', key repeat done by the daemon); other actions only press and release. Recipients (0.4): while the on-screen keyboard is visible, only connections whose hello client name is 'hinteros-osk'; otherwise, while the launcher has focus, every other subscribed connection. Apps get the pad itself (InputPlumber PASS) or, with a keyboard input profile, key presses from the daemon; no input_nav is sent then. The launcher should map arrow keys, Enter and Escape to the same intents so it works without a controller. Clients must ignore unknown actions.",
+      "description": "Directions repeat while held (phase 'repeat', key repeat done by the daemon; one repeating direction at a time, a new direction or a release ends it at once, events are sent immediately and never queued); other actions only press and release. While the on-screen keyboard is visible, back is not sent: B hides the keyboard. Recipients (0.4): while the on-screen keyboard is visible, only connections whose hello client name is 'hinteros-osk'; otherwise, while the launcher has focus, every other subscribed connection. Apps get the pad itself (InputPlumber PASS) or, with a keyboard input profile, key presses from the daemon; no input_nav is sent then. The launcher should map arrow keys, Enter and Escape to the same intents so it works without a controller. Clients must ignore unknown actions.",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -2104,7 +2104,7 @@
       ]
     },
     "osk_visibility": {
-      "summary": "The on-screen keyboard was shown or hidden (osk.show/osk.hide, the controller chord, Home, or a focus change).",
+      "summary": "The on-screen keyboard was shown or hidden (osk.show/osk.hide, the controller chord, A on a focused text field, B while it is visible, Home, or a focus change).",
       "since": "0.4",
       "params": {
         "type": "object",

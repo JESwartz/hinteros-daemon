@@ -44,6 +44,13 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   launcher back (on release, since Guide also starts the on-screen keyboard chord). Re-applies everything when InputPlumber restarts or a pad appears. Without
   InputPlumber it logs and carries on. `--dev-gamepad` reads
   pads directly instead, for desktop previews only (see "Desktop preview").
+  Latency: every InputPlumber method and property read is a polkit check, so the signal loop
+  never makes a D-Bus call per event. The pad behind a D-Bus target (for the Xbox label swap
+  and clicks) comes from the composite device's `DbusDevices` property, read once per target
+  and cached (also when nobody claims it); proxies never cache properties (a caching proxy
+  fetches all of them on first use). InputPlumber turns the left stick into directions at one
+  threshold (0.60) without hysteresis, so a direction re-pressed within
+  `[input] direction_debounce_ms` (40) of its release is chatter and dropped with its release.
 - **Apps** (`apps.rs`, `shell.rs`): `apps.launch` runs a command, or hands a
   `steam://rungameid/<id>` URL to `steam -silent`, and tracks it (`app_started`,
   `app_exited`, `focus_changed`). A command app has exited when its process tree has; a Steam
@@ -86,7 +93,29 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   d-pad/stick to arrows (with the daemon's key repeat), A to Enter, B to `back_key` (Escape
   unless set), plus anything in `[apps.keymap]`. Guide is still Home. Steam games are always
   `gamepad` (the default: InputPlumber PASS, Steam Input applies). Without a virtual keyboard a
-  keyboard app falls back to the gamepad.
+  keyboard app falls back to the gamepad. Directions never queue: a held direction repeats
+  from one timer (a new direction replaces it, a release stops it at once), direction taps go
+  to the key worker as navigation jobs that a newer one supersedes and that are dropped after
+  150 ms (typed text keeps its full queue), and stick chatter is filtered (below).
+- **Right-stick pointer** (`input/pointer.rs`, `[pointer]`, per app `pointer = false`): in a
+  keyboard-profile app the right stick moves a mouse pointer, the left stick and D-pad stay
+  arrow keys. InputPlumber does the motion: the daemon loads a device profile
+  (`LoadProfileFromYaml`; InputPlumber's default mappings plus `RightStick → Mouse:Motion`,
+  `speed_pps`, linear with InputPlumber's fixed 0.20 deadzone) and uses intercept mode
+  GAMEPAD_ONLY (3), where the profile's mouse events still reach InputPlumber's virtual mouse
+  while every gamepad event comes to the daemon over D-Bus (ALL would swallow them). The D-Bus
+  target never reports the right stick, so the profile also maps any deflection beyond
+  `activity_deadzone` to the unused `QuickAccess2` button, which arrives as `ui_quick2`: "the
+  pointer is in use". While it is (moved within `idle_ms`, and no D-pad/left stick since),
+  **A is a left click** (press and release follow the button, so dragging works) instead of
+  Enter; **RT is a left click** whenever the app has a pointer (unless the keymap maps
+  `trigger_right`). Clicks go through `CompositeDevice.SendEvent("Mouse:Button:Left", b)`. The
+  D-pad or left stick hides the pointer at once (`hide_command`, default
+  `gamescopectl paint_cursor_plane 0`; `show_command` on the next stick movement and when the
+  app loses focus); gamescope also hides it on its own after `--hide-cursor-delay`. Leaving the
+  app puts the profile that was loaded before back (or InputPlumber's default) before the next
+  mode, so games never get a mouse on the right stick. Profiles and modes are re-applied when
+  InputPlumber restarts or a pad appears.
 - **Typing** (`keys/`): `keys.type {text}` types per character through a uinput virtual US
   keyboard (Shift for capitals and symbols; the spike's `kbd.py` table) or, for characters a US
   keyboard does not have, gamescope's private `gamescope_input_method` protocol (one character
@@ -112,10 +141,20 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   `ui_context`; the daemon swaps them per composite device (`[input] xbox_label_swap`, detection
   by the xpad driver of the sources, else the "Microsoft X-Box ..." config name; Bluetooth Xbox
   pads, PlayStation, Switch are left alone), so Y is always the chord button.
-  **Automatic** (`textfocus.rs`, `firefox-extension/`): in a keyboard-profile app, a text or
-  password field getting focus in Firefox shows it, and losing focus hides it again 250 ms later
-  (so moving between fields does not flicker), unless it was shown or hidden by hand meanwhile.
-  See "Automatic on-screen keyboard in Firefox" below.
+  **B closes it**, whatever has focus (launcher, game or app): while it is visible the daemon
+  takes B itself (`osk_visibility false`, the keyboard client never sees B, nor its release),
+  and the previous mode comes back. The keyboard client owns the other buttons (X Backspace,
+  Y Shift, ...).
+  **Text fields** (`textfocus.rs`, `firefox-extension/`): the Firefox extension reports which
+  text or password field has focus, per keyboard-profile app. Nothing pops up on focus: with
+  `[osk] field_summon = "accept"` (the default) **A on a focused field shows the keyboard**
+  instead of sending Enter (A's release is dropped too). `auto_show = true` (off by default)
+  shows it as soon as a field gets focus instead. Either way a keyboard shown for a field hides
+  250 ms after the field loses focus (no flicker between fields), unless it was shown or
+  hidden by hand meanwhile. See "On-screen keyboard for Firefox text fields" below.
+  **Address bar**: WebExtensions cannot see Firefox's own URL bar, so an app with
+  `address_bar = true` (plain Firefox with a toolbar, not a kiosk) maps View (`ui_select`) to
+  Ctrl+L and then shows the keyboard (unless `[apps.keymap] view` says otherwise).
   Every chord step is logged at info level with the raw `ui_*` name of the other button
   (`chord guide+context → on-screen keyboard button=ui_context`, `guide released alone → Home`,
   `guide+secondary → ignored (not a chord) button=ui_action`), so a pad whose buttons arrive
@@ -205,6 +244,7 @@ repeat_delay_ms = 400
 repeat_interval_ms = 100
 xbox_label_swap = "auto"       # "auto" | "on" | "off": Xbox (xpad) pads give Y as ui_action, X as ui_context
 dev_gamepad = false            # development only, see "Desktop preview"
+direction_debounce_ms = 40     # a direction re-pressed this soon after its release is stick chatter (0: off)
 
 [icons]
 fetch = true                   # download web app icons (https only)
@@ -221,7 +261,16 @@ ime_delay_ms = 80              # between input method characters
 enable = true
 command = ["hinteros-osk"]     # started (and restarted) if found; not under the reaper
 summon = "guide+context"       # hold Guide + press this button (Y); or "none"
-auto_show = true               # show it when a text field gets focus in a keyboard-profile app (Firefox extension)
+field_summon = "accept"        # A on a focused text field (Firefox extension) shows it, no Enter; or "none"
+auto_show = false              # show it as soon as a text field gets focus in a keyboard-profile app
+
+[pointer]                      # right stick = mouse pointer in keyboard-profile apps
+enable = true
+speed_pps = 1000               # pixels per second at full deflection (InputPlumber profile)
+activity_deadzone = 0.25       # right stick movement that counts as using the pointer
+idle_ms = 3000                 # A clicks while the stick moved this recently; match gamescope --hide-cursor-delay
+hide_command = ["gamescopectl", "paint_cursor_plane", "0"]  # D-pad/left stick used: hide at once
+show_command = ["gamescopectl", "paint_cursor_plane", "1"]  # right stick moved again
 
 [system]
 enable = true                  # relay system.* to the system service
@@ -275,6 +324,8 @@ site_url = "https://www.youtube.com/tv"     # icon from the site (or: icon_url =
 # firefox_profile = "~/.local/share/hinteros/firefox/youtube"  # fallback: the favicon Firefox stored
 input = "keyboard"             # "gamepad" (default) or "keyboard"
 back_key = "escape"            # what B sends [default: escape]; e.g. "backspace", "alt+left"
+pointer = true                 # keyboard profile: right stick = mouse pointer [default: true]
+address_bar = false            # plain Firefox (not kiosk): View = Ctrl+L + on-screen keyboard
 
 [apps.keymap]                  # controller action = key, on top of the defaults ("none" unmaps)
 context = "ctrl+l"             # Y
@@ -542,7 +593,7 @@ inside its window instead); that `[769, launcher]` shows them with working input
 Big Picture writes `GAMESCOPECTRL_BASELAYER_APPID` itself (the daemon logs it if so); and that
 SIGTERM to the processes under Steam's reaper ends Proton games cleanly.
 
-### Automatic on-screen keyboard in Firefox
+### On-screen keyboard for Firefox text fields
 
 The chain (design: `hinteros-docs/spikes/05-on-screen-keyboard.md`, "auto-summon"):
 
@@ -557,8 +608,10 @@ The chain (design: `hinteros-docs/spikes/05-on-screen-keyboard.md`, "auto-summon
    to the daemon's internal socket `osk.sock` (next to `session.sock`;
    `$HINTEROS_OSK_SOCKET`, which the daemon sets for the apps it starts, else
    `$XDG_RUNTIME_DIR/hinteros/osk.sock`). It reconnects when the daemon restarts.
-3. The daemon believes a report only while the focused app has `input = "keyboard"` and the
-   host runs inside that app's process tree, and shows/hides the keyboard (`osk_visibility`).
+3. The daemon attributes a report to the keyboard-profile app whose process tree the host runs
+   in (an unknown pid counts for the focused app) and remembers it per app; A on a focused field
+   in the focused app shows the keyboard (`field_summon`), or the report itself does
+   (`auto_show`). Reports from other processes are ignored.
    A closed host connection counts as `none`. `osk.sock` is not part of the session API (no
    handshake, no replies) and accepts only the session user.
 
@@ -591,9 +644,35 @@ The chain (design: `hinteros-docs/spikes/05-on-screen-keyboard.md`, "auto-summon
   `enableAddonSigning = false` (a full Firefox build, no binary cache); or signing the .xpi as an
   unlisted (self-distributed) add-on on addons.mozilla.org (`web-ext sign --channel=unlisted`) and
   shipping the signed file instead.
-- The kiosk apps keep `input = "keyboard"` in `session.toml` (only those get the automatic
+- The kiosk apps keep `input = "keyboard"` in `session.toml` (only those get the text-field
   keyboard) and must be started by the daemon (so the host is in their process tree and gets
-  `HINTEROS_OSK_SOCKET`). `[osk] auto_show = false` turns it off.
+  `HINTEROS_OSK_SOCKET`). `[osk] field_summon = "none"` (and `auto_show = false`) turns it off;
+  the socket is only served while one of them is on.
+
+### Pointer and on-screen keyboard: what the system and launcher repos must do
+
+System (`hinteros-system`):
+
+- gamescope: `--hide-cursor-delay 3000` (milliseconds; gamescope's default is 10000), equal to
+  `[pointer] idle_ms`, so the pointer fades when A stops clicking. Keyboard input never resets
+  gamescope's timer and moving the pointer off-screen does not hide it (it is clamped), hence
+  the daemon's `hide_command`.
+- `gamescopectl` on the daemon's `PATH` (it is part of the gamescope package) for
+  `paint_cursor_plane`; or other `[pointer] hide_command`/`show_command`, or empty lists to rely
+  on the timeout alone.
+- InputPlumber: nothing new to install. The daemon loads its profile over D-Bus
+  (`LoadProfileFromYaml`, `GetProfileYaml`, `SendEvent`, `ProfileName`: covered by the stock
+  polkit rule for the `inputplumber` group); the pads' default targets already include
+  InputPlumber's virtual mouse (`xb360` + `mouse` + `keyboard`). A system-wide `devices.d`
+  override must keep the `mouse` target.
+- Firefox: the extension and native-messaging host as above (the text-field keyboard needs
+  them); plain Firefox entries get `address_bar = true`, kiosk entries do not.
+
+Launcher (`hinteros-osk`, the keyboard client): B never arrives while the keyboard is visible
+(the daemon hides it); map X (`secondary`) to Backspace and Y (`context`) to Shift, and do not
+queue or animate moves: apply each `input_nav` press/repeat immediately, drop moves still
+pending when a newer one arrives (the daemon sends one press, repeats at the configured rate and
+one release per direction, at once and never batched).
 
 ### Keyboard and on-screen keyboard: what is verified and what needs hardware
 

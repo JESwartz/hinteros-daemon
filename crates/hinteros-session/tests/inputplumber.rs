@@ -56,7 +56,8 @@ impl Composite {
     fn name(&self) -> String {
         self.name.clone()
     }
-    #[zbus(property, name = "DBusDevices")]
+    // Named like InputPlumber's: zbus derives `DbusDevices` from `dbus_devices`.
+    #[zbus(property)]
     fn dbus_devices(&self) -> Vec<String> {
         self.targets.clone()
     }

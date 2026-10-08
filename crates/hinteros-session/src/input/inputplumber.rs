@@ -262,9 +262,11 @@ fn source_driver(dev: &str) -> Option<String> {
 }
 
 /// Whether events from the D-Bus target `source` get their labels swapped: maps the target
-/// back to its composite device through the `DBusDevices` property (cached in `targets`; asked
-/// again when a target is not known yet, as targets appear after their composite device). A
-/// target nobody claims follows the only pad when there is exactly one.
+/// back to its composite device through the `DbusDevices` property (zbus's name for
+/// InputPlumber's `dbus_devices`). Looked up once per target and cached, also when nobody
+/// claims it (then it follows the only pad when there is exactly one): every InputPlumber
+/// property read is a polkit check, and this runs in the signal loop. The cache is cleared when
+/// pads come or go.
 async fn swaps(
     conn: &Connection,
     devices: &Devices,
@@ -276,19 +278,30 @@ async fn swaps(
     }
     if !targets.contains_key(source) {
         for (path, &swapped) in devices {
-            let Ok(proxy) = Proxy::new(conn, SERVICE, path.to_owned(), COMPOSITE_IFACE).await
-            else {
+            // No property cache: a caching proxy fetches every property (each a polkit check).
+            let proxy = zbus::proxy::Builder::<Proxy>::new(conn)
+                .destination(SERVICE)
+                .and_then(|b| b.path(path.to_owned()))
+                .and_then(|b| b.interface(COMPOSITE_IFACE))
+                .map(|b| b.cache_properties(zbus::proxy::CacheProperties::No));
+            let Ok(proxy) = proxy else { continue };
+            let Ok(proxy) = proxy.build().await else {
                 continue;
             };
-            if let Ok(paths) = proxy.get_property::<Vec<String>>("DBusDevices").await {
-                for t in paths {
-                    targets.insert(t, swapped);
+            match proxy.get_property::<Vec<String>>("DbusDevices").await {
+                Ok(paths) => {
+                    for t in paths {
+                        targets.insert(t, swapped);
+                    }
                 }
+                Err(e) => debug!(device = %path, "reading DbusDevices: {e}"),
             }
         }
+        if !targets.contains_key(source) {
+            let only = devices.len() == 1 && devices.values().all(|&s| s);
+            debug!(%source, "D-Bus target claimed by no pad");
+            targets.insert(source.to_string(), only);
+        }
     }
-    match targets.get(source) {
-        Some(&s) => s,
-        None => devices.len() == 1 && devices.values().all(|&s| s),
-    }
+    targets.get(source).copied().unwrap_or(false)
 }

@@ -672,7 +672,7 @@
                   ]
                 },
                 "pin_set": {
-                  "description": "false: a migrated profile without a PIN yet (show 'Set your PIN').",
+                  "description": "false: a migrated profile without a PIN yet (show 'Set your PIN'). Always true on a schema-1 box (before the migration there are no PINs).",
                   "type": "boolean"
                 }
               }

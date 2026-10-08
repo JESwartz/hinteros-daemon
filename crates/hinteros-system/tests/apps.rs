@@ -463,6 +463,9 @@ async fn migration_is_resumable_and_idempotent() {
         e["data"],
         json!({"service": "profiles", "reason": "schema1"})
     );
+    // No PINs before the migration: the launcher must not ask for one yet.
+    let l = call(&mut c, "profiles.list", json!({})).await.unwrap();
+    assert_eq!(l["profiles"][0]["pin_set"], true, "{l}");
     drop(c);
 
     // "Next boot": a new service, the marker gone, the switch works now.
@@ -490,6 +493,11 @@ async fn migration_is_resumable_and_idempotent() {
     );
     assert_eq!(state["services"], json!([]));
     assert_eq!(state["profiles"], json!([{"id": "p1", "user": "hinteros"}]));
+    // Now p1 has no PIN yet: "Set your PIN".
+    let mut c = sys.client().await;
+    let l = call(&mut c, "profiles.list", json!({})).await.unwrap();
+    assert_eq!(l["profiles"][0]["pin_set"], false, "{l}");
+    drop(c);
     // p1's env was set once only; the starter set is the box's apps.
     let sets = root
         .read("nix-env.log")

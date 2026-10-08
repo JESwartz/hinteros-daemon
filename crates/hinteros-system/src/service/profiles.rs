@@ -349,7 +349,8 @@ impl Service {
                     active: uid.is_some() && uid == active_uid,
                     last_used_at: m.last_used_at,
                     usage: usage.get(&a.id).map(to_api),
-                    pin_set: pins.is_set(&a.id),
+                    // Schema 1 has no PINs yet: nothing to set until the migration ran.
+                    pin_set: pins.is_set(&a.id) || !state.is_schema2(),
                 }
             })
             .collect();
@@ -367,7 +368,7 @@ impl Service {
                 active: true,
                 last_used_at: None,
                 usage: usage.get(&a.id).map(to_api),
-                pin_set: false,
+                pin_set: true,
             });
         }
         Ok(ProfilesListResult {

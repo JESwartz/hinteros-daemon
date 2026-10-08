@@ -26,6 +26,10 @@
 //!   asked for, when a call failed or timed out, or when the pad stops answering and later
 //!   answers again. A pad object that vanishes, or InputPlumber restarting, sets up from
 //!   scratch (as before).
+//! - setting InputPlumber up (`ManageAllDevices`) runs in its own task too, and is retried
+//!   (250 ms, doubling up to 5 s) until it works: after a restart its bus name appears before
+//!   its Manager object is exported, so the first try can fail with `UnknownObject`. Once set
+//!   up, the same task checks every [`Settings::watchdog`] that `ManageAllDevices` is still on.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -227,9 +231,23 @@ async fn run(
         devices: HashMap::new(),
         targets: HashMap::new(),
     };
+    // InputPlumber's presence (a new generation every time it appears) for the manager task,
+    // which sets it up (retrying until that works) and reports the pads to add.
+    let (presence, presence_rx) = watch::channel(None::<u64>);
+    let (ready_tx, mut ready) = mpsc::unbounded_channel();
+    let _manager = AbortOnDrop(tokio::spawn(manage(
+        task.conn.clone(),
+        task.settings.clone(),
+        presence_rx,
+        ready_tx,
+    )));
+    let mut generation = 0;
     let service = BusName::try_from(SERVICE)?;
     match dbus.name_has_owner(service).await {
-        Ok(true) => task.setup(&objects).await,
+        Ok(true) => {
+            generation += 1;
+            presence.send_replace(Some(generation));
+        }
         Ok(false) => info!("waiting for InputPlumber ({SERVICE}) to appear on D-Bus"),
         Err(e) => warn!("asking D-Bus for InputPlumber: {e}; waiting for it to appear"),
     }
@@ -266,9 +284,26 @@ async fn run(
                 task.targets.clear();
                 if change.args()?.new_owner().is_some() {
                     info!("InputPlumber appeared");
-                    task.setup(&objects).await;
+                    generation += 1;
+                    presence.send_replace(Some(generation));
                 } else {
                     warn!("InputPlumber went away; waiting for it to come back");
+                    presence.send_replace(None);
+                }
+            }
+            Some((set_up, paths)) = ready.recv() => {
+                // Set up (again): every pad it has gets a worker (one we have keeps its own).
+                if set_up == generation {
+                    for path in paths {
+                        if !task.devices.contains_key(&path) {
+                            task.add(path);
+                        }
+                    }
+                    info!(
+                        controllers = task.devices.len(),
+                        routing = ?*task.routing.borrow(),
+                        "InputPlumber ready"
+                    );
                 }
             }
             Some(signal) = added.next() => {
@@ -303,41 +338,133 @@ async fn device_proxy<'a>(conn: &Connection, path: &ObjectPath<'_>) -> zbus::Res
         .await
 }
 
-impl Task {
-    /// (Re)initialize after InputPlumber (re)started: manage all pads and start a worker for
-    /// every composite device. Errors are logged; new devices still arrive via
-    /// InterfacesAdded.
-    async fn setup(&mut self, objects: &ObjectManagerProxy<'_>) {
-        let result: Result<Vec<OwnedObjectPath>> = async {
-            let manager = Proxy::new(&self.conn, SERVICE, MANAGER_PATH, MANAGER_IFACE).await?;
-            manager
-                .set_property("ManageAllDevices", true)
-                .await
-                .context("setting ManageAllDevices (is the user in the 'inputplumber' group, with polkit running?)")?;
-            Ok(objects
-                .get_managed_objects()
-                .await?
-                .into_iter()
-                .filter(|(_, interfaces)| interfaces.keys().any(|i| i.as_str() == COMPOSITE_IFACE))
-                .map(|(path, _)| path)
-                .collect())
-        }
-        .await;
-        match result {
-            Ok(paths) => {
-                for path in paths {
-                    self.add(path);
+/// Aborts the task when dropped (the manager task ends with the signal loop).
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The first retry of a failed setup; doubles up to [`SETUP_RETRY_MAX`].
+const SETUP_RETRY_MIN: Duration = Duration::from_millis(250);
+const SETUP_RETRY_MAX: Duration = Duration::from_secs(5);
+
+/// Manage all pads, and list the composite devices.
+async fn set_up(conn: &Connection) -> Result<Vec<OwnedObjectPath>> {
+    let manager = Proxy::new(conn, SERVICE, MANAGER_PATH, MANAGER_IFACE).await?;
+    manager
+        .set_property("ManageAllDevices", true)
+        .await
+        .context(
+            "setting ManageAllDevices (is the user in the 'inputplumber' group, with polkit running?)",
+        )?;
+    let objects = ObjectManagerProxy::builder(conn)
+        .destination(SERVICE)?
+        .path(ROOT)?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?;
+    Ok(objects
+        .get_managed_objects()
+        .await?
+        .into_iter()
+        .filter(|(_, interfaces)| interfaces.keys().any(|i| i.as_str() == COMPOSITE_IFACE))
+        .map(|(path, _)| path)
+        .collect())
+}
+
+/// Whether InputPlumber still manages all pads.
+async fn manages_all(conn: &Connection) -> Result<bool> {
+    let manager = Proxy::new(conn, SERVICE, MANAGER_PATH, MANAGER_IFACE).await?;
+    Ok(manager.get_property::<bool>("ManageAllDevices").await?)
+}
+
+/// (Re)initialize InputPlumber whenever it appears: `ManageAllDevices`, then the pads it has
+/// go to the signal loop (`ready`, with the presence generation they belong to). A failed setup
+/// is retried (250 ms, doubling up to 5 s) for as long as InputPlumber is there: its bus name
+/// can appear before its Manager object does. Once set up, every [`Settings::watchdog`] it
+/// checks that `ManageAllDevices` is still on and sets up again if not.
+async fn manage(
+    conn: Connection,
+    settings: Arc<Settings>,
+    mut presence: watch::Receiver<Option<u64>>,
+    ready: mpsc::UnboundedSender<(u64, Vec<OwnedObjectPath>)>,
+) {
+    loop {
+        let current = *presence.borrow_and_update();
+        let generation = match current {
+            Some(g) => g,
+            None => {
+                if presence.changed().await.is_err() {
+                    return;
                 }
-                info!(
-                    controllers = self.devices.len(),
-                    routing = ?*self.routing.borrow(),
-                    "InputPlumber ready"
-                );
+                continue;
             }
-            Err(e) => warn!("setting up InputPlumber: {e:#}"),
+        };
+        let mut set = false;
+        let mut retry = SETUP_RETRY_MIN;
+        let mut failures = 0u32;
+        loop {
+            let wait = if set {
+                match manages_all(&conn).await {
+                    Ok(true) => settings.watchdog,
+                    Ok(false) => {
+                        warn!("InputPlumber no longer manages all pads; setting it up again");
+                        set = false;
+                        continue;
+                    }
+                    Err(e) => {
+                        debug!("checking InputPlumber's ManageAllDevices: {e:#}");
+                        settings.watchdog
+                    }
+                }
+            } else {
+                match set_up(&conn).await {
+                    Ok(paths) => {
+                        if failures > 0 {
+                            info!(
+                                attempts = failures + 1,
+                                "InputPlumber set up after retrying"
+                            );
+                        }
+                        set = true;
+                        retry = SETUP_RETRY_MIN;
+                        failures = 0;
+                        if ready.send((generation, paths)).is_err() {
+                            return;
+                        }
+                        settings.watchdog
+                    }
+                    Err(e) => {
+                        if failures == 0 {
+                            warn!("setting up InputPlumber: {e:#}; retrying");
+                        } else {
+                            debug!(failures, "setting up InputPlumber: {e:#}");
+                        }
+                        failures += 1;
+                        let wait = retry;
+                        retry = (retry * 2).min(SETUP_RETRY_MAX);
+                        wait
+                    }
+                }
+            };
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                changed = presence.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    // Gone, or a new InputPlumber: start over.
+                    break;
+                }
+            }
         }
     }
+}
 
+impl Task {
     /// A composite device appeared: start its worker (which classifies it and applies the
     /// routing).
     fn add(&mut self, path: OwnedObjectPath) {

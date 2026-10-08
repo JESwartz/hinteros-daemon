@@ -208,6 +208,12 @@ impl Fake {
     }
 
     async fn start_named(address: &str, name: &str) -> Self {
+        Self::start_full(address, name, true).await
+    }
+
+    /// `with_manager = false`: the bus name and the pads, but no Manager object yet
+    /// ([`Self::export_manager`]), as InputPlumber looks for a moment after it starts.
+    async fn start_full(address: &str, name: &str, with_manager: bool) -> Self {
         let manage_all = Arc::new(AtomicBool::new(false));
         let calls = Calls::default();
         let mode = Arc::new(AtomicU32::new(0));
@@ -216,8 +222,6 @@ impl Fake {
         let conn = zbus::connection::Builder::address(address)
             .unwrap()
             .serve_at(ROOT, zbus::fdo::ObjectManager)
-            .unwrap()
-            .serve_at(MANAGER, Manager(manage_all.clone()))
             .unwrap()
             .serve_at(device(0), composite)
             .unwrap()
@@ -228,14 +232,26 @@ impl Fake {
             .build()
             .await
             .unwrap();
-        Self {
+        let fake = Self {
             conn,
             manage_all,
             modes: vec![mode],
             calls,
             faults,
             profile,
+        };
+        if with_manager {
+            fake.export_manager().await;
         }
+        fake
+    }
+
+    async fn export_manager(&self) {
+        self.conn
+            .object_server()
+            .at(MANAGER, Manager(self.manage_all.clone()))
+            .await
+            .unwrap();
     }
 
     fn profile(&self) -> String {
@@ -955,4 +971,41 @@ async fn hung_inputplumber_never_breaks_guide() {
     fake.press("ui_guide", 0.0).await;
     assert_eq!(event_named(&mut c, "home_pressed").await, json!({}));
     ready(&fake, 1, 2).await;
+}
+
+/// InputPlumber restarting (a system switch): its bus name appears before its Manager object,
+/// so the first `ManageAllDevices` fails with UnknownObject. The daemon keeps trying until it
+/// works, and its watchdog puts `ManageAllDevices` back when InputPlumber loses it.
+#[tokio::test(flavor = "multi_thread")]
+async fn inputplumber_name_before_its_manager() {
+    let Some(bus) = Bus::start() else { return };
+    let address = bus.address.clone();
+    let d = Daemon::start_with(|dir| youtube_daemon(dir, &address));
+    let mut c = d.client().await;
+
+    let fake = Fake::start_full(&bus.address, "Generic Gamepad", false).await;
+    // The pad is set up (mode ALL) only through the manager: nothing yet.
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    assert!(!fake.manage_all.load(Ordering::SeqCst));
+    fake.export_manager().await;
+    ready(&fake, 0, 2).await;
+
+    // InputPlumber forgets ManageAllDevices: the watchdog sets it again.
+    fake.manage_all.store(false, Ordering::SeqCst);
+    eventually("ManageAllDevices again", async || {
+        fake.manage_all.load(Ordering::SeqCst).then_some(())
+    })
+    .await;
+
+    // Input still arrives.
+    call(&mut c, "subscribe", json!({ "events": ["input_nav"] }))
+        .await
+        .unwrap();
+    fake.press("ui_accept", 1.0).await;
+    assert_eq!(nav(&mut c).await, ("accept".into(), "press".into()));
+    assert!(
+        d.log().contains("InputPlumber set up after retrying"),
+        "{}",
+        d.log()
+    );
 }

@@ -265,11 +265,12 @@ pub fn clear_stale_x(tmp: &Path, proc_dir: &Path) {
         if !std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.file_type().is_file()) {
             continue;
         }
-        // Xwayland writes its pid, space-padded. Unreadable: leave it alone.
-        let Some(pid) = std::fs::read_to_string(e.path())
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-        else {
+        // The pid, space-padded and NUL-terminated (wlroots). Unreadable: leave it alone.
+        let Some(pid) = std::fs::read_to_string(e.path()).ok().and_then(|s| {
+            s.trim_matches(|c: char| c.is_whitespace() || c == '\0')
+                .parse::<u32>()
+                .ok()
+        }) else {
             continue;
         };
         if proc_dir.join(pid.to_string()).exists() {
@@ -479,9 +480,9 @@ mod tests {
         std::fs::create_dir_all(proc_dir.path().join("777")).unwrap();
         // :0 and :1 from an ended session, :2 alive, :3 unreadable, :4 a symlink.
         for (n, pid) in [
-            (0, "      1282\n"),
+            (0, "      1282\0"),
             (1, "      1283\n"),
-            (2, "       777\n"),
+            (2, "       777\0"),
             (3, "x"),
         ] {
             std::fs::write(t.join(format!(".X{n}-lock")), pid).unwrap();

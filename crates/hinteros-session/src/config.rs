@@ -1343,10 +1343,11 @@ pub fn own_display(tmp: &Path, proc_dir: &Path, uid: u32) -> Option<String> {
         if !meta.file_type().is_file() || meta.uid() != uid {
             continue;
         }
-        let Some(pid) = std::fs::read_to_string(e.path())
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-        else {
+        let Some(pid) = std::fs::read_to_string(e.path()).ok().and_then(|s| {
+            s.trim_matches(|c: char| c.is_whitespace() || c == '\0')
+                .parse::<u32>()
+                .ok()
+        }) else {
             continue;
         };
         if !proc_dir.join(pid.to_string()).exists()
@@ -1376,7 +1377,7 @@ mod tests {
         assert_eq!(own_display(t, proc_dir.path(), me), None);
         // :0 and :1 dead (an ended session), :4 and :5 ours and alive, :3 has no socket.
         for (n, pid) in [(0, "40"), (1, "41"), (3, "60"), (4, "50"), (5, "51")] {
-            std::fs::write(t.join(format!(".X{n}-lock")), format!("      {pid}\n")).unwrap();
+            std::fs::write(t.join(format!(".X{n}-lock")), format!("      {pid}\0")).unwrap();
             if n != 3 {
                 std::fs::write(t.join(format!(".X11-unix/X{n}")), "").unwrap();
             }

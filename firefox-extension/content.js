@@ -3,6 +3,11 @@
 // Sends {focus: "text" | "password" | "none"} to the background script whenever that
 // changes. Focus moving from one field to the next (focusout, then focusin) is settled
 // before reporting, so a field change does not report "none" in between.
+//
+// A click into the focused field (a trusted primary-button click that lands on it, whether it
+// just got focus or had it already) sends {focus, clicked: true} even when nothing changed:
+// the daemon shows the keyboard for a click, not for focus that came by itself (arrow keys,
+// a page focusing a field on load).
 "use strict";
 
 // <input> types that take typed text. Everything else (checkbox, range, color, date
@@ -79,6 +84,21 @@ window.addEventListener("pagehide", () => {
   }
 }, true);
 document.addEventListener("visibilitychange", settle, true);
+// A click into the focused field. "click" comes after the press moved focus, and only for
+// the primary button (the right click, for the context menu, is "auxclick").
+window.addEventListener("click", (event) => {
+  if (!event.isTrusted || !document.hasFocus()) {
+    return;
+  }
+  const el = deepActiveElement();
+  const focus = kindOf(el);
+  // On the field itself, not elsewhere (a suggestion list that keeps focus in the field).
+  if (focus === "none" || !event.composedPath().includes(el)) {
+    return;
+  }
+  reported = focus;
+  browser.runtime.sendMessage({ focus, clicked: true }).catch(() => {});
+}, true);
 // An autofocused field may have focus before our listeners ran.
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", settle, { once: true });

@@ -91,11 +91,13 @@ pub enum Msg {
     /// A text field in a web app gained or lost focus (see [`crate::textfocus`]); `pid` is the
     /// reporting process (Firefox's native-messaging host, or Firefox itself for its own
     /// toolbar fields), `reporter` the connection it came on (one Firefox has two: page fields
-    /// through the extension, the address bar and other browser fields directly).
+    /// through the extension, the address bar and other browser fields directly). `clicked`:
+    /// the user just clicked into the field with the pointer (it may have had focus already).
     TextFocus {
         pid: Option<u32>,
         reporter: u64,
         focus: FieldFocus,
+        clicked: bool,
     },
 }
 
@@ -125,6 +127,13 @@ const GUIDE_HOLD_MAX: Duration = Duration::from_secs(10);
 /// How long after a text field loses focus an automatically shown keyboard hides: moving to
 /// the next field (or into a frame) reports `none` and then `text` again.
 pub const OSK_AUTO_HIDE_DELAY: Duration = Duration::from_millis(250);
+
+/// A text field that gets focus this soon after our left click (RT) in its app was clicked
+/// into: the keyboard shows (focus that comes by itself, from arrow keys or a page focusing a
+/// field on load, does not show it). Reporters also say `clicked` themselves (see
+/// [`crate::textfocus`]); this covers clicks that focus a field without landing on it (a
+/// label, the padding around the address bar). Focus reports take a few milliseconds.
+pub const OSK_CLICK_WINDOW: Duration = Duration::from_millis(600);
 
 /// Where controller navigation goes right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,6 +323,8 @@ pub struct Shell {
     cursor: Box<dyn CursorControl>,
     /// Buttons held down as mouse buttons: the pad they came from and the mouse button.
     clicking: BTreeMap<NavAction, (String, MouseButton)>,
+    /// Our last left click (RT) in a keyboard-profile app: the app and when.
+    left_click: Option<(String, Instant)>,
 }
 
 impl Shell {
@@ -336,6 +347,7 @@ impl Shell {
             pointer_profile: false,
             cursor: Box::new(NoCursor),
             clicking: BTreeMap::new(),
+            left_click: None,
             cfg,
             focus,
             input,
@@ -412,7 +424,8 @@ impl Shell {
                 pid,
                 reporter,
                 focus,
-            } => self.text_focus(pid, reporter, focus, now),
+                clicked,
+            } => self.text_focus(pid, reporter, focus, clicked, now),
         }
     }
 
@@ -1162,8 +1175,10 @@ impl Shell {
 
     /// A text field in a web app gained or lost focus (reported by the Firefox extension's
     /// host, `pid`). Remembered per keyboard-profile app whose process tree the host is in (an
-    /// unknown pid counts for the focused app), for A ([`Self::field_accept`]). With
-    /// `auto_show`, also shows the keyboard right away when that app has focus; a keyboard
+    /// unknown pid counts for the focused app), for A ([`Self::field_accept`]). When that app
+    /// has focus, also shows the keyboard right away if the user clicked into the field with
+    /// the pointer (`clicked`, or focus within [`OSK_CLICK_WINDOW`] of our left click there),
+    /// or always with `auto_show`; a keyboard
     /// shown for a field (either way) hides again [`OSK_AUTO_HIDE_DELAY`] after the field
     /// loses focus.
     ///
@@ -1171,7 +1186,14 @@ impl Shell {
     /// own state: the page reporting `none` because the address bar took focus (before or
     /// after the address bar reports `text`) leaves a field focused. The field counts as lost
     /// (and the keyboard hides) only once no reporter has one.
-    fn text_focus(&mut self, pid: Option<u32>, reporter: u64, focus: FieldFocus, now: Instant) {
+    fn text_focus(
+        &mut self,
+        pid: Option<u32>,
+        reporter: u64,
+        focus: FieldFocus,
+        clicked: bool,
+        now: Instant,
+    ) {
         let keyboard_apps: Vec<(String, Option<u32>)> = self
             .apps
             .values()
@@ -1219,8 +1241,24 @@ impl Shell {
         }
         if focus.editable() {
             self.osk_auto_hide_at = None;
-            if self.cfg.osk_auto_show && !self.osk_visible {
-                info!(app = %id, ?focus, "text field focused → on-screen keyboard");
+            // Focus right after our left click in this app came from that click (used up).
+            let after_click = self
+                .left_click
+                .take_if(|(app, at)| {
+                    *app == id && now.saturating_duration_since(*at) <= OSK_CLICK_WINDOW
+                })
+                .is_some();
+            let why = if clicked {
+                "clicked"
+            } else if after_click {
+                "focused by a click"
+            } else if self.cfg.osk_auto_show {
+                "focused"
+            } else {
+                ""
+            };
+            if !why.is_empty() && !self.osk_visible {
+                info!(app = %id, ?focus, "text field {why} → on-screen keyboard");
                 self.set_osk(true, true);
                 self.osk_auto = true;
             }
@@ -1553,7 +1591,7 @@ impl Shell {
             }
             return;
         }
-        if route == Route::Keys && pressed && self.keys_button(action, &input.source) {
+        if route == Route::Keys && pressed && self.keys_button(action, &input.source, now) {
             if !self.clicking.contains_key(&action) {
                 self.swallow.insert(action);
             }
@@ -1593,7 +1631,7 @@ impl Shell {
     /// LT right) with
     /// the pointer, the on-screen keyboard for a text field, the address bar. Returns whether
     /// it was handled (its release is then dropped, or ends the click).
-    fn keys_button(&mut self, action: NavAction, source: &str) -> bool {
+    fn keys_button(&mut self, action: NavAction, source: &str, now: Instant) -> bool {
         let pointer = self.pointer_app();
         if pointer && action.is_direction() {
             // D-pad or left stick: the pointer is done.
@@ -1607,6 +1645,7 @@ impl Shell {
         let mapped = |a: NavAction| app.keymap.as_ref().is_some_and(|m| m.contains_key(&a));
         let view_mapped = mapped(NavAction::View);
         let address_bar = app.address_bar;
+        let app_id = app.info.id.clone();
         // RT is the left click and LT the right click whenever there is a pointer (unless the
         // app maps them); A never clicks (it is Enter, or the on-screen keyboard on a text field).
         let click = match action {
@@ -1621,6 +1660,9 @@ impl Shell {
             self.cursor_change(change);
             self.input.mouse_button(source, button, true);
             self.clicking.insert(action, (source.to_string(), button));
+            if button == MouseButton::Left {
+                self.left_click = Some((app_id, now));
+            }
             // Its release ends the click (see `clicking`).
             return true;
         }
@@ -3481,11 +3523,16 @@ mod tests {
         }
 
         fn text_focus_from(&mut self, pid: u32, reporter: u64, focus: FieldFocus) {
+            self.report(pid, reporter, focus, false);
+        }
+
+        fn report(&mut self, pid: u32, reporter: u64, focus: FieldFocus, clicked: bool) {
             self.shell.handle(
                 Msg::TextFocus {
                     pid: Some(pid),
                     reporter,
                     focus,
+                    clicked,
                 },
                 self.now,
             );
@@ -3616,6 +3663,7 @@ mod tests {
                 pid: None,
                 reporter: 1,
                 focus: FieldFocus::Text,
+                clicked: false,
             },
             t.now,
         );
@@ -3633,6 +3681,94 @@ mod tests {
             t.text_focus(555, FieldFocus::Text);
             assert!(!t.shell.osk_visible());
         }
+    }
+
+    #[test]
+    fn clicking_into_a_text_field_shows_the_keyboard() {
+        // auto_show off (the default): focus by itself (arrow keys, a page focusing a field on
+        // load) does not show it.
+        let mut t = firefox_with_host(|_| {});
+        t.text_focus(555, FieldFocus::Text);
+        assert!(!t.shell.osk_visible());
+        t.text_focus(555, FieldFocus::None);
+        t.log.take();
+
+        // RT (left click) on a field: it reports focus a moment later → shown, and hidden
+        // again once the field loses focus, like auto_show.
+        t.input("ui_r2", 1.0);
+        t.advance(MS(30));
+        t.text_focus(555, FieldFocus::Text);
+        assert!(t.shell.osk_visible());
+        assert_eq!(
+            t.log.take(),
+            [
+                Call::Click(true),
+                Call::Osk(true),
+                Call::Mode(InterceptMode::All)
+            ]
+        );
+        // The release still ends the click (the keyboard took the pad meanwhile).
+        t.input("ui_r2", 0.0);
+        assert_eq!(t.log.take(), [Call::Click(false)]);
+        t.text_focus(555, FieldFocus::None);
+        t.advance(OSK_AUTO_HIDE_DELAY);
+        assert!(!t.shell.osk_visible());
+        t.log.take();
+
+        // A click used up: a later focus (the page focusing a field) does not show it.
+        t.text_focus(555, FieldFocus::Text);
+        assert!(!t.shell.osk_visible());
+        t.text_focus(555, FieldFocus::None);
+        // Too long after the click: not from it (a link opened a page that focused a field).
+        t.input("ui_r2", 1.0);
+        t.input("ui_r2", 0.0);
+        t.advance(OSK_CLICK_WINDOW + MS(1));
+        t.text_focus(555, FieldFocus::Text);
+        assert!(!t.shell.osk_visible());
+        t.text_focus(555, FieldFocus::None);
+        // LT (right click, for the context menu) does not count.
+        t.input("ui_l2", 1.0);
+        t.input("ui_l2", 0.0);
+        t.text_focus(555, FieldFocus::Text);
+        assert!(!t.shell.osk_visible());
+
+        // Clicking into the field that already has focus: the reporter says so itself.
+        t.input("ui_r2", 1.0);
+        t.input("ui_r2", 0.0);
+        t.advance(Duration::from_secs(2));
+        t.report(555, 1, FieldFocus::Text, true);
+        assert!(t.shell.osk_visible());
+        // B hides it; the field keeps focus; another click shows it again.
+        t.input("ui_back", 1.0);
+        t.input("ui_back", 0.0);
+        assert!(!t.shell.osk_visible());
+        t.report(555, 1, FieldFocus::Text, true);
+        assert!(t.shell.osk_visible());
+        // Shown for the click: hides with the field.
+        t.text_focus(555, FieldFocus::None);
+        t.advance(OSK_AUTO_HIDE_DELAY);
+        assert!(!t.shell.osk_visible());
+
+        // A still shows it without a click.
+        t.text_focus(555, FieldFocus::Text);
+        t.input("ui_accept", 1.0);
+        assert!(t.shell.osk_visible());
+    }
+
+    #[test]
+    fn clicking_the_address_bar_shows_the_keyboard() {
+        const PAGE: u64 = 1;
+        const BAR: u64 = 2;
+        let mut t = firefox_with_host(|_| {});
+        let firefox = t.shell.apps["youtube"].info.pid.unwrap();
+        // A page field had focus; RT on the address bar: the bar (Firefox's chrome reporter,
+        // which reports no click itself when the click missed the input) reports focus.
+        t.text_focus_from(555, PAGE, FieldFocus::Text);
+        t.input("ui_r2", 1.0);
+        t.text_focus_from(firefox, BAR, FieldFocus::Text);
+        t.text_focus_from(555, PAGE, FieldFocus::None);
+        t.input("ui_r2", 0.0);
+        assert!(t.shell.osk_visible());
     }
 
     #[test]

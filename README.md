@@ -178,10 +178,14 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   and the previous mode comes back. The keyboard client owns the other buttons (X Backspace,
   Y Shift, ...).
   **Text fields** (`textfocus.rs`, `firefox-extension/`): the Firefox extension reports which
-  text or password field has focus, per keyboard-profile app. Nothing pops up on focus: with
+  text or password field has focus, per keyboard-profile app. Nothing pops up on focus by
+  itself (arrow-key navigation, a page focusing a field on load): with
   `[osk] field_summon = "accept"` (the default) **A on a focused field shows the keyboard**
-  instead of sending Enter (A's release is dropped too). `auto_show = true` (off by default)
-  shows it as soon as a field gets focus instead. Either way a keyboard shown for a field hides
+  instead of sending Enter (A's release is dropped too), and **clicking into a field with the
+  pointer (RT; not LT) shows it**: the reporter marks a click that lands on the focused field
+  (`clicked`, also when the field had focus already), and focus that arrives within 600 ms
+  of the daemon's own left click in that app counts as clicked. `auto_show = true` (off by
+  default) shows it as soon as a field gets focus. Either way a keyboard shown for a field hides
   250 ms after the field loses focus (no flicker between fields), unless it was shown or
   hidden by hand meanwhile. See "On-screen keyboard for Firefox text fields" below.
   `osk_visibility` carries `password: true` (session API 0.10) while the keyboard is up for a
@@ -642,8 +646,11 @@ The chain (design: `hinteros-docs/spikes/05-on-screen-keyboard.md`, "auto-summon
 1. The extension `hinteros-osk@hinteros` (`firefox-extension/`, manifest v2, which Firefox keeps
    supporting) has a content script in every frame that follows `focusin`/`focusout` and
    reports `{focus: "text"|"password"|"none"}` (inputs that take text, textareas,
-   contenteditable, open shadow roots) when it changes; the background script combines frames
-   and passes the result on with `runtime.connectNative("hinteros_osk")`.
+   contenteditable, open shadow roots) when it changes, and `{focus, clicked: true}` on a
+   trusted primary-button click that lands on the focused field (even if nothing changed); the
+   background script combines frames and passes the result on with
+   `runtime.connectNative("hinteros_osk")` (`clicked` only for the active tab). `clicked` is
+   optional: without it a report means not clicked, and older daemons ignore it.
 2. Firefox starts the native-messaging host `hinteros-osk-native-host` (a symlink to
    `hinteros-session`; `hinteros-session osk-native-host` is the same), which reads Firefox's
    length-prefixed JSON on stdin, answers `{ok}` on stdout, and forwards each message as one line
@@ -652,8 +659,9 @@ The chain (design: `hinteros-docs/spikes/05-on-screen-keyboard.md`, "auto-summon
    `$XDG_RUNTIME_DIR/hinteros/osk.sock`). It reconnects when the daemon restarts.
 3. The daemon attributes a report to the keyboard-profile app whose process tree the host runs
    in (an unknown pid counts for the focused app) and remembers it per app; A on a focused field
-   in the focused app shows the keyboard (`field_summon`), or the report itself does
-   (`auto_show`). Reports from other processes are ignored.
+   in the focused app shows the keyboard (`field_summon`), or the report itself does when it
+   is `clicked` or comes within 600 ms of the daemon's left click (RT) in that app, or always
+   with `auto_show`. Reports from other processes are ignored.
 . Firefox's own fields (address bar, find bar, fields of parent-process `about:` pages), which
    content scripts cannot see, are reported by privileged autoConfig code (hinteros
    `nixos/modules/firefox-osk-chrome.js`, appended to `mozilla.cfg` with

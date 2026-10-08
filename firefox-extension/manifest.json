@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "HinterOS on-screen keyboard",
-  "version": "0.2.0",
-  "description": "Tells the HinterOS session daemon when a text field has focus, so that A on the controller brings up the TV's on-screen keyboard.",
+  "version": "0.3.0",
+  "description": "Tells the HinterOS session daemon when a text field has focus, so that A on the controller, or a click into the field, brings up the TV's on-screen keyboard.",
   "browser_specific_settings": {
     "gecko": {
       "id": "hinteros-osk@hinteros",

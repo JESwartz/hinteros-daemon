@@ -26,6 +26,15 @@
 //! reporter with its own state in the shell; a field has focus while any reporter says so.
 //!
 //! Password fields show the keyboard too: the keyboard masks its own preview.
+//!
+//! Showing on a click: focus alone shows the keyboard only with `[osk] auto_show` (arrow-key
+//! navigation and pages focusing a field on load must not pop it up); a click into a field
+//! with the pointer does. Reporters add `"clicked": true` to a report sent because of a
+//! trusted primary-button click that landed on the focused field: `{"focus": "text",
+//! "clicked": true}`. Such a report is sent even if the focus kind did not change (clicking
+//! into the field that already has focus). Older daemons ignore the field; reports without
+//! it mean `false`. The shell also counts focus that arrives right after its own left click
+//! (RT) as clicked ([`crate::shell::OSK_CLICK_WINDOW`]).
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -82,6 +91,9 @@ pub struct FocusMessage {
     pub focus: FieldFocus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    /// Sent because the user clicked into the field (see the module docs).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clicked: bool,
 }
 
 impl FocusMessage {
@@ -266,13 +278,14 @@ async fn connection(stream: tokio::net::UnixStream, shell: mpsc::UnboundedSender
         match reader.next_line().await {
             Ok(Some(line)) => match FocusMessage::parse(line.as_bytes()) {
                 Ok(msg) => {
-                    debug!(?pid, reporter, client = ?msg.client, focus = ?msg.focus, "text field focus");
+                    debug!(?pid, reporter, client = ?msg.client, focus = ?msg.focus, clicked = msg.clicked, "text field focus");
                     last = msg.focus;
                     if shell
                         .send(Msg::TextFocus {
                             pid,
                             reporter,
                             focus: msg.focus,
+                            clicked: msg.clicked,
                         })
                         .is_err()
                     {
@@ -294,6 +307,7 @@ async fn connection(stream: tokio::net::UnixStream, shell: mpsc::UnboundedSender
             pid,
             reporter,
             focus: FieldFocus::None,
+            clicked: false,
         });
     }
     debug!(?pid, "osk.sock: reporter disconnected");
@@ -359,7 +373,16 @@ mod tests {
             FocusMessage::parse(br#"{"focus":"password","frame":3}"#).unwrap(),
             FocusMessage {
                 focus: FieldFocus::Password,
-                client: None
+                client: None,
+                clicked: false,
+            }
+        );
+        assert_eq!(
+            FocusMessage::parse(br#"{"focus":"text","clicked":true}"#).unwrap(),
+            FocusMessage {
+                focus: FieldFocus::Text,
+                client: None,
+                clicked: true,
             }
         );
         assert!(FocusMessage::parse(br#"{"focus":"button"}"#).is_err());
@@ -376,6 +399,7 @@ mod tests {
 
         let mut input = frame(br#"{"focus":"text"}"#);
         input.extend(frame(br#"{"focus":"bogus"}"#));
+        input.extend(frame(br#"{"focus":"text","clicked":true}"#));
         input.extend(frame(br#"{"focus":"none"}"#));
         let mut output = vec![];
         let connects = std::cell::Cell::new(0);
@@ -391,6 +415,7 @@ mod tests {
                 json!({"ok": true}),
                 json!({"ok": false, "error": frames_error("bogus")}),
                 json!({"ok": true}),
+                json!({"ok": true}),
             ]
         );
         let (conn, _) = listener.accept().unwrap();
@@ -399,6 +424,7 @@ mod tests {
             lines,
             [
                 r#"{"focus":"text","client":"hinteros-firefox"}"#,
+                r#"{"focus":"text","client":"hinteros-firefox","clicked":true}"#,
                 r#"{"focus":"none","client":"hinteros-firefox"}"#,
             ]
         );
@@ -463,6 +489,7 @@ mod tests {
                 pid,
                 reporter,
                 focus,
+                clicked: false,
             } => (pid, reporter, focus),
             other => panic!("{other:?}"),
         }
@@ -492,6 +519,18 @@ mod tests {
         let (pid, b, focus) = next_focus(&mut rx).await;
         assert_ne!(a, b);
         assert_eq!((pid, focus), (me, FieldFocus::Text));
+        // A click into the field it already had: the same state, marked clicked.
+        d.write_all(b"{\"focus\":\"text\",\"clicked\":true}\n")
+            .unwrap();
+        match rx.recv().await.unwrap() {
+            Msg::TextFocus {
+                reporter,
+                focus: FieldFocus::Text,
+                clicked: true,
+                ..
+            } => assert_eq!(reporter, b),
+            other => panic!("{other:?}"),
+        }
         drop(d);
         assert_eq!(next_focus(&mut rx).await, (me, b, FieldFocus::None));
 

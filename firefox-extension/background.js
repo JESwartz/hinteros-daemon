@@ -3,8 +3,9 @@
 //
 // The host ("hinteros_osk", installed with the session daemon) forwards
 // {focus: "text" | "password" | "none"} to the daemon, which shows the on-screen keyboard when
-// A is pressed on a focused text field in the app the TV shows, and hides it when B is pressed
-// or the field loses focus.
+// A is pressed on a focused text field or the field is clicked in the app the TV shows, and
+// hides it when B is pressed or the field loses focus. A content script's {focus, clicked: true}
+// (a click into its focused field) is passed on as it is, even when the focus did not change.
 "use strict";
 
 const HOST = "hinteros_osk";
@@ -57,13 +58,16 @@ function current(activeTab) {
 
 let activeTab = null;
 
-async function update() {
+// `clicked`: a frame of the active tab reported a click into its field; tell the daemon even if
+// the focus is unchanged.
+async function update(clicked = false) {
   if (activeTab === null) {
     const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     activeTab = tab ? tab.id : -1;
   }
   const focus = current(activeTab);
-  if (focus === sent) {
+  clicked = clicked && focus !== "none";
+  if (focus === sent && !clicked) {
     return;
   }
   const p = connect();
@@ -71,7 +75,7 @@ async function update() {
     return;
   }
   try {
-    p.postMessage({ focus });
+    p.postMessage(clicked ? { focus, clicked: true } : { focus });
     sent = focus;
   } catch (e) {
     console.warn(`hinteros-osk: ${e}`);
@@ -88,7 +92,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
   if (msg.focus !== "none") {
     focused.set(key, msg.focus);
   }
-  update();
+  update(msg.clicked === true && msg.focus !== "none" && sender.tab.active);
 });
 
 browser.tabs.onActivated.addListener(({ tabId }) => {

@@ -19,9 +19,11 @@
 //!   do; launching it again then only focuses it. A Steam window over the launcher right after
 //!   our own Steam request gets focus (`STEAM_ANSWER_WINDOW`).
 //! - `apps.close`: SIGTERM now, SIGKILL after the close timeout, then stop tracking.
-//! - An app with the keyboard input profile: InputPlumber stays in `All` while it has focus and
-//!   `ui_*` events become key presses through its keymap (with repeat) instead of `input_nav`.
-//!   Without a virtual keyboard it falls back to the gamepad (`Pass`).
+//! - An app with the keyboard input profile: InputPlumber intercepts the pad while it has focus
+//!   (`GamepadOnly` with the right-stick pointer profile, else `All`) and `ui_*` events become
+//!   key presses through its keymap (with repeat) instead of `input_nav`; A on a focused text
+//!   field shows the on-screen keyboard. Without a virtual keyboard it falls back to the
+//!   gamepad (`Pass`).
 //! - The on-screen keyboard (`osk.show`, or Guide held + the summon button): shown as an
 //!   overlay over whatever has focus; while it is visible InputPlumber is in `All` and
 //!   `input_nav` goes only to the OSK client. Home and focus changes hide it. With a summon

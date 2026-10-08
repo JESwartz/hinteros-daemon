@@ -345,6 +345,37 @@ flake)
   printf '{"nodes":{"hinteros":{"locked":{"rev":"%s","type":"git"},"original":{"ref":"%s","type":"git"}},"root":{"inputs":{"hinteros":"hinteros"}}},"root":"root","version":7}\n' "$rev" "$ref" > "$dir/flake.lock"
   ;;
 build)
+  case "$*" in *'^out'*)
+    # App envs: <store>/env-<id+id>.drv^out builds <store>/env-<id+id> with a manifest.
+    failed=0
+    for a in "$@"; do
+      case "$a" in *'.drv^out') ;; *) continue ;; esac
+      d="${a%.drv^out}"; name="${d##*/env-}"; out="$d"
+      ids=""; [ "$name" = empty ] || ids=$(echo "$name" | tr '+' ' ')
+      bad=0
+      for i in $ids; do [ -e "$FAKE_ROOT/env-fail-$i" ] && bad=1; done
+      if [ "$bad" = 1 ]; then
+        echo '@nix {"action":"msg","level":0,"msg":"error: builder for '"$name"' failed"}' >&2
+        failed=1; continue
+      fi
+      while [ -e "$FAKE_ROOT/env-hold" ]; do sleep 0.05; done
+      mkdir -p "$out/share/hinteros" "$out/bin"
+      idj=""; appj=""; steam=null; box=""
+      for i in $ids; do
+        idj="$idj${idj:+,}\"$i\""
+        if [ "$i" = steam ]; then
+          steam="{\"path\":\"$out/bin/steam\"}"; box='"graphics32","steam-devices"'
+          printf '#!/bin/sh\n' > "$out/bin/steam"; chmod +x "$out/bin/steam"
+        else
+          appj="$appj${appj:+,}{\"id\":\"$i\",\"name\":\"App $i\",\"command\":[\"/bin/true\",\"$i\"]}"
+        fi
+      done
+      printf '{"version":1,"system_rev":"fake","ids":[%s],"apps":[%s],"steam":%s,"box":[%s]}\n' \
+        "$idj" "$appj" "$steam" "$box" > "$out/share/hinteros/apps.json"
+      echo "$out"
+    done
+    exit "$failed"
+  esac
   for a in "$@"; do last="$a"; done
   dir="${last#path:}"; dir="${dir%%#*}"
   echo '@nix {"action":"start","id":1,"level":3,"type":103,"text":""}' >&2
@@ -363,6 +394,25 @@ build)
   echo "$out"
   ;;
 eval)
+  case "$*" in *--impure*)
+    # App envs: the job's envs.json, a list of id lists.
+    [ -e "$FAKE_ROOT/eval-fail" ] && { echo "error: evaluation aborted" >&2; exit 1; }
+    f=$(echo "$*" | sed -n 's/.*readFile "\([^"]*\)".*/\1/p')
+    cp "$f" "$FAKE_ROOT/last-envs.json"
+    body=$(tr -d ' \n' < "$f" | sed 's/^\[//; s/\]$//')
+    [ -z "$body" ] && { echo '[]'; exit 0; }
+    out="["; sep=""
+    for l in $(echo "$body" | sed 's/\],\[/] [/g'); do
+      ids=$(echo "$l" | tr -d '[]"' | tr ',' ' ')
+      for i in $ids; do
+        [ -e "$FAKE_ROOT/eval-fail-$i" ] && { echo "error: cannot evaluate $i" >&2; exit 1; }
+      done
+      name=$(echo $ids | tr ' ' '+'); [ -z "$name" ] && name=empty
+      out="$out$sep{\"drv\":\"$FAKE_ROOT/store/env-$name.drv\",\"out\":\"$FAKE_ROOT/store/env-$name\"}"; sep=","
+    done
+    echo "$out]"
+    exit 0
+  esac
   [ -e "$FAKE_ROOT/catalog-ids.json" ] || { echo "error: cannot fetch" >&2; exit 1; }
   cat "$FAKE_ROOT/catalog-ids.json"
   ;;
@@ -410,6 +460,14 @@ case "$3" in
   ;;
 *) exit 2 ;;
 esac
+"#;
+
+/// The fake `nix-store`: `--add-root <link> --indirect --realise <path>` makes the link.
+const FAKE_NIX_STORE: &str = r#"
+echo "$@" >> "$FAKE_ROOT/nix-store.log"
+[ "$1" = --add-root ] || exit 2
+ln -sfn "$5" "$2"
+echo "$2"
 "#;
 
 pub const STATE: &str = r#"{
@@ -499,6 +557,23 @@ impl Root {
         script(&r.p("bin/nix"), FAKE_NIX);
         script(&r.p("mkgen"), MKGEN);
         script(&r.p("bin/nix-env"), FAKE_NIX_ENV);
+        script(&r.p("bin/nix-store"), FAKE_NIX_STORE);
+        // The test's own uid is the first account, `hinteros`.
+        std::fs::write(
+            r.p("passwd"),
+            format!(
+                "hinteros:x:{}:100::{}:/bin/sh\nhinteros-p2:x:20002:100::/nonexistent:/bin/sh\n\
+                 hinteros-guest:x:20000:100::/nonexistent:/bin/sh\n",
+                me(),
+                r.p("home").display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            r.p("group"),
+            "hinteros:x:990:hinteros,hinteros-p2,hinteros-guest\n",
+        )
+        .unwrap();
         script(
             &r.p("bin/nixos-facter"),
             r#"echo "$@" >> "$FAKE_ROOT/facter.log"; echo '{"version":1,"fake":true}' > "$2""#,
@@ -627,6 +702,14 @@ impl System {
             r("bin/nix-env"),
             "--nixos-facter".into(),
             r("bin/nixos-facter"),
+            "--nix-store".into(),
+            r("bin/nix-store"),
+            "--apps-profiles-dir".into(),
+            r("nixprofiles"),
+            "--passwd-file".into(),
+            r("passwd"),
+            "--group-file".into(),
+            r("group"),
             "--min-memory-bytes".into(),
             "0".into(),
             "--min-disk-bytes".into(),

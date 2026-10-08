@@ -171,7 +171,7 @@ impl Store {
             &self.inner.icons,
         );
         encode_result::<StoreList>(StoreListResult {
-            index_version: hinteros_api::catalog::INDEX_VERSION,
+            index_version: index.version,
             apps,
             more_after_update: more,
         })

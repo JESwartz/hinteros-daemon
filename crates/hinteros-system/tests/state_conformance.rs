@@ -45,7 +45,7 @@ fn installer_file_keeps_its_fields() {
     assert_eq!(s.settings.hostname.as_deref(), Some("hinteros"));
     assert_eq!(s.settings.admin.as_ref().unwrap().user, "james");
     assert!(s.settings.ssh.enable);
-    assert_eq!(s.apps.len(), 5);
+    assert_eq!(s.apps().len(), 5);
 }
 
 /// The VM test's config-sync snapshot is a marker file for the sync test, not a device state:

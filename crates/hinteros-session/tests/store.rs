@@ -127,7 +127,7 @@ async fn store_list_merges_catalog_and_install_state() {
     // A catalog of a version this daemon does not read.
     std::fs::write(
         dir.join("catalog.json"),
-        r#"{"indexVersion": 3, "apps": []}"#,
+        r#"{"indexVersion": 4, "apps": []}"#,
     )
     .unwrap();
     let e = call(&mut c, "store.list", json!({})).await.unwrap_err();

@@ -20,6 +20,7 @@ use hinteros_api::{ErrorCode, ErrorObject};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::appreg::{Owner, StarterFile};
 use crate::config::{Paths, Tools};
 use crate::state::State;
 
@@ -76,9 +77,66 @@ pub enum Action {
     /// Copy `/etc/hinteros` to staging, edit, build, switch, swap back.
     Apply(Apply),
     /// Switch to an existing generation, then restore `/etc/hinteros` from its snapshot.
-    Rollback { generation: u32 },
+    Rollback {
+        generation: u32,
+        /// Then rebuild every app env against the restored system (schema 2).
+        #[serde(default)]
+        rebuild_apps: bool,
+    },
     /// Fetch and verify the channel tip.
     UpdateCheck(UpdateSource),
+    /// Change one owner's app env (install, remove, rollback, starter set, new profile).
+    Apps(AppsJob),
+    /// The v1 → v2 migration (apps.md): per-profile envs from the box-wide apps, then
+    /// `state.json` schema 2 through the apply flow.
+    MigrateApps(MigrateJob),
+}
+
+/// What an apps job does to its owner's env.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AppsOp {
+    /// Build the env of exactly these ids and make it the owner's new generation.
+    Set { ids: Vec<String> },
+    /// Switch the owner's Nix profile to an existing generation.
+    Rollback { generation: u32 },
+    /// Give the owner another owner's current env (a new profile or the guest: the starter
+    /// env), without evaluating anything.
+    CopyFrom { from: Owner },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppsJob {
+    pub owner: Owner,
+    pub op: AppsOp,
+    /// Run the apply flow with this state first (stage `box`): box features the env needs
+    /// that are off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_state: Option<State>,
+    /// Vendor terms accepted with the request (recorded before anything is built).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<TermsRecord>,
+    /// App data to delete in the caller's home after the env is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_data: Option<DeleteData>,
+    /// Starter set changes: write `starter.json` once the env is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starter: Option<StarterFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrateJob {
+    /// The box-wide apps that become every account's (and the starter set's) env.
+    pub ids: Vec<String>,
+    /// The accounts.
+    pub owners: Vec<Owner>,
+    /// The schema-1 state the job migrates from (it fails if `state.json` changed).
+    pub from: State,
+    /// Terms records copied to the profiles (existing acceptances of the migrated apps).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<TermsRecord>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -97,6 +155,10 @@ pub struct Apply {
     /// App data to delete after a successful switch (`apps.remove {delete_data: true}`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delete_data: Option<DeleteData>,
+    /// After the switch, rebuild every app env against the new system (schema 2: update,
+    /// channel and base switches).
+    #[serde(default)]
+    pub rebuild_apps: bool,
 }
 
 /// One accepted terms version, as `terms-accepted.json` records it.
@@ -109,6 +171,9 @@ pub struct TermsRecord {
     pub accepted_at: i64,
     /// The unix user who accepted (the caller).
     pub by: String,
+    /// The profile id (schema 2; the guest has none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 /// Data paths to delete in profile homes; homes and paths come from the service (passwd and

@@ -2,8 +2,14 @@
 //!
 //! The service reads the file into [`State`] (unknown fields are an error, as in `state.nix`),
 //! changes it through typed operations only, and writes it back from the struct with
-//! [`State::to_canonical_json`]. Client JSON never reaches the file. `apps` (M8) and
-//! `profiles` (M7) are kept and round-tripped; their methods will edit them here too.
+//! [`State::to_canonical_json`]. Client JSON never reaches the file.
+//!
+//! Two schemas are read (device-config.md, apps.md "Migration"):
+//! - **1** (before M7): box-wide `apps`, `profiles: [{id, name, user}]` (`[]` means p1 =
+//!   `hinteros`).
+//! - **2** (M7): no `apps` (apps are per profile, in Nix profiles), `requirements` (box
+//!   features), `services`, `profiles: [{id, user}]` (the accounts; names live in
+//!   `profiles.json`), `settings.guest.enable`.
 
 use std::path::Path;
 
@@ -13,7 +19,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// The schema the service writes when it migrates (and for every new state).
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// Schemas the service reads.
+pub const SCHEMA_VERSIONS: &[u32] = &[1, 2];
+
+/// Most accounts `state.json` may declare (the guest does not count).
+pub const MAX_PROFILES: usize = 8;
+
+/// The first account's user on every box.
+pub const P1_USER: &str = "hinteros";
+
+/// The guest account.
+pub const GUEST_USER: &str = "hinteros-guest";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -29,10 +48,16 @@ pub struct State {
     /// Disk layout, installer-written; never settable through the API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<DiskState>,
-    /// Catalog app ids installed from the Store (M8: `apps.install`/`apps.remove`).
-    #[serde(default)]
-    pub apps: Vec<String>,
-    /// Profiles (M7).
+    /// Schema 1: catalog app ids installed box-wide from the Store (M8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps: Option<Vec<String>>,
+    /// Schema 2: box features that are on (apps.md "Box requirements").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirements: Option<Vec<String>>,
+    /// Schema 2: enabled services (M10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<String>>,
+    /// The accounts (schema 2: `{id, user}`; schema 1 also had `name`).
     #[serde(default)]
     pub profiles: Vec<Profile>,
 }
@@ -52,6 +77,20 @@ pub struct StateSettings {
     /// The admin account (installer-written; not settable through `settings.set`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin: Option<AdminState>,
+    /// Schema 2: the guest account (`guest.set`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<GuestState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestState {
+    #[serde(default = "yes")]
+    pub enable: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,8 +116,40 @@ pub struct DiskState {
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     pub id: String,
-    pub name: String,
+    /// Schema 1 only (names live in `profiles.json` from schema 2 on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub user: String,
+}
+
+/// An account: a `state.json` profile entry (schema 1's `[]` is p1 = `hinteros`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Account {
+    pub id: String,
+    pub user: String,
+}
+
+/// `^p[1-9][0-9]{0,2}$`: a profile id.
+pub fn is_profile_id(s: &str) -> bool {
+    let b = s.as_bytes();
+    (2..=4).contains(&b.len())
+        && b[0] == b'p'
+        && (b'1'..=b'9').contains(&b[1])
+        && b[2..].iter().all(u8::is_ascii_digit)
+}
+
+/// The number of a profile id (`p12` → 12).
+pub fn profile_number(id: &str) -> Option<u32> {
+    is_profile_id(id).then(|| id[1..].parse().ok()).flatten()
+}
+
+/// The user name of profile `p<N>`: `hinteros` for p1, `hinteros-p<N>` otherwise.
+pub fn user_for(id: &str) -> String {
+    if id == "p1" {
+        P1_USER.into()
+    } else {
+        format!("hinteros-{id}")
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -126,13 +197,55 @@ impl State {
 
     /// Invariants the service relies on (and `state.nix` checks again).
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != SCHEMA_VERSION {
-            return Err(format!(
-                "unsupported schemaVersion {} (supported: {SCHEMA_VERSION})",
-                self.schema_version
-            ));
+        match self.schema_version {
+            1 => self.validate_1(),
+            2 => self.validate_2(),
+            v => Err(format!(
+                "unsupported schemaVersion {v} (supported: {SCHEMA_VERSIONS:?})"
+            )),
         }
-        for app in &self.apps {
+    }
+
+    fn validate_2(&self) -> Result<(), String> {
+        if self.apps.is_some() {
+            return Err("schema 2 has no apps (apps are per profile)".into());
+        }
+        let requirements = self
+            .requirements
+            .as_ref()
+            .ok_or("schema 2 needs requirements")?;
+        let mut seen = std::collections::BTreeSet::new();
+        for f in requirements {
+            if !hinteros_api::catalog::is_box_feature(f) || !seen.insert(f) {
+                return Err(format!("bad requirement {f:?}"));
+            }
+        }
+        let services = self.services.as_ref().ok_or("schema 2 needs services")?;
+        for s in services {
+            if !is_app_id(s) {
+                return Err(format!("bad service id {s:?}"));
+            }
+        }
+        if self.profiles.is_empty() || self.profiles.len() > MAX_PROFILES {
+            return Err(format!("1 to {MAX_PROFILES} profiles"));
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for p in &self.profiles {
+            if !is_profile_id(&p.id) || p.user != user_for(&p.id) || p.name.is_some() {
+                return Err(format!("bad profile {:?}", p.id));
+            }
+            if !ids.insert(&p.id) {
+                return Err(format!("duplicate profile {:?}", p.id));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_1(&self) -> Result<(), String> {
+        if self.requirements.is_some() || self.services.is_some() || self.settings.guest.is_some() {
+            return Err("requirements, services and settings.guest need schema 2".into());
+        }
+        for app in self.apps.iter().flatten() {
             if !is_app_id(app) {
                 return Err(format!("bad app id {app:?}"));
             }
@@ -150,13 +263,70 @@ impl State {
                         || b == b'_'
                         || (i > 0 && (b.is_ascii_digit() || b == b'-'))
                 });
-            let name_ok =
-                (1..=64).contains(&p.name.chars().count()) && !p.name.chars().any(char::is_control);
+            let name_ok = p.name.as_ref().is_some_and(|n| {
+                (1..=64).contains(&n.chars().count()) && !n.chars().any(char::is_control)
+            });
             if !(id_ok && user_ok && name_ok) {
                 return Err(format!("bad profile {:?}", p.id));
             }
         }
         Ok(())
+    }
+
+    pub fn is_schema2(&self) -> bool {
+        self.schema_version >= 2
+    }
+
+    /// Schema 1's box-wide apps (empty on schema 2).
+    pub fn apps(&self) -> &[String] {
+        self.apps.as_deref().unwrap_or(&[])
+    }
+
+    /// Schema 2's enabled box features (empty on schema 1).
+    pub fn requirements(&self) -> &[String] {
+        self.requirements.as_deref().unwrap_or(&[])
+    }
+
+    /// The accounts this state declares (schema 1's `[]` is p1 = `hinteros`).
+    pub fn accounts(&self) -> Vec<Account> {
+        if self.profiles.is_empty() {
+            return vec![Account {
+                id: "p1".into(),
+                user: P1_USER.into(),
+            }];
+        }
+        self.profiles
+            .iter()
+            .map(|p| Account {
+                id: p.id.clone(),
+                user: p.user.clone(),
+            })
+            .collect()
+    }
+
+    /// Whether the guest account exists (schema 2, `settings.guest.enable`, default true).
+    pub fn guest_enabled(&self) -> bool {
+        self.is_schema2() && self.settings.guest.as_ref().is_none_or(|g| g.enable)
+    }
+
+    /// The schema-2 state a schema-1 state migrates to (apps.md "The v1 → v2 migration"):
+    /// `apps` removed, `requirements` as given, no services, the accounts as `{id, user}`.
+    pub fn migrated(&self, requirements: Vec<String>) -> State {
+        let mut s = self.clone();
+        s.schema_version = 2;
+        s.apps = None;
+        s.requirements = Some(requirements);
+        s.services = Some(Vec::new());
+        s.profiles = self
+            .accounts()
+            .into_iter()
+            .map(|a| Profile {
+                id: a.id,
+                name: None,
+                user: a.user,
+            })
+            .collect();
+        s
     }
 
     /// The bytes the service writes: pretty JSON with a trailing newline, fields in a fixed
@@ -312,7 +482,7 @@ mod tests {
     fn reads_the_real_schema_and_round_trips() {
         let s = State::parse(DEVBOX.as_bytes()).unwrap();
         assert!(s.settings.ssh.enable);
-        assert_eq!(s.apps, ["steam"]);
+        assert_eq!(s.apps(), ["steam"]);
         let out = s.to_canonical_json();
         let again = State::parse(&out).unwrap();
         assert_eq!(again, s);
@@ -326,7 +496,18 @@ mod tests {
     #[test]
     fn rejects_what_state_nix_rejects() {
         for bad in [
+            r#"{"schemaVersion":3}"#,
             r#"{"schemaVersion":2}"#,
+            r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[]}"#,
+            r#"{"schemaVersion":2,"requirements":[],"services":[],"apps":[],"profiles":[{"id":"p1","user":"hinteros"}]}"#,
+            r#"{"schemaVersion":2,"requirements":["x86"],"services":[],"profiles":[{"id":"p1","user":"hinteros"}]}"#,
+            r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[{"id":"p2","user":"hinteros"}]}"#,
+            r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[{"id":"p1","name":"x","user":"hinteros"}]}"#,
+            r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[{"id":"p1","user":"hinteros"},{"id":"p1","user":"hinteros"}]}"#,
+            r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[{"id":"p01","user":"hinteros-p01"}]}"#,
+            r#"{"schemaVersion":1,"requirements":[]}"#,
+            r#"{"schemaVersion":1,"settings":{"guest":{"enable":true}}}"#,
+            r#"{"schemaVersion":1,"profiles":[{"id":"p1","user":"hinteros"}]}"#,
             r#"{"schemaVersion":1,"extra":1}"#,
             r#"{"schemaVersion":1,"disk":{"layout":"x","size":1}}"#,
             r#"{"schemaVersion":1,"settings":{"admin":{}}}"#,
@@ -342,6 +523,56 @@ mod tests {
         ] {
             assert!(State::parse(bad.as_bytes()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn schema_2_and_the_migration() {
+        let s1 = State::parse(DEVBOX.as_bytes()).unwrap();
+        assert!(!s1.is_schema2() && !s1.guest_enabled());
+        assert_eq!(
+            s1.accounts(),
+            [Account {
+                id: "p1".into(),
+                user: "hinteros".into()
+            }]
+        );
+        let s2 = s1.migrated(vec!["graphics32".into()]);
+        s2.validate().unwrap();
+        let text = String::from_utf8(s2.to_canonical_json()).unwrap();
+        assert!(
+            !text.contains("apps") && !text.contains("\"name\""),
+            "{text}"
+        );
+        let again = State::parse(text.as_bytes()).unwrap();
+        assert_eq!(again, s2);
+        assert!(again.guest_enabled());
+        assert_eq!(again.requirements(), ["graphics32"]);
+        // profiles: [] (every box the old installer made) is p1 = hinteros.
+        let empty = State::parse(br#"{"schemaVersion":1,"apps":["youtube"],"profiles":[]}"#)
+            .unwrap()
+            .migrated(Vec::new());
+        assert_eq!(empty.profiles[0].user, "hinteros");
+        empty.validate().unwrap();
+        let s = State::parse(
+            br#"{"schemaVersion":2,"requirements":[],"services":[],"settings":{"guest":{"enable":false}},
+                "profiles":[{"id":"p1","user":"hinteros"},{"id":"p12","user":"hinteros-p12"}]}"#,
+        )
+        .unwrap();
+        assert!(!s.guest_enabled());
+        assert_eq!(s.accounts()[1].user, "hinteros-p12");
+    }
+
+    #[test]
+    fn profile_ids() {
+        for ok in ["p1", "p9", "p10", "p999"] {
+            assert!(is_profile_id(ok), "{ok}");
+        }
+        for bad in ["p0", "p01", "p1000", "p", "q1", "P1", "p1a", ""] {
+            assert!(!is_profile_id(bad), "{bad}");
+        }
+        assert_eq!(profile_number("p12"), Some(12));
+        assert_eq!(user_for("p1"), "hinteros");
+        assert_eq!(user_for("p3"), "hinteros-p3");
     }
 
     #[test]

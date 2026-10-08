@@ -12,8 +12,9 @@ use hinteros_api::common::{Peer as ApiPeer, Ping};
 use hinteros_api::jsonrpc;
 use hinteros_api::server::{self, Connection, Step, method_not_found};
 use hinteros_api::system::{
-    self, AppsInstall, AppsInstallParams, AppsRemove, AppsRemoveParams, BaseSet, BaseSetParams,
-    ChannelSet, ChannelSetParams, EventName, GenerationsList, GenerationsListResult,
+    self, AppsAcceptTerms, AppsAcceptTermsParams, AppsGenerations, AppsInstall, AppsInstallParams,
+    AppsList, AppsRemove, AppsRemoveParams, AppsRollback, AppsRollbackParams, BaseSet,
+    BaseSetParams, ChannelSet, ChannelSetParams, EventName, GenerationsList, GenerationsListResult,
     HardwareRedetect, JobIdParams, JobKind, JobRef, JobsCancel, JobsGet, JobsGetResult, JobsList,
     JobsListResult, Rebuild, Rollback, RollbackParams, Settings, SettingsGet, SettingsGetResult,
     SettingsSet, SettingsSetParams, SshInfo, SshSet, SshSetParams, SshSettings, Subscribe,
@@ -40,6 +41,8 @@ use crate::peer::Peer;
 use crate::state::{self, State};
 use crate::store;
 
+mod apps;
+
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -63,6 +66,7 @@ pub struct Service {
     jobs: Mutex<Jobs>,
     events: broadcast::Sender<Broadcast>,
     connections: Mutex<HashMap<u32, usize>>,
+    users: crate::users::Users,
 }
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
@@ -70,6 +74,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
     // 0660: only root and the socket's group (set by the unit) can connect at all.
+    startup(&args);
     let listener = server::bind_unix(&args.socket, 0o660, 0o755)
         .with_context(|| format!("binding {}", args.socket.display()))?;
     info!(socket = %args.socket.display(), api_version = %system::VERSION, "listening");
@@ -85,6 +90,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         jobs: Mutex::new(Jobs::load(paths.clone())),
         events,
         connections: Mutex::new(HashMap::new()),
+        users: args.users(),
         paths,
         args,
     });
@@ -115,11 +121,28 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     Ok(())
 }
 
+/// Before serving: the registry is checked against the env manifests and the session links are
+/// published (schema 2).
+fn startup(args: &ServeArgs) {
+    let paths = args.paths();
+    if let Ok((state, _)) = State::load(&paths.state_json())
+        && state.is_schema2()
+    {
+        crate::appreg::Registry::reconcile(&paths, &state);
+        crate::appreg::publish(&paths, &state);
+    }
+}
+
 /// Follow the running job and broadcast its events (at most 4 per second).
 async fn monitor(svc: Arc<Service>) {
     let mut tick = tokio::time::interval(Duration::from_millis(250));
+    let mut n: u64 = 0;
     loop {
         tick.tick().await;
+        if n.is_multiple_of(20) {
+            svc.maybe_migrate().await;
+        }
+        n += 1;
         let (events, finished) = svc.jobs.lock().unwrap().poll();
         for e in events {
             let _ = svc.events.send(e);
@@ -356,7 +379,8 @@ async fn dispatch(
                     ssh: SshSettings {
                         enabled: state.settings.ssh.enable,
                     },
-                    apps: state.apps.clone(),
+                    apps: (!state.is_schema2()).then(|| state.apps().to_vec()),
+                    requirements: state.is_schema2().then(|| state.requirements().to_vec()),
                 },
             })
         }
@@ -378,6 +402,14 @@ async fn dispatch(
             decode::<JobsList>(params)?;
             let jobs = svc.jobs.lock().unwrap().list();
             encode::<JobsList>(JobsListResult { jobs })
+        }
+        AppsList::NAME => {
+            decode::<AppsList>(params)?;
+            encode::<AppsList>(svc.apps_list(peer)?)
+        }
+        AppsGenerations::NAME => {
+            decode::<AppsGenerations>(params)?;
+            encode::<AppsGenerations>(svc.apps_generations(peer)?)
         }
         _ => Err(method_not_found(method)),
     }
@@ -477,6 +509,8 @@ pub(crate) enum Request {
     BaseSet(BaseSetParams),
     AppsInstall(AppsInstallParams),
     AppsRemove(AppsRemoveParams),
+    AppsRollback(AppsRollbackParams),
+    AppsAcceptTerms(AppsAcceptTermsParams),
     JobsCancel(JobIdParams),
 }
 
@@ -541,6 +575,35 @@ impl Request {
                 check_revision(&p.revision)?;
                 store::check_ids(&p.ids)?;
                 Self::AppsRemove(p)
+            }
+            AppsRollback::NAME => {
+                let p: AppsRollbackParams = decode::<AppsRollback>(params)?;
+                if p.generation == 0 {
+                    return Err(ErrorObject::invalid_field(
+                        "generation",
+                        "out_of_range",
+                        "generation must be at least 1",
+                    ));
+                }
+                Self::AppsRollback(p)
+            }
+            AppsAcceptTerms::NAME => {
+                let p: AppsAcceptTermsParams = decode::<AppsAcceptTerms>(params)?;
+                if !hinteros_api::catalog::is_app_id(&p.id) {
+                    return Err(ErrorObject::invalid_field(
+                        "id",
+                        "bad_format",
+                        "id must be a catalog id",
+                    ));
+                }
+                if !hinteros_api::catalog::is_terms_version(&p.version) {
+                    return Err(ErrorObject::invalid_field(
+                        "version",
+                        "bad_format",
+                        "version must match ^[A-Za-z0-9._-]{1,32}$",
+                    ));
+                }
+                Self::AppsAcceptTerms(p)
             }
             JobsCancel::NAME => {
                 let p: JobIdParams = decode::<JobsCancel>(params)?;
@@ -748,6 +811,7 @@ impl Service {
                 if new == state {
                     return job_ref(None);
                 }
+                let new = self.requirements_update(&new).unwrap_or(new);
                 self.preflight()?;
                 let spec = self.spec(
                     JobKind::Settings,
@@ -765,6 +829,7 @@ impl Service {
                     return job_ref(None);
                 }
                 state.settings.ssh.enable = p.enabled;
+                let state = self.requirements_update(&state).unwrap_or(state);
                 self.preflight()?;
                 let spec = self.spec(
                     JobKind::Ssh,
@@ -777,19 +842,27 @@ impl Service {
                 job_ref(Some(self.start(spec).await?))
             }
             Request::Rebuild => {
-                self.load_state()?;
+                let (state, _) = self.load_state()?;
                 self.preflight()?;
-                let spec = self.spec(JobKind::Rebuild, uid, Action::Apply(Apply::default()));
+                let spec = self.spec(
+                    JobKind::Rebuild,
+                    uid,
+                    Action::Apply(Apply {
+                        state: self.requirements_update(&state),
+                        ..Default::default()
+                    }),
+                );
                 job_ref(Some(self.start(spec).await?))
             }
             Request::HardwareRedetect => {
-                self.load_state()?;
+                let (state, _) = self.load_state()?;
                 self.preflight()?;
                 let spec = self.spec(
                     JobKind::HardwareRedetect,
                     uid,
                     Action::Apply(Apply {
                         facter: true,
+                        state: self.requirements_update(&state),
                         ..Default::default()
                     }),
                 );
@@ -802,11 +875,13 @@ impl Service {
                     return job_ref(None);
                 };
                 state.base = base;
+                let state = self.requirements_update(&state).unwrap_or(state);
                 self.preflight()?;
                 let spec = self.spec(
                     JobKind::Base,
                     uid,
                     Action::Apply(Apply {
+                        rebuild_apps: state.is_schema2(),
                         state: Some(state),
                         ..Default::default()
                     }),
@@ -843,7 +918,10 @@ impl Service {
                 let spec = self.spec(
                     JobKind::Rollback,
                     uid,
-                    Action::Rollback { generation: target },
+                    Action::Rollback {
+                        generation: target,
+                        rebuild_apps: true,
+                    },
                 );
                 job_ref(Some(self.start(spec).await?))
             }
@@ -870,7 +948,7 @@ impl Service {
                 source.catalog = Some(job::CatalogCheck {
                     index: std::fs::canonicalize(&index).unwrap_or(index),
                     installed: State::load(&self.paths.state_json())
-                        .map(|(s, _)| s.apps)
+                        .map(|(s, _)| self.installed_anywhere(&s))
                         .unwrap_or_default(),
                     input_url: table.input_url(&source.branch, None),
                 });
@@ -910,11 +988,14 @@ impl Service {
                     not_fast_forward: NotFastForward::Reject,
                     retarget_from: None,
                 };
+                let state = self.load_state().ok().map(|(s, _)| s);
                 let spec = self.spec(
                     JobKind::UpdateApply,
                     uid,
                     Action::Apply(Apply {
                         update: Some(update),
+                        state: state.as_ref().and_then(|s| self.requirements_update(s)),
+                        rebuild_apps: state.as_ref().is_some_and(State::is_schema2),
                         ..Default::default()
                     }),
                 );
@@ -948,11 +1029,14 @@ impl Service {
                         NotFastForward::NeedsAcknowledgement
                     },
                 };
+                let state = self.load_state().ok().map(|(s, _)| s);
                 let spec = self.spec(
                     JobKind::Channel,
                     uid,
                     Action::Apply(Apply {
                         update: Some(update),
+                        state: state.as_ref().and_then(|s| self.requirements_update(s)),
+                        rebuild_apps: state.as_ref().is_some_and(State::is_schema2),
                         ..Default::default()
                     }),
                 );
@@ -960,11 +1044,14 @@ impl Service {
             }
             Request::AppsInstall(p) => {
                 let (mut state, revision) = self.load_state()?;
+                if state.is_schema2() {
+                    return self.apps_install_v2(peer, state, p).await;
+                }
                 if p.revision != revision {
                     return Err(state_conflict());
                 }
                 let index = self.catalog()?;
-                let plan = store::plan_install(&index, &state.apps, &p.ids, &p.accepted_terms)?;
+                let plan = store::plan_install(&index, state.apps(), &p.ids, &p.accepted_terms)?;
                 if plan.new.is_empty() {
                     return job_ref(None);
                 }
@@ -987,9 +1074,13 @@ impl Service {
                         version: version.clone(),
                         accepted_at: now,
                         by: by.clone(),
+                        profile: None,
                     })
                     .collect();
-                state.apps.extend(plan.new.iter().cloned());
+                state
+                    .apps
+                    .get_or_insert_with(Vec::new)
+                    .extend(plan.new.iter().cloned());
                 let spec = self.spec(
                     JobKind::AppsInstall,
                     uid,
@@ -1009,6 +1100,9 @@ impl Service {
             }
             Request::AppsRemove(p) => {
                 let (mut state, revision) = self.load_state()?;
+                if state.is_schema2() {
+                    return self.apps_remove_v2(peer, state, p).await;
+                }
                 if p.revision != revision {
                     return Err(state_conflict());
                 }
@@ -1019,8 +1113,10 @@ impl Service {
                     Err(e) if p.delete_data => return Err(e),
                     Err(_) => None,
                 };
-                let removing = store::plan_remove(index.as_ref(), &state.apps, &p.ids)?;
-                state.apps.retain(|a| !removing.contains(a));
+                let removing = store::plan_remove(index.as_ref(), state.apps(), &p.ids)?;
+                if let Some(apps) = state.apps.as_mut() {
+                    apps.retain(|a| !removing.contains(a));
+                }
                 let delete_data = match (&index, p.delete_data) {
                     (Some(index), true) => Some(job::DeleteData {
                         homes: match &self.args.test_profile_home {
@@ -1049,6 +1145,8 @@ impl Service {
                 info!(job = %id, apps = ?removing, delete_data = p.delete_data, "removing apps");
                 job_ref(Some(id))
             }
+            Request::AppsRollback(p) => self.apps_rollback(peer, p).await,
+            Request::AppsAcceptTerms(p) => self.apps_accept_terms(peer, p),
             Request::JobsCancel(p) => {
                 self.jobs.lock().unwrap().cancel(&p.job_id)?;
                 info!(job = %p.job_id, uid, "cancel requested");

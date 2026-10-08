@@ -424,6 +424,9 @@ mod tests {
             profile: d.join("profiles/system"),
             current_system: d.join("current"),
             booted_system: d.join("booted"),
+            apps_profiles: d.join("nixprofiles"),
+            catalog_index: None,
+            users: Default::default(),
         }
     }
 
@@ -440,6 +443,7 @@ mod tests {
                 git: "git".into(),
                 ssh_keygen: "ssh-keygen".into(),
                 nixos_facter: "nixos-facter".into(),
+                nix_store: "nix-store".into(),
             },
             bus: None,
             action: Action::Apply(Apply::default()),

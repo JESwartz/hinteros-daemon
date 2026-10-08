@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 10);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 12);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -817,6 +817,10 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<RelayBaseSet>(),
         MethodInfo::of::<RelayAppsInstall>(),
         MethodInfo::of::<RelayAppsRemove>(),
+        MethodInfo::of::<RelayAppsList>(),
+        MethodInfo::of::<RelayAppsGenerations>(),
+        MethodInfo::of::<RelayAppsRollback>(),
+        MethodInfo::of::<RelayAppsAcceptTerms>(),
         MethodInfo::of::<RelayJobsGet>(),
         MethodInfo::of::<RelayJobsList>(),
         MethodInfo::of::<RelayJobsCancel>(),
@@ -922,6 +926,10 @@ relay! {
     RelayBaseSet = "system.base.set" => crate::system::BaseSet;
     RelayAppsInstall = "system.apps.install" => crate::system::AppsInstall;
     RelayAppsRemove = "system.apps.remove" => crate::system::AppsRemove;
+    RelayAppsList = "system.apps.list" => crate::system::AppsList;
+    RelayAppsGenerations = "system.apps.generations" => crate::system::AppsGenerations;
+    RelayAppsRollback = "system.apps.rollback" => crate::system::AppsRollback;
+    RelayAppsAcceptTerms = "system.apps.accept_terms" => crate::system::AppsAcceptTerms;
     RelayJobsGet = "system.jobs.get" => crate::system::JobsGet;
     RelayJobsList = "system.jobs.list" => crate::system::JobsList;
     RelayJobsCancel = "system.jobs.cancel" => crate::system::JobsCancel;

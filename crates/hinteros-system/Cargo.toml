@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+argon2 = { version = "0.5", features = ["std"] }
 base64.workspace = true
 clap.workspace = true
 hinteros-api.workspace = true

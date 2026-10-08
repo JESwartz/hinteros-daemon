@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, ErrorObject, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 3);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 4);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/system-api.json");
@@ -90,6 +90,18 @@ pub enum JobKind {
     Base,
     AppsInstall,
     AppsRemove,
+    /// 0.4: a profile's apps back to an earlier generation.
+    AppsRollback,
+    /// 0.4: a new starter env.
+    StarterSet,
+    /// 0.4: the one-time move from box-wide apps (state.json schema 1) to per-profile apps.
+    MigrateApps,
+    /// 0.4: a new account (a rebuild).
+    ProfilesCreate,
+    /// 0.4: an account and its home removed (a rebuild).
+    ProfilesRemove,
+    /// 0.4: the guest account on or off (a rebuild).
+    GuestSet,
 }
 
 impl JobKind {
@@ -105,6 +117,12 @@ impl JobKind {
         JobKind::Base,
         JobKind::AppsInstall,
         JobKind::AppsRemove,
+        JobKind::AppsRollback,
+        JobKind::StarterSet,
+        JobKind::MigrateApps,
+        JobKind::ProfilesCreate,
+        JobKind::ProfilesRemove,
+        JobKind::GuestSet,
     ];
 }
 
@@ -133,10 +151,15 @@ pub enum Stage {
     Preparing,
     Fetching,
     Verifying,
+    /// 0.4: the system rebuild that turns on box features an app needs (nix progress still
+    /// attached).
+    Box,
     Evaluating,
     Downloading,
     Building,
     Activating,
+    /// 0.4: after a system switch, every profile's app env is rebuilt against the new system.
+    Apps,
     Finishing,
 }
 
@@ -145,10 +168,12 @@ impl Stage {
         Stage::Preparing,
         Stage::Fetching,
         Stage::Verifying,
+        Stage::Box,
         Stage::Evaluating,
         Stage::Downloading,
         Stage::Building,
         Stage::Activating,
+        Stage::Apps,
         Stage::Finishing,
     ];
 }
@@ -283,8 +308,13 @@ pub struct SshSettings {
 pub struct Settings {
     pub base: Base,
     pub ssh: SshSettings,
-    /// Catalog app ids installed from the Store (`state.json` `apps`), in install order.
-    pub apps: Vec<String>,
+    /// Schema-1 boxes: catalog app ids installed box-wide from the Store (`state.json` `apps`),
+    /// in install order. Absent on schema-2 boxes (0.4: apps are per profile, `apps.list`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps: Option<Vec<String>>,
+    /// Schema-2 boxes (0.4): the box features that are on (read-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirements: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -544,6 +574,92 @@ impl Method for AppsRemove {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Apps per profile (0.4)
+
+/// `apps.list`: the caller's current app env.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsListResult {
+    /// Stands for the caller's current app generation (64 hex); `apps.install`/`apps.remove`
+    /// take it as `revision` on schema-2 boxes.
+    pub revision: String,
+    /// The Nix profile generation (null: no apps yet, or the guest's single link).
+    #[serde(deserialize_with = "nullable")]
+    pub generation: Option<u32>,
+    /// Catalog ids in the env, sorted.
+    pub ids: Vec<String>,
+    /// Ids whose vendor terms this profile has not accepted at the catalog's version (apps
+    /// from the starter set): the launcher asks on first launch.
+    pub needs_terms: Vec<String>,
+    /// Box features the env needs.
+    #[serde(rename = "box")]
+    pub box_features: Vec<String>,
+}
+
+pub struct AppsList;
+impl Method for AppsList {
+    const NAME: &'static str = "apps.list";
+    type Params = NoParams;
+    type Result = AppsListResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppGeneration {
+    pub generation: u32,
+    /// When it was made (Unix time, seconds).
+    pub date: i64,
+    pub ids: Vec<String>,
+    /// The system revision the env was built against.
+    #[serde(deserialize_with = "nullable")]
+    pub system_rev: Option<String>,
+    pub current: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsGenerationsResult {
+    /// Newest first.
+    pub generations: Vec<AppGeneration>,
+}
+
+pub struct AppsGenerations;
+impl Method for AppsGenerations {
+    const NAME: &'static str = "apps.generations";
+    type Params = NoParams;
+    type Result = AppsGenerationsResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppsRollbackParams {
+    pub generation: u32,
+}
+
+pub struct AppsRollback;
+impl Method for AppsRollback {
+    const NAME: &'static str = "apps.rollback";
+    type Params = AppsRollbackParams;
+    type Result = JobRef;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppsAcceptTermsParams {
+    pub id: String,
+    pub version: String,
+}
+
+/// An empty result object.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Empty {}
+
+pub struct AppsAcceptTerms;
+impl Method for AppsAcceptTerms {
+    const NAME: &'static str = "apps.accept_terms";
+    type Params = AppsAcceptTermsParams;
+    type Result = Empty;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Jobs
 
 /// Result of a job that changed the system.
@@ -556,6 +672,21 @@ pub struct AppliedResult {
     /// Locked revision after the job.
     #[serde(deserialize_with = "nullable")]
     pub rev: Option<String>,
+    /// 0.4: app envs the final `apps` stage could not rebuild (they keep their previous
+    /// generation, which still works). Absent when every env was rebuilt or there was none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps_not_updated: Option<Vec<AppNotUpdated>>,
+}
+
+/// An owner's env that the `apps` stage left at its old generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppNotUpdated {
+    /// A profile id, `starter` or `guest`.
+    pub owner: String,
+    /// The ids of the env that was not rebuilt.
+    pub ids: Vec<String>,
+    /// What failed (a log line).
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -715,6 +846,10 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<BaseSet>(),
         MethodInfo::of::<AppsInstall>(),
         MethodInfo::of::<AppsRemove>(),
+        MethodInfo::of::<AppsList>(),
+        MethodInfo::of::<AppsGenerations>(),
+        MethodInfo::of::<AppsRollback>(),
+        MethodInfo::of::<AppsAcceptTerms>(),
         MethodInfo::of::<JobsGet>(),
         MethodInfo::of::<JobsList>(),
         MethodInfo::of::<JobsCancel>(),
@@ -741,6 +876,8 @@ pub const MUTATING: &[&str] = &[
     BaseSet::NAME,
     AppsInstall::NAME,
     AppsRemove::NAME,
+    AppsRollback::NAME,
+    AppsAcceptTerms::NAME,
     JobsCancel::NAME,
 ];
 
@@ -755,7 +892,9 @@ pub fn polkit_action(method: &str) -> Option<&'static str> {
         Rollback::NAME => "org.hinteros.system.rollback",
         ChannelSet::NAME | BaseSet::NAME => "org.hinteros.system.channel",
         JobsCancel::NAME => "org.hinteros.system.jobs.cancel",
-        AppsInstall::NAME | AppsRemove::NAME => "org.hinteros.system.apps",
+        AppsInstall::NAME | AppsRemove::NAME | AppsRollback::NAME | AppsAcceptTerms::NAME => {
+            "org.hinteros.system.apps"
+        }
         _ => return None,
     })
 }

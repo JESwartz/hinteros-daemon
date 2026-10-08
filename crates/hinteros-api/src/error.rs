@@ -113,6 +113,7 @@ impl ErrorCode {
         Self::AuthenticationRequired,
         Self::AppConflict,
         Self::TermsRequired,
+        Self::Unavailable,
     ];
 
     pub const fn code(self) -> i64 {

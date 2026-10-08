@@ -43,6 +43,8 @@ pub enum Service {
     Catalog,
     /// polkit: the authentication agent's helper (`auth.respond`).
     Polkit,
+    /// 0.4/0.12: per-profile apps and profiles (`unavailable {service: profiles, reason: schema1}`).
+    Profiles,
 }
 
 impl Service {
@@ -54,6 +56,7 @@ impl Service {
         Service::Logind,
         Service::Catalog,
         Service::Polkit,
+        Service::Profiles,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -64,6 +67,7 @@ impl Service {
             Service::Display => "display",
             Service::Logind => "logind",
             Service::Catalog => "catalog",
+            Service::Profiles => "profiles",
             Service::Polkit => "polkit",
         }
     }

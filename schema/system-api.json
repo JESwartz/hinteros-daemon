@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.3",
+  "version": "0.4",
   "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -36,16 +36,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.3", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.3", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "0.4", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "0.4", "server": { "name": "hinteros-system", "version": "0.1.0" } }
         },
         {
           "name": "mismatch",
           "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 0.1, server 0.3",
-            "data": { "client_api_version": "0.1", "server_api_version": "0.3" }
+            "message": "API version mismatch: client 0.1, server 0.4",
+            "data": { "client_api_version": "0.1", "server_api_version": "0.4" }
           }
         }
       ]
@@ -150,14 +150,19 @@
           "revision": { "$ref": "#/$defs/Revision" },
           "settings": {
             "type": "object",
-            "required": ["base", "ssh", "apps"],
+            "required": ["base", "ssh"],
             "additionalProperties": false,
             "properties": {
               "base": { "$ref": "#/$defs/Base" },
               "apps": {
-                "description": "Catalog app ids installed from the Store (state.json apps), in install order (since 0.3).",
+                "description": "Schema-1 boxes: catalog app ids installed box-wide from the Store (state.json apps), in install order (since 0.3). Absent on schema-2 boxes (0.4: apps are per profile, see apps.list).",
                 "type": "array",
                 "items": { "$ref": "#/$defs/CatalogId" }
+              },
+              "requirements": {
+                "description": "Schema-2 boxes (0.4): the box features that are on (read-only).",
+                "type": "array",
+                "items": { "$ref": "#/$defs/BoxFeature" }
               },
               "ssh": {
                 "type": "object",
@@ -411,7 +416,7 @@
     },
     "apps.install": {
       "summary": "Install Store apps (job). Action org.hinteros.system.apps.",
-      "description": "ids (1 to 8 catalog ids) must be in the running generation's catalog index (/run/current-system/sw/share/hinteros/catalog.json, never the caller's copy) with status available; their depends are added (transitively). Ids already installed are skipped; if nothing is left the result is job_id null. A conflict between a new app and an installed or requested one is app_conflict. Every new app with vendor terms needs accepted_terms[id] equal to the catalog's terms.version, else terms_required (the box records the acceptance: id, version, time, uid and profile, in the audit log and /var/lib/hinteros/terms-accepted.json). revision must be settings.get's (state_conflict otherwise). Free disk space must cover the new apps' sizeMiB plus the usual rebuild margin (insufficient_resources). The job writes state.json's apps from the service's typed state and runs the apply flow.",
+      "description": "ids (1 to 8 catalog ids) must be in the running generation's catalog index (/run/current-system/sw/share/hinteros/catalog.json, never the caller's copy) with status available; their depends are added (transitively). Ids already installed are skipped; if nothing is left the result is job_id null. A conflict between a new app and an installed or requested one is app_conflict. Every new app with vendor terms needs accepted_terms[id] equal to the catalog's terms.version, else terms_required (the box records the acceptance: id, version, time, uid and profile, in the audit log and /var/lib/hinteros/terms-accepted.json). revision must be settings.get's (state_conflict otherwise); 0.4, schema-2 boxes: the app revision from apps.list, and the apps are installed into the caller's own profile (a new generation of its Nix profile, no system rebuild unless a box feature must be turned on first: stage box). Free disk space must cover the new apps' sizeMiB plus the usual rebuild margin (insufficient_resources). The job writes state.json's apps from the service's typed state and runs the apply flow.",
       "since": "0.3",
       "params": {
         "type": "object",
@@ -477,6 +482,97 @@
           "error": { "code": 3013, "message": "youtube depends on firefox", "data": { "id": "firefox", "conflicts_with": "youtube" } }
         },
         { "name": "not installed", "params": { "ids": ["plex-htpc"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": false }, "error": { "code": 3010, "message": "plex-htpc is not installed" } }
+      ]
+    },
+    "apps.list": {
+      "summary": "The caller's own apps (0.4, schema-2 boxes): its current app env.",
+      "description": "Read-only. The caller is resolved from its uid: a profile (or the guest). revision stands for the current app generation; pass it to apps.install/apps.remove as revision. needs_terms: ids whose vendor terms this profile has not accepted at the catalog's current version (apps that came with the starter set); the launcher shows the terms on first launch and calls apps.accept_terms. A spare account gets an empty list. Schema-1 boxes (not migrated yet): unavailable {service: profiles, reason: schema1}.",
+      "since": "0.4",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": {
+        "type": "object",
+        "required": ["revision", "generation", "ids", "needs_terms", "box"],
+        "additionalProperties": false,
+        "properties": {
+          "revision": { "$ref": "#/$defs/Revision" },
+          "generation": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+          "ids": { "type": "array", "items": { "$ref": "#/$defs/CatalogId" } },
+          "needs_terms": { "type": "array", "items": { "$ref": "#/$defs/CatalogId" } },
+          "box": { "type": "array", "items": { "$ref": "#/$defs/BoxFeature" } }
+        }
+      },
+      "errors": ["permission_denied", "unavailable"],
+      "examples": [
+        { "name": "a profile with Steam from the starter set", "params": {}, "result": { "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "generation": 3, "ids": ["firefox", "steam", "youtube"], "needs_terms": ["steam"], "box": ["graphics32", "steam-devices"] } },
+        { "name": "not migrated yet", "params": {}, "error": { "code": 4001, "message": "this box has not moved to per-profile apps yet", "data": { "service": "profiles", "reason": "schema1" } } }
+      ]
+    },
+    "apps.generations": {
+      "summary": "The caller's app generations (0.4), newest first.",
+      "description": "Read-only. Every generation of the caller's Nix profile of apps (the newest 3 plus the current one are kept), with the ids of its env and the system revision it was built against. apps.rollback takes one of them.",
+      "since": "0.4",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": {
+        "type": "object",
+        "required": ["generations"],
+        "additionalProperties": false,
+        "properties": {
+          "generations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["generation", "date", "ids", "system_rev", "current"],
+              "additionalProperties": false,
+              "properties": {
+                "generation": { "type": "integer", "minimum": 1 },
+                "date": { "type": "integer" },
+                "ids": { "type": "array", "items": { "$ref": "#/$defs/CatalogId" } },
+                "system_rev": { "oneOf": [{ "type": "string", "maxLength": 64 }, { "type": "null" }] },
+                "current": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      },
+      "errors": ["permission_denied", "unavailable"],
+      "examples": [
+        { "name": "two generations", "params": {}, "result": { "generations": [
+          { "generation": 2, "date": 1791300000, "ids": ["moonlight", "youtube"], "system_rev": "0f3c5a9e2b7d4c1a8e6f9b0d2c4e6a8b1d3f5a7c", "current": true },
+          { "generation": 1, "date": 1791200000, "ids": ["youtube"], "system_rev": "0f3c5a9e2b7d4c1a8e6f9b0d2c4e6a8b1d3f5a7c", "current": false } ] } }
+      ]
+    },
+    "apps.rollback": {
+      "summary": "Switch the caller's apps back to an earlier generation (job, 0.4). Action org.hinteros.system.apps.",
+      "description": "generation must be one of apps.generations and not the current one (not_found otherwise). If its env needs box features that are off, the job first runs the box stage (a system rebuild). Job kind apps_rollback.",
+      "since": "0.4",
+      "params": {
+        "type": "object",
+        "required": ["generation"],
+        "additionalProperties": false,
+        "properties": { "generation": { "type": "integer", "minimum": 1 } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "not_found", "unavailable"],
+      "examples": [
+        { "name": "back to generation 1", "params": { "generation": 1 }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "the current one", "params": { "generation": 2 }, "error": { "code": 3010, "message": "app generation 2 is not on disk or is the current one" } }
+      ]
+    },
+    "apps.accept_terms": {
+      "summary": "Accept an installed app's vendor terms for the caller's profile (0.4). Action org.hinteros.system.apps.",
+      "description": "For apps that reached the profile without an acceptance (the starter set): id must be in the caller's env and have terms, version must be the running catalog's terms.version (invalid_params otherwise). Records {version, accepted_at, by: <user>, profile: <id>} in terms-accepted.json and the audit log; then the id leaves apps.list's needs_terms. Accepting what is already accepted is a no-op.",
+      "since": "0.4",
+      "params": {
+        "type": "object",
+        "required": ["id", "version"],
+        "additionalProperties": false,
+        "properties": { "id": { "$ref": "#/$defs/CatalogId" }, "version": { "$ref": "#/$defs/TermsVersion" } }
+      },
+      "result": { "type": "object", "additionalProperties": false, "properties": {} },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "not_found", "unavailable"],
+      "examples": [
+        { "name": "Steam on first launch", "params": { "id": "steam", "version": "2026-09-10" }, "result": {} },
+        { "name": "an older version", "params": { "id": "steam", "version": "2025-01-01" }, "error": { "code": -32602, "message": "the current terms version of steam is 2026-09-10", "data": { "field": "version", "reason": "not_current" } } }
       ]
     },
     "jobs.get": {
@@ -717,7 +813,7 @@
         "additionalProperties": false,
         "properties": {
           "action": { "$ref": "#/$defs/PolkitAction" },
-          "reason": { "enum": ["seat", "polkit", "peer"] }
+          "reason": { "enum": ["seat", "polkit", "peer", "profile"] }
         }
       }
     },
@@ -829,6 +925,20 @@
         "properties": { "id": { "$ref": "#/$defs/CatalogId" }, "conflicts_with": { "$ref": "#/$defs/CatalogId" } }
       }
     },
+    "unavailable": {
+      "code": 4001,
+      "since": "0.4",
+      "summary": "0.4: the per-profile methods on a box that still has box-wide apps (state.json schema 1, before the migration job): service profiles, reason schema1.",
+      "data": {
+        "type": "object",
+        "required": ["service", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "service": { "enum": ["networkmanager", "bluez", "audio", "display", "logind", "catalog", "polkit", "profiles"] },
+          "reason": { "type": "string", "maxLength": 300 }
+        }
+      }
+    },
     "terms_required": {
       "code": 3014,
       "since": "0.3",
@@ -876,7 +986,8 @@
     "PolkitAction": { "type": "string", "pattern": "^org\\.hinteros\\.system\\.[a-z.]+$" },
     "Channel": { "enum": ["stable", "beta"] },
     "Base": { "enum": ["stable", "unstable"] },
-    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove"] },
+    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "migrate_apps", "profiles_create", "profiles_remove", "guest_set"] },
+    "BoxFeature": { "description": "A box feature (catalog format 3): box-wide configuration an app needs, turned on when any owner has such an app.", "enum": ["graphics32", "steam-devices"] },
     "CatalogId": { "description": "Catalog app id (state.json apps).", "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
     "TermsVersion": { "description": "A vendor terms version from the catalog.", "type": "string", "pattern": "^[A-Za-z0-9._-]{1,32}$" },
     "CatalogApp": {
@@ -896,7 +1007,7 @@
       }
     },
     "JobState": { "enum": ["running", "succeeded", "failed", "cancelled"] },
-    "Stage": { "enum": ["preparing", "fetching", "verifying", "evaluating", "downloading", "building", "activating", "finishing"] },
+    "Stage": { "enum": ["preparing", "fetching", "verifying", "box", "evaluating", "downloading", "building", "activating", "apps", "finishing"] },
     "Severity": { "enum": ["low", "medium", "high", "critical"] },
     "JobRef": {
       "description": "A started job, or null when there was nothing to do.",
@@ -958,7 +1069,21 @@
       "additionalProperties": false,
       "properties": {
         "generation": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
-        "rev": { "oneOf": [{ "$ref": "#/$defs/Rev" }, { "type": "null" }] }
+        "rev": { "oneOf": [{ "$ref": "#/$defs/Rev" }, { "type": "null" }] },
+        "apps_not_updated": {
+          "description": "0.4: app envs the final apps stage could not rebuild; each keeps its previous generation, which still works. Absent when there were none.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["owner", "ids", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "owner": { "description": "A profile id, starter or guest.", "type": "string", "pattern": "^(p[1-9][0-9]{0,2}|starter|guest)$" },
+              "ids": { "type": "array", "items": { "$ref": "#/$defs/CatalogId" } },
+              "reason": { "type": "string", "maxLength": 300 }
+            }
+          }
+        }
       }
     },
     "JobResult": {

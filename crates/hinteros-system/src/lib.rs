@@ -8,6 +8,7 @@
 //! edits a staging copy of `/etc/hinteros`, builds and switches, and only then replaces it.
 //! See `hinteros-docs/design/system-api.md`.
 
+pub mod appreg;
 pub mod audit;
 pub mod authz;
 pub mod config;
@@ -19,11 +20,13 @@ pub mod job;
 pub mod jobs;
 pub mod nixlog;
 pub mod peer;
+pub mod profiles;
 pub mod runner;
 pub mod service;
 pub mod state;
 pub mod store;
 pub mod update;
+pub mod users;
 
 #[cfg(test)]
 mod props;

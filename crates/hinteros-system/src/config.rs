@@ -100,6 +100,19 @@ pub struct ServeArgs {
     /// nixos-facter binary (hardware.redetect)
     #[arg(long, default_value = "nixos-facter")]
     pub nixos_facter: String,
+    /// nix-store binary (the guest's GC root)
+    #[arg(long, default_value = "nix-store")]
+    pub nix_store: String,
+
+    /// Root of the per-profile app Nix profiles (`apps/<user>`, `starter`)
+    #[arg(long, default_value = "/nix/var/nix/profiles/hinteros")]
+    pub apps_profiles_dir: PathBuf,
+    /// Tests only: a passwd-format file instead of the system's user database
+    #[arg(long, hide = true)]
+    pub passwd_file: Option<PathBuf>,
+    /// Tests only: a group-format file instead of the system's group database
+    #[arg(long, hide = true)]
+    pub group_file: Option<PathBuf>,
 
     /// Free memory a rebuild needs (MemAvailable)
     #[arg(long, default_value_t = 2 << 30)]
@@ -152,6 +165,16 @@ impl ServeArgs {
             profile: self.profile.clone(),
             current_system: self.current_system.clone(),
             booted_system: self.booted_system.clone(),
+            apps_profiles: self.apps_profiles_dir.clone(),
+            catalog_index: self.catalog_index.clone(),
+            users: self.users(),
+        }
+    }
+
+    pub fn users(&self) -> crate::users::Users {
+        crate::users::Users {
+            passwd: self.passwd_file.clone(),
+            group: self.group_file.clone(),
         }
     }
 
@@ -162,6 +185,7 @@ impl ServeArgs {
             git: self.git.clone(),
             ssh_keygen: self.ssh_keygen.clone(),
             nixos_facter: self.nixos_facter.clone(),
+            nix_store: self.nix_store.clone(),
         }
     }
 
@@ -174,9 +198,7 @@ impl ServeArgs {
     }
 
     pub fn catalog_index(&self) -> PathBuf {
-        self.catalog_index
-            .clone()
-            .unwrap_or_else(|| self.current_system.join("sw/share/hinteros/catalog.json"))
+        self.paths().catalog_index()
     }
 }
 
@@ -190,9 +212,80 @@ pub struct Paths {
     pub profile: PathBuf,
     pub current_system: PathBuf,
     pub booted_system: PathBuf,
+    /// Root of the per-profile app Nix profiles.
+    #[serde(default = "default_apps_profiles")]
+    pub apps_profiles: PathBuf,
+    /// The catalog index override (tests); `None`: the running generation's.
+    #[serde(default)]
+    pub catalog_index: Option<PathBuf>,
+    /// Where users come from.
+    #[serde(default)]
+    pub users: crate::users::Users,
+}
+
+fn default_apps_profiles() -> PathBuf {
+    "/nix/var/nix/profiles/hinteros".into()
 }
 
 impl Paths {
+    /// The running generation's catalog index (resolved when called).
+    pub fn catalog_index(&self) -> PathBuf {
+        self.catalog_index
+            .clone()
+            .unwrap_or_else(|| self.current_system.join("sw/share/hinteros/catalog.json"))
+    }
+    /// A profile's app Nix profile (`apps/<user>`, generations `apps/<user>-<n>-link`).
+    pub fn app_profile(&self, user: &str) -> PathBuf {
+        self.apps_profiles.join("apps").join(user)
+    }
+    /// The starter env's Nix profile.
+    pub fn starter_profile(&self) -> PathBuf {
+        self.apps_profiles.join("starter")
+    }
+    /// `/run/hinteros/apps`: one link per profile user, what sessions read.
+    pub fn apps_run_dir(&self) -> PathBuf {
+        self.run_dir.join("apps")
+    }
+    /// The guest's env link (a single link, no generations; an indirect GC root).
+    pub fn guest_link(&self) -> PathBuf {
+        self.apps_run_dir().join(crate::state::GUEST_USER)
+    }
+    /// The app registry (owners, their ids and box features).
+    pub fn registry(&self) -> PathBuf {
+        self.state_dir.join("apps/registry.json")
+    }
+    /// The starter set's ids.
+    pub fn starter_json(&self) -> PathBuf {
+        self.state_dir.join("starter.json")
+    }
+    /// Profile metadata (names, colours, lock flags, the counter).
+    pub fn profiles_json(&self) -> PathBuf {
+        self.state_dir.join("profiles.json")
+    }
+    /// PIN hashes and backoff state.
+    pub fn pins_dir(&self) -> PathBuf {
+        self.state_dir.join("pins")
+    }
+    /// Shared display mode and audio output.
+    pub fn runtime_json(&self) -> PathBuf {
+        self.state_dir.join("runtime.json")
+    }
+    /// Disk use per profile.
+    pub fn usage_json(&self) -> PathBuf {
+        self.state_dir.join("usage.json")
+    }
+    /// The greeter's public view.
+    pub fn public_json(&self) -> PathBuf {
+        self.run_dir.join("profiles-public.json")
+    }
+    /// The switch hint and one-time token (root only).
+    pub fn switch_json(&self) -> PathBuf {
+        self.run_dir.join("switch.json")
+    }
+    /// Created once the service queued the v1 → v2 migration this boot.
+    pub fn migrate_marker(&self) -> PathBuf {
+        self.run_dir.join("migrate-attempted")
+    }
     pub fn jobs_dir(&self) -> PathBuf {
         self.run_dir.join("jobs")
     }
@@ -223,4 +316,10 @@ pub struct Tools {
     pub git: String,
     pub ssh_keygen: String,
     pub nixos_facter: String,
+    #[serde(default = "default_nix_store")]
+    pub nix_store: String,
+}
+
+fn default_nix_store() -> String {
+    "nix-store".into()
 }

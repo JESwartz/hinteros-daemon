@@ -33,6 +33,8 @@ use crate::job::{self, Action, Apply, JobSpec, NotFastForward, ProgressLine, Sna
 use crate::nixlog;
 use crate::update::{Git, GitError, Rejection};
 
+mod apps;
+
 /// Files of a config dir that belong to a generation (the snapshot; device-config.nix).
 pub const MANAGED: &[&str] = &["flake.nix", "flake.lock", "state.json"];
 
@@ -72,9 +74,26 @@ fn run(dir: &Path) -> anyhow::Result<()> {
     let mut r = Runner::new(spec, dir.to_owned());
     let before = r.snapshot();
     let outcome = match r.spec.action.clone() {
-        Action::Apply(a) => r.apply(&a),
-        Action::Rollback { generation } => r.rollback(generation),
+        Action::Apply(a) => r.apply(&a).and_then(|o| {
+            if a.rebuild_apps {
+                r.with_apps_stage(o)
+            } else {
+                Ok(o)
+            }
+        }),
+        Action::Rollback {
+            generation,
+            rebuild_apps,
+        } => r.rollback(generation).and_then(|o| {
+            if rebuild_apps {
+                r.with_apps_stage(o)
+            } else {
+                Ok(o)
+            }
+        }),
         Action::UpdateCheck(_) => r.update_check(),
+        Action::Apps(j) => r.apps_job(&j),
+        Action::MigrateApps(m) => r.migrate(&m),
     };
     let staging = r.spec.paths.staging();
     let status = match outcome {
@@ -148,6 +167,8 @@ struct Runner {
     last_progress: Option<(Instant, ProgressLine)>,
     /// logind inhibitor (delay, then block during activation); dropped at the end.
     inhibitor: Option<OwnedFd>,
+    /// Report every stage as this one (the `box` stage wraps a whole apply flow).
+    stage_override: Option<Stage>,
 }
 
 impl Runner {
@@ -165,6 +186,7 @@ impl Runner {
             progress,
             last_progress: None,
             inhibitor: None,
+            stage_override: None,
         }
     }
 
@@ -185,6 +207,7 @@ impl Runner {
     }
 
     fn set_stage(&mut self, stage: Stage) {
+        let stage = self.stage_override.unwrap_or(stage);
         if self.stage != Some(stage) {
             self.stage = Some(stage);
             self.report(ProgressLine {
@@ -195,7 +218,10 @@ impl Runner {
         }
     }
 
-    fn report(&mut self, line: ProgressLine) {
+    fn report(&mut self, mut line: ProgressLine) {
+        if let Some(s) = self.stage_override {
+            line.stage = s;
+        }
         let now = Instant::now();
         // Stage changes always; progress within a stage at most 4 times a second.
         if let Some((at, last)) = &self.last_progress
@@ -662,6 +688,7 @@ impl Runner {
             Some(JobResult::Applied(AppliedResult {
                 generation: after.generation,
                 rev: after.rev,
+                apps_not_updated: None,
             })),
             restart,
         ))
@@ -764,6 +791,7 @@ impl Runner {
             Some(JobResult::Applied(AppliedResult {
                 generation: after.generation,
                 rev: after.rev,
+                apps_not_updated: None,
             })),
             restart,
         ))
@@ -910,11 +938,14 @@ pub fn record_terms(path: &Path, records: &[job::TermsRecord]) -> std::io::Resul
         Err(e) => return Err(e),
     };
     for r in records {
-        let entry = json!({
+        let mut entry = json!({
             "version": r.version,
             "accepted_at": rfc3339(r.accepted_at),
             "by": r.by,
         });
+        if let Some(p) = &r.profile {
+            entry["profile"] = json!(p);
+        }
         match doc.entry(r.id.clone()).or_insert_with(|| json!([])) {
             serde_json::Value::Array(list) => list.push(entry),
             other => *other = json!([entry]),
@@ -929,6 +960,28 @@ pub fn record_terms(path: &Path, records: &[job::TermsRecord]) -> std::io::Resul
     let mut bytes = serde_json::to_vec_pretty(&doc)?;
     bytes.push(b'\n');
     fsutil::write_atomic(path, &bytes, 0o600)
+}
+
+/// The acceptances in `terms-accepted.json`: (id, version, by, profile).
+pub fn accepted_terms(path: &Path) -> Vec<(String, String, String, Option<String>)> {
+    let Some(doc) = fs::read(path).ok().and_then(|b| {
+        serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&b).ok()
+    }) else {
+        return Vec::new();
+    };
+    let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
+    doc.iter()
+        .flat_map(|(id, list)| {
+            list.as_array().into_iter().flatten().filter_map(move |r| {
+                Some((
+                    id.clone(),
+                    s(r, "version")?,
+                    s(r, "by").unwrap_or_default(),
+                    s(r, "profile"),
+                ))
+            })
+        })
+        .collect()
 }
 
 /// Unix seconds as RFC 3339 UTC (`2026-10-06T12:00:00Z`).
@@ -1015,6 +1068,7 @@ mod tests {
             version: v.into(),
             accepted_at: 1_791_300_000,
             by: "hinteros".into(),
+            profile: None,
         };
         record_terms(&path, &[rec("2026-09-10")]).unwrap();
         record_terms(&path, &[rec("2027-01-01")]).unwrap();

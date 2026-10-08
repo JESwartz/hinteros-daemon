@@ -89,6 +89,7 @@ pub fn plan_install(
     for id in &ids {
         let entry = index
             .get(id)
+            .filter(|e| e.entry_kind == catalog::EntryKind::App)
             .ok_or_else(|| not_found(format!("{id} is not in this system's catalog")))?;
         // An installed app stays installed whatever its status; a new one must be available.
         if entry.status != Status::Available && !installed.contains(id) {

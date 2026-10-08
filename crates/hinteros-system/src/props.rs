@@ -83,13 +83,15 @@ proptest! {
         users in prop::collection::vec(("[a-z0-9-]{1,8}", "[^\\p{Cc}]{1,20}", "[a-z_][a-z0-9_-]{0,10}"), 0..3),
     ) {
         let s = State {
-            schema_version: state::SCHEMA_VERSION,
+            schema_version: 1,
             base: if stable { Base::Stable } else { Base::Unstable },
             state_version: host.clone().map(|_| "26.11".to_string()),
-            settings: StateSettings { hostname: host, ssh: SshState { enable }, admin: None },
+            settings: StateSettings { hostname: host, ssh: SshState { enable }, admin: None, guest: None },
             disk: None,
-            apps,
-            profiles: users.into_iter().map(|(id, name, user)| Profile { id, name, user }).collect(),
+            apps: Some(apps),
+            requirements: None,
+            services: None,
+            profiles: users.into_iter().map(|(id, name, user)| Profile { id, name: Some(name), user }).collect(),
         };
         prop_assume!(s.validate().is_ok());
         let bytes = s.to_canonical_json();

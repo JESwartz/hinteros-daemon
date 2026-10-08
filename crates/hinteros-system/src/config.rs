@@ -28,6 +28,14 @@ pub enum Command {
         /// Job id (16 hex digits)
         id: String,
     },
+    /// Check that state.json files parse with the same `State::parse` the service uses (no
+    /// service, no root, no sockets, no D-Bus). Prints `ok <file>` or `invalid <file>: <reason>`;
+    /// exits 0 if all are valid, 1 if any is invalid, 2 on usage or I/O errors.
+    CheckState {
+        /// state.json files to check
+        #[arg(required = true, value_name = "FILE")]
+        files: Vec<PathBuf>,
+    },
 }
 
 #[derive(Args, Debug, Clone)]

@@ -1162,3 +1162,90 @@ async fn store_install_and_remove() {
     let log = sys.job_log(&id);
     assert!(log.contains("deleted app data"), "{log}");
 }
+
+mod check_state {
+    use std::path::PathBuf;
+    use std::process::{Command, Output};
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/state")
+            .join(name)
+    }
+
+    fn run(files: &[&std::path::Path]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_hinteros-system"))
+            .arg("check-state")
+            .args(files)
+            .output()
+            .unwrap()
+    }
+
+    fn stdout(o: &Output) -> String {
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    }
+
+    #[test]
+    fn valid_fixture_is_ok() {
+        let f = fixture("device-devbox.json");
+        let o = run(&[&f]);
+        assert_eq!(o.status.code(), Some(0));
+        assert_eq!(stdout(&o), format!("ok {}\n", f.display()));
+    }
+
+    #[test]
+    fn unknown_field_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(fixture("device-devbox.json")).unwrap()).unwrap();
+        v["surprise"] = serde_json::json!(1);
+        let f = dir.path().join("state.json");
+        std::fs::write(&f, serde_json::to_vec(&v).unwrap()).unwrap();
+        let o = run(&[&f]);
+        assert_eq!(o.status.code(), Some(1));
+        let out = stdout(&o);
+        assert!(
+            out.starts_with(&format!("invalid {}: ", f.display())),
+            "{out}"
+        );
+        assert!(out.contains("out of sync"), "{out}");
+        assert!(out.contains("surprise"), "{out}");
+    }
+
+    #[test]
+    fn missing_file_is_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("nope.json");
+        let o = run(&[&f]);
+        assert_eq!(o.status.code(), Some(2));
+        assert!(stdout(&o).starts_with(&format!("invalid {}: ", f.display())));
+    }
+
+    #[test]
+    fn no_files_is_usage_error() {
+        let o = run(&[]);
+        assert_eq!(o.status.code(), Some(2));
+    }
+
+    #[test]
+    fn multiple_files_report_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, b"{not json").unwrap();
+        let good_a = fixture("vm-system-a.json");
+        let good_b = fixture("vm-system-b.json");
+
+        let o = run(&[&good_a, &good_b]);
+        assert_eq!(o.status.code(), Some(0));
+        assert_eq!(stdout(&o).lines().count(), 2);
+
+        let o = run(&[&good_a, &bad, &good_b]);
+        assert_eq!(o.status.code(), Some(1));
+        let out = stdout(&o);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "{out}");
+        assert!(lines[0].starts_with("ok "));
+        assert!(lines[1].starts_with("invalid "));
+        assert!(lines[2].starts_with("ok "));
+    }
+}

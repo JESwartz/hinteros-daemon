@@ -714,6 +714,13 @@ All paths default to the box's; tests point them at a temporary root.
 
 `hinteros-system job [--run-dir DIR] <id>` runs one job (the job unit's `ExecStart`).
 
+`hinteros-system check-state FILE...` parses each file with the same `State::parse` the service
+uses, without starting the service (no root, sockets or D-Bus). It prints `ok <file>` or
+`invalid <file>: <reason>` per file (an unknown field says "daemon and system repo are out of
+sync"). Exit status: 0 if all files are valid, 1 if any is invalid, 2 for usage errors or a file
+that cannot be read (that file is reported as `invalid <file>: reading: ...`). The system repo
+runs it in a Nix check over every state.json the installer can write.
+
 ### What the system module must provide
 
 For `daemon.nix` (and the VM tests) in the system repo:

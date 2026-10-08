@@ -434,7 +434,9 @@ async fn profiles_lifecycle_and_pins() {
             .iter()
             .any(|e| e.get("HINTEROS_PIN_CHECK").map(String::as_str) == Some("admin"))
     );
-    assert!(!sys.log().contains("1357"));
+    // Quoted or as a field value: a bare "1357" can turn up inside a timestamp or pid.
+    let log = sys.log();
+    assert!(!log.contains("\"1357\"") && !log.contains("=1357"), "{log}");
 
     // Guest off with the admin PIN (a rebuild).
     let e = call(

@@ -242,6 +242,46 @@ fn end_list(ctx: &Ctx, targets: Vec<(String, u32)>, proc_dir: &Path) {
     }
 }
 
+/// Xwayland's leftovers from a session that was ended: a `<tmp>/.X<n>-lock` whose pid is gone,
+/// and its `<tmp>/.X11-unix/X<n>` socket. gamescope takes the first free display numbers, and
+/// the session daemon (a user service, so not gamescope's child) expects `:0`: a stale `:0`
+/// leaves the next session's home app and keyboard without a screen.
+pub fn clear_stale_x(tmp: &Path, proc_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(n) = name
+            .to_str()
+            .and_then(|s| s.strip_prefix(".X"))
+            .and_then(|s| s.strip_suffix("-lock"))
+        else {
+            continue;
+        };
+        if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if !std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.file_type().is_file()) {
+            continue;
+        }
+        // Xwayland writes its pid, space-padded. Unreadable: leave it alone.
+        let Some(pid) = std::fs::read_to_string(e.path())
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if proc_dir.join(pid.to_string()).exists() {
+            continue;
+        }
+        // remove_file never follows a symlink.
+        let _ = std::fs::remove_file(tmp.join(".X11-unix").join(format!("X{n}")));
+        let _ = std::fs::remove_file(e.path());
+        info!(display = n, "removed a display left by an ended session");
+    }
+}
+
 /// Mark `user`'s profile as used now (the picker focuses the last-used profile).
 fn touch_last_used(ctx: &Ctx, user: &str, now: i64) {
     let Some(state) = ctx.state() else { return };
@@ -291,6 +331,7 @@ pub fn main(verb: Verb, ctx: &Ctx) -> ExitCode {
         }
         Verb::EndOthers => {
             end_others(ctx, &user, Path::new("/proc"));
+            clear_stale_x(Path::new("/tmp"), Path::new("/proc"));
             if user != "hinteros-greeter" {
                 touch_last_used(ctx, &user, now);
             }
@@ -427,5 +468,36 @@ mod tests {
         std::fs::create_dir_all(d.path().join("self")).unwrap();
         assert_eq!(processes_of(d.path(), 20002), [11]);
         assert!(processes_of(d.path(), 5).is_empty());
+    }
+
+    #[test]
+    fn clears_only_dead_displays() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proc_dir = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        std::fs::create_dir_all(t.join(".X11-unix")).unwrap();
+        std::fs::create_dir_all(proc_dir.path().join("777")).unwrap();
+        // :0 and :1 from an ended session, :2 alive, :3 unreadable, :4 a symlink.
+        for (n, pid) in [
+            (0, "      1282\n"),
+            (1, "      1283\n"),
+            (2, "       777\n"),
+            (3, "x"),
+        ] {
+            std::fs::write(t.join(format!(".X{n}-lock")), pid).unwrap();
+            std::fs::write(t.join(format!(".X11-unix/X{n}")), "").unwrap();
+        }
+        std::fs::write(t.join("victim"), "").unwrap();
+        std::os::unix::fs::symlink(t.join("victim"), t.join(".X4-lock")).unwrap();
+        std::fs::write(t.join(".X11-unix/X4"), "").unwrap();
+
+        clear_stale_x(t, proc_dir.path());
+
+        let exists = |p: &str| t.join(p).exists();
+        assert!(!exists(".X0-lock") && !exists(".X11-unix/X0"));
+        assert!(!exists(".X1-lock") && !exists(".X11-unix/X1"));
+        assert!(exists(".X2-lock") && exists(".X11-unix/X2"));
+        assert!(exists(".X3-lock") && exists(".X11-unix/X3"));
+        assert!(exists(".X4-lock") && exists(".X11-unix/X4") && exists("victim"));
     }
 }

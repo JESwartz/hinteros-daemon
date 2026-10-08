@@ -778,7 +778,7 @@ impl Service {
                     return Err(ErrorObject::with_data(
                         ErrorCode::InvalidParams,
                         format!("{id} is not installed in the admin profile"),
-                        json!({ "field": "ids", "reason": "not_in_admin_profile", "id": id }),
+                        json!({ "field": "ids", "reason": "not_in_admin_profile" }),
                     ));
                 }
                 let ids = appreg::normalize(p.ids.iter().cloned());

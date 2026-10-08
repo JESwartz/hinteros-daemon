@@ -359,6 +359,66 @@ async fn profiles_lifecycle_and_pins() {
     .await;
     assert_eq!(r["id"], "p4");
 
+    // The starter set: the admin PIN, only apps the admin profile has; the guest, which has
+    // installed nothing, follows it.
+    std::fs::write(
+        root.p("policy/catalog.json"),
+        r#"{"indexVersion": 3, "apps": [
+          {"id": "youtube", "kind": "app", "type": "web", "name": "YouTube", "status": "available"},
+          {"id": "moonlight", "kind": "app", "type": "native", "name": "Moonlight", "status": "available"}]}"#,
+    )
+    .unwrap();
+    let rev = call(&mut c, "apps.list", json!({})).await.unwrap()["revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    job(
+        &sys,
+        &mut c,
+        "apps.install",
+        json!({"ids": ["moonlight"], "revision": rev}),
+    )
+    .await;
+    let e = call(
+        &mut c,
+        "starter_set.set",
+        json!({"ids": ["moonlight", "steam"], "pin": ADMIN_PIN}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["data"]["reason"], "not_in_admin_profile");
+    let e = call(
+        &mut c,
+        "starter_set.set",
+        json!({"ids": ["moonlight"], "pin": "1111"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["data"]["pin"], "admin");
+    assert!(root.p("run/apps/hinteros-guest").is_symlink());
+    job(
+        &sys,
+        &mut c,
+        "starter_set.set",
+        json!({"ids": ["moonlight", "youtube"], "pin": ADMIN_PIN}),
+    )
+    .await;
+    let s = call(&mut c, "starter_set.get", json!({})).await.unwrap();
+    assert_eq!(s["ids"], json!(["moonlight", "youtube"]));
+    assert_eq!(
+        std::fs::canonicalize(root.p("nixprofiles/starter")).unwrap(),
+        root.p("store/env-moonlight+youtube")
+    );
+    assert_eq!(
+        std::fs::canonicalize(root.p("run/apps/hinteros-guest")).unwrap(),
+        root.p("store/env-moonlight+youtube")
+    );
+    // Existing profiles are never changed by it.
+    assert_eq!(
+        std::fs::canonicalize(root.p("nixprofiles/apps/hinteros-p4")).unwrap(),
+        root.p("store/env-youtube")
+    );
+
     // No PIN ever reaches the audit log.
     let audit = sys.audit();
     for entry in &audit {

@@ -257,6 +257,10 @@ impl Runner {
             self.inhibitor = None;
             self.inhibit("delay");
         }
+        // A guest that still has the old starter env (it installed nothing) follows the set.
+        let old_starter = (j.owner == Owner::Starter)
+            .then(|| appreg::current(&Owner::Starter, &paths).map(|c| c.env))
+            .flatten();
         let env = match &j.op {
             AppsOp::Set { ids } => {
                 let mut built = self.build_envs(std::slice::from_ref(ids))?;
@@ -308,6 +312,12 @@ impl Runner {
         if let Some(s) = &j.starter {
             s.save(&paths.starter_json())
                 .map_err(|e| self.fail(format!("writing starter.json: {e}")))?;
+        }
+        if let (Some(old), Some(new)) = (old_starter, appreg::current(&Owner::Starter, &paths))
+            && appreg::current(&Owner::Guest, &paths).is_some_and(|g| g.env == old)
+            && let Err(Failure::Error(e)) = self.set_env(&Owner::Guest, &new.env)
+        {
+            warn!("the guest keeps the old starter env: {}", e.message);
         }
         self.refresh_registry();
         if let Some(d) = &j.delete_data {

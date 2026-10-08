@@ -162,6 +162,24 @@ impl Restarter {
     }
 }
 
+/// End this user's graphical session on seat0 (a profile switch): greetd then starts the
+/// greeter.
+pub async fn terminate_own_session(bus: Option<&str>) -> Result<(), String> {
+    let r = Restarter::new(SessionConfig::default(), bus.map(str::to_owned));
+    let conn = dbus::connect(bus).await.map_err(|e| e.to_string())?;
+    let session = r.find_session(&conn).await.map_err(|e| e.message)?;
+    conn.call_method(
+        Some(LOGIND),
+        session.as_str(),
+        Some(SESSION),
+        "Terminate",
+        &(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 async fn restart_unit(bus: Option<&str>, unit: &str) -> zbus::Result<()> {
     let conn = match bus {
         Some(a) => zbus::connection::Builder::address(a)?.build().await?,

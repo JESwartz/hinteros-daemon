@@ -236,6 +236,19 @@ pub struct Cli {
     /// Read the apps from this app env (link) instead of the config's `[apps] profile`
     #[arg(long, env = "HINTEROS_APPS_PROFILE", hide = true)]
     pub apps_profile: Option<PathBuf>,
+
+    /// Tests only: a profile switch does not end the logind session
+    #[arg(long, hide = true)]
+    pub test_no_session_end: bool,
+
+    /// Tests only: look for Steam's processes here instead of /proc
+    #[arg(long, hide = true)]
+    pub test_proc_dir: Option<PathBuf>,
+
+    /// Greeter mode: serve the picker (greetd IPC through $GREETD_SOCK, greeter.sock); no
+    /// apps, Steam, system relay or Bluetooth
+    #[arg(long)]
+    pub greeter: bool,
 }
 
 fn flag(on: bool, off: bool) -> Option<bool> {
@@ -267,12 +280,53 @@ pub struct Config {
     pub audio: AudioConfig,
     pub display: DisplayConfig,
     pub bluetooth: BluetoothConfig,
+    pub switch: SwitchSection,
+    pub greeter: GreeterSection,
     /// `[[apps]]` (a list) or `[apps] profile = "…"` (a table).
     #[serde(rename = "apps", deserialize_with = "apps_key")]
     pub apps_key: AppsKey,
     /// The app list: `[[apps]]`, or the profile manifest's entries (filled by [`Config::load`]).
     #[serde(skip)]
     pub apps: Vec<AppConfig>,
+}
+
+/// `[switch]`: how long a profile switch waits for apps (and Steam) before asking.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SwitchSection {
+    pub wait_s: u64,
+    pub steam_wait_s: u64,
+}
+
+impl Default for SwitchSection {
+    fn default() -> Self {
+        Self {
+            wait_s: 10,
+            steam_wait_s: 15,
+        }
+    }
+}
+
+/// `[greeter]`: the picker (greeter mode and `hinteros-session greet`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GreeterSection {
+    /// The service's public view of the profiles.
+    pub public: PathBuf,
+    /// The service's greeter socket (profile creation).
+    pub socket: PathBuf,
+    /// What greetd runs for a profile.
+    pub session_command: Vec<String>,
+}
+
+impl Default for GreeterSection {
+    fn default() -> Self {
+        Self {
+            public: "/run/hinteros/profiles-public.json".into(),
+            socket: "/run/hinteros/greeter.sock".into(),
+            session_command: vec!["/run/current-system/sw/bin/hinteros-console-session".into()],
+        }
+    }
 }
 
 /// The `apps` key of session.toml.

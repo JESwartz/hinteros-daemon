@@ -1,0 +1,257 @@
+//! The session's side of profiles (session API 0.12): `profile.current`, the profile switch
+//! against a fake system service (no silent force-close: a TERM-ignoring app produces
+//! `switch_blocked` and lives until `switch_force_close`; `switch_cancel` keeps the session),
+//! `session.unlock`, and `profiles_changed` from the system's event.
+
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use hinteros_api::codec::{LineReader, write_message};
+use hinteros_api::common::Peer;
+use hinteros_api::server::{Connection, Step};
+use hinteros_api::{ErrorObject, jsonrpc, system};
+use serde_json::{Value, json};
+use tokio::net::UnixListener;
+
+mod common;
+
+use common::*;
+
+type Calls = Arc<Mutex<Vec<(String, Value)>>>;
+
+const LIST: &str = r#"{"profiles": [
+  {"id": "p1", "name": "James", "color": "teal", "user": "hinteros", "admin": true, "locked": true,
+   "locked_until": null, "active": true, "last_used_at": null, "usage": null, "pin_set": true},
+  {"id": "p3", "name": "Sam", "color": "orange", "user": "hinteros-p3", "admin": false, "locked": false,
+   "locked_until": null, "active": false, "last_used_at": null, "usage": null, "pin_set": true}],
+  "guest": {"enabled": true, "usage": null}, "max": 8, "first_boot": false,
+  "caller": {"id": "p1", "user": "hinteros", "guest": false, "spare": false}}"#;
+
+/// A fake system service answering the profile methods; records calls; after `profiles.rename`
+/// it sends `profiles_changed`.
+fn fake_system(path: &Path, calls: Calls) -> tokio::task::JoinHandle<()> {
+    let _ = std::fs::remove_file(path);
+    let listener = UnixListener::bind(path).unwrap();
+    tokio::spawn(async move {
+        let mut conns = tokio::task::JoinSet::new();
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let calls = calls.clone();
+            conns.spawn(async move {
+                let (r, mut w) = stream.into_split();
+                let mut reader = LineReader::new(r);
+                let mut conn = Connection::new(system::VERSION, Peer::new("fake-system", "0"));
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let reply = match conn.step(&line) {
+                        Step::Reply(v) | Step::ReplyAndClose(v) => v,
+                        Step::Ignore => continue,
+                        Step::Dispatch(req) => {
+                            let params = req.params.clone().unwrap_or(json!({}));
+                            calls
+                                .lock()
+                                .unwrap()
+                                .push((req.method.clone(), params.clone()));
+                            let outcome: Result<Value, ErrorObject> = match req.method.as_str() {
+                                "subscribe" => Ok(params.clone()),
+                                "profiles.list" => Ok(serde_json::from_str(LIST).unwrap()),
+                                "profiles.switch" => Ok(json!({})),
+                                "profiles.unlock" if params["pin"] == "2468" => Ok(json!({})),
+                                "profiles.unlock" => Err(ErrorObject::with_data(
+                                    hinteros_api::ErrorCode::PinRequired,
+                                    "that PIN didn't match",
+                                    json!({"pin": "self"}),
+                                )),
+                                "profiles.rename" => Ok(json!({})),
+                                m => Err(hinteros_api::server::method_not_found(m)),
+                            };
+                            let renamed = req.method == "profiles.rename";
+                            let reply = jsonrpc::response(&req.id.unwrap(), outcome);
+                            write_message(&mut w, &reply).await.unwrap();
+                            if renamed {
+                                let ev = jsonrpc::notification("profiles_changed", json!({}));
+                                write_message(&mut w, &ev).await.unwrap();
+                            }
+                            continue;
+                        }
+                    };
+                    write_message(&mut w, &reply).await.unwrap();
+                }
+            });
+        }
+    })
+}
+
+fn daemon() -> Daemon {
+    Daemon::start_with(|dir| {
+        std::fs::write(
+            dir.join("session.toml"),
+            "[switch]\nwait_s = 1\nsteam_wait_s = 1\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("proc")).unwrap();
+        vec![
+            "--config".into(),
+            dir.join("session.toml").into(),
+            "--test-no-session-end".into(),
+            "--test-proc-dir".into(),
+            dir.join("proc").into(),
+            "--no-runtime".into(),
+        ]
+    })
+}
+
+async fn launch(c: &mut Client, cmd: &str) -> (String, u32) {
+    let r = call(
+        c,
+        "apps.launch",
+        json!({"command": ["sh", "-c", cmd], "name": "Stubborn"}),
+    )
+    .await
+    .unwrap();
+    (
+        r["app"]["id"].as_str().unwrap().to_owned(),
+        r["app"]["pid"].as_u64().unwrap() as u32,
+    )
+}
+
+use hinteros_api::client::Client;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn switch_closes_apps_and_never_kills_silently() {
+    let d = daemon();
+    let calls: Calls = Arc::default();
+    let task = fake_system(&d.dir.path().join("system.sock"), calls.clone());
+    let mut c = d.client().await;
+    call(
+        &mut c,
+        "subscribe",
+        json!({"events": ["switch_progress", "switch_blocked", "app_exited", "profiles_changed"]}),
+    )
+    .await
+    .unwrap();
+    let cur = eventually("the relay", async || {
+        call(&mut c, "profile.current", json!({})).await.ok()
+    })
+    .await;
+    assert_eq!(
+        cur,
+        json!({"id": "p1", "name": "James", "color": "teal", "admin": true, "locked": true,
+               "guest": false, "setup_required": false, "pin_set": true, "screen_locked": false})
+    );
+    let e = call(&mut c, "session.switch_profile", json!({"id": "p1"}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["data"]["reason"], "same");
+
+    // One app quits on SIGTERM, one ignores it.
+    let (_polite, _) = launch(&mut c, "exec sleep 60").await;
+    let (stubborn, pid) = launch(&mut c, "trap '' TERM; while true; do sleep 1; done").await;
+    call(&mut c, "session.switch_profile", json!({"id": "p3"}))
+        .await
+        .unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, p)| m == "profiles.switch" && p["id"] == "p3")
+    );
+    assert_eq!(
+        event_named(&mut c, "switch_progress").await["stage"],
+        "closing_apps"
+    );
+    let blocked = event_named(&mut c, "switch_blocked").await;
+    assert_eq!(blocked["app"]["id"], json!(stubborn));
+    assert!(blocked["waited_s"].as_u64().unwrap() >= 1);
+    // Nothing is killed while the user decides.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(alive(pid), "killed without asking");
+    call(&mut c, "session.switch_wait", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        event_named(&mut c, "switch_blocked").await["app"]["id"],
+        json!(stubborn)
+    );
+    call(
+        &mut c,
+        "session.switch_force_close",
+        json!({"app": stubborn}),
+    )
+    .await
+    .unwrap();
+    let p = event_named(&mut c, "switch_progress").await;
+    assert_eq!(p["stage"], "ending", "{p}");
+    eventually("the stubborn app gone", async || {
+        (!alive(pid)).then_some(())
+    })
+    .await;
+
+    // A second switch, cancelled: the app stays, the session stays.
+    let shell_pid = d.dir.path().join("stubborn.pid");
+    let (stubborn, pid) = launch(
+        &mut c,
+        &format!(
+            "echo $$ > {}; trap '' TERM; while true; do sleep 1; done",
+            shell_pid.display()
+        ),
+    )
+    .await;
+    call(&mut c, "session.switch_profile", json!({"id": "guest"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        event_named(&mut c, "switch_blocked").await["app"]["id"],
+        json!(stubborn)
+    );
+    call(&mut c, "session.switch_cancel", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        event_named(&mut c, "switch_progress").await["stage"],
+        "cancelled"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(alive(pid));
+    let e = call(&mut c, "session.switch_wait", json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["data"]["reason"], "no_switch");
+
+    // The sleep lock's PIN goes through the system service.
+    let e = call(&mut c, "session.unlock", json!({"pin": "0000"}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["code"], 3016);
+    call(&mut c, "session.unlock", json!({"pin": "2468"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&mut c, "session.lock_state", json!({})).await.unwrap(),
+        json!({"locked": false})
+    );
+
+    // profiles_changed: the system's empty event becomes the list.
+    call(
+        &mut c,
+        "system.profiles.rename",
+        json!({"id": "p1", "name": "Jim"}),
+    )
+    .await
+    .unwrap();
+    let ev = event_named(&mut c, "profiles_changed").await;
+    assert_eq!(ev["profiles"][1]["id"], "p3");
+    // It ignores SIGTERM: kill it so nothing outlives the test.
+    let _ = stubborn;
+    if let Some(p) = std::fs::read_to_string(&shell_pid)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process(p, rustix::process::Signal::KILL);
+    }
+    task.abort();
+}

@@ -41,6 +41,10 @@ pub enum EventName {
     AuthenticationRequested,
     AuthenticationFinished,
     StoreChanged,
+    SwitchProgress,
+    SwitchBlocked,
+    LockState,
+    ProfilesChanged,
 }
 
 impl EventName {
@@ -65,6 +69,10 @@ impl EventName {
         EventName::AuthenticationRequested,
         EventName::AuthenticationFinished,
         EventName::StoreChanged,
+        EventName::SwitchProgress,
+        EventName::SwitchBlocked,
+        EventName::LockState,
+        EventName::ProfilesChanged,
     ];
 
     /// The event's wire name (its JSON-RPC notification method).
@@ -90,6 +98,10 @@ impl EventName {
             EventName::AuthenticationRequested => AuthenticationRequested::NAME,
             EventName::AuthenticationFinished => AuthenticationFinished::NAME,
             EventName::StoreChanged => StoreChanged::NAME,
+            EventName::SwitchProgress => SwitchProgress::NAME,
+            EventName::SwitchBlocked => SwitchBlocked::NAME,
+            EventName::LockState => LockState::NAME,
+            EventName::ProfilesChanged => ProfilesChanged::NAME,
         }
     }
 }
@@ -873,6 +885,14 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<AuthRespond>(),
         MethodInfo::of::<AuthCancel>(),
         MethodInfo::of::<SessionRestart>(),
+        MethodInfo::of::<ProfileCurrent>(),
+        MethodInfo::of::<SessionSwitchProfile>(),
+        MethodInfo::of::<SessionSwitchWait>(),
+        MethodInfo::of::<SessionSwitchForceClose>(),
+        MethodInfo::of::<SessionSwitchCancel>(),
+        MethodInfo::of::<SessionLockState>(),
+        MethodInfo::of::<SessionUnlock>(),
+        MethodInfo::of::<SessionEndGuest>(),
         MethodInfo::of::<StoreList>(),
     ],
     events: &[
@@ -896,6 +916,10 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<AuthenticationRequested>(),
         EventInfo::of::<AuthenticationFinished>(),
         EventInfo::of::<StoreChanged>(),
+        EventInfo::of::<SwitchProgress>(),
+        EventInfo::of::<SwitchBlocked>(),
+        EventInfo::of::<LockState>(),
+        EventInfo::of::<ProfilesChanged>(),
     ],
     errors: ErrorCode::ALL,
 };
@@ -1125,6 +1149,192 @@ impl Method for SessionRestart {
     const NAME: &'static str = "session.restart";
     type Params = SessionRestartParams;
     type Result = SessionRestartResult;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Profiles (0.12, profiles.md)
+
+/// Params of the profile methods that take none (closed).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileNoParams {}
+
+/// An empty result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileEmpty {}
+
+/// `profile.current`: who this session is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileCurrentResult {
+    /// The profile (or spare account) id; null for the guest.
+    #[serde(deserialize_with = "nullable")]
+    pub id: Option<String>,
+    #[serde(deserialize_with = "nullable")]
+    pub name: Option<String>,
+    #[serde(deserialize_with = "nullable")]
+    pub color: Option<String>,
+    pub admin: bool,
+    /// The profile asks for its PIN to enter (and after sleep).
+    pub locked: bool,
+    pub guest: bool,
+    /// A spare account in first-boot mode: the launcher runs the first-boot wizard, which
+    /// creates the admin profile (`system.profiles.setup_admin`).
+    pub setup_required: bool,
+    /// false: a migrated profile without a PIN yet ("Set your PIN").
+    pub pin_set: bool,
+    /// The sleep lock is up right now.
+    pub screen_locked: bool,
+}
+
+pub struct ProfileCurrent;
+impl Method for ProfileCurrent {
+    const NAME: &'static str = "profile.current";
+    type Params = ProfileNoParams;
+    type Result = ProfileCurrentResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchProfileParams {
+    /// A profile id or `guest`.
+    pub id: String,
+}
+
+pub struct SessionSwitchProfile;
+impl Method for SessionSwitchProfile {
+    const NAME: &'static str = "session.switch_profile";
+    type Params = SwitchProfileParams;
+    type Result = ProfileEmpty;
+}
+
+pub struct SessionSwitchWait;
+impl Method for SessionSwitchWait {
+    const NAME: &'static str = "session.switch_wait";
+    type Params = ProfileNoParams;
+    type Result = ProfileEmpty;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchForceCloseParams {
+    /// The app id from `switch_blocked`.
+    pub app: String,
+}
+
+pub struct SessionSwitchForceClose;
+impl Method for SessionSwitchForceClose {
+    const NAME: &'static str = "session.switch_force_close";
+    type Params = SwitchForceCloseParams;
+    type Result = ProfileEmpty;
+}
+
+pub struct SessionSwitchCancel;
+impl Method for SessionSwitchCancel {
+    const NAME: &'static str = "session.switch_cancel";
+    type Params = ProfileNoParams;
+    type Result = ProfileEmpty;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockStateParams {
+    pub locked: bool,
+}
+
+pub struct SessionLockState;
+impl Method for SessionLockState {
+    const NAME: &'static str = "session.lock_state";
+    type Params = ProfileNoParams;
+    type Result = LockStateParams;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionUnlockParams {
+    pub pin: String,
+}
+
+pub struct SessionUnlock;
+impl Method for SessionUnlock {
+    const NAME: &'static str = "session.unlock";
+    type Params = SessionUnlockParams;
+    type Result = ProfileEmpty;
+}
+
+pub struct SessionEndGuest;
+impl Method for SessionEndGuest {
+    const NAME: &'static str = "session.end_guest";
+    type Params = ProfileNoParams;
+    type Result = ProfileEmpty;
+}
+
+/// An app named in the switch events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppRef {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchStage {
+    ClosingApps,
+    ClosingSteam,
+    Ending,
+    /// `session.switch_cancel`: the profile stays.
+    Cancelled,
+}
+
+impl SwitchStage {
+    pub const ALL: &[SwitchStage] = &[
+        SwitchStage::ClosingApps,
+        SwitchStage::ClosingSteam,
+        SwitchStage::Ending,
+        SwitchStage::Cancelled,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitchProgressParams {
+    pub stage: SwitchStage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<AppRef>,
+}
+
+pub struct SwitchProgress;
+impl Event for SwitchProgress {
+    const NAME: &'static str = "switch_progress";
+    type Params = SwitchProgressParams;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitchBlockedParams {
+    pub app: AppRef,
+    pub waited_s: u32,
+}
+
+pub struct SwitchBlocked;
+impl Event for SwitchBlocked {
+    const NAME: &'static str = "switch_blocked";
+    type Params = SwitchBlockedParams;
+}
+
+pub struct LockState;
+impl Event for LockState {
+    const NAME: &'static str = "lock_state";
+    type Params = LockStateParams;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfilesChangedParams {
+    /// As `system.profiles.list`'s `profiles`.
+    pub profiles: Vec<crate::system::ProfileInfo>,
+}
+
+pub struct ProfilesChanged;
+impl Event for ProfilesChanged {
+    const NAME: &'static str = "profiles_changed";
+    type Params = ProfilesChangedParams;
 }
 
 // ---------------------------------------------------------------------------------------------

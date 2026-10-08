@@ -90,6 +90,18 @@ pub enum Msg {
     SetSteam(Option<PathBuf>),
     /// Apps whose vendor terms this profile has not accepted (from `system.apps.list`).
     SetNeedsTerms(std::collections::BTreeMap<String, hinteros_api::session::StoreTerms>),
+    /// A profile switch: SIGTERM to every app, never followed by a SIGKILL on its own.
+    CloseAll {
+        reply: oneshot::Sender<()>,
+    },
+    /// The apps still running (a profile switch waits for them).
+    RunningApps {
+        reply: oneshot::Sender<Vec<hinteros_api::session::AppRef>>,
+    },
+    /// "Force close" in the not-responding pop-up of a switch.
+    ForceClose {
+        id: String,
+    },
     /// A text field in a web app gained or lost focus (see [`crate::textfocus`]); `pid` is the
     /// reporting process (Firefox's native-messaging host, or Firefox itself for its own
     /// toolbar fields), `reporter` the connection it came on (one Firefox has two: page fields
@@ -429,6 +441,31 @@ impl Shell {
             Msg::SetApps(apps) => self.cfg.apps = apps,
             Msg::SetSteam(path) => self.set_steam(path),
             Msg::SetNeedsTerms(map) => self.cfg.needs_terms = map,
+            Msg::CloseAll { reply } => {
+                let ids: Vec<String> = self.apps.keys().cloned().collect();
+                for id in ids {
+                    let _ = self.close(AppsCloseParams { id: id.clone() }, now);
+                    // No silent force-close: the user decides (switch_blocked).
+                    if let Some(app) = self.apps.get_mut(&id)
+                        && let Some(c) = app.closing.as_mut()
+                    {
+                        c.deadline = now + Duration::from_secs(365 * 24 * 3600);
+                    }
+                }
+                let _ = reply.send(());
+            }
+            Msg::RunningApps { reply } => {
+                let _ = reply.send(
+                    self.apps
+                        .values()
+                        .map(|a| hinteros_api::session::AppRef {
+                            id: a.info.id.clone(),
+                            name: a.info.name.clone(),
+                        })
+                        .collect(),
+                );
+            }
+            Msg::ForceClose { id } => self.force_close(&id, now),
             Msg::TextFocus {
                 pid,
                 reporter,

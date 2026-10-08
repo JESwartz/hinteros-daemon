@@ -3122,6 +3122,368 @@
         { "name": "already over", "params": { "cookie": "3-6f1c0e2a9b7d4c58-1-0a9f3e1d2c4b5a69" }, "error": { "code": 3010, "message": "no authentication request 3-6f1c0e2a9b7d4c58-1-0a9f3e1d2c4b5a69" } }
       ]
     },
+    "profile.current": {
+      "summary": "Who this session is (0.12). The launcher asks at start: setup_required starts the first-boot wizard; pin_set false shows the unskippable 'Set your PIN' screen; screen_locked shows the lock screen.",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "color",
+          "admin",
+          "locked",
+          "guest",
+          "setup_required",
+          "pin_set",
+          "screen_locked"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "color": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ProfileColor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "admin": {
+            "type": "boolean"
+          },
+          "locked": {
+            "type": "boolean"
+          },
+          "guest": {
+            "type": "boolean"
+          },
+          "setup_required": {
+            "type": "boolean"
+          },
+          "pin_set": {
+            "type": "boolean"
+          },
+          "screen_locked": {
+            "type": "boolean"
+          }
+        }
+      },
+      "errors": [
+        "system_unavailable"
+      ],
+      "examples": [
+        {
+          "name": "James",
+          "params": {},
+          "result": {
+            "id": "p1",
+            "name": "James",
+            "color": "teal",
+            "admin": true,
+            "locked": false,
+            "guest": false,
+            "setup_required": false,
+            "pin_set": true,
+            "screen_locked": false
+          }
+        },
+        {
+          "name": "first boot",
+          "params": {},
+          "result": {
+            "id": "p1",
+            "name": null,
+            "color": null,
+            "admin": false,
+            "locked": false,
+            "guest": false,
+            "setup_required": true,
+            "pin_set": false,
+            "screen_locked": false
+          }
+        }
+      ]
+    },
+    "session.switch_profile": {
+      "summary": "Switch to another profile (0.12): writes the switch hint (system.profiles.switch), then closes every app (SIGTERM, no silent force-close) and Steam (steam -shutdown), and ends this session; the greeter takes over. Answers once the hint is written; progress comes as switch_progress, a stuck app as switch_blocked.",
+      "description": "invalid_params {field: id, reason: same} for the own profile. While a switch runs a second one is invalid_params {reason: busy}.",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "const": "guest"
+              }
+            ]
+          }
+        }
+      },
+      "result": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": [
+        "system_unavailable",
+        "permission_denied",
+        "authentication_required",
+        "rate_limited",
+        "not_found",
+        "unavailable"
+      ],
+      "examples": [
+        {
+          "name": "to Sam",
+          "params": {
+            "id": "p3"
+          },
+          "result": {}
+        },
+        {
+          "name": "itself",
+          "params": {
+            "id": "p1"
+          },
+          "error": {
+            "code": -32602,
+            "message": "that is this profile",
+            "data": {
+              "field": "id",
+              "reason": "same"
+            }
+          }
+        }
+      ]
+    },
+    "session.switch_wait": {
+      "summary": "Keep waiting for the blocked app (another switch.wait_s, 10 s).",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": [],
+      "examples": [
+        {
+          "name": "wait",
+          "params": {},
+          "result": {}
+        }
+      ]
+    },
+    "session.switch_force_close": {
+      "summary": "Force-close the blocked app (SIGKILL of its process group; for Steam, its processes). Unsaved data may be lost.",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [
+          "app"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "app": {
+            "$ref": "#/$defs/AppId"
+          }
+        }
+      },
+      "result": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": [
+        "app_not_found"
+      ],
+      "examples": [
+        {
+          "name": "YouTube",
+          "params": {
+            "app": "youtube"
+          },
+          "result": {}
+        }
+      ]
+    },
+    "session.switch_cancel": {
+      "summary": "Stop the switch: this profile stays (what already closed is gone). switch_progress {stage: cancelled} follows.",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": [],
+      "examples": [
+        {
+          "name": "cancel",
+          "params": {},
+          "result": {}
+        }
+      ]
+    },
+    "session.lock_state": {
+      "summary": "Whether the sleep lock is up (0.12).",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": [
+          "locked"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "locked": {
+            "type": "boolean"
+          }
+        }
+      },
+      "errors": [],
+      "examples": [
+        {
+          "name": "unlocked",
+          "params": {},
+          "result": {
+            "locked": false
+          }
+        }
+      ]
+    },
+    "session.unlock": {
+      "summary": "The PIN on the sleep lock screen (relays system.profiles.unlock); lock_state {locked: false} follows.",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [
+          "pin"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "pin": {
+            "$ref": "#/$defs/Pin"
+          }
+        }
+      },
+      "result": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": [
+        "system_unavailable",
+        "permission_denied",
+        "rate_limited",
+        "pin_required",
+        "unavailable"
+      ],
+      "examples": [
+        {
+          "name": "right",
+          "params": {
+            "pin": "2468"
+          },
+          "result": {}
+        },
+        {
+          "name": "wrong",
+          "params": {
+            "pin": "0000"
+          },
+          "error": {
+            "code": 3016,
+            "message": "that PIN didn't match",
+            "data": {
+              "pin": "self"
+            }
+          }
+        }
+      ]
+    },
+    "session.end_guest": {
+      "summary": "Guest only: end the guest session now (like a switch, to the picker). The guest's home and apps are wiped at the next boot.",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": [
+        "permission_denied"
+      ],
+      "examples": [
+        {
+          "name": "end",
+          "params": {},
+          "result": {}
+        }
+      ]
+    },
     "session.restart": {
       "summary": "Restart the TV session: the compositor, the launcher and everything started in it, and the session daemon itself.",
       "description": "For job_finished {session_restart_required: true} (and system_unavailable {reason: version_mismatch}). The daemon answers first, then asks logind to terminate the user's graphical session on seat0 (a greetd session: greetd's default_session starts it again at once, with the new generation's programs), then asks the user's systemd to restart the session daemon's own unit. Apps the daemon started end with it. Only a session started by greetd is ever terminated (never a desktop session). unavailable {service: logind}: no such session, or logind cannot be reached.",
@@ -3612,6 +3974,169 @@
       "since": "0.8",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "examples": [{ "name": "changed", "params": {} }]
+    },
+    "switch_progress": {
+      "summary": "0.12: a profile switch is closing apps, closing Steam, ending the session, or was cancelled. app: the app being closed.",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [
+          "stage"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "stage": {
+            "$ref": "#/$defs/SwitchStage"
+          },
+          "app": {
+            "type": "object",
+            "required": [
+              "id",
+              "name"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/AppId"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      },
+      "examples": [
+        {
+          "name": "closing",
+          "params": {
+            "stage": "closing_apps"
+          }
+        },
+        {
+          "name": "Steam",
+          "params": {
+            "stage": "closing_steam",
+            "app": {
+              "id": "steam",
+              "name": "Steam"
+            }
+          }
+        }
+      ]
+    },
+    "switch_blocked": {
+      "summary": "0.12: an app has not closed after waited_s seconds. Show 'X isn't responding (N s). Force-closing it may lose unsaved data.' with Keep waiting (session.switch_wait), Force close (session.switch_force_close) and Cancel switch (session.switch_cancel). Nothing is killed until Force close.",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [
+          "app",
+          "waited_s"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "app": {
+            "type": "object",
+            "required": [
+              "id",
+              "name"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/AppId"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "waited_s": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "examples": [
+        {
+          "name": "YouTube",
+          "params": {
+            "app": {
+              "id": "youtube",
+              "name": "YouTube"
+            },
+            "waited_s": 10
+          }
+        }
+      ]
+    },
+    "lock_state": {
+      "summary": "0.12: the sleep lock went up (before the box sleeps, for a locked profile) or down (session.unlock).",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [
+          "locked"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "locked": {
+            "type": "boolean"
+          }
+        }
+      },
+      "examples": [
+        {
+          "name": "locked",
+          "params": {
+            "locked": true
+          }
+        }
+      ]
+    },
+    "profiles_changed": {
+      "summary": "0.12: the profiles changed (a profile job, a rename, a PIN, lock or appearance change); profiles as system.profiles.list's.",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [
+          "profiles"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "profiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ProfileInfo"
+            }
+          }
+        }
+      },
+      "examples": [
+        {
+          "name": "renamed",
+          "params": {
+            "profiles": [
+              {
+                "id": "p1",
+                "name": "Jim",
+                "color": "teal",
+                "user": "hinteros",
+                "admin": true,
+                "locked": false,
+                "locked_until": null,
+                "active": true,
+                "last_used_at": null,
+                "usage": null,
+                "pin_set": true
+              }
+            ]
+          }
+        }
+      ]
     }
 
   },
@@ -3962,7 +4487,7 @@
     },
     "EventName": {
       "type": "string",
-      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_visibility", "job_started", "job_progress", "job_finished", "network_changed", "wifi_list_changed", "bluetooth_changed", "bluetooth_confirm", "audio_changed", "authentication_requested", "authentication_finished", "store_changed"]
+      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_visibility", "job_started", "job_progress", "job_finished", "network_changed", "wifi_list_changed", "bluetooth_changed", "bluetooth_confirm", "audio_changed", "authentication_requested", "authentication_finished", "store_changed", "switch_progress", "switch_blocked", "lock_state", "profiles_changed"]
     },
     "AppId": {
       "description": "App identifier: an apps.list id, or for running apps started by command or Steam URL 'cmd-<n>' / 'steam-<appid>'. 'steam' is Steam itself (Big Picture and its other windows).",
@@ -4168,6 +4693,8 @@
       "additionalProperties": false,
       "properties": { "total_bytes": { "type": "integer", "minimum": 0 }, "steam_games_bytes": { "type": "integer", "minimum": 0 }, "at": { "type": "integer" } }
     },
+    "SwitchStage": { "enum": ["closing_apps", "closing_steam", "ending", "cancelled"] },
+    "ProfileInfo": {"type": "object", "required": ["id", "name", "color", "user", "admin", "locked", "locked_until", "active", "last_used_at", "usage", "pin_set"], "additionalProperties": false, "properties": {"id": {"$ref": "#/$defs/ProfileId"}, "name": {"$ref": "#/$defs/ProfileName"}, "color": {"$ref": "#/$defs/ProfileColor"}, "user": {"type": "string", "maxLength": 32}, "admin": {"type": "boolean"}, "locked": {"type": "boolean"}, "locked_until": {"oneOf": [{"type": "integer"}, {"type": "null"}]}, "active": {"type": "boolean"}, "last_used_at": {"oneOf": [{"type": "integer"}, {"type": "null"}]}, "usage": {"oneOf": [{"$ref": "#/$defs/ProfileUsage"}, {"type": "null"}]}, "pin_set": {"type": "boolean"}}},
     "BoxFeature": {
       "description": "A box feature (catalog format 3): box-wide configuration an app needs, turned on when any owner has such an app.",
       "enum": ["graphics32", "steam-devices"]

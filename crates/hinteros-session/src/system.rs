@@ -266,7 +266,10 @@ async fn serve(
                         }
                     }
                     Ok(ServerMessage::Notification { method, params }) => {
-                        if let Some(name) = session_event(&method) {
+                        if method == <system::ProfilesChanged as hinteros_api::Event>::NAME {
+                            // The session re-queries and sends its own (see profile.rs).
+                            let _ = events.send((EventName::ProfilesChanged, params, Audience::Internal));
+                        } else if let Some(name) = session_event(&method) {
                             let _ = events.send((name, params, Audience::All));
                         }
                     }

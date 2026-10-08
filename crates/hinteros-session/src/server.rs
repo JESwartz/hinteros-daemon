@@ -30,6 +30,7 @@ pub struct Services {
     pub auth: Auth,
     pub store: Store,
     pub restarter: Restarter,
+    pub profiles: crate::profile::Profiles,
 }
 
 /// Methods answered by a task of their own, so a slow one (a relayed call waiting for the admin
@@ -37,6 +38,7 @@ pub struct Services {
 /// same connection. Their responses may come out of order (clients match them by id).
 fn concurrent(method: &str) -> bool {
     session::relay_target(method).is_some()
+        || crate::profile::METHODS.contains(&method)
         || matches!(
             method,
             "auth.respond" | "auth.cancel" | "store.list" | "session.restart"
@@ -145,6 +147,7 @@ fn for_us(audience: Audience, conn: &Connection) -> bool {
         Audience::LauncherClient => conn
             .negotiated()
             .is_some_and(|(_, client)| client.name == session::LAUNCHER_CLIENT_NAME),
+        Audience::Internal => false,
     }
 }
 
@@ -215,6 +218,7 @@ async fn slow(
             hinteros_api::server::decode_params::<session::SessionRestart>(params.clone())?;
             s.restarter.restart(params).await
         }
+        m if crate::profile::METHODS.contains(&m) => s.profiles.call(m, params).await,
         _ => Err(method_not_found(method)),
     }
 }

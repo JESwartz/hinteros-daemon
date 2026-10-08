@@ -327,6 +327,22 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         hinteros_session::system::Relay::disabled()
     };
 
+    let profiles = hinteros_session::profile::Profiles::spawn(
+        relay.clone(),
+        shell_tx.clone(),
+        events.clone(),
+        hinteros_session::profile::SwitchConfig {
+            wait: Duration::from_secs(config.switch.wait_s),
+            steam_wait: Duration::from_secs(config.switch.steam_wait_s),
+            steam: hinteros_session::apps::steam_binary(&config.steam.path),
+            bus: config.runtime.bus.clone(),
+            proc_dir: cli.test_proc_dir.clone().unwrap_or_else(|| "/proc".into()),
+            end_session: !cli.test_no_session_end,
+        },
+    );
+    if config.runtime.enable {
+        profiles.spawn_sleep_watch();
+    }
     let store = hinteros_session::store::Store::spawn(
         config.store.index.clone(),
         icon_store.clone(),
@@ -352,6 +368,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         runtime,
         auth: hinteros_session::auth::Auth::spawn(config.auth.clone(), events.clone()),
         store,
+        profiles,
         restarter: hinteros_session::restart::Restarter::new(
             config.session.clone(),
             config.runtime.bus.clone(),

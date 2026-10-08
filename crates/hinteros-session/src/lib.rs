@@ -15,6 +15,7 @@ pub mod input;
 pub mod keys;
 pub mod osk;
 pub mod procs;
+pub mod profile;
 pub mod reaper;
 pub mod reload;
 pub mod restart;
@@ -38,6 +39,8 @@ pub enum Audience {
     /// Only connections of the launcher itself (hello client name `hinteros-launcher`):
     /// authentication prompts.
     LauncherClient,
+    /// No connection: between the daemon's own parts (the system's `profiles_changed`).
+    Internal,
 }
 
 /// An event as broadcast to the connections: name, encoded params and audience.

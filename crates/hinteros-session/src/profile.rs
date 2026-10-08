@@ -36,6 +36,9 @@ pub const METHODS: &[&str] = &[
     SessionEndGuest::NAME,
 ];
 
+/// How often a running switch renews its hint (the service keeps it 60 s).
+const RENEW_EVERY: Duration = Duration::from_secs(25);
+
 /// What a switch waits for.
 #[derive(Debug, Clone)]
 pub struct SwitchConfig {
@@ -148,7 +151,8 @@ impl Profiles {
             }
             SessionSwitchProfile::NAME => {
                 let p = decode_params::<SessionSwitchProfile>(params)?;
-                self.switch(Some(p.id)).await?;
+                let pin = p.pin.map(zeroize::Zeroizing::new);
+                self.switch(Some(p.id), pin).await?;
                 encode_result::<SessionSwitchProfile>(ProfileEmpty {})
             }
             SessionEndGuest::NAME => {
@@ -161,7 +165,7 @@ impl Profiles {
                         json!({"action": "org.hinteros.system.profiles", "reason": "profile"}),
                     ));
                 }
-                self.switch(None).await?;
+                self.switch(None, None).await?;
                 encode_result::<SessionEndGuest>(ProfileEmpty {})
             }
             SessionSwitchWait::NAME => {
@@ -229,8 +233,14 @@ impl Profiles {
         }
     }
 
-    /// Start a switch to `target` (`None`: to the picker without a target).
-    async fn switch(&self, target: Option<String>) -> Result<(), ErrorObject> {
+    /// Start a switch to `target` (`None`: to the picker without a target). A locked target's
+    /// PIN goes to `system.profiles.switch` first: wrong or missing, the error comes back and
+    /// nothing closes; right, the hint carries a one-time token (DECISIONS J1).
+    async fn switch(
+        &self,
+        target: Option<String>,
+        pin: Option<zeroize::Zeroizing<String>>,
+    ) -> Result<(), ErrorObject> {
         if self.inner.switch.lock().unwrap().is_some() {
             return Err(invalid("id", "busy", "a switch is already running"));
         }
@@ -239,16 +249,20 @@ impl Profiles {
             if cur.id.as_deref() == Some(id.as_str()) || (cur.guest && id == "guest") {
                 return Err(invalid("id", "same", "that is this profile"));
             }
+            let mut params = json!({ "id": id });
+            if let Some(pin) = &pin {
+                params["pin"] = json!(pin.as_str());
+            }
             self.inner
                 .relay
-                .call(system::ProfilesSwitch::NAME, Some(json!({ "id": id })))
+                .call(system::ProfilesSwitch::NAME, Some(params))
                 .await?;
         }
         let (tx, rx) = mpsc::unbounded_channel();
         *self.inner.switch.lock().unwrap() = Some(tx);
         let me = self.clone();
         tokio::spawn(async move {
-            let ended = me.run_switch(rx).await;
+            let ended = me.run_switch(rx, target).await;
             *me.inner.switch.lock().unwrap() = None;
             if ended {
                 me.end_session().await;
@@ -298,8 +312,26 @@ impl Profiles {
             .collect()
     }
 
+    /// Renew the switch hint (and a locked target's token) while the switch runs, so it is still
+    /// live when the session ends; the service renews a token only for the caller that got it.
+    async fn renew_hint(&self, target: &str) {
+        if let Err(e) = self
+            .inner
+            .relay
+            .call(system::ProfilesSwitch::NAME, Some(json!({ "id": target })))
+            .await
+        {
+            warn!("cannot renew the switch hint: {}", e.message);
+        }
+    }
+
     /// Close everything. `true`: done, end the session; `false`: cancelled.
-    async fn run_switch(&self, mut ctl: mpsc::UnboundedReceiver<Ctl>) -> bool {
+    async fn run_switch(
+        &self,
+        mut ctl: mpsc::UnboundedReceiver<Ctl>,
+        target: Option<String>,
+    ) -> bool {
+        let mut renewed = Instant::now();
         let cfg = self.inner.cfg.clone();
         self.send(
             EventName::SwitchProgress,
@@ -344,6 +376,12 @@ impl Profiles {
             let steam = self.steam_pids();
             if apps.is_empty() && steam.is_empty() {
                 break;
+            }
+            if let Some(t) = &target
+                && renewed.elapsed() >= RENEW_EVERY
+            {
+                renewed = Instant::now();
+                self.renew_hint(t).await;
             }
             let now = Instant::now();
             let mut blocked: Vec<AppRef> = Vec::new();
@@ -391,12 +429,27 @@ impl Profiles {
                     }
                     Some(Ctl::Cancel) | None => {
                         info!("switch cancelled");
+                        if target.is_some()
+                            && let Err(e) = self
+                                .inner
+                                .relay
+                                .call(system::ProfilesSwitchCancel::NAME, Some(json!({})))
+                                .await
+                        {
+                            warn!("cannot drop the switch hint: {}", e.message);
+                        }
                         self.send(EventName::SwitchProgress, SwitchProgressParams { stage: SwitchStage::Cancelled, app: None });
                         return false;
                     }
                 },
                 () = tokio::time::sleep(Duration::from_millis(250)) => {}
             }
+        }
+        // The greeter reads the hint right after this session ends: make sure it is fresh.
+        if let Some(t) = &target
+            && renewed.elapsed() >= Duration::from_secs(5)
+        {
+            self.renew_hint(t).await;
         }
         self.send(
             EventName::SwitchProgress,

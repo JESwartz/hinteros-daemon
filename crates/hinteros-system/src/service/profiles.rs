@@ -36,6 +36,8 @@ const RECOVER_ACTION: &str = "org.hinteros.system.profiles.recover";
 pub enum Which {
     Own,
     Admin,
+    /// The profile a switch enters (profiles.switch with a PIN).
+    Target,
 }
 
 impl Which {
@@ -43,6 +45,7 @@ impl Which {
         match self {
             Which::Own => "self",
             Which::Admin => "admin",
+            Which::Target => "target",
         }
     }
 }
@@ -70,6 +73,7 @@ pub enum ProfilesRequest {
     ResetPin(ProfilesResetPinParams),
     Remove(ProfilesRemoveParams),
     Switch(ProfilesSwitchParams),
+    SwitchCancel,
     Unlock(PinParams),
     GuestSet(GuestSetParams),
     SaveMode(DisplaySaveModeParams),
@@ -166,12 +170,14 @@ impl ProfilesRequest {
                 super::check_revision(&p.revision)
             }
             R::Switch(p) => {
-                if p.id == "guest" {
-                    Ok(())
-                } else {
-                    check_id(&p.id, "id")
+                if p.id != "guest" {
+                    check_id(&p.id, "id")?;
                 }
+                p.pin
+                    .as_deref()
+                    .map_or(Ok(()), |x| check_pin_field(x, "pin"))
             }
+            R::SwitchCancel => Ok(()),
             R::Unlock(p) => check_pin_field(&p.pin, "pin"),
             R::GuestSet(p) => check_pin_field(&p.admin_pin, "admin_pin"),
             R::SaveMode(p) => {
@@ -258,10 +264,13 @@ impl Service {
         let pin = Zeroizing::new(pin.to_owned());
         let id2 = id.to_owned();
         let now = job::now();
-        let outcome = tokio::task::spawn_blocking(move || pins.verify(&id2, &pin, now))
-            .await
-            .map_err(internal)?
-            .map_err(internal)?;
+        // The admin profile's PIN has no backoff (DECISIONS J4): a wait there blocked the box.
+        let backoff = !self.is_admin_profile(id);
+        let outcome =
+            tokio::task::spawn_blocking(move || pins.verify_with(&id2, &pin, now, backoff))
+                .await
+                .map_err(internal)?
+                .map_err(internal)?;
         let (result, label) = match outcome {
             Verify::Ok | Verify::NoPin => (Ok(()), "verified"),
             Verify::Wrong { locked_for } => (
@@ -279,6 +288,28 @@ impl Service {
         };
         self.audit.pin_check(uid, method, which.name(), label);
         result
+    }
+
+    /// Whether `id` is the admin profile (of the running accounts).
+    pub(super) fn is_admin_profile(&self, id: &str) -> bool {
+        let Ok((state, _)) = self.load_state() else {
+            return false;
+        };
+        let file = self.profiles_file();
+        file.admin(&state).is_some_and(|(a, _)| a.id == id)
+    }
+
+    /// The admin profile's PIN has no backoff: forget a wait left from before (an upgrade from
+    /// a version that had one), so neither the picker nor PAM ever shows or applies it.
+    pub(super) fn clear_admin_backoff(&self) {
+        let Ok((state, _)) = self.load_state() else {
+            return;
+        };
+        if let Some((a, _)) = self.profiles_file().admin(&state)
+            && let Err(e) = Pins::new(self.paths.pins_dir()).reset_backoff(&a.id)
+        {
+            warn!("cannot clear the admin profile's PIN wait: {e}");
+        }
     }
 
     /// Rewrite the public view and tell subscribers.
@@ -345,7 +376,9 @@ impl Service {
                     user: a.user.clone(),
                     admin: m.admin,
                     locked: m.locked,
-                    locked_until: Some(pins.backoff(&a.id).locked_until).filter(|t| *t > now),
+                    locked_until: (!m.admin)
+                        .then(|| pins.backoff(&a.id).locked_until)
+                        .filter(|t| *t > now),
                     active: uid.is_some() && uid == active_uid,
                     last_used_at: m.last_used_at,
                     usage: usage.get(&a.id).map(to_api),
@@ -696,34 +729,86 @@ impl Service {
                 let (state, _) = self.require_schema2()?;
                 let file = self.profiles_file();
                 let caller = self.caller(uid, &state);
-                let target_user = if p.id == "guest" {
+                let (target_user, locked) = if p.id == "guest" {
                     if !state.guest_enabled() {
                         return Err(ErrorObject::new(ErrorCode::NotFound, "the guest is off"));
                     }
-                    state::GUEST_USER.to_string()
+                    (state::GUEST_USER.to_string(), false)
                 } else {
                     file.visible(&state)
                         .into_iter()
                         .find(|(a, _)| a.id == p.id)
-                        .map(|(a, _)| a.user)
+                        .map(|(a, m)| (a.user, m.locked))
                         .ok_or_else(|| ErrorObject::new(ErrorCode::NotFound, "no such profile"))?
                 };
                 let now = job::now();
                 let own = caller.id.as_deref() == Some(&p.id)
                     || (p.id == "guest" && caller.role == Role::Guest);
+                let from = caller.owner_key();
+                // A locked target is entered with a one-time token, issued only for its PIN
+                // (checked here, before the caller's session closes anything), or renewed for
+                // the same caller and target while that token is still live (a switch waiting
+                // for apps to close). The greeter then needs no UI (DECISIONS J1).
+                let needs_pin = !own && locked && Pins::new(self.paths.pins_dir()).is_set(&p.id);
+                let token = if own {
+                    true
+                } else if needs_pin {
+                    match p.pin.as_deref() {
+                        Some(pin) => {
+                            self.check_pin(uid, method, &p.id, Some(pin), Which::Target)
+                                .await?;
+                            true
+                        }
+                        None => {
+                            let live = SwitchHint::current(&self.paths.switch_json(), now)
+                                .is_some_and(|h| {
+                                    from.is_some()
+                                        && h.from == from
+                                        && h.target == p.id
+                                        && h.token.as_ref().is_some_and(|t| {
+                                            t.user == target_user && t.expires > now
+                                        })
+                                });
+                            if !live {
+                                self.audit
+                                    .pin_check(uid, method, Which::Target.name(), "missing");
+                                return Err(pin_required(Which::Target, None, "a PIN is needed"));
+                            }
+                            true
+                        }
+                    }
+                } else {
+                    false
+                };
                 SwitchHint {
                     target: p.id.clone(),
-                    from: caller.owner_key(),
+                    from: from.clone(),
                     expires: now + public::HINT_TTL_S,
-                    token: own.then(|| public::Token {
+                    token: token.then(|| public::Token {
                         user: target_user,
                         expires: now + public::HINT_TTL_S,
                     }),
                 }
                 .save(&self.paths.switch_json())
                 .map_err(internal)?;
-                info!(from = ?caller.owner_key(), to = %p.id, resume = own, "switch hint");
+                info!(from = ?from, to = %p.id, resume = own, token, "switch hint");
                 public::publish(&self.paths, &state, &file, now);
+                empty()
+            }
+            R::SwitchCancel => {
+                let (state, _) = self.require_schema2()?;
+                let caller = self.caller(uid, &state);
+                let path = self.paths.switch_json();
+                let from = caller.owner_key();
+                if from.is_some() && SwitchHint::load(&path).is_some_and(|h| h.from == from) {
+                    if let Err(e) = std::fs::remove_file(&path)
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        return Err(internal(e));
+                    }
+                    info!(from = ?from, "switch hint dropped (cancelled)");
+                    public::publish(&self.paths, &state, &self.profiles_file(), job::now());
+                }
                 empty()
             }
             R::Unlock(p) => {

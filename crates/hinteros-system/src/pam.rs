@@ -86,7 +86,9 @@ pub fn verify(ctx: &Ctx, user: &str, pin: &str, now: i64) -> (bool, Option<Strin
     else {
         return (false, None);
     };
-    match Pins::new(ctx.paths.pins_dir()).verify(&account.id, pin, now) {
+    // The admin profile's PIN has no backoff (DECISIONS J4).
+    let backoff = !file.admin(&state).is_some_and(|(a, _)| a.id == account.id);
+    match Pins::new(ctx.paths.pins_dir()).verify_with(&account.id, pin, now, backoff) {
         Ok(Verify::Ok) => (true, None),
         Ok(Verify::Wrong { locked_for }) if locked_for > 0 => {
             (false, Some(format!("hinteros:locked:{locked_for}")))
@@ -312,14 +314,7 @@ pub fn main(verb: Verb, ctx: &Ctx) -> ExitCode {
         // Cosmetic: never fails a login, whatever happens.
         let tty = std::env::var("PAM_TTY").ok();
         let paths = &ctx.paths;
-        let _ = std::panic::catch_unwind(|| {
-            crate::splash::run(
-                &paths.state_json(),
-                &paths.profiles_json(),
-                &user,
-                tty.as_deref(),
-            )
-        });
+        let _ = std::panic::catch_unwind(|| crate::splash::run(paths, &user, tty.as_deref(), now));
         return ExitCode::SUCCESS;
     }
     if user.is_empty() {
@@ -463,6 +458,19 @@ mod tests {
         );
         assert_eq!(verify(&c, "hinteros-p2", "2468", 12), (true, None));
         assert_eq!(verify(&c, "hinteros-p3", "2468", 12), (false, None));
+        // The admin profile (p1): no backoff, however many wrong tries; a stale wait from
+        // before is ignored.
+        pins.set("p1", "1357").unwrap();
+        for _ in 0..8 {
+            let _ = pins.verify("p1", "0000", 12);
+        }
+        for _ in 0..8 {
+            assert_eq!(
+                verify(&c, "hinteros", "0000", 12),
+                (false, Some("hinteros:wrong".into()))
+            );
+        }
+        assert_eq!(verify(&c, "hinteros", "1357", 12), (true, None));
         assert_eq!(verify(&c, "admin", "2468", 12), (false, None));
 
         // end-others: the other members and the guest, never the admin account or system users.

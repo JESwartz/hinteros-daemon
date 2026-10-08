@@ -127,6 +127,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     if let Some(id) = svc.jobs.lock().unwrap().busy() {
         info!(job = id, "re-attached to a running job");
     }
+    svc.clear_admin_backoff();
     svc.profiles_changed();
     tokio::spawn(monitor(svc.clone()));
 
@@ -729,6 +730,10 @@ impl Request {
                     system::ProfilesSwitch::NAME => {
                         P::Switch(decode::<system::ProfilesSwitch>(params)?)
                     }
+                    system::ProfilesSwitchCancel::NAME => {
+                        decode::<system::ProfilesSwitchCancel>(params)?;
+                        P::SwitchCancel
+                    }
                     system::ProfilesUnlock::NAME => {
                         P::Unlock(decode::<system::ProfilesUnlock>(params)?)
                     }
@@ -786,6 +791,7 @@ fn profiles_method_name(r: &profiles::ProfilesRequest) -> &'static str {
         P::ResetPin(_) => system::ProfilesResetPin::NAME,
         P::Remove(_) => system::ProfilesRemove::NAME,
         P::Switch(_) => system::ProfilesSwitch::NAME,
+        P::SwitchCancel => system::ProfilesSwitchCancel::NAME,
         P::Unlock(_) => system::ProfilesUnlock::NAME,
         P::GuestSet(_) => system::GuestSet::NAME,
         P::SaveMode(_) => system::DisplaySaveMode::NAME,

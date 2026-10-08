@@ -912,12 +912,24 @@ impl Method for ProfilesRemove {
 pub struct ProfilesSwitchParams {
     /// A profile id or `guest`.
     pub id: String,
+    /// The target's PIN: needed for a locked profile other than the caller's own. Right: the
+    /// hint carries a one-time token for the target, so the greeter enters it without asking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
 }
 
 pub struct ProfilesSwitch;
 impl Method for ProfilesSwitch {
     const NAME: &'static str = "profiles.switch";
     type Params = ProfilesSwitchParams;
+    type Result = Empty;
+}
+
+/// Drop the caller's switch hint and its token (the switch was cancelled).
+pub struct ProfilesSwitchCancel;
+impl Method for ProfilesSwitchCancel {
+    const NAME: &'static str = "profiles.switch_cancel";
+    type Params = NoParams;
     type Result = Empty;
 }
 
@@ -1218,6 +1230,7 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<ProfilesResetPin>(),
         MethodInfo::of::<ProfilesRemove>(),
         MethodInfo::of::<ProfilesSwitch>(),
+        MethodInfo::of::<ProfilesSwitchCancel>(),
         MethodInfo::of::<ProfilesUnlock>(),
         MethodInfo::of::<GuestSet>(),
         MethodInfo::of::<DisplaySaveMode>(),
@@ -1262,6 +1275,7 @@ pub const MUTATING: &[&str] = &[
     ProfilesResetPin::NAME,
     ProfilesRemove::NAME,
     ProfilesSwitch::NAME,
+    ProfilesSwitchCancel::NAME,
     ProfilesUnlock::NAME,
     GuestSet::NAME,
     DisplaySaveMode::NAME,
@@ -1307,6 +1321,7 @@ pub fn polkit_action(method: &str) -> Option<&'static str> {
         | ProfilesResetPin::NAME
         | ProfilesRemove::NAME
         | ProfilesSwitch::NAME
+        | ProfilesSwitchCancel::NAME
         | ProfilesUnlock::NAME => "org.hinteros.system.profiles",
         GuestSet::NAME | StarterSetSet::NAME => "org.hinteros.system.starter",
         DisplaySaveMode::NAME | AudioSaveOutput::NAME => "org.hinteros.system.settings",

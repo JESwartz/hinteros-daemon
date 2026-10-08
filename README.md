@@ -1209,12 +1209,13 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
 
 - `profiles.json` (`profiles.rs`), PINs (`pins.rs`: argon2id PHC strings in `pins/<id>`, backoff
   in `pins/<id>.state` under `flock`, 3 free failures then 1 s doubling to 5 min, the lock counted
-  from when the hash check ended), the public view `/run/hinteros/profiles-public.json` (0644) and
+  from when the hash check ended; **none for the admin profile's PIN**: wrong is only wrong, and a
+  stale wait file of the admin is ignored and cleared at service start), the public view `/run/hinteros/profiles-public.json` (0644) and
   the switch hint with one-time tokens `/run/hinteros/switch.json` (0600) (`public.rs`),
   `runtime.json` → `/run/hinteros/gamescope-modes` and `audio-output`, `usage.json`
   (`hinteros-system usage`, started over D-Bus when `profiles.list` sees data older than an hour).
 - Methods (`service/profiles.rs`): `profiles.list/create/setup_admin/rename/set_appearance/
-  set_pin/set_locked/reset_pin/remove/switch/unlock`, `guest.set`, `starter_set.get/set`,
+  set_pin/set_locked/reset_pin/remove/switch/switch_cancel/unlock`, `guest.set`, `starter_set.get/set`,
   `display.save_mode`, `audio.save_output`; event `profiles_changed`. Which PIN each checks:
   own changes `self`, anything on another profile or the box `admin`; a profile without a PIN yet
   passes. `pin_required` (3016) names it, with `retry_after_ms` during the lock; the audit has
@@ -1224,6 +1225,11 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   starter env only after the account's switch; a removal ends the account's processes, switches
   without it, then deletes the home with `datadel`'s no-symlink walk, the PIN, the metadata and the
   app links. Profiles (and the guest) without an env get the starter env while the box is idle.
+- `profiles.switch {id, pin?}`: a locked target (other than the caller's own) needs its PIN (`pin_required
+  {pin: target}`, backoff unless it is the admin profile); right, the hint gets a one-time token for
+  the target user (60 s, single use in `pin unlocked`), so `greet` enters it with no UI. Without
+  `pin`, the caller that holds a live token for that target renews hint and token (a switch still
+  closing apps). `profiles.switch_cancel` drops the caller's own hint.
 - `greeter.sock` (`--greeter-socket`, group `--greeter-group`, 0660): `hello`, `ping`,
   `subscribe`, `settings.get`, `jobs.get`, `profiles.create` (a create from it grants the new
   account a token).
@@ -1232,8 +1238,11 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   (`splash.rs`) paints the session's VT (`PAM_TTY`, only `/dev/ttyN`/`ttyN`, opened without
   following links and checked to be a VT) during greetd's handover: console escape sequences only
   (palette background/foreground = the launcher's `#0E1118`/`#F4F6FB`, clear, cursor hidden) and
-  a centred "Loading <name>…" (the profile's name from profiles.json, "Guest"; just "HinterOS"
-  for the greeter), names sanitised to printable characters and cut at 32. Always exits 0.
+  "Loading <name>…" in block letters (`bigtext.rs`: a 5x8 font in `█▀▄`, scale 1-3, the largest
+  that fits the VT's size, on one line or "Loading" above the name; the console font's own text
+  when nothing fits or a character has no glyph), centred (the profile's name from profiles.json,
+  "Guest"; the greeter shows the target of a fast switch, else "HinterOS"), names sanitised to
+  printable characters and cut at 32. Always exits 0.
 - **Forgotten PIN:** `sudo hinteros-system reset-pin [<id or exact name>]` (`resetpin.rs`, root
   only; no argument lists the profiles with their ids). Removes the profile's PIN and clears its
   wrong-PIN wait under the backoff file's `flock` (no race with a check in the service or the
@@ -1259,8 +1268,12 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   `display.keep` and `audio.set_output` also save the mode/output for every profile.
 - `hinteros-session greet [--config FILE] -- <picker…>` and `hinteros-session --greeter`
   (`greeter.list/login/pin/cancel/create`, `greeter_prompt`, `greeter_result`; `[greeter] public,
-  socket, session_command`). `greeter.list.switch_to`: an unexpired switch hint's target (the
-  picker goes straight to its PIN pad). The greeter never reads an `[apps] profile` env.
+  socket, session_command`). `greet` decides before any compositor runs: a live hint with `fast`
+  (unlocked target, the guest, or a token) is entered over greetd IPC and the picker never starts;
+  otherwise it execs the picker. `greeter.list.switch_to`: an unexpired switch hint's target (the
+  picker goes straight to its PIN pad). `session.switch_profile {id, pin?}` passes the PIN to
+  `system.profiles.switch` before anything closes, renews the hint every 25 s and right before
+  the session ends, and drops it on `switch_cancel`. The greeter never reads an `[apps] profile` env.
 
 Verified here against fakes (`crates/hinteros-system/tests/{apps,profiles}.rs`,
 `crates/hinteros-session/tests/{reload,profiles,greeter}.rs`). Needs the system repo's VM tests

@@ -133,7 +133,10 @@ pub fn view(paths: &Paths, state: &State, file: &ProfilesFile, now: i64) -> Publ
             color: m.color.clone(),
             locked: m.locked && pins.is_set(&a.id),
             admin: m.admin,
-            locked_until: Some(pins.backoff(&a.id).locked_until).filter(|t| *t > now),
+            // The admin profile's PIN has no backoff (a stale file is ignored).
+            locked_until: (!m.admin)
+                .then(|| pins.backoff(&a.id).locked_until)
+                .filter(|t| *t > now),
         })
         .collect();
     let mut appearance = crate::profiles::Appearance::default();

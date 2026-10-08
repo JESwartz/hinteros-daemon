@@ -205,16 +205,25 @@ pub fn greet_main(args: &[String]) -> i32 {
             crate::config::Config::default()
         }
     };
+    // No compositor and no launcher before this decision: a switch the hint lets through goes
+    // from the old session to the new one with one display mode set (the new session's).
     let view = PublicView::load(&config.greeter.public);
-    if let Some(user) = view.fast_path(now()) {
-        match fast(&user, &config.greeter.session_command) {
+    let now = now();
+    match view.fast_path(now) {
+        Some(user) => match fast(&user, &config.greeter.session_command) {
             Ok(true) => {
-                info!(%user, "fast path: the session starts");
+                info!(%user, "fast path: the session starts, no picker");
                 return 0;
             }
-            Ok(false) => info!(%user, "fast path needs the picker"),
-            Err(e) => warn!("fast path failed: {e}"),
-        }
+            Ok(false) => info!(%user, "fast path refused by PAM; the picker asks"),
+            Err(e) => warn!(%user, "fast path failed: {e}"),
+        },
+        None => match &view.next {
+            Some(n) if n.expires > now => {
+                info!(target = %n.target, "switch hint without a token: the picker asks")
+            }
+            _ => info!("no switch hint: the picker"),
+        },
     }
     exec_picker(picker)
 }

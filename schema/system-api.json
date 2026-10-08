@@ -1293,8 +1293,8 @@
       ]
     },
     "profiles.switch": {
-      "summary": "Choose the next profile (0.4): writes the switch hint the greeter reads. It selects; it authorises nothing.",
-      "description": "id is a profile id or guest. For the caller's own id it also issues a one-time resume token (session.restart: a locked profile comes back without its PIN), valid 60 s. The session daemon then ends the session (session.switch_profile).",
+      "summary": "Choose the next profile (0.4): writes the switch hint the greeter reads. A locked target needs its PIN here, before the caller's session closes anything.",
+      "description": "id is a profile id or guest. A locked profile (with a PIN) other than the caller's own needs pin = the target's PIN: wrong or missing is pin_required {pin: target, retry_after_ms?} and nothing is written; right, the hint carries a one-time token for the target (single use, bound to its user, valid 60 s), so the greeter enters it without any UI. The same caller may call again without pin while its token is live to extend hint and token by 60 s (a switch waiting for apps to close). The admin profile's PIN has no backoff. For the caller's own id it issues a one-time resume token (session.restart). Unlocked profiles and the guest need no PIN. The session daemon then ends the session (session.switch_profile).",
       "since": "0.4",
       "params": {
         "type": "object",
@@ -1312,6 +1312,9 @@
                 "const": "guest"
               }
             ]
+          },
+          "pin": {
+            "$ref": "#/$defs/Pin"
           }
         }
       },
@@ -1326,7 +1329,8 @@
         "authentication_required",
         "rate_limited",
         "not_found",
-        "unavailable"
+        "unavailable",
+        "pin_required"
       ],
       "examples": [
         {
@@ -1337,10 +1341,62 @@
           "result": {}
         },
         {
+          "name": "to the locked Kim, with her PIN",
+          "params": {
+            "id": "p4",
+            "pin": "2468"
+          },
+          "result": {}
+        },
+        {
+          "name": "to the locked Kim, wrong PIN",
+          "params": {
+            "id": "p4",
+            "pin": "0000"
+          },
+          "error": {
+            "code": 3016,
+            "message": "that PIN didn't match",
+            "data": {
+              "pin": "target"
+            }
+          }
+        },
+        {
           "name": "guest",
           "params": {
             "id": "guest"
           },
+          "result": {}
+        }
+      ]
+    },
+    "profiles.switch_cancel": {
+      "summary": "Drop the caller's switch hint and its token (0.4): the switch was cancelled and the session stays.",
+      "description": "Only a hint the caller wrote is removed; otherwise nothing happens.",
+      "since": "0.4",
+      "params": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": [
+        "permission_denied",
+        "authentication_required",
+        "rate_limited",
+        "unavailable"
+      ],
+      "examples": [
+        {
+          "name": "cancel",
+          "params": {},
           "result": {}
         }
       ]

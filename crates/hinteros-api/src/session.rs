@@ -852,6 +852,7 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<RelayProfilesResetPin>(),
         MethodInfo::of::<RelayProfilesRemove>(),
         MethodInfo::of::<RelayProfilesSwitch>(),
+        MethodInfo::of::<RelayProfilesSwitchCancel>(),
         MethodInfo::of::<RelayProfilesUnlock>(),
         MethodInfo::of::<RelayGuestSet>(),
         MethodInfo::of::<RelayDisplaySaveMode>(),
@@ -996,6 +997,7 @@ relay! {
     RelayProfilesResetPin = "system.profiles.reset_pin" => crate::system::ProfilesResetPin;
     RelayProfilesRemove = "system.profiles.remove" => crate::system::ProfilesRemove;
     RelayProfilesSwitch = "system.profiles.switch" => crate::system::ProfilesSwitch;
+    RelayProfilesSwitchCancel = "system.profiles.switch_cancel" => crate::system::ProfilesSwitchCancel;
     RelayProfilesUnlock = "system.profiles.unlock" => crate::system::ProfilesUnlock;
     RelayGuestSet = "system.guest.set" => crate::system::GuestSet;
     RelayDisplaySaveMode = "system.display.save_mode" => crate::system::DisplaySaveMode;
@@ -1212,6 +1214,9 @@ impl Method for ProfileCurrent {
 pub struct SwitchProfileParams {
     /// A profile id or `guest`.
     pub id: String,
+    /// The target's PIN, for a locked profile: checked before anything closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
 }
 
 pub struct SessionSwitchProfile;

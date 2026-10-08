@@ -231,31 +231,49 @@ async fn profiles_lifecycle_and_pins() {
         .unwrap_err();
     assert_eq!(code(&e), ErrorCode::InvalidParams.code());
 
-    // The backoff: 3 free failures, then the lock (also for the right PIN).
-    for _ in 0..3 {
+    // The admin profile's PIN has no backoff: wrong is only wrong, however often.
+    for _ in 0..6 {
         let e = call(&mut c, "profiles.unlock", json!({"pin": "0000"}))
             .await
             .unwrap_err();
-        assert_eq!(e["data"], json!({"pin": "self"}));
+        assert_eq!(
+            e["data"],
+            json!({"pin": "self"}),
+            "no wait for the admin PIN"
+        );
     }
-    let e = call(&mut c, "profiles.unlock", json!({"pin": "0000"}))
-        .await
-        .unwrap_err();
-    assert_eq!(e["data"]["retry_after_ms"], 1000);
-    // Locked, or wrong again with a longer lock: either way the client is told to wait.
-    let e = call(&mut c, "profiles.unlock", json!({"pin": "0000"}))
-        .await
-        .unwrap_err();
-    assert!(e["data"]["retry_after_ms"].as_i64().unwrap() > 0, "{e}");
-    std::thread::sleep(std::time::Duration::from_millis(3100));
+    assert!(public(root)["profiles"][0]["locked_until"].is_null());
     call(&mut c, "profiles.unlock", json!({"pin": ADMIN_PIN}))
         .await
         .unwrap();
 
-    // The switch hint: 0600, mirrored in the public view; for the own id a resume token.
-    call(&mut c, "profiles.switch", json!({"id": "p3"}))
+    // The switch hint: 0600, mirrored in the public view. Sam is locked: the switch needs
+    // Sam's PIN first (nothing is written without it), then carries a token for Sam.
+    let e = call(&mut c, "profiles.switch", json!({"id": "p3"}))
         .await
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(code(&e), ErrorCode::PinRequired.code());
+    assert_eq!(e["data"], json!({"pin": "target"}));
+    assert!(!root.p("run/switch.json").exists());
+    let e = call(
+        &mut c,
+        "profiles.switch",
+        json!({"id": "p3", "pin": ADMIN_PIN}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        e["data"],
+        json!({"pin": "target"}),
+        "the admin PIN is not Sam's"
+    );
+    call(
+        &mut c,
+        "profiles.switch",
+        json!({"id": "p3", "pin": "1357"}),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         std::fs::metadata(root.p("run/switch.json"))
             .unwrap()
@@ -264,9 +282,57 @@ async fn profiles_lifecycle_and_pins() {
             & 0o777,
         0o600
     );
+    let hint: Value = serde_json::from_str(&root.read("run/switch.json")).unwrap();
+    assert_eq!(hint["token"]["user"], "hinteros-p3");
+    assert_eq!(hint["from"], "p1");
     let v = public(root);
     assert_eq!(v["next"]["target"], "p3");
-    assert_eq!(v["next"]["fast"], false, "Sam is locked");
+    assert_eq!(v["next"]["fast"], true, "Sam's PIN was given: no UI");
+    // The same caller renews its live token without the PIN (a switch still closing apps).
+    call(&mut c, "profiles.switch", json!({"id": "p3"}))
+        .await
+        .unwrap();
+    let renewed: Value = serde_json::from_str(&root.read("run/switch.json")).unwrap();
+    assert_eq!(renewed["token"]["user"], "hinteros-p3");
+    assert!(renewed["token"]["expires"].as_i64() >= hint["token"]["expires"].as_i64());
+    // Cancelled: hint and token are gone; asking again needs the PIN again.
+    call(&mut c, "profiles.switch_cancel", json!({}))
+        .await
+        .unwrap();
+    assert!(!root.p("run/switch.json").exists());
+    assert!(public(root)["next"].is_null());
+    let e = call(&mut c, "profiles.switch", json!({"id": "p3"}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["data"], json!({"pin": "target"}));
+    // Sam is not the admin: Sam's PIN keeps its backoff (3 free failures, then a wait).
+    for _ in 0..3 {
+        let e = call(
+            &mut c,
+            "profiles.switch",
+            json!({"id": "p3", "pin": "0000"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e["data"], json!({"pin": "target"}));
+    }
+    let e = call(
+        &mut c,
+        "profiles.switch",
+        json!({"id": "p3", "pin": "0000"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["data"]["retry_after_ms"], 1000);
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    call(
+        &mut c,
+        "profiles.switch",
+        json!({"id": "p3", "pin": "1357"}),
+    )
+    .await
+    .unwrap();
+    // For the own id a resume token.
     call(&mut c, "profiles.switch", json!({"id": "p1"}))
         .await
         .unwrap();
@@ -348,6 +414,25 @@ async fn profiles_lifecycle_and_pins() {
     assert!(!root.p("nixprofiles/apps/hinteros-p3-1-link").exists());
     let pf: Value = serde_json::from_str(&root.read("var/lib/hinteros/profiles.json")).unwrap();
     assert!(pf["profiles"].get("p3").is_none());
+    // Gone from what the pickers show: the session's list and the greeter's public view.
+    let l = call(&mut c, "profiles.list", json!({})).await.unwrap();
+    assert!(
+        l["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["id"] != "p3"),
+        "{l}"
+    );
+    let v = public(root);
+    assert!(
+        v["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["id"] != "p3"),
+        "{v}"
+    );
     // The next profile is p4: names are never reused.
     let rev = revision(&mut c).await;
     let r = job(
@@ -591,15 +676,14 @@ fn pam_helper_verbs() {
         pin("verify", "hinteros", "0000\0"),
         (false, "hinteros:wrong\n".into())
     );
-    pin("verify", "hinteros", "0000\0");
-    pin("verify", "hinteros", "0000\0");
-    assert_eq!(
-        pin("verify", "hinteros", "0000\0"),
-        (false, "hinteros:locked:1\n".into())
-    );
-    // Then the wait applies (refused at once, or wrong again with a longer lock).
-    let (ok, line) = pin("verify", "hinteros", "0000\0");
-    assert!(!ok && line.starts_with("hinteros:locked:"), "{line}");
+    // p1 is the admin profile: no backoff, wrong stays just wrong (DECISIONS J4).
+    for _ in 0..5 {
+        assert_eq!(
+            pin("verify", "hinteros", "0000\0"),
+            (false, "hinteros:wrong\n".into())
+        );
+    }
+    assert_eq!(pin("verify", "hinteros", "2468\0"), (true, String::new()));
     // end-others with nobody else running: succeeds, touches last_used_at.
     assert!(pin("end-others", "hinteros", "").0);
     let pf: Value = serde_json::from_str(&root.read("var/lib/hinteros/profiles.json")).unwrap();
@@ -644,7 +728,7 @@ async fn reset_pin_from_the_terminal() {
     let mut c = sys.client().await;
     let pins = hinteros_system::pins::Pins::new(root.p("var/lib/hinteros/pins"));
 
-    // p1 locked with its PIN, then wrong PINs until the wait starts.
+    // p1 locked with its PIN, then wrong PINs: the admin profile has no wait (DECISIONS J4).
     call(
         &mut c,
         "profiles.set_locked",
@@ -662,8 +746,7 @@ async fn reset_pin_from_the_terminal() {
         .unwrap_err();
         assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{e}");
     }
-    assert_eq!(pins.backoff("p1").failures, 4);
-    assert!(pins.backoff("p1").locked_until > 0);
+    assert_eq!(pins.backoff("p1").failures, 0);
     assert!(!pam_ok(root, "unlocked", "hinteros"));
 
     // Not root: the binary refuses (and changes nothing).

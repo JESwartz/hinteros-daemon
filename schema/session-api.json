@@ -2197,8 +2197,8 @@
       "relay": true
     },
     "system.profiles.switch": {
-      "summary": "Relayed to the system service's profiles.switch. Choose the next profile (0.4): writes the switch hint the greeter reads. It selects; it authorises nothing.",
-      "description": "id is a profile id or guest. For the caller's own id it also issues a one-time resume token (session.restart: a locked profile comes back without its PIN), valid 60 s. The session daemon then ends the session (session.switch_profile).",
+      "summary": "Relayed to the system service's profiles.switch. Choose the next profile (0.4): writes the switch hint the greeter reads. A locked target needs its PIN here, before the caller's session closes anything.",
+      "description": "id is a profile id or guest. A locked profile (with a PIN) other than the caller's own needs pin = the target's PIN: wrong or missing is pin_required {pin: target, retry_after_ms?} and nothing is written; right, the hint carries a one-time token for the target (single use, bound to its user, valid 60 s), so the greeter enters it without any UI. The same caller may call again without pin while its token is live to extend hint and token by 60 s (a switch waiting for apps to close). The admin profile's PIN has no backoff. For the caller's own id it issues a one-time resume token (session.restart). Unlocked profiles and the guest need no PIN. The session daemon then ends the session (session.switch_profile).",
       "since": "0.12",
       "params": {
         "type": "object",
@@ -2216,6 +2216,9 @@
                 "const": "guest"
               }
             ]
+          },
+          "pin": {
+            "$ref": "#/$defs/Pin"
           }
         }
       },
@@ -2231,7 +2234,8 @@
         "authentication_required",
         "rate_limited",
         "not_found",
-        "unavailable"
+        "unavailable",
+        "pin_required"
       ],
       "examples": [
         {
@@ -2242,10 +2246,64 @@
           "result": {}
         },
         {
+          "name": "to the locked Kim, with her PIN",
+          "params": {
+            "id": "p4",
+            "pin": "2468"
+          },
+          "result": {}
+        },
+        {
+          "name": "to the locked Kim, wrong PIN",
+          "params": {
+            "id": "p4",
+            "pin": "0000"
+          },
+          "error": {
+            "code": 3016,
+            "message": "that PIN didn't match",
+            "data": {
+              "pin": "target"
+            }
+          }
+        },
+        {
           "name": "guest",
           "params": {
             "id": "guest"
           },
+          "result": {}
+        }
+      ],
+      "relay": true
+    },
+    "system.profiles.switch_cancel": {
+      "summary": "Relayed to the system service's profiles.switch_cancel. Drop the caller's switch hint and its token (0.4): the switch was cancelled and the session stays.",
+      "description": "Only a hint the caller wrote is removed; otherwise nothing happens.",
+      "since": "0.12",
+      "params": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "result": {
+        "type": "object",
+        "required": [],
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "errors": [
+        "system_unavailable",
+        "permission_denied",
+        "authentication_required",
+        "rate_limited",
+        "unavailable"
+      ],
+      "examples": [
+        {
+          "name": "cancel",
+          "params": {},
           "result": {}
         }
       ],
@@ -3235,8 +3293,8 @@
       ]
     },
     "session.switch_profile": {
-      "summary": "Switch to another profile (0.12): writes the switch hint (system.profiles.switch), then closes every app (SIGTERM, no silent force-close) and Steam (steam -shutdown), and ends this session; the greeter takes over. Answers once the hint is written; progress comes as switch_progress, a stuck app as switch_blocked.",
-      "description": "invalid_params {field: id, reason: same} for the own profile. While a switch runs a second one is invalid_params {reason: busy}.",
+      "summary": "Switch to another profile (0.12): writes the switch hint (system.profiles.switch with the PIN of a locked target; a wrong or missing PIN is pin_required {pin: target} and nothing closes), then closes every app (SIGTERM, no silent force-close) and Steam (steam -shutdown), and ends this session; the greeter takes over. Answers once the hint is written; progress comes as switch_progress, a stuck app as switch_blocked.",
+      "description": "invalid_params {field: id, reason: same} for the own profile. While a switch runs a second one is invalid_params {reason: busy}. pin: the target's PIN, needed for a locked profile (asked in the session before anything closes); the hint then carries a one-time token, so the greeter enters the target with no UI. While closing takes long the daemon extends the token; switch_cancel drops it.",
       "since": "0.12",
       "params": {
         "type": "object",
@@ -3254,6 +3312,9 @@
                 "const": "guest"
               }
             ]
+          },
+          "pin": {
+            "$ref": "#/$defs/Pin"
           }
         }
       },
@@ -3269,7 +3330,8 @@
         "authentication_required",
         "rate_limited",
         "not_found",
-        "unavailable"
+        "unavailable",
+        "pin_required"
       ],
       "examples": [
         {
@@ -3278,6 +3340,28 @@
             "id": "p3"
           },
           "result": {}
+        },
+        {
+          "name": "to the locked Kim, with her PIN",
+          "params": {
+            "id": "p4",
+            "pin": "2468"
+          },
+          "result": {}
+        },
+        {
+          "name": "to the locked Kim, wrong PIN",
+          "params": {
+            "id": "p4",
+            "pin": "0000"
+          },
+          "error": {
+            "code": 3016,
+            "message": "that PIN didn't match",
+            "data": {
+              "pin": "target"
+            }
+          }
         },
         {
           "name": "itself",

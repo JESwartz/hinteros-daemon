@@ -11,6 +11,7 @@
 pub mod appreg;
 pub mod audit;
 pub mod authz;
+pub mod bigtext;
 pub mod config;
 pub mod datadel;
 pub mod flake;

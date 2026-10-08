@@ -57,7 +57,14 @@ fn fake_system(path: &Path, calls: Calls) -> tokio::task::JoinHandle<()> {
                             let outcome: Result<Value, ErrorObject> = match req.method.as_str() {
                                 "subscribe" => Ok(params.clone()),
                                 "profiles.list" => Ok(serde_json::from_str(LIST).unwrap()),
-                                "profiles.switch" => Ok(json!({})),
+                                "profiles.switch" if params["pin"] == "0000" => {
+                                    Err(ErrorObject::with_data(
+                                        hinteros_api::ErrorCode::PinRequired,
+                                        "that PIN didn't match",
+                                        json!({"pin": "target"}),
+                                    ))
+                                }
+                                "profiles.switch" | "profiles.switch_cancel" => Ok(json!({})),
                                 "profiles.unlock" if params["pin"] == "2468" => Ok(json!({})),
                                 "profiles.unlock" => Err(ErrorObject::with_data(
                                     hinteros_api::ErrorCode::PinRequired,
@@ -146,6 +153,26 @@ async fn switch_closes_apps_and_never_kills_silently() {
         .unwrap_err();
     assert_eq!(e["data"]["reason"], "same");
 
+    // A locked target: a wrong PIN comes back as the system's error and nothing starts.
+    let e = call(
+        &mut c,
+        "session.switch_profile",
+        json!({"id": "p3", "pin": "0000"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (e["code"].clone(), e["data"].clone()),
+        (json!(3016), json!({"pin": "target"}))
+    );
+    let e = call(&mut c, "session.switch_wait", json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e["data"]["reason"], "no_switch",
+        "no switch runs after a wrong PIN"
+    );
+
     // One app quits on SIGTERM, one ignores it.
     let (_polite, _) = launch(&mut c, "exec sleep 60").await;
     let (stubborn, pid) = launch(&mut c, "trap '' TERM; while true; do sleep 1; done").await;
@@ -157,7 +184,7 @@ async fn switch_closes_apps_and_never_kills_silently() {
             .lock()
             .unwrap()
             .iter()
-            .any(|(m, p)| m == "profiles.switch" && p["id"] == "p3")
+            .any(|(m, p)| m == "profiles.switch" && p["id"] == "p3" && p["pin"].is_null())
     );
     assert_eq!(
         event_named(&mut c, "switch_progress").await["stage"],
@@ -216,6 +243,14 @@ async fn switch_closes_apps_and_never_kills_silently() {
     );
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(alive(pid));
+    // The hint (and a token) the switch wrote is dropped.
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, _)| m == "profiles.switch_cancel")
+    );
     let e = call(&mut c, "session.switch_wait", json!({}))
         .await
         .unwrap_err();

@@ -195,15 +195,46 @@ impl Pins {
         Ok(())
     }
 
+    /// Forget `id`'s failures and wait (the admin profile, which has no backoff).
+    pub fn reset_backoff(&self, id: &str) -> std::io::Result<()> {
+        if !self.state_path(id).exists() {
+            return Ok(());
+        }
+        self.with_state(id, |_| Backoff::default())
+    }
+
     /// Check `pin` for profile `id` at `now`, applying the backoff: a lock refuses at once; the
     /// outcome is recorded under the lock, counted from when the (slow) hash check ended.
     pub fn verify(&self, id: &str, pin: &str, now: i64) -> std::io::Result<Verify> {
+        self.verify_with(id, pin, now, true)
+    }
+
+    /// [`Pins::verify`]; with `backoff` false (the admin profile, DECISIONS J4) a wrong PIN is
+    /// only wrong: no count, no wait, and a stale backoff file never refuses.
+    pub fn verify_with(
+        &self,
+        id: &str,
+        pin: &str,
+        now: i64,
+        backoff: bool,
+    ) -> std::io::Result<Verify> {
         let pin = Zeroizing::new(pin.to_owned());
         let phc = match fs::read_to_string(self.hash_path(id)) {
             Ok(p) => Zeroizing::new(p),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Verify::NoPin),
             Err(e) => return Err(e),
         };
+        if !backoff {
+            let ok = is_pin(&pin) && matches(phc.trim(), &pin);
+            if self.backoff(id) != Backoff::default() {
+                self.reset_backoff(id)?;
+            }
+            return Ok(if ok {
+                Verify::Ok
+            } else {
+                Verify::Wrong { locked_for: 0 }
+            });
+        }
         let left = self.backoff(id).remaining(now);
         if left > 0 {
             return Ok(Verify::Locked { seconds: left });
@@ -317,6 +348,40 @@ mod tests {
         assert_eq!(pins.backoff("p1"), Backoff::default());
         pins.remove("p1");
         assert!(!pins.is_set("p1"));
+    }
+
+    #[test]
+    fn no_backoff_for_the_admin_pin() {
+        let d = tempfile::tempdir().unwrap();
+        let pins = Pins::new(d.path().join("pins"));
+        pins.set("p1", "2468").unwrap();
+        // A stale lock from before the upgrade (or from the backoff path) never refuses.
+        for _ in 0..6 {
+            let _ = pins.verify("p1", "0000", 100);
+        }
+        assert!(pins.backoff("p1").remaining(100) > 0);
+        for _ in 0..10 {
+            assert_eq!(
+                pins.verify_with("p1", "0000", 100, false).unwrap(),
+                Verify::Wrong { locked_for: 0 }
+            );
+        }
+        assert_eq!(
+            pins.backoff("p1"),
+            Backoff::default(),
+            "the stale lock is gone"
+        );
+        assert_eq!(
+            pins.verify_with("p1", "2468", 100, false).unwrap(),
+            Verify::Ok
+        );
+        assert_eq!(pins.backoff("p1"), Backoff::default());
+        assert_eq!(
+            pins.verify_with("p9", "2468", 100, false).unwrap(),
+            Verify::NoPin
+        );
+        pins.reset_backoff("p9").unwrap();
+        assert!(!d.path().join("pins/p9.state").exists());
     }
 
     #[test]

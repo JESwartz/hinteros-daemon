@@ -124,6 +124,18 @@ async fn picker_logs_in_through_greetd() {
     // No apps in the picker, not even the stand-ins.
     let apps = call(&mut c, "apps.list", json!({})).await.unwrap();
     assert_eq!(apps["apps"], json!([]));
+    // The list is read fresh each time (a profile removed while the picker is up goes away
+    // at its next look).
+    let gone = d.dir.path().join("public.json");
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&gone).unwrap()).unwrap();
+    v["profiles"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|p| p["id"] != "p3");
+    std::fs::write(&gone, v.to_string()).unwrap();
+    let l = call(&mut c, "greeter.list", json!({})).await.unwrap();
+    assert_eq!(l["profiles"].as_array().unwrap().len(), 1, "{l}");
+    public(d.dir.path(), Value::Null);
 
     // Unlocked: straight in, with the configured session command.
     call(&mut c, "greeter.login", json!({"id": "p1"}))
@@ -209,6 +221,23 @@ fn greet_takes_the_fast_path_or_runs_the_picker() {
             .iter()
             .any(|r| r["type"] == "create_session" && r["username"] == "hinteros")
     );
+    // The guest: no PIN ever, the fast path.
+    public(
+        dir,
+        json!({"target": "guest", "fast": true, "expires": far}),
+    );
+    assert!(greet(&dir.join("m0").display().to_string()).success());
+    assert!(!dir.join("m0").exists());
+    assert!(
+        log.lock()
+            .unwrap()
+            .iter()
+            .any(|r| r["type"] == "create_session" && r["username"] == "hinteros-guest")
+    );
+    // An expired hint: the picker.
+    public(dir, json!({"target": "p1", "fast": true, "expires": 1}));
+    assert!(greet(&dir.join("m4").display().to_string()).success());
+    assert!(dir.join("m4").exists());
     // A locked target without a token: the picker.
     public(dir, json!({"target": "p3", "fast": false, "expires": far}));
     assert!(greet(&dir.join("m2").display().to_string()).success());

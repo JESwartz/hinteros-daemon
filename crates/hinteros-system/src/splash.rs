@@ -2,11 +2,13 @@
 //! from the picker to a profile's session (or back). Between the last frame of one compositor and
 //! the first of the next the kernel console (fbcon) of greetd's VT is on screen, ~2 s on real
 //! hardware; this paints it in the launcher's colours with a centred "Loading <name>…" instead of
-//! a black (or stale) text screen.
+//! a black (or stale) text screen, in block letters large enough to read from a couch
+//! ([`crate::bigtext`]).
 //!
 //! Linux console escape sequences only (console_codes(4)): palette entries 0 (background) and 7/15
 //! (the default and bold foreground), reset attributes, clear, cursor home, cursor hidden, then
-//! the line at the centre of the tty's size (TIOCGWINSZ). The tty comes from `PAM_TTY` and must be
+//! the lines centred in the tty's size (TIOCGWINSZ, read when the splash runs: the console font is
+//! set in the initrd, so the size is final by then). The tty comes from `PAM_TTY` and must be
 //! `/dev/ttyN` or `ttyN` (a virtual console); it is opened without following symlinks and checked
 //! to be a VT character device. Nothing here ever fails a login: the verb always exits 0.
 
@@ -16,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::info;
 
+use crate::bigtext;
 use crate::profiles::ProfilesFile;
 use crate::state::{self, State};
 
@@ -106,36 +109,118 @@ fn palette(out: &mut Vec<u8>, entry: char, rgb: [u8; 3]) {
     );
 }
 
-/// The bytes that paint the splash on a `cols` x `rows` console.
-pub fn render(text: &str, cols: u16, rows: u16) -> Vec<u8> {
-    let (cols, rows) = if cols == 0 || rows == 0 {
-        (80, 25)
-    } else {
-        (cols, rows)
-    };
-    // Never wider than the screen.
-    let text: String = text.chars().take(cols as usize).collect();
-    let width = text.chars().count() as u16;
-    let row = rows / 2 + 1;
-    let col = (cols - width) / 2 + 1;
-    let mut out = Vec::new();
-    palette(&mut out, '0', BACKGROUND);
-    palette(&mut out, '7', TEXT);
-    palette(&mut out, 'F', TEXT);
-    // Default colours and attributes, blank screen, cursor home and hidden.
+/// Palette, default attributes, blank screen, cursor home and hidden.
+fn prelude(out: &mut Vec<u8>) {
+    palette(out, '0', BACKGROUND);
+    palette(out, '7', TEXT);
+    palette(out, 'F', TEXT);
     out.extend_from_slice(b"\x1b[0m\x1b[2J\x1b[H\x1b[?25l");
-    out.extend_from_slice(format!("\x1b[{row};{col}H").as_bytes());
-    out.extend_from_slice(b"\x1b[1m");
-    out.extend_from_slice(text.as_bytes());
-    out.extend_from_slice(b"\x1b[0m");
+}
+
+/// The lines the splash may show for `name` (see [`text_for`]), in order of preference at a
+/// given size: one line, else "Loading" above the name.
+fn layouts(name: Option<&str>) -> Vec<Vec<String>> {
+    let text = text_for(name);
+    let mut out = vec![vec![text.clone()]];
+    if let Some(rest) = text.strip_prefix("Loading ") {
+        out.push(vec!["Loading".to_owned(), rest.to_owned()]);
+    }
     out
 }
 
-/// The name to show for `user`: None for the greeter ("HinterOS"), "Guest" for the guest, the
-/// profile's name, else (a spare in first-boot mode, anything unknown) "HinterOS" too.
-pub fn name_for(state_json: &Path, profiles_json: &Path, user: &str) -> Option<String> {
+/// How the splash is drawn on a console of a given size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layout {
+    /// Block-letter scale (1-3); 0: the console font's own text (nothing larger fits).
+    pub scale: usize,
+    pub lines: Vec<String>,
+    /// Top row and each line's first column, 1-based (console cursor addresses).
+    pub top: usize,
+    pub cols: Vec<usize>,
+}
+
+/// The largest block-letter layout of the splash for `name` that fits a `cols` x `rows`
+/// console with a margin, centred; else the plain line in the middle. An unknown size (0)
+/// counts as 80x25.
+pub fn layout(name: Option<&str>, cols: u16, rows: u16) -> Layout {
+    let (cols, rows) = if cols == 0 || rows == 0 {
+        (80usize, 25usize)
+    } else {
+        (cols as usize, rows as usize)
+    };
+    for scale in (1..=3).rev() {
+        for lines in layouts(name) {
+            if !lines.iter().all(|l| bigtext::drawable(l)) {
+                continue;
+            }
+            let gap = scale;
+            let h = lines.len() * bigtext::height(scale) + (lines.len() - 1) * gap;
+            let widest = lines.iter().map(|l| bigtext::width(l, scale)).max();
+            if widest.is_some_and(|w| w + 4 <= cols) && h + 2 <= rows {
+                let top = (rows - h) / 2 + 1;
+                let cols = lines
+                    .iter()
+                    .map(|l| (cols - bigtext::width(l, scale)) / 2 + 1)
+                    .collect();
+                return Layout {
+                    scale,
+                    lines,
+                    top,
+                    cols,
+                };
+            }
+        }
+    }
+    // Never wider than the screen.
+    let text: String = text_for(name).chars().take(cols).collect();
+    let width = text.chars().count();
+    Layout {
+        scale: 0,
+        cols: vec![(cols - width) / 2 + 1],
+        top: rows / 2 + 1,
+        lines: vec![text],
+    }
+}
+
+/// The bytes that paint the splash for `name` (None: "HinterOS") on a `cols` x `rows` console.
+pub fn render(name: Option<&str>, cols: u16, rows: u16) -> Vec<u8> {
+    let l = layout(name, cols, rows);
+    let mut out = Vec::new();
+    prelude(&mut out);
+    if l.scale == 0 {
+        out.extend_from_slice(format!("\x1b[{};{}H", l.top, l.cols[0]).as_bytes());
+        out.extend_from_slice(b"\x1b[1m");
+        out.extend_from_slice(l.lines[0].as_bytes());
+        out.extend_from_slice(b"\x1b[0m");
+        return out;
+    }
+    let mut row = l.top;
+    for (line, col) in l.lines.iter().zip(&l.cols) {
+        for cells in bigtext::rows(line, l.scale) {
+            if !cells.is_empty() {
+                out.extend_from_slice(format!("\x1b[{row};{col}H").as_bytes());
+                out.extend_from_slice(cells.as_bytes());
+            }
+            row += 1;
+        }
+        row += l.scale;
+    }
+    out
+}
+
+/// The name to show for `user`: "Guest" for the guest, the profile's name, else None
+/// ("HinterOS": a spare in first-boot mode, anything unknown). The greeter shows the target of
+/// a switch it is about to enter without any UI (the public view's live `next` with `fast`),
+/// so the TV says "Loading Sam…" all the way; otherwise "HinterOS".
+pub fn name_for(
+    state_json: &Path,
+    profiles_json: &Path,
+    public_json: &Path,
+    user: &str,
+    now: i64,
+) -> Option<String> {
     if user == GREETER_USER {
-        return None;
+        return switch_target(public_json, now);
     }
     if user == state::GUEST_USER {
         return Some("Guest".into());
@@ -144,6 +229,20 @@ pub fn name_for(state_json: &Path, profiles_json: &Path, user: &str) -> Option<S
     let account = state.accounts().into_iter().find(|a| a.user == user)?;
     let file = ProfilesFile::load(profiles_json).ok()?;
     file.profiles.get(&account.id).map(|m| m.name.clone())
+}
+
+/// The name of a live fast switch target from the public view.
+fn switch_target(public_json: &Path, now: i64) -> Option<String> {
+    let v: crate::public::PublicView =
+        serde_json::from_slice(&std::fs::read(public_json).ok()?).ok()?;
+    let next = v.next.filter(|n| n.fast && n.expires > now)?;
+    if next.target == "guest" {
+        return Some("Guest".into());
+    }
+    v.profiles
+        .into_iter()
+        .find(|p| p.id == next.target)
+        .map(|p| p.name)
 }
 
 /// Open `path` (a VT) for writing, never following a symlink, and check it is one.
@@ -171,7 +270,7 @@ fn libc_flags() -> i32 {
 }
 
 /// Paint the splash on `PAM_TTY` for `user`. Errors are logged, never returned.
-pub fn run(state_json: &Path, profiles_json: &Path, user: &str, pam_tty: Option<&str>) {
+pub fn run(paths: &crate::config::Paths, user: &str, pam_tty: Option<&str>, now: i64) {
     let Some(path) = pam_tty.and_then(tty_path) else {
         info!("splash: no virtual console in PAM_TTY");
         return;
@@ -186,8 +285,14 @@ pub fn run(state_json: &Path, profiles_json: &Path, user: &str, pam_tty: Option<
     let (cols, rows) = rustix::termios::tcgetwinsize(&f)
         .map(|w| (w.ws_col, w.ws_row))
         .unwrap_or((0, 0));
-    let name = name_for(state_json, profiles_json, user);
-    let bytes = render(&text_for(name.as_deref()), cols, rows);
+    let name = name_for(
+        &paths.state_json(),
+        &paths.profiles_json(),
+        &paths.public_json(),
+        user,
+        now,
+    );
+    let bytes = render(name.as_deref(), cols, rows);
     if let Err(e) = f.write_all(&bytes) {
         info!("splash: writing {}: {e}", path.display());
     }
@@ -238,8 +343,9 @@ mod tests {
     }
 
     #[test]
-    fn renders_palette_clear_hidden_cursor_and_centred_text() {
-        let out = String::from_utf8(render("Loading Sam…", 120, 33)).unwrap();
+    fn renders_palette_clear_hidden_cursor_and_centred_block_letters() {
+        // Terminus 16x32 (console.font ter-v32b, set in the initrd) on a 1920x1080 TV: 120x33.
+        let out = String::from_utf8(render(Some("Sam"), 120, 33)).unwrap();
         // Palette: background, foreground and bold foreground in the launcher's colours.
         assert!(
             out.starts_with("\x1b]P00E1118\x1b]P7F4F6FB\x1b]PFF4F6FB"),
@@ -247,27 +353,90 @@ mod tests {
         );
         let clear = out.find("\x1b[2J").unwrap();
         let hide = out.find("\x1b[?25l").unwrap();
-        // "Loading Sam…" is 12 cells: column (120 - 12) / 2 + 1 = 55; row 33 / 2 + 1 = 17.
-        let at = out.find("\x1b[17;55H").unwrap();
-        let text = out.find("Loading Sam…").unwrap();
-        assert!(clear < at && hide < at && at < text, "{out:?}");
-        assert!(out.ends_with("Loading Sam…\x1b[0m"));
-        // Only escape sequences and the text: no other control characters.
+        // "Loading" over "Sam…" at scale 2: 82 and 46 cells wide, 8 rows each and a 2-row gap
+        // (18 rows): top row (33 - 18) / 2 + 1 = 8, columns (120 - 82) / 2 + 1 = 20 and
+        // (120 - 46) / 2 + 1 = 38.
+        let l = layout(Some("Sam"), 120, 33);
+        assert_eq!(l.scale, 2);
+        assert_eq!(l.lines, ["Loading", "Sam…"]);
+        assert_eq!((l.top, l.cols.clone()), (8, vec![20, 38]));
+        let first = out.find("\x1b[8;20H").unwrap();
+        assert!(clear < first && hide < first, "{out:?}");
+        assert!(out.contains("\x1b[18;38H"), "{out:?}");
+        // Only escape sequences, block characters and spaces: no other control characters.
         assert!(
             !out.chars()
                 .any(|c| c.is_control() && c != '\x1b' && c != '\u{7}'),
             "{out:?}"
         );
+        assert!(
+            out.chars().any(|c| "█▀▄".contains(c)),
+            "drawn in block characters"
+        );
+    }
+
+    #[test]
+    fn centred_for_the_console_sizes_of_a_tv() {
+        // (cols, rows) → the brand's scale, top row, column; every layout inside the screen
+        // with its margin, the same distance from the left and the right edge (±1), and from
+        // the top and the bottom.
+        let sizes = [
+            (120, 33, 2, 13, 14), // ter-v32b at 1920x1080 (the box)
+            (240, 67, 3, 28, 50), // ter-v32b at 3840x2160, or 8x16 at 1920x1080
+            (80, 25, 1, 11, 17),  // unknown size
+            (160, 45, 3, 17, 10), // 8x16 at 1280x720
+        ];
+        for (cols, rows, scale, top, col) in sizes {
+            let l = layout(None, cols, rows);
+            assert_eq!(l.lines, ["HinterOS"]);
+            assert_eq!(
+                (l.scale, l.top, l.cols[0]),
+                (scale, top, col),
+                "{cols}x{rows}"
+            );
+        }
+        for (cols, rows, ..) in sizes {
+            for name in [
+                None,
+                Some("Sam"),
+                Some("James"),
+                Some("Guest"),
+                Some("Alexandria"),
+            ] {
+                let l = layout(name, cols, rows);
+                assert!(l.scale >= 1, "{name:?} {cols}x{rows}");
+                let h = l.lines.len() * bigtext::height(l.scale) + (l.lines.len() - 1) * l.scale;
+                let (above, below) = (l.top - 1, rows as usize - (l.top - 1 + h));
+                assert!(above.abs_diff(below) <= 1, "{name:?} {cols}x{rows}: {l:?}");
+                for (line, c) in l.lines.iter().zip(&l.cols) {
+                    let w = bigtext::width(line, l.scale);
+                    let (left, right) = (c - 1, cols as usize - (c - 1 + w));
+                    assert!(left >= 2 && right >= 2, "{name:?} {cols}x{rows}: {l:?}");
+                    assert!(left.abs_diff(right) <= 1, "{name:?} {cols}x{rows}: {l:?}");
+                }
+            }
+        }
     }
 
     #[test]
     fn small_or_unknown_sizes() {
-        let out = String::from_utf8(render("HinterOS", 0, 0)).unwrap();
-        // 80x25 fallback: column 37, row 13.
-        assert!(out.contains("\x1b[13;37HHinterOS") || out.contains("\x1b[13;37H\x1b[1mHinterOS"));
-        // Narrower than the text: cut to the width, column 1.
-        let out = String::from_utf8(render("Loading Samantha…", 7, 3)).unwrap();
+        // 80x25 fallback: block letters at scale 1.
+        assert_eq!(layout(None, 0, 0), layout(None, 80, 25));
+        // Too small for any block letters: the plain line, cut to the width, column 1.
+        let out = String::from_utf8(render(Some("Samantha"), 7, 3)).unwrap();
         assert!(out.contains("\x1b[2;1H\x1b[1mLoading\x1b[0m"), "{out:?}");
+        // A name the block font cannot draw: the plain line, centred.
+        let l = layout(Some("山田"), 120, 33);
+        assert_eq!(
+            (l.scale, l.lines.clone()),
+            (0, vec!["Loading 山田…".to_owned()])
+        );
+        assert_eq!((l.top, l.cols[0]), (17, 55));
+        // A long name: still big, on two lines, or plain if even that does not fit.
+        let l = layout(Some(&"W".repeat(32)), 120, 33);
+        assert_eq!(l.scale, 0);
+        let l = layout(Some("Christopher"), 120, 33);
+        assert_eq!((l.scale, l.lines.len()), (1, 2));
     }
 
     #[test]
@@ -275,6 +444,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let state = d.path().join("state.json");
         let profiles = d.path().join("profiles.json");
+        let public = d.path().join("profiles-public.json");
         std::fs::write(
             &state,
             r#"{"schemaVersion":2,"requirements":[],"services":[],"settings":{},
@@ -288,18 +458,31 @@ mod tests {
                "appearance":{"text_scale":1.0,"high_contrast":false,"reduce_motion":false}}}}"#,
         )
         .unwrap();
-        assert_eq!(
-            name_for(&state, &profiles, "hinteros").as_deref(),
-            Some("James")
-        );
-        assert_eq!(
-            name_for(&state, &profiles, "hinteros-guest").as_deref(),
-            Some("Guest")
-        );
-        assert_eq!(name_for(&state, &profiles, "hinteros-greeter"), None);
+        let name = |user: &str, now: i64| name_for(&state, &profiles, &public, user, now);
+        assert_eq!(name("hinteros", 0).as_deref(), Some("James"));
+        assert_eq!(name("hinteros-guest", 0).as_deref(), Some("Guest"));
+        // The greeter without a switch it enters by itself: "HinterOS".
+        assert_eq!(name("hinteros-greeter", 0), None);
         // A spare: no profile yet.
-        assert_eq!(name_for(&state, &profiles, "hinteros-p2"), None);
-        assert_eq!(name_for(&state, &profiles, "root"), None);
+        assert_eq!(name("hinteros-p2", 0), None);
+        assert_eq!(name("root", 0), None);
+        // A fast switch to James or the guest: the greeter already says "Loading James…".
+        let view = |target: &str, fast: bool| {
+            format!(
+                r#"{{"version":1,"profiles":[{{"id":"p1","user":"hinteros","name":"James","color":"teal",
+                   "locked":true,"admin":true,"locked_until":null}}],
+                   "guest":{{"enabled":true,"user":"hinteros-guest"}},"first_boot":false,"spare":null,
+                   "last_used":"p1","next":{{"target":"{target}","fast":{fast},"expires":100}},
+                   "appearance":{{"text_scale":1.0,"high_contrast":false,"reduce_motion":false}}}}"#
+            )
+        };
+        std::fs::write(&public, view("p1", true)).unwrap();
+        assert_eq!(name("hinteros-greeter", 50).as_deref(), Some("James"));
+        assert_eq!(name("hinteros-greeter", 150), None, "expired");
+        std::fs::write(&public, view("guest", true)).unwrap();
+        assert_eq!(name("hinteros-greeter", 50).as_deref(), Some("Guest"));
+        std::fs::write(&public, view("p1", false)).unwrap();
+        assert_eq!(name("hinteros-greeter", 50), None, "the picker will ask");
     }
 
     #[test]

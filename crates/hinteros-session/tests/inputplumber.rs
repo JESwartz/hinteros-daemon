@@ -50,12 +50,49 @@ impl Calls {
     }
 }
 
+/// How a fake composite device misbehaves, the way InputPlumber 0.81 does on real hardware.
+#[derive(Clone)]
+struct Faults {
+    /// `SendEvent` never answers: InputPlumber 0.81 panics in that D-Bus method
+    /// (`blocking_send` inside the tokio runtime, composite_device/client.rs:463), so its task
+    /// dies without a reply.
+    hang_send_event: Arc<AtomicBool>,
+    /// Loading the pointer profile works, and then the device stops answering anything
+    /// (methods, `InterceptMode`, `ProfileName`) until `wedged` is cleared. Its D-Bus target
+    /// still sends events.
+    wedge_after_load: Arc<AtomicBool>,
+    wedged: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Default for Faults {
+    fn default() -> Self {
+        Self {
+            hang_send_event: Arc::default(),
+            wedge_after_load: Arc::default(),
+            wedged: Arc::new(tokio::sync::watch::channel(false).0),
+        }
+    }
+}
+
+impl Faults {
+    /// Never returns while the device is wedged.
+    async fn gate(&self) {
+        let mut rx = self.wedged.subscribe();
+        let _ = rx.wait_for(|w| !*w).await;
+    }
+
+    fn unwedge(&self) {
+        self.wedged.send_replace(false);
+    }
+}
+
 struct Composite {
     mode: Arc<AtomicU32>,
     name: String,
     targets: Vec<String>,
-    profile: String,
+    profile: Arc<std::sync::Mutex<String>>,
     calls: Calls,
+    faults: Faults,
 }
 
 impl Composite {
@@ -64,8 +101,9 @@ impl Composite {
             mode,
             name: name.into(),
             targets,
-            profile: "Default".into(),
+            profile: Arc::new(std::sync::Mutex::new("Default".into())),
             calls,
+            faults: Faults::default(),
         }
     }
 }
@@ -73,11 +111,14 @@ impl Composite {
 #[zbus::interface(name = "org.shadowblip.Input.CompositeDevice")]
 impl Composite {
     #[zbus(property)]
-    fn intercept_mode(&self) -> u32 {
+    async fn intercept_mode(&self) -> u32 {
+        self.faults.gate().await;
         self.mode.load(Ordering::SeqCst)
     }
+    // `&self` (interior mutability): a wedged call must not hold the interface's write lock.
     #[zbus(property)]
-    fn set_intercept_mode(&mut self, value: u32) {
+    async fn set_intercept_mode(&self, value: u32) {
+        self.faults.gate().await;
         self.mode.store(value, Ordering::SeqCst);
     }
     #[zbus(property)]
@@ -95,16 +136,19 @@ impl Composite {
         vec!["/dev/input/event99".into()]
     }
     #[zbus(property)]
-    fn profile_name(&self) -> String {
-        self.profile.clone()
+    async fn profile_name(&self) -> String {
+        self.faults.gate().await;
+        self.profile.lock().unwrap().clone()
     }
-    fn get_profile_yaml(&self) -> String {
+    async fn get_profile_yaml(&self) -> String {
+        self.faults.gate().await;
         format!(
             "version: 1\nkind: DeviceProfile\nname: {}\nmapping: []\n",
-            self.profile
+            self.profile.lock().unwrap()
         )
     }
-    fn load_profile_from_yaml(&mut self, yaml: String) {
+    async fn load_profile_from_yaml(&self, yaml: String) {
+        self.faults.gate().await;
         let name = yaml
             .lines()
             .find_map(|l| l.strip_prefix("name: "))
@@ -115,15 +159,23 @@ impl Composite {
             .lock()
             .unwrap()
             .push(format!("profile {name}"));
-        self.profile = name;
+        if name == "HinterOS pointer" && self.faults.wedge_after_load.swap(false, Ordering::SeqCst)
+        {
+            self.faults.wedged.send_replace(true);
+        }
+        *self.profile.lock().unwrap() = name;
     }
-    fn send_event(&self, event: String, value: zbus::zvariant::Value<'_>) {
+    async fn send_event(&self, event: String, value: zbus::zvariant::Value<'_>) {
+        self.faults.gate().await;
         let pressed = matches!(value, zbus::zvariant::Value::Bool(true));
         self.calls
             .log
             .lock()
             .unwrap()
             .push(format!("{event} {pressed}"));
+        if self.faults.hang_send_event.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -144,6 +196,10 @@ struct Fake {
     modes: Vec<Arc<AtomicU32>>,
     /// Device 0's.
     calls: Calls,
+    /// Device 0's.
+    faults: Faults,
+    /// Device 0's loaded profile.
+    profile: Arc<std::sync::Mutex<String>>,
 }
 
 impl Fake {
@@ -155,16 +211,15 @@ impl Fake {
         let manage_all = Arc::new(AtomicBool::new(false));
         let calls = Calls::default();
         let mode = Arc::new(AtomicU32::new(0));
+        let composite = Composite::new(mode.clone(), name, vec![TARGET.into()], calls.clone());
+        let (faults, profile) = (composite.faults.clone(), composite.profile.clone());
         let conn = zbus::connection::Builder::address(address)
             .unwrap()
             .serve_at(ROOT, zbus::fdo::ObjectManager)
             .unwrap()
             .serve_at(MANAGER, Manager(manage_all.clone()))
             .unwrap()
-            .serve_at(
-                device(0),
-                Composite::new(mode.clone(), name, vec![TARGET.into()], calls.clone()),
-            )
+            .serve_at(device(0), composite)
             .unwrap()
             .serve_at(TARGET, DBusDevice)
             .unwrap()
@@ -178,7 +233,25 @@ impl Fake {
             manage_all,
             modes: vec![mode],
             calls,
+            faults,
+            profile,
         }
+    }
+
+    fn profile(&self) -> String {
+        self.profile.lock().unwrap().clone()
+    }
+
+    /// Unplug pad `n` (its object vanishes; InputPlumber 0.81 also drops a composite device
+    /// whose sources went away).
+    async fn remove_device(&self, n: usize) {
+        assert!(
+            self.conn
+                .object_server()
+                .remove::<Composite, _>(device(n as u32))
+                .await
+                .unwrap()
+        );
     }
 
     fn mode(&self, n: usize) -> u32 {
@@ -333,9 +406,11 @@ async fn inputplumber_modes_nav_and_home() {
 }
 
 /// The key events written by `--fake-keyboard`, as `(code, down)`.
+/// Only complete lines: the daemon may be writing one right now.
 fn key_log(path: &std::path::Path) -> Vec<(u16, bool)> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
+    let log = std::fs::read_to_string(path).unwrap_or_default();
+    let complete = log.rfind('\n').map_or("", |end| &log[..end]);
+    complete
         .lines()
         .map(|l| {
             let (what, code) = l.split_once(' ').unwrap();
@@ -741,4 +816,143 @@ input = "keyboard"
     })
     .await;
     assert_eq!(key_log(&keys_file), taps(&[108]), "never an Enter");
+}
+
+/// Writes a `session.toml` with a keyboard-profile "YouTube" (a `sleep`) and fast InputPlumber
+/// timeouts, and returns the daemon's arguments (with `--fake-keyboard <dir>/keys.log`).
+fn youtube_daemon(dir: &std::path::Path, bus: &str) -> Vec<std::ffi::OsString> {
+    let config = dir.join("session.toml");
+    std::fs::write(
+        &config,
+        r#"
+[inputplumber]
+call_timeout_ms = 300
+watchdog_ms = 300
+[keys]
+key_delay_ms = 0
+[[apps]]
+id = "youtube"
+name = "YouTube"
+kind = "web"
+command = ["sleep", "60"]
+input = "keyboard"
+"#,
+    )
+    .unwrap();
+    vec![
+        "--config".into(),
+        config.into(),
+        "--inputplumber".into(),
+        "--inputplumber-bus".into(),
+        bus.into(),
+        "--fake-keyboard".into(),
+        dir.join("keys.log").into(),
+    ]
+}
+
+/// The watchdog test. InputPlumber 0.81 never answers `SendEvent` (it panics in it): the click
+/// used to wait for that answer in the loop that also forwards events, so after the first RT
+/// in Firefox nothing reached the daemon again (Guide no longer went Home, the pad stayed in
+/// GAMEPAD_ONLY with the pointer profile). Now hung calls time out off the input path, and a
+/// pad that stops answering (here: right after the profile load) is re-checked and put right
+/// once it answers again; a pad that vanishes and comes back gets the current routing.
+#[tokio::test(flavor = "multi_thread")]
+async fn hung_inputplumber_never_breaks_guide() {
+    let Some(bus) = Bus::start() else { return };
+    let address = bus.address.clone();
+    let d = Daemon::start_with(|dir| youtube_daemon(dir, &address));
+    let keys_file = d.dir.path().join("keys.log");
+    let mut fake = Fake::start(&bus.address).await;
+    fake.faults.hang_send_event.store(true, Ordering::SeqCst);
+    ready(&fake, 0, 2).await;
+    let mut c = d.client().await;
+    call(
+        &mut c,
+        "subscribe",
+        json!({ "events": ["home_pressed", "focus_changed"] }),
+    )
+    .await
+    .unwrap();
+
+    // 1. SendEvent hangs (the real-hardware regression).
+    call(&mut c, "apps.launch", json!({ "id": "youtube" }))
+        .await
+        .unwrap();
+    ready(&fake, 0, 3).await;
+    assert_eq!(fake.profile(), "HinterOS pointer");
+    fake.press("ui_quick2", 1.0).await;
+    fake.press("ui_r2", 1.0).await;
+    fake.press("ui_r2", 0.0).await;
+    eventually("the click that never returns", async || {
+        let calls = fake.calls.log.lock().unwrap().clone();
+        calls
+            .contains(&"Mouse:Button:Left true".to_string())
+            .then_some(())
+    })
+    .await;
+    // Input still flows: arrow keys and A (Enter) reach the app...
+    fake.press("ui_down", 1.0).await;
+    fake.press("ui_down", 0.0).await;
+    fake.press("ui_accept", 1.0).await;
+    fake.press("ui_accept", 0.0).await;
+    eventually("down and enter", async || {
+        (key_log(&keys_file) == taps(&[108, 28])).then_some(())
+    })
+    .await;
+    // ...and Guide goes Home: ALL, the stock profile back.
+    fake.press("ui_guide", 1.0).await;
+    fake.press("ui_guide", 0.0).await;
+    assert_eq!(event_named(&mut c, "home_pressed").await, json!({}));
+    ready(&fake, 0, 2).await;
+    eventually("the profile restored", async || {
+        (fake.profile() == "Default").then_some(())
+    })
+    .await;
+    assert!(d.log().contains("mouse button"), "{}", d.log());
+
+    // 2. The pad stops answering right after the pointer profile is loaded.
+    fake.faults.hang_send_event.store(false, Ordering::SeqCst);
+    fake.faults.wedge_after_load.store(true, Ordering::SeqCst);
+    call(&mut c, "apps.launch", json!({ "id": "youtube" }))
+        .await
+        .unwrap();
+    eventually("the pad wedged", async || {
+        (*fake.faults.wedged.borrow() && fake.profile() == "HinterOS pointer").then_some(())
+    })
+    .await;
+    eventually("the daemon noticing", async || {
+        d.log().contains("stopped answering").then_some(())
+    })
+    .await;
+    // Guide still goes Home while it is wedged.
+    fake.press("ui_guide", 1.0).await;
+    fake.press("ui_guide", 0.0).await;
+    assert_eq!(event_named(&mut c, "home_pressed").await, json!({}));
+    // It answers again: the watchdog puts back what the launcher needs.
+    fake.faults.unwedge();
+    eventually("ALL and the stock profile after recovery", async || {
+        (fake.mode(0) == 2 && fake.profile() == "Default").then_some(())
+    })
+    .await;
+    assert!(d.log().contains("answers again"), "{}", d.log());
+    fake.press("ui_left", 1.0).await;
+    fake.press("ui_left", 0.0).await;
+
+    // 3. Somebody else changes the mode behind our back: the watchdog sets ours again.
+    fake.modes[0].store(1, Ordering::SeqCst);
+    ready(&fake, 0, 2).await;
+
+    // 4. The pad's object vanishes and a new one appears while the app has focus: it gets the
+    //    app's routing.
+    call(&mut c, "apps.launch", json!({ "id": "youtube" }))
+        .await
+        .unwrap();
+    ready(&fake, 0, 3).await;
+    fake.remove_device(0).await;
+    fake.add_device().await;
+    ready(&fake, 1, 3).await;
+    fake.press("ui_guide", 1.0).await;
+    fake.press("ui_guide", 0.0).await;
+    assert_eq!(event_named(&mut c, "home_pressed").await, json!({}));
+    ready(&fake, 1, 2).await;
 }

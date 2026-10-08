@@ -165,14 +165,18 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         let (tx, rx) = mpsc::unbounded_channel();
         forward(rx, shell_tx.clone(), Msg::Input);
         Box::new(inputplumber::spawn(
-            config.inputplumber.bus.clone(),
-            InterceptMode::All,
-            config.input.xbox_label_swap,
-            inputplumber::PointerProfile {
-                yaml: pointer::profile_yaml(
-                    config.pointer.speed_pps,
-                    config.pointer.activity_deadzone,
-                ),
+            inputplumber::Settings {
+                bus: config.inputplumber.bus.clone(),
+                initial: InterceptMode::All,
+                swap: config.input.xbox_label_swap,
+                profile: inputplumber::PointerProfile {
+                    yaml: pointer::profile_yaml(
+                        config.pointer.speed_pps,
+                        config.pointer.activity_deadzone,
+                    ),
+                },
+                call_timeout: config.inputplumber.call_timeout(),
+                watchdog: config.inputplumber.watchdog(),
             },
             tx,
         ))

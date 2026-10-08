@@ -27,6 +27,8 @@
 //! [inputplumber]
 //! enable = true
 //! bus = "unix:path=/run/dbus/system_bus_socket"  # default: the system bus
+//! call_timeout_ms = 2000       # an InputPlumber call taking longer has failed (input never waits)
+//! watchdog_ms = 5000           # check every pad's mode and profile this often; re-apply if wrong
 //!
 //! [input]
 //! repeat_delay_ms = 400
@@ -501,6 +503,10 @@ impl Default for GamescopeConfig {
 pub struct InputPlumberConfig {
     pub enable: bool,
     pub bus: Option<String>,
+    /// The longest an InputPlumber method call or property access may take.
+    pub call_timeout_ms: u64,
+    /// How often each pad's mode and profile are checked (and re-applied if wrong).
+    pub watchdog_ms: u64,
 }
 
 impl Default for InputPlumberConfig {
@@ -508,7 +514,19 @@ impl Default for InputPlumberConfig {
         Self {
             enable: true,
             bus: None,
+            call_timeout_ms: 2000,
+            watchdog_ms: 5000,
         }
+    }
+}
+
+impl InputPlumberConfig {
+    pub fn call_timeout(&self) -> Duration {
+        Duration::from_millis(self.call_timeout_ms.max(1))
+    }
+
+    pub fn watchdog(&self) -> Duration {
+        Duration::from_millis(self.watchdog_ms.max(100))
     }
 }
 
@@ -1089,6 +1107,8 @@ mod tests {
             display = ":1"
             [inputplumber]
             enable = false
+            call_timeout_ms = 500
+            watchdog_ms = 0
             [input]
             repeat_delay_ms = 300
             [[apps]]
@@ -1110,6 +1130,12 @@ mod tests {
         assert_eq!(c.close.timeout_ms, 100);
         assert_eq!(c.gamescope_display(), ":1");
         assert!(!c.gamescope.enable && !c.inputplumber.enable);
+        assert_eq!(c.inputplumber.call_timeout(), Duration::from_millis(500));
+        assert_eq!(
+            c.inputplumber.watchdog(),
+            Duration::from_millis(100),
+            "floor"
+        );
         assert_eq!(c.input.repeat_delay(), Duration::from_millis(300));
         assert_eq!(c.input.repeat_interval(), Duration::from_millis(100));
         assert_eq!(c.apps[1].steam_app_id, Some(620));
@@ -1251,6 +1277,8 @@ mod tests {
         assert_eq!(c.osk.field_summon, FieldSummon::Accept);
         assert!(c.pointer.enable);
         assert_eq!(c.pointer.idle_ms, None);
+        assert_eq!(c.inputplumber.call_timeout(), Duration::from_secs(2));
+        assert_eq!(c.inputplumber.watchdog(), Duration::from_secs(5));
         assert_eq!(
             c.pointer.hide_command,
             ["gamescopectl", "paint_cursor_plane", "0"]

@@ -48,7 +48,21 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   never makes a D-Bus call per event. The pad behind a D-Bus target (for the Xbox label swap
   and clicks) comes from the composite device's `DbusDevices` property, read once per target
   and cached (also when nobody claims it); proxies never cache properties (a caching proxy
-  fetches all of them on first use). InputPlumber turns the left stick into directions at one
+  fetches all of them on first use).
+  Robustness: a hung InputPlumber call never holds up input. Every call times out
+  (`[inputplumber] call_timeout_ms`, 2000), and the signal loop makes none of them (only the
+  cached `DbusDevices` lookups): each pad has a worker task that loads profiles, sets modes and
+  sends mouse buttons. Each worker is a watchdog: every `watchdog_ms` (5000) it reads the pad's
+  `InterceptMode` and `ProfileName` and re-applies the routing when they differ from what the
+  daemon asked for, after a failed or timed-out call, and when a pad that stopped answering
+  answers again (logged: "stopped answering", "answers again"). A pad whose object vanishes is
+  dropped, a new one gets the current routing, and InputPlumber restarting sets everything up
+  again. This is what broke on real hardware: InputPlumber 0.81 panics inside
+  `CompositeDevice.SendEvent` (`blocking_send` within its tokio runtime,
+  `composite_device/client.rs:463`) and never replies; the daemon used to await that reply in
+  the signal loop, so after the first click in Firefox no event (Guide included) got through.
+  HinterOS patches InputPlumber (system repo); the daemon no longer depends on it.
+  InputPlumber turns the left stick into directions at one
   threshold (0.60) without hysteresis, so a direction re-pressed within
   `[input] direction_debounce_ms` (40) of its release is chatter and dropped with its release.
 - **Apps** (`apps.rs`, `shell.rs`): `apps.launch` runs a command, or hands a
@@ -118,16 +132,17 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   while every gamepad event comes to the daemon over D-Bus (ALL would swallow them). The D-Bus
   target never reports the right stick, so the profile also maps any deflection beyond
   `activity_deadzone` to the unused `QuickAccess2` button, which arrives as `ui_quick2`: "the
-  pointer is in use". While it is (moved within `idle_ms`, and no D-pad/left stick since),
-  **A is a left click** (press and release follow the button, so dragging works) instead of
-  Enter; **RT is a left click** whenever the app has a pointer (unless the keymap maps
-  `trigger_right`). Clicks go through `CompositeDevice.SendEvent("Mouse:Button:Left", b)`. The
-  D-pad or left stick hides the pointer at once (`hide_command`, default
-  `gamescopectl paint_cursor_plane 0`; `show_command` on the next stick movement and when the
-  app loses focus); gamescope also hides it on its own after `--hide-cursor-delay`. Leaving the
-  app puts the profile that was loaded before back (or InputPlumber's default) before the next
-  mode, so games never get a mouse on the right stick. Profiles and modes are re-applied when
-  InputPlumber restarts or a pad appears.
+  right stick moved". **RT is the left click** whenever the app has a pointer (unless the
+  keymap maps `trigger_right`; press and release follow the trigger, so dragging works).
+  **A never clicks**: it is Enter, or shows the on-screen keyboard on a focused text field.
+  Clicks go through `CompositeDevice.SendEvent("Mouse:Button:Left", b)` (in the pad's worker,
+  see "Robustness" above). The pointer **never hides on inactivity**: the D-pad or left stick
+  (arrow keys) hides it at once (`hide_command`, default `gamescopectl paint_cursor_plane 0`),
+  the right stick or RT shows it again (`show_command`, also when the app loses focus); the
+  system runs gamescope with a `--hide-cursor-delay` too long to matter. Leaving the app puts
+  the profile that was loaded before back (or InputPlumber's default) before the next mode, so
+  games never get a mouse on the right stick. Profiles and modes are re-applied when
+  InputPlumber restarts, a pad appears, or the watchdog finds them changed.
 - **Typing** (`keys/`): `keys.type {text}` types per character through a uinput virtual US
   keyboard (Shift for capitals and symbols; the spike's `kbd.py` table) or, for characters a US
   keyboard does not have, gamescope's private `gamescope_input_method` protocol (one character
@@ -250,6 +265,8 @@ unmap_gl_dummies = true     # unmap invisible full-screen override-redirect wind
 [inputplumber]
 enable = true
 bus = "unix:path=/run/dbus/system_bus_socket"  # default: the system bus
+call_timeout_ms = 2000         # an InputPlumber call taking longer has failed (input never waits for one)
+watchdog_ms = 5000             # check each pad's InterceptMode/ProfileName this often; re-apply if wrong
 
 [input]
 repeat_delay_ms = 400
@@ -280,7 +297,7 @@ auto_show = false              # show it as soon as a text field gets focus in a
 enable = true
 speed_pps = 1000               # pixels per second at full deflection (InputPlumber profile)
 activity_deadzone = 0.25       # right stick movement that counts as using the pointer
-idle_ms = 3000                 # A clicks while the stick moved this recently; match gamescope --hide-cursor-delay
+# idle_ms                      # ignored, still accepted (older configs): A never clicks, no idle hiding
 hide_command = ["gamescopectl", "paint_cursor_plane", "0"]  # D-pad/left stick used: hide at once
 show_command = ["gamescopectl", "paint_cursor_plane", "1"]  # right stick moved again
 
@@ -665,18 +682,19 @@ The chain (design: `hinteros-docs/spikes/05-on-screen-keyboard.md`, "auto-summon
 
 System (`hinteros-system`):
 
-- gamescope: `--hide-cursor-delay 3000` (milliseconds; gamescope's default is 10000), equal to
-  `[pointer] idle_ms`, so the pointer fades when A stops clicking. Keyboard input never resets
-  gamescope's timer and moving the pointer off-screen does not hide it (it is clamped), hence
-  the daemon's `hide_command`.
+- gamescope: a `--hide-cursor-delay` long enough never to matter (gamescope's default is
+  10000 ms; 0 would hide it at once): the pointer must not fade on inactivity, only the daemon
+  hides it (D-pad/left stick). Moving the pointer off-screen does not hide it (it is clamped).
+  For a TV, a larger pointer: `--cursor-scale-height` (gamescope scales its 36 px base by
+  output height / this, so 540 gives 72 px at 1080p) and `XCURSOR_SIZE` for the apps.
 - `gamescopectl` on the daemon's `PATH` (it is part of the gamescope package) for
-  `paint_cursor_plane`; or other `[pointer] hide_command`/`show_command`, or empty lists to rely
-  on the timeout alone.
-- InputPlumber: nothing new to install. The daemon loads its profile over D-Bus
-  (`LoadProfileFromYaml`, `GetProfileYaml`, `SendEvent`, `ProfileName`: covered by the stock
-  polkit rule for the `inputplumber` group); the pads' default targets already include
-  InputPlumber's virtual mouse (`xb360` + `mouse` + `keyboard`). A system-wide `devices.d`
-  override must keep the `mouse` target.
+  `paint_cursor_plane`; or other `[pointer] hide_command`/`show_command`.
+- InputPlumber: the daemon loads its profile over D-Bus (`LoadProfileFromYaml`,
+  `GetProfileYaml`, `SendEvent`, `ProfileName`, `InterceptMode`: covered by the stock polkit
+  rule for the `inputplumber` group); the pads' default targets already include InputPlumber's
+  virtual mouse (`xb360` + `mouse` + `keyboard`). A system-wide `devices.d` override must keep
+  the `mouse` target. InputPlumber 0.81 needs a patch for `SendEvent` (it panics and never
+  answers, so RT clicks do nothing; the daemon times the call out and carries on).
 - Firefox: the extension and native-messaging host as above (the text-field keyboard needs
   them); plain Firefox entries get `address_bar = true`, kiosk entries do not.
 

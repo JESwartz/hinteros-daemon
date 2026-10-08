@@ -111,6 +111,7 @@ pub async fn handle(
                                 &mut subscriptions,
                                 &shell,
                                 &services.runtime,
+                                &services.relay,
                             ).await;
                             write_message(&mut w, &jsonrpc::response(&id, outcome)).await?;
                         }
@@ -160,9 +161,13 @@ async fn dispatch(
     subscriptions: &mut BTreeSet<EventName>,
     shell: &mpsc::UnboundedSender<Msg>,
     runtime: &Runtime,
+    relay: &Relay,
 ) -> Result<Value, ErrorObject> {
     if Runtime::handles(method) {
-        return runtime.call(method, params).await;
+        let kept = params.clone();
+        let result = runtime.call(method, params).await?;
+        persist_shared(method, kept.as_ref(), relay);
+        return Ok(result);
     }
     match method {
         Ping::NAME => call::<Ping>(params, server::ping),
@@ -194,6 +199,57 @@ async fn dispatch(
             result.await.map_err(|_| unavailable())?
         }
         _ => Err(method_not_found(method)),
+    }
+}
+
+/// The display mode and the audio output are the box's, not the profile's (profiles.md): a kept
+/// mode and a chosen output are saved with the system service, which publishes them for every
+/// profile's session. Best effort, in the background.
+fn persist_shared(method: &str, params: Option<&Value>, relay: &Relay) {
+    let calls: Vec<(&'static str, Value)> = match method {
+        "display.keep" => {
+            let Some(file) = std::env::var_os("GAMESCOPE_MODE_SAVE_FILE") else {
+                return;
+            };
+            let text = std::fs::read_to_string(file).unwrap_or_default();
+            text.lines()
+                .take(2)
+                .filter_map(|l| {
+                    let (display, mode) = l.split_once(':')?;
+                    let mode = mode.split_whitespace().next()?;
+                    let (wh, hz) = mode.split_once('@')?;
+                    let (w, h) = wh.split_once('x')?;
+                    Some((
+                        hinteros_api::system::DisplaySaveMode::NAME,
+                        serde_json::json!({
+                            "display": display,
+                            "width": w.parse::<u32>().ok()?,
+                            "height": h.parse::<u32>().ok()?,
+                            "refresh": hz.parse::<f64>().ok()?.round() as u32,
+                        }),
+                    ))
+                })
+                .collect()
+        }
+        "audio.set_output" => params
+            .and_then(|p| p.get("id"))
+            .and_then(Value::as_str)
+            .map(|node| {
+                vec![(
+                    hinteros_api::system::AudioSaveOutput::NAME,
+                    serde_json::json!({ "node": node }),
+                )]
+            })
+            .unwrap_or_default(),
+        _ => return,
+    };
+    for (m, p) in calls {
+        let relay = relay.clone();
+        tokio::spawn(async move {
+            if let Err(e) = relay.call(m, Some(p)).await {
+                debug!("not saved for every profile ({m}): {}", e.message);
+            }
+        });
     }
 }
 

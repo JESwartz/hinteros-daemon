@@ -756,7 +756,8 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.3
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.4 (0.4: profiles and per-profile apps, see
+"Profiles and per-profile apps" below)
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
 trust.
@@ -1156,6 +1157,102 @@ order), and:
 - On-screen keyboard (0.10): mask the typed-text preview only while `osk_visibility.password` is
   true; show it plainly otherwise (also when no field was reported).
 
+## Profiles and per-profile apps (system API 0.4, session API 0.12; M7)
+
+Design: `hinteros-docs/design/profiles.md` and `apps.md`. Cross-repo contracts (paths, file
+formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
+
+### Apps per profile (system service)
+
+- **Schema 2** (`state.rs`): `state.json` without `apps`, with `requirements` (box features:
+  `graphics32`, `steam-devices`), `services`, `profiles: [{id, user}]` (1–8; `p1` = `hinteros`,
+  else `hinteros-p<N>`) and `settings.guest.enable`. Schema 1 keeps working unchanged
+  (`apps.install/remove` rebuild the box as in 0.3).
+- **Envs** (`appreg.rs`, `runner/apps.rs`): a profile's apps are the root-owned Nix profile
+  `/nix/var/nix/profiles/hinteros/apps/<user>` (`--apps-profiles-dir`), the starter set's
+  `…/starter`, the guest's a single link `/run/hinteros/apps/hinteros-guest` (an indirect GC root
+  via `nix-store --add-root --indirect --realise`). The service publishes
+  `/run/hinteros/apps/<user>` → the profile's Nix profile at start and after every job. An env
+  is built by `config.hinteros.appEnv.build ids` of `/etc/hinteros` (`nix eval --impure --json
+  --expr` over a list of id lists, all of a job's envs in one evaluation, then `nix build
+  <drv>^out … --keep-going`) and set with `nix-env -p <profile> --set` (skipped when it is
+  already the current env). Its manifest `share/hinteros/apps.json` (`hinteros_api::manifest`)
+  is the truth; `/var/lib/hinteros/apps/registry.json` caches owners' ids and box features and is
+  rewritten from the manifests at start.
+- **Methods**: `apps.list` (`{revision, generation, ids, needs_terms, box}`), `apps.generations`,
+  `apps.install`/`apps.remove` on the caller's own profile (the profile's `revision` from
+  `apps.list`; `delete_data` only in the caller's home), `apps.rollback {generation}`,
+  `apps.accept_terms {id, version}` (records `{version, accepted_at, by, profile}`). A spare
+  account, root or the admin account gets `permission_denied {reason: profile}`; schema 1 gets
+  `unavailable {service: profiles, reason: schema1}` for the new methods.
+- **Box features**: an install or rollback whose apps need a feature that is off runs the `box`
+  stage first (the apply flow with `requirements` = every needed feature plus the new ones).
+  Every other job that rebuilds the system writes `requirements` = what the owners' envs need,
+  so unneeded features go only then. Update, channel, base and rollback jobs end with an `apps`
+  stage that rebuilds every owner's env against the new system (tombstoned ids dropped); an env
+  that fails keeps its generation and is listed in `apps_not_updated`, the job still succeeds.
+- **v1 → v2** (`service/apps.rs` `maybe_migrate`, `runner/apps.rs` `migrate`): on a schema-1 box
+  whose running generation's `release.json` says `"stateSchema": 2`, the service creates
+  `profiles.json` (p1: the admin profile, name from schema 1 or "Profile 1", unlocked, no PIN)
+  and queues `migrate_apps` once per boot (`/run/hinteros/migrate-attempted`): one env for the
+  box-wide apps (tombstones dropped) for every account and the starter set, `starter.json`, the
+  terms of migrated apps copied to the accounts, then `state.json` schema 2 through the apply
+  flow. Idempotent (envs already set are not set again) and resumable; a failure leaves schema 1.
+
+### Profiles, PINs, greeter (system service)
+
+- `profiles.json` (`profiles.rs`), PINs (`pins.rs`: argon2id PHC strings in `pins/<id>`, backoff
+  in `pins/<id>.state` under `flock`, 3 free failures then 1 s doubling to 5 min, the lock counted
+  from when the hash check ended), the public view `/run/hinteros/profiles-public.json` (0644) and
+  the switch hint with one-time tokens `/run/hinteros/switch.json` (0600) (`public.rs`),
+  `runtime.json` → `/run/hinteros/gamescope-modes` and `audio-output`, `usage.json`
+  (`hinteros-system usage`, started over D-Bus when `profiles.list` sees data older than an hour).
+- Methods (`service/profiles.rs`): `profiles.list/create/setup_admin/rename/set_appearance/
+  set_pin/set_locked/reset_pin/remove/switch/unlock`, `guest.set`, `starter_set.get/set`,
+  `display.save_mode`, `audio.save_output`; event `profiles_changed`. Which PIN each checks:
+  own changes `self`, anything on another profile or the box `admin`; a profile without a PIN yet
+  passes. `pin_required` (3016) names it, with `retry_after_ms` during the lock; the audit has
+  `HINTEROS_PIN_CHECK`/`_PIN_OUTCOME` and every PIN field is `***` in `HINTEROS_PARAMS`.
+  `profiles.create`/`remove`/`guest.set`/`starter_set.set` are jobs (`profiles_create`,
+  `profiles_remove`, `guest_set`, `starter_set`); a create writes metadata, PIN hash and the
+  starter env only after the account's switch; a removal ends the account's processes, switches
+  without it, then deletes the home with `datadel`'s no-symlink walk, the PIN, the metadata and the
+  app links. Profiles (and the guest) without an env get the starter env while the box is idle.
+- `greeter.sock` (`--greeter-socket`, group `--greeter-group`, 0660): `hello`, `ping`,
+  `subscribe`, `settings.get`, `jobs.get`, `profiles.create` (a create from it grants the new
+  account a token).
+- `hinteros-system pin unlocked|verify|end-others` (`pam.rs`): the PAM helper (`PAM_USER`; the
+  PIN on stdin; prints only `hinteros:wrong` / `hinteros:locked:<s>`).
+
+### Session daemon
+
+- `session.toml` `[apps] profile = "/run/hinteros/apps/%u"` (instead of `[[apps]]`): apps, Steam's
+  path and icons from the env; the whole link chain is watched. `apps.list` entries get
+  `needs_terms`; `apps.launch` refuses them (`terms_required`); Steam's autostart waits for its
+  terms. `store.list` uses the profile's ids and hides services.
+- `profile.current`, `session.switch_profile` (+ `switch_wait`, `switch_force_close`,
+  `switch_cancel`; events `switch_progress {stage: closing_apps|closing_steam|ending|cancelled}`,
+  `switch_blocked {app, waited_s}`; `[switch] wait_s = 10`, `steam_wait_s = 15`; nothing is
+  killed without `switch_force_close`), `session.end_guest`, the sleep lock (logind delay
+  inhibitor; `lock_state`, `session.lock_state`, `session.unlock`), `profiles_changed {profiles}`.
+  `display.keep` and `audio.set_output` also save the mode/output for every profile.
+- `hinteros-session greet [--config FILE] -- <picker…>` and `hinteros-session --greeter`
+  (`greeter.list/login/pin/cancel/create`, `greeter_prompt`, `greeter_result`; `[greeter] public,
+  socket, session_command`).
+
+Verified here against fakes (`crates/hinteros-system/tests/{apps,profiles}.rs`,
+`crates/hinteros-session/tests/{reload,profiles,greeter}.rs`). Needs the system repo's VM tests
+(profiles-*, apps-*, first-boot, guest, starter-set): real greetd/PAM, logind's sleep signal,
+`end-others` killing a real profile's processes, real `appEnv.build`.
+
+### What the launcher must do (session API 0.12)
+
+Hello with `0.12`. Everything of 0.10 stays. New: the methods and events above (schema:
+`schema/session-api.json`), all `system.*` profile, apps and starter-set relays; the first-boot
+wizard when `profile.current.setup_required`; "Set your PIN" when `!pin_set`; the terms dialog
+for `apps.list` entries with `needs_terms`; on schema-2 boxes pass `system.apps.list`'s
+`revision` to `system.apps.install/remove`.
+
 ## Development
 
 ```sh
@@ -1169,7 +1266,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.10","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.12","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

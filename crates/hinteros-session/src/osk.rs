@@ -97,7 +97,7 @@ pub async fn supervise(
     while !children.is_closing() {
         let mut cmd = tokio::process::Command::new(&program);
         cmd.args(&argv[1..])
-            .envs(env.iter().map(|(k, v)| (k, v)))
+            .envs(crate::config::live_env(&env))
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
         match cmd.spawn() {

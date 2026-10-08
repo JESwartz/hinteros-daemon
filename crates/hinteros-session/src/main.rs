@@ -154,7 +154,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
 
     let osk_pid = Arc::new(AtomicU32::new(0));
     let focus: Box<dyn FocusControl> = if config.gamescope.enable {
-        let dpy = config.gamescope_display();
+        let dpy = config.gamescope_display_setting();
         info!(display = %dpy, launcher_app_id = config.launcher.app_id, "gamescope focus control on");
         let (tx, rx) = mpsc::unbounded_channel();
         forward(rx, shell_tx.clone(), Msg::Gamescope);
@@ -511,7 +511,7 @@ async fn supervise_launcher(
     while !children.is_closing() {
         let mut cmd = tokio::process::Command::new(&exe);
         cmd.args(reaper::args(app_id, &argv))
-            .envs(env.iter().map(|(k, v)| (k, v)))
+            .envs(hinteros_session::config::live_env(&env))
             .stdin(std::process::Stdio::null());
         match cmd.spawn() {
             Ok(mut child) => {
@@ -545,7 +545,7 @@ fn start_steam(path: &Path, env: &[(String, String)]) {
     };
     let mut cmd = tokio::process::Command::new(program);
     cmd.arg("-silent")
-        .envs(env.iter().map(|(k, v)| (k, v)))
+        .envs(hinteros_session::config::live_env(env))
         .stdin(std::process::Stdio::null());
     match cmd.spawn() {
         Ok(mut child) => {

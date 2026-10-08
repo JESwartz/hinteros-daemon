@@ -239,6 +239,7 @@ pub async fn modes(ctx: &Ctx) -> Result<DisplayModes, ErrorObject> {
 /// Set `GAMESCOPE_DISPLAY_MODE_NUDGE` on gamescope's Xwayland root: it picks the display's
 /// mode again.
 fn nudge(display: &str) -> Result<(), ErrorObject> {
+    let display = &crate::config::resolve_display(display);
     let (conn, screen) = x11rb::connect(Some(display)).map_err(|e| {
         unavailable(
             SVC,

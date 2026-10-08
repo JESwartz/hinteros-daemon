@@ -79,6 +79,7 @@ struct Conn {
 impl Conn {
     /// Connect to `display` and check that it really is gamescope (it sets `GAMESCOPE_PID`).
     fn open(display: &str) -> Result<Self> {
+        let display = &crate::config::resolve_display(display);
         let (conn, screen) =
             x11rb::connect(Some(display)).with_context(|| format!("connecting to X {display}"))?;
         let root = conn.setup().roots[screen].root;

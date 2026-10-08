@@ -134,7 +134,10 @@ impl Runtime {
             audio: config.audio.clone(),
             display: config.display.clone(),
             bluetooth: config.bluetooth.clone(),
-            x_display: config.gamescope.enable.then(|| config.gamescope_display()),
+            x_display: config
+                .gamescope
+                .enable
+                .then(|| config.gamescope_display_setting()),
             wayland_display: config.wayland_display(),
             events,
             conn: OnceCell::new(),

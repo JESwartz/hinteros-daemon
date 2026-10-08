@@ -115,7 +115,7 @@ impl Spawner for ProcessSpawner {
                 cmd
             }
         };
-        cmd.envs(self.env.iter().map(|(k, v)| (k, v)))
+        cmd.envs(crate::config::live_env(&self.env))
             .stdin(Stdio::null())
             .kill_on_drop(false);
         let mut child = cmd.spawn()?;

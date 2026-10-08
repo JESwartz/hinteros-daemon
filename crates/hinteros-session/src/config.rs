@@ -1247,8 +1247,14 @@ impl Config {
         Ok(())
     }
 
-    /// The Xwayland display gamescope serves X11 clients on.
+    /// The Xwayland display gamescope serves X11 clients on (`"auto"` resolved now).
     pub fn gamescope_display(&self) -> String {
+        resolve_display(&self.gamescope_display_setting())
+    }
+
+    /// The configured display, possibly `"auto"`; resolve it with [`resolve_display`] at each
+    /// connection (the session's displays exist only once gamescope is up).
+    pub fn gamescope_display_setting(&self) -> String {
         self.gamescope
             .display
             .clone()
@@ -1277,16 +1283,109 @@ impl Config {
         }
         let wayland = self.wayland_display();
         vec![
-            ("DISPLAY".into(), self.gamescope_display()),
+            ("DISPLAY".into(), self.gamescope_display_setting()),
             ("WAYLAND_DISPLAY".into(), wayland.clone()),
             ("GAMESCOPE_WAYLAND_DISPLAY".into(), wayland),
         ]
     }
 }
 
+/// `display = "auto"`: the lowest X display whose server runs as this user, i.e. the first
+/// Xwayland of this session's gamescope. The daemon is a user service, not gamescope's child, so
+/// it can't inherit `DISPLAY`; and gamescope takes the first free numbers, which are not `:0`
+/// while an ended session's or the picker's Xwayland is still there. `:0` until one exists.
+/// Anything else is returned as it is.
+pub fn resolve_display(setting: &str) -> String {
+    if setting != "auto" {
+        return setting.to_owned();
+    }
+    own_display(
+        Path::new("/tmp"),
+        Path::new("/proc"),
+        nix::unistd::geteuid().as_raw(),
+    )
+    .unwrap_or_else(|| ":0".into())
+}
+
+/// `env` (from [`Config::child_env`]) with a `DISPLAY` of `"auto"` resolved now, for a process
+/// about to start.
+pub fn live_env(env: &[(String, String)]) -> Vec<(String, String)> {
+    env.iter()
+        .map(|(k, v)| {
+            let v = if k == "DISPLAY" {
+                resolve_display(v)
+            } else {
+                v.clone()
+            };
+            (k.clone(), v)
+        })
+        .collect()
+}
+
+/// The lowest `n` with a `<tmp>/.X<n>-lock` owned by `uid` whose pid is alive and a
+/// `<tmp>/.X11-unix/X<n>` socket.
+pub fn own_display(tmp: &Path, proc_dir: &Path, uid: u32) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let mut best: Option<u32> = None;
+    for e in std::fs::read_dir(tmp).ok()?.flatten() {
+        let name = e.file_name();
+        let Some(n) = name
+            .to_str()
+            .and_then(|s| s.strip_prefix(".X"))
+            .and_then(|s| s.strip_suffix("-lock"))
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(meta) = std::fs::symlink_metadata(e.path()) else {
+            continue;
+        };
+        if !meta.file_type().is_file() || meta.uid() != uid {
+            continue;
+        }
+        let Some(pid) = std::fs::read_to_string(e.path())
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if !proc_dir.join(pid.to_string()).exists()
+            || !tmp.join(".X11-unix").join(format!("X{n}")).exists()
+        {
+            continue;
+        }
+        best = Some(best.map_or(n, |b| b.min(n)));
+    }
+    best.map(|n| format!(":{n}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_display_is_this_users_lowest_live_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proc_dir = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let me = nix::unistd::geteuid().as_raw();
+        std::fs::create_dir_all(t.join(".X11-unix")).unwrap();
+        for pid in ["50", "51", "60"] {
+            std::fs::create_dir_all(proc_dir.path().join(pid)).unwrap();
+        }
+        assert_eq!(own_display(t, proc_dir.path(), me), None);
+        // :0 and :1 dead (an ended session), :4 and :5 ours and alive, :3 has no socket.
+        for (n, pid) in [(0, "40"), (1, "41"), (3, "60"), (4, "50"), (5, "51")] {
+            std::fs::write(t.join(format!(".X{n}-lock")), format!("      {pid}\n")).unwrap();
+            if n != 3 {
+                std::fs::write(t.join(format!(".X11-unix/X{n}")), "").unwrap();
+            }
+        }
+        assert_eq!(own_display(t, proc_dir.path(), me).as_deref(), Some(":4"));
+        // Another user's live displays don't count.
+        assert_eq!(own_display(t, proc_dir.path(), me + 1), None);
+        assert_eq!(resolve_display(":7"), ":7");
+    }
 
     #[test]
     fn apps_key_is_a_list_or_a_profile() {

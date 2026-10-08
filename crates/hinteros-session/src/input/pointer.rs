@@ -189,7 +189,7 @@ impl CursorControl for CommandCursor {
         let Some(program) = argv.first() else { return };
         let mut cmd = tokio::process::Command::new(program);
         cmd.args(&argv[1..])
-            .envs(self.env.iter().map(|(k, v)| (k, v)))
+            .envs(crate::config::live_env(&self.env))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .kill_on_drop(true);

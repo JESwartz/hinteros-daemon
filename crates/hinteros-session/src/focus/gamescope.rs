@@ -24,7 +24,9 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 use super::dummies;
-use super::{FocusControl, GamescopeEvent, GamescopeState, baselayer_for};
+use super::{
+    FocusControl, GamescopeEvent, GamescopeState, baselayer_for, baselayer_for_steam_game,
+};
 use crate::osk;
 use crate::procs;
 use crate::steam::windows::{self, HelperType, WindowInfo};
@@ -174,7 +176,10 @@ impl GamescopeFocus {
     }
 
     fn set_focus(&mut self, target: Option<u32>) -> Result<()> {
-        let apps = baselayer_for(target, self.launcher_app_id);
+        self.set_baselayer(baselayer_for(target, self.launcher_app_id))
+    }
+
+    fn set_baselayer(&mut self, apps: Vec<u32>) -> Result<()> {
         debug!(?apps, "GAMESCOPECTRL_BASELAYER_APPID");
         self.with(|c| c.set_baselayer(&apps))
     }
@@ -195,6 +200,10 @@ impl FocusControl for GamescopeFocus {
 
     fn focus_app(&mut self, app_id: u32) -> Result<()> {
         self.set_focus(Some(app_id))
+    }
+
+    fn focus_steam_game(&mut self, app_id: u32) -> Result<()> {
+        self.set_baselayer(baselayer_for_steam_game(app_id, self.launcher_app_id))
     }
 
     fn set_osk_visible(&mut self, visible: bool) -> Result<()> {

@@ -69,6 +69,18 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   prefixes for future versions). inotify on the library directories (debounced, plus a periodic
   rescan) sends `games_changed` when the result changes. Launch a game with
   `apps.launch {url: "steam://rungameid/<appid>"}`; it is named from its manifest.
+- **Steam games** (`shell.rs`): focus for a game is `[game, 769, launcher]`: the game as soon
+  as it has a window, Steam's own windows until then (the "Processing Vulkan shaders"
+  pre-launch window, launch errors, cloud sync), the launcher otherwise; InputPlumber is in
+  PASS, so the pad works in those windows too (skip shader processing). A game counts as
+  running while Steam's reaper for it (`reaper SteamLaunch AppId=<id>`) is alive: missing
+  windows (a loading gap) or the launch timeout do not end it then, nor does the launch timeout
+  while Steam shows windows of its own before the game's first. `apps.launch` of a game whose
+  reaper is alive focuses it instead of asking Steam again (which would only say "Game already
+  running"), and games running when the daemon starts are tracked again. A Steam window that
+  appears over the launcher within 10 s of our own Steam request (launch, close, Big Picture)
+  is Steam's answer to it: Steam gets focus and the pad until its windows close (or Home);
+  later pop-ups keep the `steam_attention` banner.
 - **Steam itself** (`shell.rs`, `steam/windows.rs`): `apps.list` starts with the built-in
   `steam` entry while Steam is installed: `steam.path` (a path, or a name looked up in `PATH`)
   must be an executable file. Without one the entry is left out, `apps.launch {id: "steam"}`

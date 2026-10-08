@@ -172,7 +172,7 @@ async fn focus_follows_launches_home_and_closed_windows() {
         next_event(&mut c).await,
         ("focus_changed".into(), json!({ "app": "steam-570" }))
     );
-    gs.baselayer_becomes(&[570, LAUNCHER]).await;
+    gs.baselayer_becomes(&[570, 769, LAUNCHER]).await;
 
     // gamescope maps the game's window and focuses it.
     gs.set("GAMESCOPE_FOCUSABLE_APPS", &[570]);
@@ -193,7 +193,7 @@ async fn focus_follows_launches_home_and_closed_windows() {
         .await
         .unwrap();
     assert_eq!(next_event(&mut c).await.0, "focus_changed");
-    gs.baselayer_becomes(&[570, LAUNCHER]).await;
+    gs.baselayer_becomes(&[570, 769, LAUNCHER]).await;
     gs.set("GAMESCOPE_FOCUSED_APP", &[570]);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     gs.set("GAMESCOPE_FOCUSABLE_APPS", &[]);
@@ -691,16 +691,16 @@ async fn focus_is_applied_again_after_gamescope_restarts() {
     )
     .await
     .unwrap();
-    gs.baselayer_becomes(&[570, LAUNCHER]).await;
+    gs.baselayer_becomes(&[570, 769, LAUNCHER]).await;
 
     // greetd restarts gamescope and its Xwayland: the daemon's connections are dead.
     gs.restart();
     assert!(gs.get("GAMESCOPECTRL_BASELAYER_APPID").is_empty());
-    gs.baselayer_becomes(&[570, LAUNCHER]).await;
+    gs.baselayer_becomes(&[570, 769, LAUNCHER]).await;
 
     // And once more, to be sure it keeps working.
     gs.restart();
-    gs.baselayer_becomes(&[570, LAUNCHER]).await;
+    gs.baselayer_becomes(&[570, 769, LAUNCHER]).await;
 }
 
 impl FakeGamescope {
@@ -788,5 +788,214 @@ async fn gl_dummies_are_left_alone_when_turned_off() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     for (name, window) in w {
         assert!(gs.is_mapped(window), "{name}");
+    }
+}
+
+/// A daemon on `gs` whose Steam is `steam`.
+fn start_daemon_with_steam(gs: &FakeGamescope, steam: &std::path::Path, extra: &str) -> Daemon {
+    let display = gs.display.clone();
+    let steam = steam.to_path_buf();
+    let extra = extra.to_string();
+    Daemon::start_with(|dir| {
+        let config = dir.join("session.toml");
+        std::fs::write(
+            &config,
+            format!("[gamescope]\nfocus_loss_debounce_ms = 200\n{extra}"),
+        )
+        .unwrap();
+        vec![
+            "--config".into(),
+            config.into(),
+            "--gamescope".into(),
+            "--gamescope-display".into(),
+            display.into(),
+            "--steam-path".into(),
+            steam.into(),
+        ]
+    })
+}
+
+/// Steam's pre-launch window (shader pre-caching) while a game starts: shown, the launch is
+/// not given up; launching the running game again only focuses it, also from a daemon that
+/// started after the game.
+#[tokio::test]
+async fn steam_game_launch_survives_shader_precaching_and_is_not_launched_twice() {
+    let Some(gs) = FakeGamescope::start() else {
+        return;
+    };
+    // Unique per run: a game left over from an aborted run must not count.
+    let game_id = 1_000_000 + std::process::id() % 1_000_000;
+    let steam_dir = tempfile::tempdir().unwrap();
+    let dir = steam_dir.path();
+    let _cleanup = KillGame(dir.join("game.pid"));
+    // A fake Steam: logs every launch request and starts the game (without a window) under a
+    // Steam-style reaper, like `steam -silent steam://rungameid/<id>`.
+    let steam = dir.join("steam");
+    script(
+        &steam,
+        &format!(
+            "echo \"$*\" >> {dir}/requests\n\
+             case \"$2\" in steam://rungameid/*) id=${{2#steam://rungameid/}}\n\
+             {reaper} reaper SteamLaunch AppId=$id -- sh -c \"echo \\$\\$ > {dir}/game.pid; exec sleep 60\" >/dev/null 2>&1 & ;; esac",
+            reaper = env!("CARGO_BIN_EXE_hinteros-session"),
+            dir = dir.display(),
+        ),
+    );
+    let requests = || {
+        std::fs::read_to_string(dir.join("requests"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    let d = start_daemon_with_steam(&gs, &steam, "[steam]\nlaunch_timeout_s = 1\n");
+    gs.baselayer_becomes(&[LAUNCHER]).await;
+    let mut c = d.client().await;
+    call(
+        &mut c,
+        "subscribe",
+        json!({ "events": ["app_exited", "focus_changed", "steam_attention"] }),
+    )
+    .await
+    .unwrap();
+    call(
+        &mut c,
+        "apps.launch",
+        json!({ "url": format!("steam://rungameid/{game_id}") }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        next_event(&mut c).await,
+        (
+            "focus_changed".into(),
+            json!({ "app": format!("steam-{game_id}") })
+        )
+    );
+    // The game first, Steam's own windows while it has none, then the launcher.
+    gs.baselayer_becomes(&[game_id, 769, LAUNCHER]).await;
+    let game_pid: u32 = eventually("the game to start", async || {
+        std::fs::read_to_string(dir.join("game.pid"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    })
+    .await;
+    // Steam's shader pre-caching window; gamescope shows it (app 769).
+    let shaders = gs.window(&TestWindow {
+        class: Some("steam"),
+        title: "Processing Vulkan shaders",
+        ..Default::default()
+    });
+    eventually("the window tagged as Steam's", async || {
+        (gs.get_on(shaders, "STEAM_GAME") == [769]).then_some(())
+    })
+    .await;
+    gs.set("GAMESCOPE_FOCUSABLE_APPS", &[769]);
+    gs.set("GAMESCOPE_FOCUSED_APP", &[769]);
+    // Well past the launch timeout (1 s): still launching, still focused.
+    let quiet = tokio::time::timeout(Duration::from_secs(3), next_event(&mut c)).await;
+    assert!(quiet.is_err(), "unexpected {quiet:?}");
+    gs.destroy(shaders);
+    gs.set("GAMESCOPE_FOCUSABLE_APPS", &[]);
+    gs.set("GAMESCOPE_FOCUSED_APP", &[LAUNCHER]);
+    // No window, but its reaper is alive: still running.
+    let quiet = tokio::time::timeout(Duration::from_secs(2), next_event(&mut c)).await;
+    assert!(quiet.is_err(), "unexpected {quiet:?}");
+
+    // Play again: focused, not requested from Steam again.
+    let r = call(
+        &mut c,
+        "apps.launch",
+        json!({ "url": format!("steam://rungameid/{game_id}") }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r["app"]["id"], format!("steam-{game_id}"));
+    assert_eq!(requests(), 1);
+
+    // The daemon restarts while the game runs: it finds the game and does not launch it again.
+    drop(c);
+    drop(d);
+    let d = start_daemon_with_steam(&gs, &steam, "");
+    let mut c = d.client().await;
+    // (Games of other tests running at the same time may be adopted too.)
+    eventually("the game to be adopted", async || {
+        let r = call(&mut c, "apps.running", json!({})).await.ok()?;
+        let id = format!("steam-{game_id}");
+        r["apps"]
+            .as_array()?
+            .iter()
+            .any(|a| a["id"] == id)
+            .then_some(())
+    })
+    .await;
+    call(
+        &mut c,
+        "apps.launch",
+        json!({ "url": format!("steam://rungameid/{game_id}") }),
+    )
+    .await
+    .unwrap();
+    gs.baselayer_becomes(&[game_id, 769, LAUNCHER]).await;
+    assert_eq!(requests(), 1, "never 'Game already running'");
+    assert!(alive(game_pid));
+}
+
+/// A Steam window that answers our own request while the launcher has focus (here: an error
+/// after a launch the user left with Home) gets focus and the pad.
+#[tokio::test]
+async fn steams_answer_over_the_launcher_gets_focus() {
+    let Some(gs) = FakeGamescope::start() else {
+        return;
+    };
+    let steam_dir = tempfile::tempdir().unwrap();
+    let steam = steam_dir.path().join("steam");
+    script(&steam, "exit 0");
+    let d = start_daemon_with_steam(&gs, &steam, "");
+    gs.baselayer_becomes(&[LAUNCHER]).await;
+    let mut c = d.client().await;
+    call(&mut c, "subscribe", json!({ "events": ["focus_changed"] }))
+        .await
+        .unwrap();
+    call(
+        &mut c,
+        "apps.launch",
+        json!({ "url": "steam://rungameid/620" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        next_event(&mut c).await,
+        ("focus_changed".into(), json!({ "app": "steam-620" }))
+    );
+    call(&mut c, "apps.focus", json!({ "id": null }))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_event(&mut c).await,
+        ("focus_changed".into(), json!({ "app": null }))
+    );
+    let error = gs.window(&TestWindow {
+        class: Some("steamwebhelper"),
+        title: "Steam - Error",
+        ..Default::default()
+    });
+    assert_eq!(
+        next_event(&mut c).await,
+        ("focus_changed".into(), json!({ "app": "steam" }))
+    );
+    gs.baselayer_becomes(&[769, LAUNCHER]).await;
+    gs.destroy(error);
+}
+
+/// Ends the fake game (and so its reaper) whose pid is in the file, also when a test fails.
+struct KillGame(std::path::PathBuf);
+
+impl Drop for KillGame {
+    fn drop(&mut self) {
+        if let Ok(pid) = std::fs::read_to_string(&self.0) {
+            let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+        }
     }
 }

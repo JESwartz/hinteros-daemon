@@ -49,6 +49,12 @@ pub trait FocusControl: Send {
     fn focus_launcher(&mut self) -> anyhow::Result<()>;
     /// Show the windows of `app_id` as soon as it has one; the launcher until then.
     fn focus_app(&mut self, app_id: u32) -> anyhow::Result<()>;
+    /// Show a Steam game's windows as soon as it has one, Steam's own windows (app 769: shader
+    /// pre-caching, launch errors) until then, else the launcher
+    /// ([`baselayer_for_steam_game`]).
+    fn focus_steam_game(&mut self, app_id: u32) -> anyhow::Result<()> {
+        self.focus_app(app_id)
+    }
     /// Show or hide the on-screen keyboard's overlay window (see [`crate::osk`]).
     fn set_osk_visible(&mut self, visible: bool) -> anyhow::Result<()>;
 }
@@ -60,6 +66,17 @@ pub fn baselayer_for(target: Option<u32>, launcher_app_id: u32) -> Vec<u32> {
         Some(id) if id != launcher_app_id => vec![id, launcher_app_id],
         _ => vec![launcher_app_id],
     }
+}
+
+/// The `GAMESCOPECTRL_BASELAYER_APPID` list for a Steam game: the game, Steam's own windows
+/// while the game has none (Steam's "Processing Vulkan shaders" pre-launch window, launch
+/// errors, cloud sync), then the launcher.
+pub fn baselayer_for_steam_game(app_id: u32, launcher_app_id: u32) -> Vec<u32> {
+    vec![
+        app_id,
+        hinteros_api::session::STEAM_CLIENT_GAMESCOPE_APP_ID,
+        launcher_app_id,
+    ]
 }
 
 /// Focus control when gamescope integration is off (dev desktops): does nothing.
@@ -92,5 +109,6 @@ mod tests {
         assert_eq!(baselayer_for(None, 9), vec![9]);
         assert_eq!(baselayer_for(Some(570), 9), vec![570, 9]);
         assert_eq!(baselayer_for(Some(9), 9), vec![9]);
+        assert_eq!(baselayer_for_steam_game(570, 9), vec![570, 769, 9]);
     }
 }

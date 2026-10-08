@@ -23,6 +23,11 @@ pub trait ProcessControl: Send {
     /// Steam's reaper processes for a game: named `reaper`, with `SteamLaunch` and
     /// `AppId=<app_id>` before `--` on the command line.
     fn steam_reapers(&mut self, app_id: u32) -> Vec<u32>;
+    /// The app ids of the Steam games running now: those with a live Steam reaper
+    /// (`reaper SteamLaunch AppId=<id> -- ...`).
+    fn steam_games(&mut self) -> Vec<u32> {
+        Vec::new()
+    }
     /// Whether the Steam client (a process named `steam`) is running.
     fn steam_running(&mut self) -> bool;
 }
@@ -181,6 +186,18 @@ impl ProcessControl for Procs {
             })
             .map(|p| p.pid)
             .collect()
+    }
+
+    fn steam_games(&mut self) -> Vec<u32> {
+        let mut ids: Vec<u32> = list()
+            .into_iter()
+            .filter(|p| p.comm == "reaper")
+            .filter_map(|p| reaper_app_id(&fs::read(format!("/proc/{}/cmdline", p.pid)).ok()?))
+            .filter(|&id| id != 0 && id != hinteros_api::session::STEAM_CLIENT_GAMESCOPE_APP_ID)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
     fn steam_running(&mut self) -> bool {

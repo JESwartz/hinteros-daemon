@@ -160,8 +160,6 @@ pub struct ShellConfig {
     pub osk_field_accept: bool,
     /// The right stick moves a pointer in keyboard-profile apps (InputPlumber profile).
     pub pointer_enabled: bool,
-    /// How long after the right stick last moved A still clicks.
-    pub pointer_idle: Duration,
     /// Stick chatter filter for directions (0: off).
     pub direction_debounce: Duration,
     /// The button that, pressed while Guide is held, shows/hides the on-screen keyboard.
@@ -189,7 +187,6 @@ impl From<&Config> for ShellConfig {
             osk_auto_show: c.osk.auto_show,
             osk_field_accept: c.osk.field_summon == FieldSummon::Accept,
             pointer_enabled: c.pointer.enable,
-            pointer_idle: c.pointer.idle(),
             direction_debounce: c.input.direction_debounce(),
             osk_summon: c.osk.summon_button().ok().flatten(),
             icons: IconStore::default(),
@@ -325,7 +322,7 @@ impl Shell {
     ) -> Self {
         let repeat = Repeat::new(cfg.repeat_delay, cfg.repeat_interval);
         let debounce = Debounce::new(cfg.direction_debounce);
-        let pointer = PointerState::new(cfg.pointer_idle);
+        let pointer = PointerState::new();
         Self {
             text_fields: BTreeMap::new(),
             debounce,
@@ -1442,7 +1439,7 @@ impl Shell {
             Intent::Home => return self.guide(pressed, now),
             Intent::Pointer => {
                 if pressed && self.pointer_app() {
-                    let change = self.pointer.motion(now);
+                    let change = self.pointer.motion();
                     self.cursor_change(change);
                 }
                 return;
@@ -1494,7 +1491,7 @@ impl Shell {
             }
             return;
         }
-        if route == Route::Keys && pressed && self.keys_button(action, &input.source, now) {
+        if route == Route::Keys && pressed && self.keys_button(action, &input.source) {
             if !self.clicking.contains_key(&action) {
                 self.swallow.insert(action);
             }
@@ -1530,14 +1527,14 @@ impl Shell {
         }
     }
 
-    /// A button pressed in a keyboard-profile app that means more than its key: a click with
+    /// A button pressed in a keyboard-profile app that means more than its key: a click (RT) with
     /// the pointer, the on-screen keyboard for a text field, the address bar. Returns whether
     /// it was handled (its release is then dropped, or ends the click).
-    fn keys_button(&mut self, action: NavAction, source: &str, now: Instant) -> bool {
+    fn keys_button(&mut self, action: NavAction, source: &str) -> bool {
         let pointer = self.pointer_app();
         if pointer && action.is_direction() {
             // D-pad or left stick: the pointer is done.
-            let change = self.pointer.navigated(now);
+            let change = self.pointer.navigated();
             self.cursor_change(change);
             return false;
         }
@@ -1547,16 +1544,12 @@ impl Shell {
         let mapped = |a: NavAction| app.keymap.as_ref().is_some_and(|m| m.contains_key(&a));
         let (rt_mapped, view_mapped) = (mapped(NavAction::TriggerRight), mapped(NavAction::View));
         let address_bar = app.address_bar;
-        // A while the pointer is in use, RT whenever there is a pointer (unless mapped).
-        let click = pointer
-            && match action {
-                NavAction::Accept => self.pointer.active(now),
-                NavAction::TriggerRight => !rt_mapped,
-                _ => false,
-            };
+        // RT is the left click whenever there is a pointer (unless mapped); A never clicks (it
+        // is Enter, or the on-screen keyboard on a text field).
+        let click = pointer && action == NavAction::TriggerRight && !rt_mapped;
         if click {
             debug!(?action, "click");
-            let change = self.pointer.motion(now);
+            let change = self.pointer.motion();
             self.cursor_change(change);
             self.input.mouse_button(source, MouseButton::Left, true);
             self.clicking.insert(action, source.to_string());
@@ -2156,7 +2149,6 @@ mod tests {
                 osk_auto_show: false,
                 osk_field_accept: true,
                 pointer_enabled: true,
-                pointer_idle: MS(3000),
                 direction_debounce: MS(40),
                 osk_summon: None,
                 icons: IconStore::default(),
@@ -3196,6 +3188,8 @@ mod tests {
         assert_eq!(
             t.log.take(),
             [
+                // The D-pad hides the pointer (until the right stick moves).
+                Call::Cursor(false),
                 keys(&["down"]),
                 keys(&["down"]),
                 keys(&["enter"]),
@@ -3928,19 +3922,31 @@ mod tests {
         let mut t = T::new();
         t.launch(json!({"id": "youtube"}));
         t.log.take();
-        // A without the pointer in use: Enter.
+        // A: Enter.
         t.input("ui_accept", 1.0);
         t.input("ui_accept", 0.0);
         assert_eq!(t.log.take(), [keys(&["enter"])]);
 
-        // The right stick moves (activity events): A clicks, press and release.
+        // The right stick moves (activity events): A is still Enter, never a click.
         t.input("ui_quick2", 1.0);
         t.input("ui_quick2", 0.0);
         t.advance(MS(500));
         t.input("ui_accept", 1.0);
         t.advance(MS(80));
         t.input("ui_accept", 0.0);
+        assert_eq!(t.log.take(), [keys(&["enter"])]);
+
+        // RT is the left click; held, it drags (press ... release, with the stick moving).
+        t.input("ui_r2", 1.0);
+        t.input("ui_quick2", 1.0);
+        t.advance(MS(400));
+        t.input("ui_quick2", 0.0);
+        t.input("ui_r2", 0.0);
         assert_eq!(t.log.take(), [Call::Click(true), Call::Click(false)]);
+
+        // The pointer never hides on inactivity.
+        t.advance(Duration::from_secs(60));
+        assert!(t.log.take().is_empty());
 
         // The D-pad: the pointer hides at once and the arrow key goes to the app.
         t.input("ui_down", 1.0);
@@ -3949,18 +3955,27 @@ mod tests {
         t.input("ui_accept", 1.0);
         t.input("ui_accept", 0.0);
         assert_eq!(t.log.take(), [keys(&["enter"])]);
-        // Moving the stick again shows it.
+        // The left stick (also arrow keys) keeps it hidden: no second hide.
+        t.input("ui_left", 1.0);
+        t.input("ui_left", 0.0);
+        assert_eq!(t.log.take(), [keys(&["left"])]);
+        // Moving the right stick shows it again, and it stays.
         t.input("ui_quick2", 1.0);
         assert_eq!(t.log.take(), [Call::Cursor(true)]);
-        // Idle for longer than pointer_idle: A is Enter again.
-        t.advance(MS(3100));
-        t.input("ui_accept", 1.0);
-        t.input("ui_accept", 0.0);
-        assert_eq!(t.log.take(), [keys(&["enter"])]);
-        // RT clicks whenever there is a pointer.
+        t.advance(Duration::from_secs(60));
+        t.input("ui_quick2", 0.0);
+        t.input("ui_quick2", 1.0);
+        assert!(t.log.take().is_empty());
+        // RT on a hidden pointer shows it and clicks.
+        t.input("ui_down", 1.0);
+        t.input("ui_down", 0.0);
+        t.log.take();
         t.input("ui_r2", 1.0);
         t.input("ui_r2", 0.0);
-        assert_eq!(t.log.take(), [Call::Click(true), Call::Click(false)]);
+        assert_eq!(
+            t.log.take(),
+            [Call::Cursor(true), Call::Click(true), Call::Click(false)]
+        );
 
         // Hidden by the D-pad, then Home: the pointer is given back, the profile unloaded.
         t.input("ui_quick2", 1.0);

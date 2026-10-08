@@ -57,7 +57,7 @@
 //! enable = true
 //! speed_pps = 1000             # pixels per second at full deflection
 //! activity_deadzone = 0.25     # stick movement that counts as using the pointer
-//! idle_ms = 3000               # A clicks while the stick moved this recently (= gamescope --hide-cursor-delay)
+//! # idle_ms                    # ignored (older configs): A never clicks, the pointer never idles out
 //! hide_command = ["gamescopectl", "paint_cursor_plane", "0"]  # on D-pad/left stick use
 //! show_command = ["gamescopectl", "paint_cursor_plane", "1"]
 //!
@@ -671,9 +671,9 @@ pub struct PointerConfig {
     pub speed_pps: u32,
     /// How far the right stick must move to count as "using the pointer" (0..1).
     pub activity_deadzone: f64,
-    /// The pointer stays "in use" (A clicks) this long after the right stick last moved. Keep
-    /// it equal to gamescope's `--hide-cursor-delay`.
-    pub idle_ms: u64,
+    /// Ignored, accepted so that older configs still load. (A clicked while the right stick
+    /// had moved this recently; now A never clicks and the pointer never hides on inactivity.)
+    pub idle_ms: Option<u64>,
     /// Run to hide the pointer at once when the D-pad or left stick is used.
     pub hide_command: Vec<String>,
     /// Run to show it again.
@@ -686,7 +686,7 @@ impl Default for PointerConfig {
             enable: true,
             speed_pps: 1000,
             activity_deadzone: 0.25,
-            idle_ms: 3000,
+            idle_ms: None,
             hide_command: ["gamescopectl", "paint_cursor_plane", "0"]
                 .map(String::from)
                 .into(),
@@ -694,12 +694,6 @@ impl Default for PointerConfig {
                 .map(String::from)
                 .into(),
         }
-    }
-}
-
-impl PointerConfig {
-    pub fn idle(&self) -> Duration {
-        Duration::from_millis(self.idle_ms)
     }
 }
 
@@ -1256,7 +1250,7 @@ mod tests {
         assert!(!c.osk.auto_show);
         assert_eq!(c.osk.field_summon, FieldSummon::Accept);
         assert!(c.pointer.enable);
-        assert_eq!(c.pointer.idle(), Duration::from_secs(3));
+        assert_eq!(c.pointer.idle_ms, None);
         assert_eq!(
             c.pointer.hide_command,
             ["gamescopectl", "paint_cursor_plane", "0"]
@@ -1286,7 +1280,7 @@ mod tests {
         .unwrap();
         assert_eq!(c.osk.field_summon, FieldSummon::None);
         assert!(c.osk.auto_show && !c.pointer.enable);
-        assert_eq!((c.pointer.speed_pps, c.pointer.idle_ms), (1500, 1500));
+        assert_eq!((c.pointer.speed_pps, c.pointer.idle_ms), (1500, Some(1500)));
         assert!(c.pointer.hide_command.is_empty());
         assert!(c.apps[0].address_bar);
         assert_eq!(c.apps[0].pointer, Some(false));

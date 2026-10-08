@@ -14,12 +14,17 @@
 //! default profile (`load_device_profile` clears the map), so [`profile_yaml`] repeats the
 //! mappings of InputPlumber's `default.yaml`.
 //!
-//! Clicks: `CompositeDevice.SendEvent("Mouse:Button:Left", <bool>)`, which in `GAMEPAD_ONLY`
-//! also goes to the mouse target. Hiding the pointer: gamescope hides it on its own after
-//! `--hide-cursor-delay` without motion, and immediately with its `paint_cursor_plane` convar
-//! (`gamescopectl paint_cursor_plane 0`); see [`CursorControl`].
+//! Clicks (RT only; A is Enter, or the on-screen keyboard on a text field):
+//! `CompositeDevice.SendEvent("Mouse:Button:Left", <bool>)`, which in `GAMEPAD_ONLY` also goes
+//! to the mouse target. InputPlumber 0.81 panics in `SendEvent` and never answers (HinterOS
+//! patches it); the call is made off the input path with a timeout (`super::inputplumber`).
+//!
+//! Showing and hiding the pointer ([`PointerState`]): never on inactivity (the system runs
+//! gamescope with a `--hide-cursor-delay` too long to matter); the D-pad or left stick hides it
+//! at once with gamescope's `paint_cursor_plane` convar (`gamescopectl paint_cursor_plane 0`),
+//! the right stick (or RT) shows it again; see [`CursorControl`].
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tracing::{debug, warn};
 
@@ -203,13 +208,10 @@ impl CursorControl for CommandCursor {
     }
 }
 
-/// Whether the right-stick pointer is "in use": it moved within `idle` and no D-pad or left
-/// stick navigation came since. Decides what A does (click or Enter) and when to hide the
-/// pointer.
-#[derive(Debug)]
+/// Whether gamescope's pointer is shown in a pointer app. It is never hidden for inactivity:
+/// the D-pad or left stick (arrow keys) hides it, the right stick shows it again.
+#[derive(Debug, Default)]
 pub struct PointerState {
-    idle: Duration,
-    last_motion: Option<Instant>,
     /// We hid the pointer (and must show it again before anyone else needs it).
     hidden: bool,
 }
@@ -222,40 +224,32 @@ pub enum CursorChange {
 }
 
 impl PointerState {
-    pub fn new(idle: Duration) -> Self {
-        Self {
-            idle,
-            last_motion: None,
-            hidden: false,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn active(&self, now: Instant) -> bool {
-        self.last_motion
-            .is_some_and(|t| now.duration_since(t) <= self.idle)
+    /// The pointer is hidden (by us).
+    pub fn hidden(&self) -> bool {
+        self.hidden
     }
 
-    /// The right stick moved.
-    pub fn motion(&mut self, now: Instant) -> Option<CursorChange> {
-        self.last_motion = Some(now);
+    /// The right stick moved, or RT clicked: the pointer shows.
+    pub fn motion(&mut self) -> Option<CursorChange> {
         std::mem::take(&mut self.hidden).then_some(CursorChange::Show)
     }
 
-    /// D-pad or left stick navigation: the pointer is done.
-    pub fn navigated(&mut self, now: Instant) -> Option<CursorChange> {
-        let was_active = self.active(now);
-        self.last_motion = None;
-        if was_active && !self.hidden {
+    /// D-pad or left stick navigation: the pointer hides until the right stick moves.
+    pub fn navigated(&mut self) -> Option<CursorChange> {
+        if self.hidden {
+            None
+        } else {
             self.hidden = true;
             Some(CursorChange::Hide)
-        } else {
-            None
         }
     }
 
     /// The pointer mode ends (focus moved away): give the pointer back to gamescope's rules.
     pub fn reset(&mut self) -> Option<CursorChange> {
-        self.last_motion = None;
         std::mem::take(&mut self.hidden).then_some(CursorChange::Show)
     }
 }
@@ -278,23 +272,18 @@ mod tests {
 
     #[test]
     fn pointer_state() {
-        let t0 = Instant::now();
-        let ms = Duration::from_millis;
-        let mut p = PointerState::new(ms(3000));
-        assert!(!p.active(t0));
-        // Navigation without a pointer in use: nothing to hide.
-        assert_eq!(p.navigated(t0), None);
-        assert_eq!(p.motion(t0), None);
-        assert!(p.active(t0 + ms(3000)));
-        assert!(!p.active(t0 + ms(3001)));
-        // D-pad while in use: hide once; the next motion shows it again.
-        assert_eq!(p.navigated(t0 + ms(10)), Some(CursorChange::Hide));
-        assert!(!p.active(t0 + ms(10)));
-        assert_eq!(p.navigated(t0 + ms(20)), None);
-        assert_eq!(p.motion(t0 + ms(30)), Some(CursorChange::Show));
-        assert_eq!(p.motion(t0 + ms(40)), None);
+        let mut p = PointerState::new();
+        // Shown until the D-pad or left stick is used, however long nothing happens.
+        assert!(!p.hidden());
+        assert_eq!(p.motion(), None);
+        // D-pad: hide once; the next motion shows it again.
+        assert_eq!(p.navigated(), Some(CursorChange::Hide));
+        assert!(p.hidden());
+        assert_eq!(p.navigated(), None);
+        assert_eq!(p.motion(), Some(CursorChange::Show));
+        assert_eq!(p.motion(), None);
         // Leaving pointer mode while hidden restores it.
-        assert_eq!(p.navigated(t0 + ms(50)), Some(CursorChange::Hide));
+        assert_eq!(p.navigated(), Some(CursorChange::Hide));
         assert_eq!(p.reset(), Some(CursorChange::Show));
         assert_eq!(p.reset(), None);
     }

@@ -710,11 +710,13 @@ input = "keyboard"
     );
     ready(&fake, 0, 3).await;
 
-    // The right stick moved: A is a click on the pointer, not Enter.
+    // The right stick moved: RT is the left click (held: a drag), A still never clicks.
     fake.press("ui_quick2", 1.0).await;
     fake.press("ui_quick2", 0.0).await;
-    fake.press("ui_accept", 1.0).await;
-    fake.press("ui_accept", 0.0).await;
+    fake.press("ui_r2", 1.0).await;
+    fake.press("ui_quick2", 1.0).await;
+    fake.press("ui_quick2", 0.0).await;
+    fake.press("ui_r2", 0.0).await;
     eventually("the click", async || {
         let calls = fake.calls.log.lock().unwrap().clone();
         (calls == ["Mouse:Button:Left true", "Mouse:Button:Left false"]).then_some(())

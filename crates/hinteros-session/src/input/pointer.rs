@@ -14,8 +14,8 @@
 //! default profile (`load_device_profile` clears the map), so [`profile_yaml`] repeats the
 //! mappings of InputPlumber's `default.yaml`.
 //!
-//! Clicks (RT only; A is Enter, or the on-screen keyboard on a text field):
-//! `CompositeDevice.SendEvent("Mouse:Button:Left", <bool>)`, which in `GAMEPAD_ONLY` also goes
+//! Clicks (RT left, LT right; A is Enter, or the on-screen keyboard on a text field):
+//! `CompositeDevice.SendEvent("Mouse:Button:Left" or "Mouse:Button:Right", <bool>)`, which in `GAMEPAD_ONLY` also goes
 //! to the mouse target. InputPlumber 0.81 panics in `SendEvent` and never answers (HinterOS
 //! patches it); the call is made off the input path with a timeout (`super::inputplumber`).
 //!

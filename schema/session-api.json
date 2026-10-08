@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.9",
+  "version": "0.10",
   "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). Responses to system.*, auth.*, store.list and session.restart may arrive out of order relative to other calls on the same connection (match them by id): a relayed call can wait minutes for an admin password. See hinteros-docs/design/api.md for the protocol rules.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -37,16 +37,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.9", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
-          "result": { "api_version": "0.9", "server": { "name": "hinteros-session", "version": "0.1.0" } }
+          "params": { "api_version": "0.10", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
+          "result": { "api_version": "0.10", "server": { "name": "hinteros-session", "version": "0.1.0" } }
         },
         {
           "name": "major mismatch",
           "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 1.0, server 0.9",
-            "data": { "client_api_version": "1.0", "server_api_version": "0.9" }
+            "message": "API version mismatch: client 1.0, server 0.10",
+            "data": { "client_api_version": "1.0", "server_api_version": "0.10" }
           }
         }
       ]
@@ -415,7 +415,8 @@
         "required": ["visible"],
         "additionalProperties": false,
         "properties": {
-          "visible": { "description": "Whether the on-screen keyboard is now visible.", "type": "boolean" }
+          "visible": { "description": "Whether the on-screen keyboard is now visible.", "type": "boolean" },
+          "password": { "description": "(0.10) The keyboard is up for a password field (see osk_visibility). Absent when false.", "type": "boolean" }
         }
       },
       "errors": ["osk_unavailable"],
@@ -438,7 +439,8 @@
         "required": ["visible"],
         "additionalProperties": false,
         "properties": {
-          "visible": { "description": "Whether the on-screen keyboard is now visible.", "type": "boolean" }
+          "visible": { "description": "Whether the on-screen keyboard is now visible.", "type": "boolean" },
+          "password": { "description": "(0.10) The keyboard is up for a password field (see osk_visibility). Absent when false.", "type": "boolean" }
         }
       },
       "errors": [],
@@ -2105,17 +2107,20 @@
     },
     "osk_visibility": {
       "summary": "The on-screen keyboard was shown or hidden (osk.show/osk.hide, the controller chord, A on a focused text field, B while it is visible, Home, or a focus change).",
+      "description": "(0.10) password is true while the keyboard is up for a password field (reported by the Firefox extension or Firefox itself in a keyboard-profile app); the keyboard should mask what it shows of the typed text then, and show it plainly otherwise (also when nothing reported a field, e.g. the keyboard was opened with the controller chord). While visible, the event is sent again (visible true) when another field of the other kind gets focus; a field losing focus changes nothing.",
       "since": "0.4",
       "params": {
         "type": "object",
         "required": ["visible"],
         "additionalProperties": false,
         "properties": {
-          "visible": { "type": "boolean" }
+          "visible": { "type": "boolean" },
+          "password": { "description": "The keyboard is up for a password field. Absent when false.", "type": "boolean" }
         }
       },
       "examples": [
         { "name": "shown", "params": { "visible": true } },
+        { "name": "shown for a password field", "params": { "visible": true, "password": true } },
         { "name": "hidden", "params": { "visible": false } }
       ]
     },

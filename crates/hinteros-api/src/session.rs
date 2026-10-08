@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 9);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 10);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -571,6 +571,10 @@ pub struct OskParams {}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OskState {
     pub visible: bool,
+    /// The keyboard is up for a password field (0.10): the keyboard masks what it shows of
+    /// the typed text. Only sent when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub password: bool,
 }
 
 pub struct OskShow;

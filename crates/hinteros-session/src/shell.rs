@@ -289,6 +289,8 @@ pub struct Shell {
     osk_auto: bool,
     /// The text field lost focus: hide the automatically shown keyboard at this time.
     osk_auto_hide_at: Option<Instant>,
+    /// Whether the keyboard is up for a password field (the last `osk_visibility.password`).
+    osk_password: bool,
     /// Guide is held: since when, and whether it was used for a chord.
     guide: Option<(Instant, bool)>,
     /// Navigation buttons currently held (as far as we can see them).
@@ -310,8 +312,8 @@ pub struct Shell {
     pointer_profile: bool,
     /// Shows and hides gamescope's pointer.
     cursor: Box<dyn CursorControl>,
-    /// Buttons held down as mouse buttons, with the pad they came from.
-    clicking: BTreeMap<NavAction, String>,
+    /// Buttons held down as mouse buttons: the pad they came from and the mouse button.
+    clicking: BTreeMap<NavAction, (String, MouseButton)>,
 }
 
 impl Shell {
@@ -357,6 +359,7 @@ impl Shell {
             osk_visible: false,
             osk_auto: false,
             osk_auto_hide_at: None,
+            osk_password: false,
             guide: None,
             held: BTreeSet::new(),
             swallow: BTreeSet::new(),
@@ -464,6 +467,7 @@ impl Shell {
                 self.show_osk()?;
                 encode_result::<OskShow>(OskState {
                     visible: self.osk_visible,
+                    password: self.osk_password,
                 })
             }
             OskHide::NAME => {
@@ -471,6 +475,7 @@ impl Shell {
                 self.hide_osk();
                 encode_result::<OskHide>(OskState {
                     visible: self.osk_visible,
+                    password: self.osk_password,
                 })
             }
             KeysType::NAME => {
@@ -1209,6 +1214,9 @@ impl Shell {
             debug!(app = %id, ?focus, "text field focus in the background");
             return;
         }
+        if any_field {
+            self.follow_field_kind();
+        }
         if focus.editable() {
             self.osk_auto_hide_at = None;
             if self.cfg.osk_auto_show && !self.osk_visible {
@@ -1250,7 +1258,40 @@ impl Shell {
         if apply_mode {
             self.apply_input();
         }
-        self.emit(EventName::OskVisibility, OskState { visible });
+        self.osk_password = visible && self.password_field();
+        self.emit(
+            EventName::OskVisibility,
+            OskState {
+                visible,
+                password: self.osk_password,
+            },
+        );
+    }
+
+    /// Whether the focused app reports a password field with focus.
+    fn password_field(&self) -> bool {
+        self.focused
+            .as_ref()
+            .and_then(|id| self.text_fields.get(id))
+            .is_some_and(|f| f.values().any(|&f| f == FieldFocus::Password))
+    }
+
+    /// While the keyboard is up, a field of the other kind (text / password) got focus: tell
+    /// the keyboard (`osk_visibility` again, still visible), so it masks or unmasks. Losing
+    /// focus changes nothing (what was typed into a password field stays masked).
+    fn follow_field_kind(&mut self) {
+        let password = self.password_field();
+        if self.osk_visible && password != self.osk_password {
+            debug!(password, "on-screen keyboard: field kind changed");
+            self.osk_password = password;
+            self.emit(
+                EventName::OskVisibility,
+                OskState {
+                    visible: true,
+                    password,
+                },
+            );
+        }
     }
 
     fn keys_type(&mut self, p: KeysTypeParams) -> Result<KeysTypeResult, ErrorObject> {
@@ -1494,8 +1535,8 @@ impl Shell {
             self.raw_names.insert(action, input.event.clone());
         } else {
             self.held.remove(&action);
-            if let Some(source) = self.clicking.remove(&action) {
-                self.input.mouse_button(&source, MouseButton::Left, false);
+            if let Some((source, button)) = self.clicking.remove(&action) {
+                self.input.mouse_button(&source, button, false);
                 return;
             }
             if self.swallow.remove(&action) {
@@ -1548,7 +1589,8 @@ impl Shell {
         }
     }
 
-    /// A button pressed in a keyboard-profile app that means more than its key: a click (RT) with
+    /// A button pressed in a keyboard-profile app that means more than its key: a click (RT left,
+    /// LT right) with
     /// the pointer, the on-screen keyboard for a text field, the address bar. Returns whether
     /// it was handled (its release is then dropped, or ends the click).
     fn keys_button(&mut self, action: NavAction, source: &str) -> bool {
@@ -1563,17 +1605,22 @@ impl Shell {
             return false;
         };
         let mapped = |a: NavAction| app.keymap.as_ref().is_some_and(|m| m.contains_key(&a));
-        let (rt_mapped, view_mapped) = (mapped(NavAction::TriggerRight), mapped(NavAction::View));
+        let view_mapped = mapped(NavAction::View);
         let address_bar = app.address_bar;
-        // RT is the left click whenever there is a pointer (unless mapped); A never clicks (it
-        // is Enter, or the on-screen keyboard on a text field).
-        let click = pointer && action == NavAction::TriggerRight && !rt_mapped;
-        if click {
-            debug!(?action, "click");
+        // RT is the left click and LT the right click whenever there is a pointer (unless the
+        // app maps them); A never clicks (it is Enter, or the on-screen keyboard on a text field).
+        let click = match action {
+            NavAction::TriggerRight => Some(MouseButton::Left),
+            NavAction::TriggerLeft => Some(MouseButton::Right),
+            _ => None,
+        }
+        .filter(|_| pointer && !mapped(action));
+        if let Some(button) = click {
+            debug!(?action, ?button, "click");
             let change = self.pointer.motion();
             self.cursor_change(change);
-            self.input.mouse_button(source, MouseButton::Left, true);
-            self.clicking.insert(action, source.to_string());
+            self.input.mouse_button(source, button, true);
+            self.clicking.insert(action, (source.to_string(), button));
             // Its release ends the click (see `clicking`).
             return true;
         }
@@ -1950,6 +1997,7 @@ mod tests {
         Keys(Vec<KeyOp>),
         Pointer(bool),
         Click(bool),
+        RightClick(bool),
         Cursor(bool),
     }
 
@@ -2013,8 +2061,10 @@ mod tests {
             self.0.push(Call::Pointer(on));
         }
         fn mouse_button(&mut self, _source: &str, button: MouseButton, pressed: bool) {
-            assert_eq!(button, MouseButton::Left);
-            self.0.push(Call::Click(pressed));
+            self.0.push(match button {
+                MouseButton::Left => Call::Click(pressed),
+                MouseButton::Right => Call::RightClick(pressed),
+            });
         }
     }
 
@@ -3476,13 +3526,20 @@ mod tests {
             t.events(),
             [ev(EventName::OskVisibility, json!({"visible": true}))]
         );
-        // Moving to the next field (none, then text): no flicker.
+        // Moving to the next field (none, then a password): no flicker, only the masking.
         t.text_focus(555, FieldFocus::None);
         t.advance(MS(100));
         t.text_focus(555, FieldFocus::Password);
         t.advance(MS(1000));
         assert!(t.shell.osk_visible());
-        assert!(t.log.take().is_empty() && t.events().is_empty());
+        assert!(t.log.take().is_empty());
+        assert_eq!(
+            t.events(),
+            [ev(
+                EventName::OskVisibility,
+                json!({"visible": true, "password": true})
+            )]
+        );
 
         // Leaving the field: hidden after the delay, keyboard profile again.
         t.text_focus(555, FieldFocus::None);
@@ -3855,6 +3912,43 @@ mod tests {
     }
 
     #[test]
+    fn the_keyboard_knows_a_password_field() {
+        let mut t = firefox_with_host(|_| {});
+        let vis = |visible: bool, password: bool| {
+            let mut p = json!({ "visible": visible });
+            if password {
+                p["password"] = json!(true);
+            }
+            ev(EventName::OskVisibility, p)
+        };
+        // Opened by A on a password field: masked.
+        t.text_focus(555, FieldFocus::Password);
+        t.input("ui_accept", 1.0);
+        t.input("ui_accept", 0.0);
+        assert_eq!(t.events(), [vis(true, true)]);
+        assert_eq!(
+            t.call("osk.show", json!({})).unwrap(),
+            json!({ "visible": true, "password": true })
+        );
+        // Losing focus keeps it masked; a text field unmasks; a password field masks again.
+        t.text_focus(555, FieldFocus::None);
+        assert!(t.events().is_empty());
+        t.text_focus(555, FieldFocus::Text);
+        assert_eq!(t.events(), [vis(true, false)]);
+        t.text_focus(555, FieldFocus::Text);
+        assert!(t.events().is_empty());
+        t.text_focus(555, FieldFocus::Password);
+        assert_eq!(t.events(), [vis(true, true)]);
+        t.call("osk.hide", json!({})).unwrap();
+        assert_eq!(t.events(), [vis(false, false)]);
+
+        // Opened with no field reported (the chord, osk.show): plain.
+        t.text_focus(555, FieldFocus::None);
+        t.call("osk.show", json!({})).unwrap();
+        assert_eq!(t.events(), [vis(true, false)]);
+    }
+
+    #[test]
     fn accept_on_a_text_field_summons_the_osk_and_back_closes_it() {
         let mut t = firefox_with_host(|_| {});
         // Focus alone does nothing (auto_show is off).
@@ -4024,6 +4118,16 @@ mod tests {
         t.input("ui_quick2", 0.0);
         t.input("ui_r2", 0.0);
         assert_eq!(t.log.take(), [Call::Click(true), Call::Click(false)]);
+
+        // LT is the right click, the same way.
+        t.input("ui_l2", 1.0);
+        t.input("ui_quick2", 1.0);
+        t.input("ui_quick2", 0.0);
+        t.input("ui_l2", 0.0);
+        assert_eq!(
+            t.log.take(),
+            [Call::RightClick(true), Call::RightClick(false)]
+        );
 
         // The pointer never hides on inactivity.
         t.advance(Duration::from_secs(60));

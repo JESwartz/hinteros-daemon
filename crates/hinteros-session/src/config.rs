@@ -78,8 +78,8 @@
 //! # firefox_profile = "~/.local/share/hinteros/firefox/youtube"  # fallback: the favicon Firefox stored
 //! input = "keyboard"           # controller -> key presses (default "gamepad": the pad itself)
 //! back_key = "escape"          # what B sends [default: escape]
-//! pointer = true               # right stick moves a pointer [default: true]
-//! # address_bar = true         # plain Firefox: View = Ctrl+L + on-screen keyboard
+//! pointer = true               # right stick moves a pointer, RT/LT click left/right [default: true]
+//! # address_bar = true         # plain Firefox: View = Ctrl+L + on-screen keyboard, LB/RB = back/forward
 //! [apps.keymap]                # more (or other) actions -> keys
 //! context = "f"
 //!
@@ -798,7 +798,8 @@ pub struct AppConfig {
     pub keymap: BTreeMap<String, String>,
     /// Keyboard profile, a browser with an address bar (plain Firefox, not a kiosk): View
     /// focuses the address bar (Ctrl+L) and shows the on-screen keyboard, unless the keymap
-    /// maps `view` itself.
+    /// maps `view` itself; LB / RB are history back / forward (Alt+Left / Alt+Right), unless
+    /// the keymap maps `page_left` / `page_right` (or unmaps them with "none").
     #[serde(default)]
     pub address_bar: bool,
     /// Keyboard profile: the right stick moves a mouse pointer ([pointer]) [default: true].
@@ -828,6 +829,15 @@ impl AppConfig {
             None => Key::Escape.into(),
         };
         let mut map = default_keymap(back);
+        if self.address_bar {
+            // A browser: LB / RB are history back / forward.
+            for (action, key) in [
+                (NavAction::PageLeft, "alt+left"),
+                (NavAction::PageRight, "alt+right"),
+            ] {
+                map.insert(action, key.parse::<KeyCombo>().map_err(anyhow::Error::msg)?);
+            }
+        }
         for (action, key) in &self.keymap {
             let action = nav_action(action)
                 .with_context(|| format!("unknown controller action '{action}'"))?;
@@ -1269,6 +1279,46 @@ mod tests {
             let text = format!("{app}{bad}\n");
             assert!(Config::parse(&text).is_err(), "accepted: {text}");
         }
+    }
+
+    #[test]
+    fn address_bar_maps_lb_rb_to_history() {
+        let c = Config::parse(
+            r#"
+            [[apps]]
+            id = "firefox"
+            name = "Firefox"
+            command = ["firefox"]
+            input = "keyboard"
+            address_bar = true
+            [[apps]]
+            id = "firefox-mine"
+            name = "Firefox"
+            command = ["firefox"]
+            input = "keyboard"
+            address_bar = true
+            [apps.keymap]
+            page_left = "none"
+            page_right = "ctrl+tab"
+            [[apps]]
+            id = "kiosk"
+            name = "Kiosk"
+            command = ["firefox", "--kiosk"]
+            input = "keyboard"
+            "#,
+        )
+        .unwrap();
+        let map = c.apps[0].keymap().unwrap().unwrap();
+        assert_eq!(map[&NavAction::PageLeft], "alt+left".parse().unwrap());
+        assert_eq!(map[&NavAction::PageRight], "alt+right".parse().unwrap());
+        // The app's keymap still wins.
+        let map = c.apps[1].keymap().unwrap().unwrap();
+        assert!(!map.contains_key(&NavAction::PageLeft));
+        assert_eq!(map[&NavAction::PageRight], "ctrl+tab".parse().unwrap());
+        // No address bar, no history keys.
+        let map = c.apps[2].keymap().unwrap().unwrap();
+        assert!(!map.contains_key(&NavAction::PageLeft));
+        assert!(!map.contains_key(&NavAction::PageRight));
     }
 
     #[test]

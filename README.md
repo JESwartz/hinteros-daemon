@@ -132,19 +132,22 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   while every gamepad event comes to the daemon over D-Bus (ALL would swallow them). The D-Bus
   target never reports the right stick, so the profile also maps any deflection beyond
   `activity_deadzone` to the unused `QuickAccess2` button, which arrives as `ui_quick2`: "the
-  right stick moved". **RT is the left click** whenever the app has a pointer (unless the
-  keymap maps `trigger_right`; press and release follow the trigger, so dragging works).
+  right stick moved". **RT is the left click and LT the right click** whenever the app has a
+  pointer (unless the keymap maps `trigger_right` / `trigger_left`; press and release follow the
+  trigger, so dragging works).
   **A never clicks**: it is Enter, or shows the on-screen keyboard on a focused text field.
-  Clicks go through `CompositeDevice.SendEvent("Mouse:Button:Left", b)` (in the pad's worker,
+  Clicks go through `CompositeDevice.SendEvent("Mouse:Button:Left"` (or `Right`)`, b)` (in the pad's worker,
   see "Robustness" above). The pointer **never hides on inactivity**: the D-pad or left stick
   (arrow keys) hides it at once (`hide_command`, default `gamescopectl paint_cursor_plane 0`),
-  the right stick or RT shows it again (`show_command`); the system runs gamescope with a
+  the right stick, RT or LT shows it again (`show_command`); the system runs gamescope with a
   `--hide-cursor-delay` too long to matter, so going Home from a pointer app hides it too (no
   stray pointer on the launcher) and the next app (a game: gamescope's own rules, for a real
   mouse) shows it again. Launcher and games alone never touch it. Leaving the app puts
   the profile that was loaded before back (or InputPlumber's default) before the next mode, so
   games never get a mouse on the right stick. Profiles and modes are re-applied when
-  InputPlumber restarts, a pad appears, or the watchdog finds them changed.
+  InputPlumber restarts, a pad appears, or the watchdog finds them changed. After a restart
+  InputPlumber's bus name appears before its Manager object, so setting `ManageAllDevices` is
+  retried (250 ms, doubling up to 5 s) until it works, and checked again every watchdog period.
 - **Typing** (`keys/`): `keys.type {text}` types per character through a uinput virtual US
   keyboard (Shift for capitals and symbols; the spike's `kbd.py` table) or, for characters a US
   keyboard does not have, gamescope's private `gamescope_input_method` protocol (one character
@@ -181,9 +184,17 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   shows it as soon as a field gets focus instead. Either way a keyboard shown for a field hides
   250 ms after the field loses focus (no flicker between fields), unless it was shown or
   hidden by hand meanwhile. See "On-screen keyboard for Firefox text fields" below.
-  **Address bar**: WebExtensions cannot see Firefox's own URL bar, so an app with
-  `address_bar = true` (plain Firefox with a toolbar, not a kiosk) maps View (`ui_select`) to
-  Ctrl+L and then shows the keyboard (unless `[apps.keymap] view` says otherwise).
+  `osk_visibility` carries `password: true` (session API 0.10) while the keyboard is up for a
+  password field, so the keyboard masks its preview only then (and again, still visible, when a
+  field of the other kind gets focus; a field losing focus changes nothing).
+  **Address bar**: WebExtensions cannot see Firefox's own URL bar, so Firefox's autoConfig
+  (hinteros `nixos/modules/firefox-osk-chrome.js`) reports it, and its other toolbar fields,
+  straight to `osk.sock` from Firefox's main process: clicking it (RT) or A on it works like any
+  text field. Each connection to `osk.sock` keeps its own state; a field has focus while any of
+  them says so. An app with `address_bar = true` (plain Firefox with a toolbar, not a kiosk)
+  also maps View (`ui_select`) to Ctrl+L and then shows the keyboard (unless `[apps.keymap]
+  view` says otherwise), and LB / RB to history back / forward (Alt+Left / Alt+Right, unless
+  the keymap maps `page_left` / `page_right`).
   Every chord step is logged at info level with the raw `ui_*` name of the other button
   (`chord guide+context → on-screen keyboard button=ui_context`, `guide released alone → Home`,
   `guide+secondary → ignored (not a chord) button=ui_action`), so a pad whose buttons arrive
@@ -221,7 +232,7 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   unchanged and `job_*` events forwarded. While the service is down or speaks another version,
   they fail with `system_unavailable {reason: down|version_mismatch}`.
 - **Admin password** (`auth/`): a polkit authentication agent for this process; prompts go to
-  the launcher (`authentication_requested`, `auth.respond`, `auth.cancel`). Session API 0.8, 0.9; see
+  the launcher (`authentication_requested`, `auth.respond`, `auth.cancel`). Session API 0.8, 0.9, 0.10; see
   "Admin password, session restart and Store" below.
 - **Session restart** (`restart.rs`): `session.restart` ends the greetd session through logind
   (greetd starts it again) and restarts the daemon's own user unit.
@@ -356,7 +367,7 @@ site_url = "https://www.youtube.com/tv"     # icon from the site (or: icon_url =
 input = "keyboard"             # "gamepad" (default) or "keyboard"
 back_key = "escape"            # what B sends [default: escape]; e.g. "backspace", "alt+left"
 pointer = true                 # keyboard profile: right stick = mouse pointer [default: true]
-address_bar = false            # plain Firefox (not kiosk): View = Ctrl+L + on-screen keyboard
+address_bar = false            # plain Firefox (not kiosk): View = Ctrl+L + on-screen keyboard, LB/RB = back/forward
 
 [apps.keymap]                  # controller action = key, on top of the defaults ("none" unmaps)
 context = "ctrl+l"             # Y
@@ -643,8 +654,14 @@ The chain (design: `hinteros-docs/spikes/05-on-screen-keyboard.md`, "auto-summon
    in (an unknown pid counts for the focused app) and remembers it per app; A on a focused field
    in the focused app shows the keyboard (`field_summon`), or the report itself does
    (`auto_show`). Reports from other processes are ignored.
-   A closed host connection counts as `none`. `osk.sock` is not part of the session API (no
-   handshake, no replies) and accepts only the session user.
+. Firefox's own fields (address bar, find bar, fields of parent-process `about:` pages), which
+   content scripts cannot see, are reported by privileged autoConfig code (hinteros
+   `nixos/modules/firefox-osk-chrome.js`, appended to `mozilla.cfg` with
+   `general.config.sandbox_enabled = false`): it follows focus in every browser window and writes
+   the same lines (`client` `hinteros-firefox-chrome`) to `osk.sock` on a connection of its own,
+   from Firefox's main process (the app's process tree). The daemon keeps each connection's
+   state apart: a field has focus while any connection says so, and a closed connection clears
+   only its own.
 
 **What the system repo must install** (Nix packages from this flake: `hinteros-session` and
 `hinteros-osk-firefox-extension`, also in `overlays.default`):
@@ -667,7 +684,10 @@ The chain (design: `hinteros-docs/spikes/05-on-screen-keyboard.md`, "auto-summon
 
   (or `Extensions.Install = [ "<that .xpi path>" ]` plus `Extensions.Locked`). It needs the
   `nativeMessaging` permission and content scripts on all sites, granted at install; in private
-  windows only if `private_browsing = true` is added to that entry.
+  windows only if `private_browsing = true` is added to that entry, and on sites Mozilla
+  quarantines only with `extensions.quarantineIgnoredByUser.hinteros-osk` = true (the
+  hinteros system sets both; Mozilla's hard-restricted domains such as addons.mozilla.org stay
+  out of reach).
 - **Signing**: the .xpi is unsigned. Release Firefox (nixpkgs `firefox`) refuses unsigned
   extensions even through policies. Options: Firefox ESR (`pkgs.firefox-esr`) with
   `lockPref("xpinstall.signatures.required", false);` (`programs.firefox.autoConfig`), which
@@ -1107,9 +1127,9 @@ server, `--icon-allow-http`, a hidden test flag).
   input in `system-escalation` (`../x`, store paths, unknown ids, terms for other apps, a symlinked
   data path pointing out of the home).
 
-### What the launcher must do (session API 0.9)
+### What the launcher must do (session API 0.10)
 
-Say hello with 0.9 (client name `hinteros-launcher`), match responses by id (they may come out of
+Say hello with 0.10 (client name `hinteros-launcher`), match responses by id (they may come out of
 order), and:
 
 - Subscribe to `authentication_requested`/`authentication_finished`. On a request show the admin
@@ -1125,6 +1145,8 @@ order), and:
   show the named terms; `app_conflict` names the other app; remove with `system.apps.remove {ids,
   revision, delete_data}` after closing the app (and confirming `data_paths` twice); progress from
   the job events; "More apps after the next update" when `more_after_update`.
+- On-screen keyboard (0.10): mask the typed-text preview only while `osk_visibility.password` is
+  true; show it plainly otherwise (also when no field was reported).
 
 ## Development
 
@@ -1139,7 +1161,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.9","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.10","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

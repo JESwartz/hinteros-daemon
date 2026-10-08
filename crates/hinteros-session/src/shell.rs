@@ -89,9 +89,12 @@ pub enum Msg {
     /// The usable Steam binary changed (`None`: Steam is not installed).
     SetSteam(Option<PathBuf>),
     /// A text field in a web app gained or lost focus (see [`crate::textfocus`]); `pid` is the
-    /// reporting process (Firefox's native-messaging host).
+    /// reporting process (Firefox's native-messaging host, or Firefox itself for its own
+    /// toolbar fields), `reporter` the connection it came on (one Firefox has two: page fields
+    /// through the extension, the address bar and other browser fields directly).
     TextFocus {
         pid: Option<u32>,
+        reporter: u64,
         focus: FieldFocus,
     },
 }
@@ -296,8 +299,9 @@ pub struct Shell {
     raw_names: BTreeMap<NavAction, String>,
     /// Buttons pressed while Guide was held that made no chord (raw `ui_*` names, for the log).
     guide_others: Vec<String>,
-    /// What has focus in each keyboard-profile app's page (from the Firefox extension).
-    text_fields: BTreeMap<String, FieldFocus>,
+    /// The text fields with focus in each keyboard-profile app, per reporter (the Firefox
+    /// extension for the page, Firefox's chrome code for the address bar). No entry: none.
+    text_fields: BTreeMap<String, BTreeMap<u64, FieldFocus>>,
     /// Stick chatter filter for directions.
     debounce: Debounce,
     /// The right-stick pointer: in use or not, hidden by us or not.
@@ -401,7 +405,11 @@ impl Shell {
             Msg::ChildExit(exit) => self.child_exit(exit),
             Msg::SetApps(apps) => self.cfg.apps = apps,
             Msg::SetSteam(path) => self.set_steam(path),
-            Msg::TextFocus { pid, focus } => self.text_focus(pid, focus, now),
+            Msg::TextFocus {
+                pid,
+                reporter,
+                focus,
+            } => self.text_focus(pid, reporter, focus, now),
         }
     }
 
@@ -1153,7 +1161,12 @@ impl Shell {
     /// `auto_show`, also shows the keyboard right away when that app has focus; a keyboard
     /// shown for a field (either way) hides again [`OSK_AUTO_HIDE_DELAY`] after the field
     /// loses focus.
-    fn text_focus(&mut self, pid: Option<u32>, focus: FieldFocus, now: Instant) {
+    ///
+    /// One app may have several reporters (Firefox's page and its address bar), each with its
+    /// own state: the page reporting `none` because the address bar took focus (before or
+    /// after the address bar reports `text`) leaves a field focused. The field counts as lost
+    /// (and the keyboard hides) only once no reporter has one.
+    fn text_focus(&mut self, pid: Option<u32>, reporter: u64, focus: FieldFocus, now: Instant) {
         let keyboard_apps: Vec<(String, Option<u32>)> = self
             .apps
             .values()
@@ -1182,7 +1195,16 @@ impl Shell {
             );
             return;
         };
-        self.text_fields.insert(id.clone(), focus);
+        let fields = self.text_fields.entry(id.clone()).or_default();
+        if focus.editable() {
+            fields.insert(reporter, focus);
+        } else {
+            fields.remove(&reporter);
+        }
+        let any_field = !fields.is_empty();
+        if !any_field {
+            self.text_fields.remove(&id);
+        }
         if self.focused.as_deref() != Some(id.as_str()) || !self.cfg.osk_enabled {
             debug!(app = %id, ?focus, "text field focus in the background");
             return;
@@ -1194,6 +1216,8 @@ impl Shell {
                 self.set_osk(true, true);
                 self.osk_auto = true;
             }
+        } else if any_field {
+            debug!(app = %id, reporter, "field lost focus here; another one still has it");
         } else if self.osk_visible && self.osk_auto && self.osk_auto_hide_at.is_none() {
             debug!(app = %id, "text field lost focus; hiding the keyboard soon");
             self.osk_auto_hide_at = Some(now + OSK_AUTO_HIDE_DELAY);
@@ -1208,8 +1232,7 @@ impl Shell {
             && self
                 .focused
                 .as_ref()
-                .and_then(|id| self.text_fields.get(id))
-                .is_some_and(|f| f.editable())
+                .is_some_and(|id| self.text_fields.contains_key(id))
     }
 
     /// Show or hide the on-screen keyboard; with `apply_mode`, switch InputPlumber to match.
@@ -3404,9 +3427,14 @@ mod tests {
 
     impl T {
         fn text_focus(&mut self, pid: u32, focus: FieldFocus) {
+            self.text_focus_from(pid, 1, focus);
+        }
+
+        fn text_focus_from(&mut self, pid: u32, reporter: u64, focus: FieldFocus) {
             self.shell.handle(
                 Msg::TextFocus {
                     pid: Some(pid),
+                    reporter,
                     focus,
                 },
                 self.now,
@@ -3529,6 +3557,7 @@ mod tests {
         t.shell.handle(
             Msg::TextFocus {
                 pid: None,
+                reporter: 1,
                 focus: FieldFocus::Text,
             },
             t.now,
@@ -3769,6 +3798,60 @@ mod tests {
                 "up release"
             ]
         );
+    }
+
+    #[test]
+    fn address_bar_and_page_fields_are_separate_reporters() {
+        // Reporter 1: the extension's host (pid 555); reporter 2: Firefox itself (the app's
+        // root process) for the address bar.
+        let mut t = firefox_with_host(auto_show);
+        let firefox = t.shell.apps["youtube"].info.pid.unwrap();
+        const PAGE: u64 = 1;
+        const BAR: u64 = 2;
+
+        // Page field, then a click on the address bar: the bar says text, then the page's
+        // late none must not hide the keyboard.
+        t.text_focus_from(555, PAGE, FieldFocus::Text);
+        assert!(t.shell.osk_visible());
+        t.text_focus_from(firefox, BAR, FieldFocus::Text);
+        t.text_focus_from(555, PAGE, FieldFocus::None);
+        t.advance(Duration::from_secs(2));
+        assert!(t.shell.osk_visible());
+        assert_eq!(t.shell.deadline(), None);
+
+        // The other order (page none first) only delays the hide until the bar reports.
+        t.text_focus_from(555, PAGE, FieldFocus::Text);
+        t.text_focus_from(firefox, BAR, FieldFocus::None);
+        t.text_focus_from(555, PAGE, FieldFocus::None);
+        t.text_focus_from(firefox, BAR, FieldFocus::Text);
+        t.advance(Duration::from_secs(2));
+        assert!(t.shell.osk_visible());
+
+        // Hidden by hand while the bar has focus: the page's none does not bring it back.
+        t.call("osk.hide", json!({})).unwrap();
+        t.text_focus_from(555, PAGE, FieldFocus::None);
+        assert!(!t.shell.osk_visible());
+        // A on the bar shows it.
+        t.input("ui_accept", 1.0);
+        t.input("ui_accept", 0.0);
+        assert!(t.shell.osk_visible());
+        t.call("osk.hide", json!({})).unwrap();
+
+        // Leaving the bar (Enter loads the page): no field anywhere, A is Enter again.
+        t.text_focus_from(firefox, BAR, FieldFocus::None);
+        t.log.take();
+        t.input("ui_accept", 1.0);
+        t.input("ui_accept", 0.0);
+        assert_eq!(t.log.take(), [keys(&["enter"])]);
+
+        // A closed reporter (a "none" from the socket) clears only its own field.
+        t.text_focus_from(firefox, BAR, FieldFocus::Text);
+        t.text_focus_from(555, PAGE, FieldFocus::Text);
+        t.text_focus_from(555, PAGE, FieldFocus::None);
+        t.call("osk.hide", json!({})).unwrap();
+        t.log.take();
+        t.input("ui_accept", 1.0);
+        assert!(t.shell.osk_visible(), "the bar still has focus");
     }
 
     #[test]

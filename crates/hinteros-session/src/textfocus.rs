@@ -19,11 +19,18 @@
 //!    this way shortly after the field loses focus (a short delay, so moving from one field to
 //!    the next does not flicker). A closed connection counts as `none`.
 //!
+//! Content scripts cannot see Firefox's own toolbar fields (the address bar, find in page),
+//! so Firefox's autoConfig (privileged chrome code, hinteros `nixos/modules/firefox-kiosk.nix`)
+//! reports those itself: it connects to the same socket straight from Firefox's main process
+//! and writes the same lines (`client` `hinteros-firefox-chrome`). Every connection is its own
+//! reporter with its own state in the shell; a field has focus while any reporter says so.
+//!
 //! Password fields show the keyboard too: the keyboard masks its own preview.
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -246,18 +253,25 @@ async fn connection(stream: tokio::net::UnixStream, shell: mpsc::UnboundedSender
         return;
     }
     let pid = cred.pid().and_then(|p| u32::try_from(p).ok());
-    debug!(?pid, "osk.sock: text field focus reporter connected");
+    // Each connection keeps its own focus state in the shell.
+    static NEXT_REPORTER: AtomicU64 = AtomicU64::new(1);
+    let reporter = NEXT_REPORTER.fetch_add(1, Ordering::Relaxed);
+    debug!(
+        ?pid,
+        reporter, "osk.sock: text field focus reporter connected"
+    );
     let mut reader = hinteros_api::codec::LineReader::with_limit(stream, MAX_FRAME);
     let mut last = FieldFocus::None;
     loop {
         match reader.next_line().await {
             Ok(Some(line)) => match FocusMessage::parse(line.as_bytes()) {
                 Ok(msg) => {
-                    debug!(?pid, client = ?msg.client, focus = ?msg.focus, "text field focus");
+                    debug!(?pid, reporter, client = ?msg.client, focus = ?msg.focus, "text field focus");
                     last = msg.focus;
                     if shell
                         .send(Msg::TextFocus {
                             pid,
+                            reporter,
                             focus: msg.focus,
                         })
                         .is_err()
@@ -278,6 +292,7 @@ async fn connection(stream: tokio::net::UnixStream, shell: mpsc::UnboundedSender
     if last.editable() {
         let _ = shell.send(Msg::TextFocus {
             pid,
+            reporter,
             focus: FieldFocus::None,
         });
     }
@@ -442,6 +457,17 @@ mod tests {
         );
     }
 
+    async fn next_focus(rx: &mut mpsc::UnboundedReceiver<Msg>) -> (Option<u32>, u64, FieldFocus) {
+        match rx.recv().await.unwrap() {
+            Msg::TextFocus {
+                pid,
+                reporter,
+                focus,
+            } => (pid, reporter, focus),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn daemon_side_reports_focus_and_a_closed_connection() {
         let dir = tempfile::tempdir().unwrap();
@@ -449,30 +475,28 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let server = tokio::spawn(serve(listener, tx));
-        let me = std::process::id();
+        let me = Some(std::process::id());
 
         let mut c = UnixStream::connect(&path).unwrap();
         c.write_all(b"{\"focus\":\"password\"}\nnot json\n{\"focus\":\"text\",\"client\":\"x\"}\n")
             .unwrap();
-        let mut got = vec![];
-        for _ in 0..2 {
-            match rx.recv().await.unwrap() {
-                Msg::TextFocus { pid, focus } => got.push((pid, focus)),
-                other => panic!("{other:?}"),
-            }
-        }
-        assert_eq!(
-            got,
-            [
-                (Some(me), FieldFocus::Password),
-                (Some(me), FieldFocus::Text)
-            ]
-        );
+        let (pid, a, focus) = next_focus(&mut rx).await;
+        assert_eq!((pid, focus), (me, FieldFocus::Password));
+        assert_eq!(next_focus(&mut rx).await, (me, a, FieldFocus::Text));
+
+        // A second reporter (Firefox's address bar next to its extension) gets its own id,
+        // and closing it clears only its own state.
+        let mut d = UnixStream::connect(&path).unwrap();
+        d.write_all(b"{\"focus\":\"text\",\"client\":\"hinteros-firefox-chrome\"}\n")
+            .unwrap();
+        let (pid, b, focus) = next_focus(&mut rx).await;
+        assert_ne!(a, b);
+        assert_eq!((pid, focus), (me, FieldFocus::Text));
+        drop(d);
+        assert_eq!(next_focus(&mut rx).await, (me, b, FieldFocus::None));
+
         drop(c);
-        match rx.recv().await.unwrap() {
-            Msg::TextFocus { pid, focus } => assert_eq!((pid, focus), (Some(me), FieldFocus::None)),
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(next_focus(&mut rx).await, (me, a, FieldFocus::None));
         server.abort();
     }
 }

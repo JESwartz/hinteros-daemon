@@ -311,6 +311,11 @@ pub struct Shell {
     attention: Vec<SteamWindow>,
     /// Who gets focus back when Steam, focused through steam.focus, closes its windows.
     steam_return: Option<String>,
+    /// Games Steam started from its library while it was in front: Steam gets focus back
+    /// when they end.
+    from_steam: BTreeSet<String>,
+    /// Steam games we track although we did not start them (found by their Steam reapers).
+    adopted: BTreeSet<String>,
     /// When we last asked Steam to do something (launch or close a game, open or close Big
     /// Picture): Steam windows that appear soon after are its answer and get focus.
     steam_action_at: Option<Instant>,
@@ -388,6 +393,8 @@ impl Shell {
             seen_windows: BTreeSet::new(),
             attention: Vec::new(),
             steam_return: None,
+            from_steam: BTreeSet::new(),
+            adopted: BTreeSet::new(),
             steam_action_at: None,
             osk_visible: false,
             osk_auto: false,
@@ -916,12 +923,12 @@ impl Shell {
                 self.steam_action_at = Some(now);
                 match self.steam_binary(ErrorCode::AppNotFound) {
                     Ok(steam_path) => {
-                        let argv = [steam_path, "steam://close/bigpicture".into()];
+                        let argv = [steam_path, "-shutdown".into()];
                         if let Err(e) = self.spawner.spawn("steam-close", &argv, None) {
-                            warn!("cannot ask Steam to close Big Picture: {e}");
+                            warn!("cannot ask Steam to shut down: {e}");
                         }
                     }
-                    Err(e) => warn!("cannot ask Steam to close Big Picture: {}", e.message),
+                    Err(e) => warn!("cannot ask Steam to shut down: {}", e.message),
                 }
                 if !self.cfg.gamescope {
                     // Nothing to watch: consider it closed.
@@ -951,30 +958,64 @@ impl Shell {
         if !self.apps.contains_key(STEAM_CLIENT_APP_ID) {
             return Vec::new();
         }
-        let launcher = self.cfg.launcher_app_id;
-        let ours: Vec<u32> = self
-            .apps
-            .values()
-            .map(|a| a.info.gamescope_app_id)
-            .collect();
-        let foreign = |id: &u32| *id != 0 && *id != launcher && !ours.contains(id);
-        let mut games: Vec<u32> = self
-            .procs
-            .steam_games()
-            .into_iter()
-            .filter(foreign)
-            .collect();
-        if games.is_empty() {
-            return games;
-        }
-        if let Some(state) = &self.gamescope {
-            for id in state.focusable_apps.iter().filter(|id| foreign(id)) {
-                if !games.contains(id) {
-                    games.push(*id);
+        let mut games = self.steam_reaper_games();
+        if !games.is_empty() {
+            for id in self.unclaimed_windows() {
+                if !games.contains(&id) {
+                    games.push(id);
                 }
             }
         }
         games
+    }
+
+    /// The app ids of the live Steam reapers that are Steam games (not our own command apps).
+    fn steam_reaper_games(&mut self) -> Vec<u32> {
+        let launcher = self.cfg.launcher_app_id;
+        let commands: Vec<u32> = self
+            .apps
+            .values()
+            .filter(|a| !tracked_by_windows(a.info.source))
+            .map(|a| a.info.gamescope_app_id)
+            .collect();
+        self.procs
+            .steam_games()
+            .into_iter()
+            .filter(|id| *id != 0 && *id != launcher && !commands.contains(id))
+            .collect()
+    }
+
+    /// Focusable windows that belong to none of our apps, Steam or the launcher: a Steam game's
+    /// window under another id than its reaper's (the id its Steam API reports).
+    fn unclaimed_windows(&self) -> Vec<u32> {
+        let Some(state) = &self.gamescope else {
+            return Vec::new();
+        };
+        let launcher = self.cfg.launcher_app_id;
+        state
+            .focusable_apps
+            .iter()
+            .copied()
+            .filter(|id| {
+                *id != 0
+                    && *id != launcher
+                    && *id != STEAM_CLIENT_GAMESCOPE_APP_ID
+                    && !self.apps.values().any(|a| a.info.gamescope_app_id == *id)
+            })
+            .collect()
+    }
+
+    /// A Steam game we track whose window carries another app id than its reaper's: those
+    /// windows, while its reaper is alive (they go in front of Steam's when it is focused).
+    fn steam_game_windows(&mut self, gs_id: u32) -> Vec<u32> {
+        let seen = self
+            .apps
+            .values()
+            .any(|a| a.info.gamescope_app_id == gs_id && a.seen_focusable);
+        if seen || self.procs.steam_reapers(gs_id).is_empty() {
+            return Vec::new();
+        }
+        self.unclaimed_windows()
     }
 
     fn steam_game_still_running(&mut self, id: &str, reason: ExitReason) -> bool {
@@ -1027,26 +1068,78 @@ impl Shell {
         }
         for steam in self.procs.steam_games() {
             // Our own command apps run under reapers too, with ids above the launcher's.
-            if steam >= self.cfg.launcher_app_id
-                || self.apps.values().any(|a| a.info.gamescope_app_id == steam)
-            {
-                continue;
+            if steam < self.cfg.launcher_app_id {
+                self.adopt_steam_game(steam, now);
             }
-            let name = self
-                .steam_dir()
-                .and_then(|dir| library::find_manifest(&dir, steam))
-                .map(|m| m.name)
-                .unwrap_or_else(|| format!("Steam game {steam}"));
-            info!(steam_app_id = steam, %name, "found running; tracking it");
-            let info = RunningApp {
-                id: format!("steam-{steam}"),
-                name,
-                source: AppSource::Steam,
-                gamescope_app_id: steam,
-                pid: None,
-            };
-            self.track(info, AppInput::default(), now);
         }
+    }
+
+    /// Track the games Steam starts from its own library (Big Picture, a non-Steam shortcut),
+    /// so they are in apps.running (Continue on Home) and can be focused and closed. Games
+    /// started while Steam was in front take focus, and give it back to Steam when they end.
+    fn adopt_steam_client_games(&mut self, now: Instant) {
+        if self.cfg.steam_path.is_none()
+            || !self.cfg.gamescope
+            || !self.apps.contains_key(STEAM_CLIENT_APP_ID)
+        {
+            return;
+        }
+        for steam in self.steam_reaper_games() {
+            let Some(id) = self.adopt_steam_game(steam, now) else {
+                continue;
+            };
+            if self.focused.as_deref() == Some(STEAM_CLIENT_APP_ID) {
+                self.from_steam.insert(id.clone());
+                self.set_focus(Some(id));
+            }
+        }
+        // An adopted game that never had a window of its own id is gone with its reaper.
+        let gone: Vec<String> = self
+            .adopted
+            .iter()
+            .filter(|id| {
+                self.apps
+                    .get(*id)
+                    .is_some_and(|a| !a.seen_focusable && a.closing.is_none())
+            })
+            .cloned()
+            .collect();
+        for id in gone {
+            let gs_id = self.apps[&id].info.gamescope_app_id;
+            if self.procs.steam_reapers(gs_id).is_empty() {
+                info!(app = %id, "its Steam reaper is gone");
+                self.exited(&id, ExitReason::Exited, None);
+            }
+        }
+    }
+
+    /// Track a running Steam game we did not start; `None` if it is tracked already.
+    fn adopt_steam_game(&mut self, steam: u32, now: Instant) -> Option<String> {
+        if self.apps.values().any(|a| a.info.gamescope_app_id == steam) {
+            return None;
+        }
+        let dir = self.steam_dir();
+        let name = dir
+            .as_deref()
+            .and_then(|dir| library::find_manifest(dir, steam))
+            .map(|m| m.name)
+            .or_else(|| {
+                dir.as_deref()
+                    .and_then(|dir| library::shortcut_name(dir, steam))
+            })
+            .unwrap_or_else(|| format!("Steam game {steam}"));
+        info!(steam_app_id = steam, %name, "found running; tracking it");
+        let id = format!("steam-{steam}");
+        let info = RunningApp {
+            id: id.clone(),
+            name,
+            source: AppSource::Steam,
+            gamescope_app_id: steam,
+            pid: None,
+        };
+        self.track(info, AppInput::default(), now);
+        self.adopted.insert(id.clone());
+        Some(id)
     }
 
     /// Every process under Steam's reaper(s) for a game.
@@ -1166,11 +1259,19 @@ impl Shell {
             self.written.pop_front();
         }
         let launcher = self.cfg.launcher_app_id;
-        // Steam with games it started itself: their windows in front of Steam's.
-        let client_games = if self.focused.as_deref() == Some(STEAM_CLIENT_APP_ID) {
-            self.steam_client_games()
-        } else {
-            Vec::new()
+        // Steam with games it started itself: their windows in front of Steam's. A Steam game
+        // whose window has another id than its own: the game, then that window.
+        let client_games = match target {
+            _ if self.focused.as_deref() == Some(STEAM_CLIENT_APP_ID) => self.steam_client_games(),
+            Some((id, true)) => {
+                let windows = self.steam_game_windows(id);
+                if windows.is_empty() {
+                    windows
+                } else {
+                    [id].into_iter().chain(windows).collect()
+                }
+            }
+            _ => Vec::new(),
         };
         self.written.push_back(match target {
             _ if !client_games.is_empty() => baselayer_for_steam_client(&client_games, launcher),
@@ -1877,11 +1978,16 @@ impl Shell {
                 exit_code,
             },
         );
+        self.adopted.remove(id);
+        let to_steam = self.from_steam.remove(id) && self.apps.contains_key(STEAM_CLIENT_APP_ID);
         if self.focused.as_deref() == Some(id) {
             let back = if id == STEAM_CLIENT_APP_ID {
                 self.steam_return
                     .take()
                     .filter(|r| self.apps.contains_key(r))
+            } else if to_steam {
+                // Started from Steam's library: back to Steam.
+                Some(STEAM_CLIENT_APP_ID.to_string())
             } else {
                 None
             };
@@ -1916,6 +2022,7 @@ impl Shell {
                 }
                 self.gamescope = Some(state);
                 self.observe(now);
+                self.adopt_steam_client_games(now);
                 if self.steam_shown() {
                     self.seen_windows
                         .extend(self.steam_windows.iter().map(|w| w.window));
@@ -3217,15 +3324,17 @@ mod tests {
     }
 
     #[test]
-    fn a_game_steam_starts_itself_keeps_steam_in_front() {
+    fn a_game_steam_starts_itself_is_tracked_and_focused() {
+        const SHORTCUT: u32 = 2_396_848_268;
+        const GAME: &str = "steam-2396848268";
         let mut t = T::new();
         t.launch(json!({"id": "steam"}));
         t.gamescope(Some(769), &[769]);
         steam_windows(&mut t, &[(10, "Steam Big Picture Mode")]);
+        t.events();
         t.log.take();
         // A non-Steam shortcut from Steam's library: its reaper has the shortcut's id, its
         // window the id its Steam API reports (480); Steam's window goes away meanwhile.
-        const SHORTCUT: u32 = 2_396_848_268;
         t.procs
             .lock()
             .unwrap()
@@ -3233,32 +3342,69 @@ mod tests {
             .insert(SHORTCUT, vec![500]);
         steam_windows(&mut t, &[]);
         t.gamescope(Some(480), &[480]);
-        t.advance(Duration::from_secs(5));
-        assert_eq!(t.shell.focused(), Some("steam"), "not back to the launcher");
+        // Tracked (Continue lists it) and in front, with its window.
+        assert!(
+            t.events()
+                .iter()
+                .any(|(n, p)| *n == EventName::AppStarted && p["app"]["id"] == GAME)
+        );
+        assert_eq!(t.shell.focused(), Some(GAME));
+        assert!(
+            t.log
+                .take()
+                .contains(&Call::FocusSteamClient(vec![SHORTCUT, 480]))
+        );
+        let running = t.call("apps.running", json!({})).unwrap();
+        assert!(
+            running["apps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["id"] == GAME)
+        );
+        // Well past the launch timeout and the focus-loss debounce: still the game.
+        t.advance(Duration::from_secs(120));
+        assert_eq!(t.shell.focused(), Some(GAME), "not back to the launcher");
         assert!(!t.log.take().contains(&Call::FocusLauncher));
-        // Home, then Steam again: the game, not Steam's (hidden) library.
+        // Home, then back to it from Continue: the game again.
         t.input("ui_guide", 1.0);
         t.input("ui_guide", 0.0);
         assert_eq!(t.shell.focused(), None);
         t.gamescope(Some(L), &[480]);
         t.log.take();
-        t.launch(json!({"id": "steam"}));
+        t.call("apps.focus", json!({"id": GAME})).unwrap();
         assert!(
             t.log
                 .take()
                 .contains(&Call::FocusSteamClient(vec![SHORTCUT, 480]))
         );
         t.gamescope(Some(480), &[480]);
-        // The game quits: Steam's window is back, and Steam alone again.
+        // The game quits: no longer tracked, and Steam (where it was started) is in front.
         t.procs.lock().unwrap().steam_reapers.remove(&SHORTCUT);
+        t.events();
         t.gamescope(Some(769), &[769]);
+        assert!(
+            t.events()
+                .iter()
+                .any(|(n, p)| *n == EventName::AppExited && p["id"] == GAME)
+        );
+        assert_eq!(t.shell.focused(), Some("steam"));
         t.advance(Duration::from_secs(5));
         assert_eq!(t.shell.focused(), Some("steam"));
-        t.input("ui_guide", 1.0);
-        t.input("ui_guide", 0.0);
-        t.log.take();
+    }
+
+    #[test]
+    fn steam_stays_in_front_while_it_runs_a_game_of_its_own() {
+        // A Steam game we track (started from Home) does not count as Steam's own; one we
+        // don't (between its reaper appearing and our adopting it) keeps Steam running.
+        let mut t = T::new();
         t.launch(json!({"id": "steam"}));
-        assert!(t.log.take().contains(&Call::FocusApp(769)));
+        t.gamescope(Some(769), &[769]);
+        t.procs.lock().unwrap().steam_reapers.insert(570, vec![501]);
+        assert_eq!(t.shell.steam_client_games(), vec![570]);
+        t.gamescope(Some(570), &[570]);
+        assert_eq!(t.shell.focused(), Some("steam-570"));
+        assert!(t.shell.steam_client_games().contains(&570));
     }
 
     #[test]
@@ -3295,14 +3441,14 @@ mod tests {
             t.call("steam.attention", json!({})).unwrap(),
             json!({"windows": []})
         );
-        // Closing Big Picture asks Steam, never kills it; its window goes: closed.
+        // Closing Steam asks it to shut down, never kills it; its window goes: closed.
         t.log.take();
         t.call("apps.close", json!({"id": "steam"})).unwrap();
         assert_eq!(
             t.log.take(),
             [Call::Spawn {
                 key: "steam-close".into(),
-                argv: vec!["/fake/steam".into(), "steam://close/bigpicture".into()],
+                argv: vec!["/fake/steam".into(), "-shutdown".into()],
                 app_id: None,
             }]
         );

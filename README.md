@@ -104,7 +104,14 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   Steam appears or goes away. Launching it runs `steam steam://open/bigpicture` (or `steam -gamepadui` if no
   Steam client runs) and shows Steam's windows: they are gamescope app 769, so focus is
   `[769, launcher]`, with InputPlumber in PASS. Home returns to the launcher; `apps.close`
-  asks Steam to close Big Picture (`steam://close/bigpicture`) and never kills Steam.
+  asks Steam to exit (`steam -shutdown`, not just leave Big Picture, which would open its
+  desktop window) and never kills Steam. Games Steam starts from its own library (a Steam
+  game, a non-Steam shortcut) are tracked as `steam-<appid>` once their Steam reaper shows up
+  (`apps.running`, so Home lists them under Continue; a shortcut is named from
+  `userdata/*/config/shortcuts.vdf`), take focus when Steam was in front, and give it back to
+  Steam when they end. A window under another id than the reaper's (the one the game's
+  Steam API reports, e.g. 480 from a `steam_appid.txt`) is focused with it: `[game, window,
+  769, launcher]`. While such a game runs, Steam's hidden window does not count as Steam gone.
 - **Steam pop-ups** (`focus/gamescope.rs`, `steam/windows.rs`): the gamescope watcher also
   follows the top-level windows on gamescope's Xwayland, recognises Steam's (owner process
   `steam`/`steamwebhelper` via XRes or `_NET_WM_PID`, `WM_CLASS` `steam`/`steamwebhelper`, or

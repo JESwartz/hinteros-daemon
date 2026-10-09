@@ -284,6 +284,67 @@ pub fn scan(steam: &Path) -> Vec<Game> {
     games
 }
 
+/// The name of a non-Steam game added to Steam ("Add a Non-Steam Game"), by its shortcut app
+/// id, from any user's `userdata/<user>/config/shortcuts.vdf` (binary VDF).
+pub fn shortcut_name(steam: &Path, appid: u32) -> Option<String> {
+    let users = fs::read_dir(steam.join("userdata")).ok()?;
+    users.flatten().find_map(|user| {
+        let data = fs::read(user.path().join("config/shortcuts.vdf")).ok()?;
+        shortcuts(&data)
+            .into_iter()
+            .find_map(|(id, name)| (id == appid).then_some(name))
+    })
+}
+
+/// `(appid, AppName)` of every shortcut in a binary `shortcuts.vdf`: a `shortcuts` map of
+/// numbered entries; a map is `00 key\0 ... 08`, a string `01 key\0 value\0`, an int32
+/// `02 key\0 <4 bytes LE>`. Stops at anything else (a damaged file gives what came before).
+fn shortcuts(data: &[u8]) -> Vec<(u32, String)> {
+    fn cstr(data: &[u8], i: &mut usize) -> Option<String> {
+        let len = data.get(*i..)?.iter().position(|&b| b == 0)?;
+        let s = String::from_utf8_lossy(&data[*i..*i + len]).into_owned();
+        *i += len + 1;
+        Some(s)
+    }
+    let mut out = Vec::new();
+    let (mut appid, mut name) = (None, None);
+    let (mut i, mut depth) = (0, 0u32);
+    while let Some(&tag) = data.get(i) {
+        i += 1;
+        match tag {
+            0x00 if cstr(data, &mut i).is_some() => depth += 1,
+            0x01 => {
+                let (Some(key), Some(value)) = (cstr(data, &mut i), cstr(data, &mut i)) else {
+                    break;
+                };
+                if depth == 2 && key.eq_ignore_ascii_case("appname") {
+                    name = Some(value);
+                }
+            }
+            0x02 => {
+                let Some(key) = cstr(data, &mut i) else { break };
+                let Some(bytes) = data.get(i..i + 4) else {
+                    break;
+                };
+                i += 4;
+                if depth == 2 && key.eq_ignore_ascii_case("appid") {
+                    appid = Some(u32::from_le_bytes(bytes.try_into().expect("4 bytes")));
+                }
+            }
+            0x08 if depth > 0 => {
+                if depth == 2
+                    && let (Some(id), Some(n)) = (appid.take(), name.take())
+                {
+                    out.push((id, n));
+                }
+                depth -= 1;
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
 /// The manifest of `appid` in any library of `steam`, if installed there.
 pub fn find_manifest(steam: &Path, appid: u32) -> Option<Manifest> {
     libraries(steam).into_iter().find_map(|lib| {
@@ -405,6 +466,45 @@ pub(crate) mod tests {
     /// The in-tree fixture: a fake home with a Steam install and a second library.
     pub fn fixture_home() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/steam-home")
+    }
+
+    /// A binary `shortcuts.vdf` as Steam writes it, for `(appid, name)` entries.
+    fn shortcuts_vdf(entries: &[(u32, &str)]) -> Vec<u8> {
+        let mut v = b"\0shortcuts\0".to_vec();
+        for (n, (id, name)) in entries.iter().enumerate() {
+            v.extend(format!("\0{n}\0").bytes());
+            v.extend(b"\x02appid\0");
+            v.extend(id.to_le_bytes());
+            v.extend(format!("\x01AppName\0{name}\0").bytes());
+            v.extend(b"\x01Exe\0\"/games/x\"\0\x02IsHidden\0\0\0\0\0\0tags\0\x08\x08");
+        }
+        v.extend(b"\x08\x08");
+        v
+    }
+
+    #[test]
+    fn shortcut_names_from_binary_vdf() {
+        let data = shortcuts_vdf(&[(2_396_848_268, "Zombie Force"), (2_147_483_649, "Other")]);
+        assert_eq!(
+            shortcuts(&data),
+            [
+                (2_396_848_268, "Zombie Force".to_string()),
+                (2_147_483_649, "Other".to_string())
+            ]
+        );
+        // Damaged: what came before.
+        assert_eq!(shortcuts(&data[..40]), []);
+        assert_eq!(shortcuts(b""), []);
+
+        let steam = tempfile::tempdir().unwrap();
+        let config = steam.path().join("userdata/1234/config");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(config.join("shortcuts.vdf"), &data).unwrap();
+        assert_eq!(
+            shortcut_name(steam.path(), 2_396_848_268).as_deref(),
+            Some("Zombie Force")
+        );
+        assert_eq!(shortcut_name(steam.path(), 7), None);
     }
 
     #[test]

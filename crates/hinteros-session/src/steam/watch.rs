@@ -32,6 +32,8 @@ pub fn watched_dirs(steam: &Path) -> BTreeSet<PathBuf> {
             .into_iter()
             .map(|l| l.join("steamapps")),
     );
+    // Non-Steam games: each Steam user's shortcuts.vdf (and grid artwork next to it).
+    dirs.extend(library::user_config_dirs(steam));
     dirs.retain(|d| d.is_dir());
     dirs
 }

@@ -15,6 +15,9 @@
 //!   Steamworks redistributables, plus name prefixes for versions we don't know yet. (Steam's
 //!   authoritative "type: Tool" lives in the binary `appinfo.vdf`, which we don't parse.)
 //! - **Artwork** from `<steam>/appcache/librarycache`, see [`artwork`].
+//! - **Non-Steam games** ("Add a Non-Steam Game") from every Steam user's
+//!   `userdata/<user>/config/shortcuts.vdf` ([`Shortcut`]), installed, artwork from Steam's
+//!   custom `grid/` images; launched as `steam://rungameid/<`[`steam_game_id`]`>`.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -275,6 +278,12 @@ pub fn scan(steam: &Path) -> Vec<Game> {
             });
         }
     }
+    // Non-Steam games added to Steam (hidden ones stay hidden, as in Steam's library).
+    for (s, config) in all_shortcuts(&steam) {
+        if !s.hidden && seen.insert(s.appid) {
+            games.push(shortcut_game(s, &config));
+        }
+    }
     games.sort_by(|a, b| {
         a.name
             .to_lowercase()
@@ -284,30 +293,126 @@ pub fn scan(steam: &Path) -> Vec<Game> {
     games
 }
 
-/// The name of a non-Steam game added to Steam ("Add a Non-Steam Game"), by its shortcut app
-/// id, from any user's `userdata/<user>/config/shortcuts.vdf` (binary VDF).
-pub fn shortcut_name(steam: &Path, appid: u32) -> Option<String> {
-    let users = fs::read_dir(steam.join("userdata")).ok()?;
-    users.flatten().find_map(|user| {
-        let data = fs::read(user.path().join("config/shortcuts.vdf")).ok()?;
-        shortcuts(&data)
-            .into_iter()
-            .find_map(|(id, name)| (id == appid).then_some(name))
-    })
+/// A non-Steam game added to Steam ("Add a Non-Steam Game"), from a user's
+/// `userdata/<user>/config/shortcuts.vdf`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shortcut {
+    /// The shortcut's app id (high bit set). Steam launches it as game id
+    /// [`steam_game_id`]`(appid)`.
+    pub appid: u32,
+    pub name: String,
+    pub hidden: bool,
+    /// Unix time in seconds; 0 if never played.
+    pub last_play_time: u32,
+    /// The icon the user picked (a path), if any.
+    pub icon: Option<String>,
 }
 
-/// `(appid, AppName)` of every shortcut in a binary `shortcuts.vdf`: a `shortcuts` map of
-/// numbered entries; a map is `00 key\0 ... 08`, a string `01 key\0 value\0`, an int32
-/// `02 key\0 <4 bytes LE>`. Stops at anything else (a damaged file gives what came before).
-fn shortcuts(data: &[u8]) -> Vec<(u32, String)> {
+/// The id `steam://rungameid/<id>` takes for `appid`: the app id itself for a Steam game; for
+/// a non-Steam shortcut (app id with the high bit set) the 64-bit game id Steam derives from
+/// it (`appid << 32 | 0x02000000`, type "shortcut").
+pub fn steam_game_id(appid: u32) -> u64 {
+    if appid & 0x8000_0000 == 0 {
+        u64::from(appid)
+    } else {
+        u64::from(appid) << 32 | 0x0200_0000
+    }
+}
+
+/// Every user's `userdata/<user>/config` directory (where `shortcuts.vdf` and `grid/` live).
+pub fn user_config_dirs(steam: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = fs::read_dir(steam.join("userdata"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|u| u.path().join("config"))
+        .filter(|d| d.is_dir())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// The non-Steam games of every Steam user on this account, with the config directory they
+/// came from (for their artwork). The first user listing an app id wins.
+pub fn all_shortcuts(steam: &Path) -> Vec<(Shortcut, PathBuf)> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for config in user_config_dirs(steam) {
+        let Ok(data) = fs::read(config.join("shortcuts.vdf")) else {
+            continue;
+        };
+        for s in shortcuts(&data) {
+            if seen.insert(s.appid) {
+                out.push((s, config.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// The name of a non-Steam game, by its shortcut app id.
+pub fn shortcut_name(steam: &Path, appid: u32) -> Option<String> {
+    all_shortcuts(steam)
+        .into_iter()
+        .find_map(|(s, _)| (s.appid == appid).then_some(s.name))
+}
+
+/// A non-Steam game as a library entry: always installed (it is a program on disk), no size,
+/// artwork from Steam's custom grid images (`config/grid/<appid>p.png` portrait,
+/// `<appid>.png` header, `<appid>_hero.png`, `<appid>_logo.png`, png or jpg) and its icon.
+fn shortcut_game(s: Shortcut, config: &Path) -> Game {
+    let grid = config.join("grid");
+    let find = |suffix: &str| {
+        ["png", "jpg", "jpeg"]
+            .iter()
+            .map(|ext| grid.join(format!("{}{suffix}.{ext}", s.appid)))
+            .find(|p| p.is_file())
+            .map(|p| p.to_string_lossy().into_owned())
+    };
+    let icon = s
+        .icon
+        .as_deref()
+        .map(|i| i.trim_matches('"'))
+        .filter(|i| Path::new(i).is_file())
+        .map(str::to_string)
+        .or_else(|| find("_icon"));
+    Game {
+        appid: s.appid,
+        artwork: GameArtwork {
+            portrait: find("p"),
+            header: find(""),
+            hero: find("_hero"),
+            logo: find("_logo"),
+            icon,
+        },
+        name: s.name,
+        install_state: InstallState::Installed,
+        size_bytes: 0,
+        last_played: (s.last_play_time != 0).then_some(u64::from(s.last_play_time)),
+    }
+}
+
+/// Every shortcut in a binary `shortcuts.vdf`: a `shortcuts` map of numbered entries; a map is
+/// `00 key\0 ... 08`, a string `01 key\0 value\0`, an int32 `02 key\0 <4 bytes LE>`. Keys are
+/// matched without case (Steam has written both `appid` and `AppID`). An entry without an app
+/// id or a name is left out. Stops at anything else (a damaged file gives what came before).
+fn shortcuts(data: &[u8]) -> Vec<Shortcut> {
     fn cstr(data: &[u8], i: &mut usize) -> Option<String> {
         let len = data.get(*i..)?.iter().position(|&b| b == 0)?;
         let s = String::from_utf8_lossy(&data[*i..*i + len]).into_owned();
         *i += len + 1;
         Some(s)
     }
+    #[derive(Default)]
+    struct Entry {
+        appid: Option<u32>,
+        name: Option<String>,
+        hidden: bool,
+        last_play_time: u32,
+        icon: Option<String>,
+    }
     let mut out = Vec::new();
-    let (mut appid, mut name) = (None, None);
+    let mut e = Entry::default();
     let (mut i, mut depth) = (0, 0u32);
     while let Some(&tag) = data.get(i) {
         i += 1;
@@ -317,8 +422,12 @@ fn shortcuts(data: &[u8]) -> Vec<(u32, String)> {
                 let (Some(key), Some(value)) = (cstr(data, &mut i), cstr(data, &mut i)) else {
                     break;
                 };
-                if depth == 2 && key.eq_ignore_ascii_case("appname") {
-                    name = Some(value);
+                if depth == 2 {
+                    match key.to_ascii_lowercase().as_str() {
+                        "appname" => e.name = Some(value),
+                        "icon" if !value.is_empty() => e.icon = Some(value),
+                        _ => {}
+                    }
                 }
             }
             0x02 => {
@@ -327,15 +436,28 @@ fn shortcuts(data: &[u8]) -> Vec<(u32, String)> {
                     break;
                 };
                 i += 4;
-                if depth == 2 && key.eq_ignore_ascii_case("appid") {
-                    appid = Some(u32::from_le_bytes(bytes.try_into().expect("4 bytes")));
+                let v = u32::from_le_bytes(bytes.try_into().expect("4 bytes"));
+                if depth == 2 {
+                    match key.to_ascii_lowercase().as_str() {
+                        "appid" => e.appid = Some(v),
+                        "ishidden" => e.hidden = v != 0,
+                        "lastplaytime" => e.last_play_time = v,
+                        _ => {}
+                    }
                 }
             }
             0x08 if depth > 0 => {
-                if depth == 2
-                    && let (Some(id), Some(n)) = (appid.take(), name.take())
-                {
-                    out.push((id, n));
+                if depth == 2 {
+                    let entry = std::mem::take(&mut e);
+                    if let (Some(appid), Some(name)) = (entry.appid, entry.name) {
+                        out.push(Shortcut {
+                            appid,
+                            name,
+                            hidden: entry.hidden,
+                            last_play_time: entry.last_play_time,
+                            icon: entry.icon,
+                        });
+                    }
                 }
                 depth -= 1;
             }
@@ -468,28 +590,47 @@ pub(crate) mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/steam-home")
     }
 
-    /// A binary `shortcuts.vdf` as Steam writes it, for `(appid, name)` entries.
-    fn shortcuts_vdf(entries: &[(u32, &str)]) -> Vec<u8> {
+    /// A binary `shortcuts.vdf` as Steam writes it, for `(appid, name, hidden, last play)`.
+    fn shortcuts_vdf(entries: &[(u32, &str, bool, u32)]) -> Vec<u8> {
         let mut v = b"\0shortcuts\0".to_vec();
-        for (n, (id, name)) in entries.iter().enumerate() {
+        for (n, (id, name, hidden, played)) in entries.iter().enumerate() {
             v.extend(format!("\0{n}\0").bytes());
             v.extend(b"\x02appid\0");
             v.extend(id.to_le_bytes());
             v.extend(format!("\x01AppName\0{name}\0").bytes());
-            v.extend(b"\x01Exe\0\"/games/x\"\0\x02IsHidden\0\0\0\0\0\0tags\0\x08\x08");
+            v.extend(b"\x01Exe\0\"/games/x\"\0\x01icon\0\0\x02IsHidden\0");
+            v.extend(u32::from(*hidden).to_le_bytes());
+            v.extend(b"\x02LastPlayTime\0");
+            v.extend(played.to_le_bytes());
+            v.extend(b"\0tags\0\x08\x08");
         }
         v.extend(b"\x08\x08");
         v
     }
 
     #[test]
-    fn shortcut_names_from_binary_vdf() {
-        let data = shortcuts_vdf(&[(2_396_848_268, "Zombie Force"), (2_147_483_649, "Other")]);
+    fn shortcuts_from_binary_vdf() {
+        let data = shortcuts_vdf(&[
+            (2_396_848_268, "Zombie Force", false, 1_791_578_911),
+            (2_147_483_649, "Other", true, 0),
+        ]);
         assert_eq!(
             shortcuts(&data),
             [
-                (2_396_848_268, "Zombie Force".to_string()),
-                (2_147_483_649, "Other".to_string())
+                Shortcut {
+                    appid: 2_396_848_268,
+                    name: "Zombie Force".into(),
+                    hidden: false,
+                    last_play_time: 1_791_578_911,
+                    icon: None,
+                },
+                Shortcut {
+                    appid: 2_147_483_649,
+                    name: "Other".into(),
+                    hidden: true,
+                    last_play_time: 0,
+                    icon: None,
+                }
             ]
         );
         // Damaged: what came before.
@@ -505,6 +646,43 @@ pub(crate) mod tests {
             Some("Zombie Force")
         );
         assert_eq!(shortcut_name(steam.path(), 7), None);
+    }
+
+    #[test]
+    fn non_steam_games_are_in_the_library() {
+        let steam = tempfile::tempdir().unwrap();
+        fs::create_dir_all(steam.path().join("steamapps")).unwrap();
+        let config = steam.path().join("userdata/1234/config");
+        fs::create_dir_all(config.join("grid")).unwrap();
+        fs::write(
+            config.join("shortcuts.vdf"),
+            shortcuts_vdf(&[
+                (2_396_848_268, "Zombie Force", false, 1_791_578_911),
+                (2_147_483_649, "Hidden", true, 0),
+            ]),
+        )
+        .unwrap();
+        fs::write(config.join("grid/2396848268p.png"), b"png").unwrap();
+        let games = scan(steam.path());
+        assert_eq!(games.len(), 1, "the hidden one is left out: {games:?}");
+        let g = &games[0];
+        assert_eq!((g.appid, g.name.as_str()), (2_396_848_268, "Zombie Force"));
+        assert_eq!(g.install_state, InstallState::Installed);
+        assert_eq!(g.last_played, Some(1_791_578_911));
+        assert!(
+            g.artwork
+                .portrait
+                .as_deref()
+                .unwrap()
+                .ends_with("grid/2396848268p.png")
+        );
+        assert_eq!(g.artwork.header, None);
+    }
+
+    #[test]
+    fn game_ids_for_rungameid() {
+        assert_eq!(steam_game_id(570), 570);
+        assert_eq!(steam_game_id(2_396_848_268), 10_294_384_924_567_797_760);
     }
 
     #[test]

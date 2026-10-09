@@ -811,7 +811,8 @@ impl Shell {
                 let argv = vec![
                     steam_path.clone(),
                     "-silent".into(),
-                    format!("{STEAM_RUNGAMEID}{steam}"),
+                    // A non-Steam shortcut launches by its 64-bit game id.
+                    format!("{STEAM_RUNGAMEID}{}", library::steam_game_id(steam)),
                 ];
                 // Not under our reaper: the game runs under Steam's own reaper, which tags it
                 // with its Steam app id, and an outer reaper would override that.

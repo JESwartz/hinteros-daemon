@@ -83,6 +83,12 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   prefixes for future versions). inotify on the library directories (debounced, plus a periodic
   rescan) sends `games_changed` when the result changes. Launch a game with
   `apps.launch {url: "steam://rungameid/<appid>"}`; it is named from its manifest.
+  Non-Steam games added to Steam are listed too, from every Steam user's
+  `userdata/<user>/config/shortcuts.vdf` (binary VDF; hidden ones left out): their app id is the
+  shortcut's (high bit set), always installed, size 0, last played from `LastPlayTime`, artwork
+  from Steam's custom `config/grid/<appid>{p,,_hero,_logo}.{png,jpg}` and the chosen icon.
+  `apps.launch` with such an app id asks Steam for the 64-bit game id (`appid << 32 |
+  0x02000000`), the only form `steam://rungameid` accepts for a shortcut.
 - **Steam games** (`shell.rs`): focus for a game is `[game, 769, launcher]`: the game as soon
   as it has a window, Steam's own windows until then (the "Processing Vulkan shaders"
   pre-launch window, launch errors, cloud sync), the launcher otherwise; InputPlumber is in

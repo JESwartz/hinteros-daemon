@@ -22,6 +22,8 @@ pub const BACKGROUND: Rgb = Rgb(0x0E, 0x11, 0x18);
 pub const TEXT: Rgb = Rgb(0xF4, 0xF6, 0xFB);
 /// `surfaceHigh`: the guest's avatar.
 pub const SURFACE_HIGH: Rgb = Rgb(0x2A, 0x31, 0x47);
+/// `accent`: the loading spinner.
+pub const ACCENT: Rgb = Rgb(0x7A, 0xA2, 0xFF);
 
 /// The launcher's page at 1080 px of height (logical pixels at device pixel ratio 1).
 const AVATAR: f32 = 200.0;
@@ -29,6 +31,11 @@ const GAP: f32 = 32.0;
 const HEADLINE: f32 = 56.0;
 const LINE_HEIGHT: f32 = 1.25;
 const SPINNER: f32 = 56.0;
+/// The spinner's stroke (`CircularProgressIndicator(strokeWidth: 6)`).
+const SPINNER_STROKE: f32 = 6.0;
+/// How much of the circle the spinner's arc covers, and how far it turns per painted frame.
+const SPINNER_SWEEP: f32 = std::f32::consts::PI * 1.5;
+pub const SPINNER_STEP: f32 = std::f32::consts::PI / 8.0;
 const MARGIN: f32 = 64.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +161,9 @@ pub struct Layout {
     pub baseline: f32,
     /// Avatar centre and radius.
     pub avatar: Option<(f32, f32, f32)>,
+    /// The spinner below the line (with an avatar, as on the launcher's loading page): its
+    /// square's left and top edge and side, in whole pixels, and the stroke width.
+    pub spinner: Option<(u32, u32, u32, f32)>,
 }
 
 /// Lay out a line measured by `measure` (its metrics at a font size), with or without an avatar.
@@ -191,6 +201,19 @@ pub fn layout(w: u32, h: u32, avatar: bool, measure: impl Fn(f32) -> TextMetrics
         line_height,
         baseline,
         avatar: avatar.then(|| (wf / 2.0, top + AVATAR * unit / 2.0, AVATAR * unit / 2.0)),
+        spinner: avatar
+            .then(|| {
+                let side = (SPINNER * unit).round().max(4.0);
+                let left = ((wf - side) / 2.0).round();
+                let top = (line_top + line_height + GAP * unit).round();
+                (left >= 0.0 && top + side <= hf).then_some((
+                    left as u32,
+                    top as u32,
+                    side as u32,
+                    SPINNER_STROKE * unit,
+                ))
+            })
+            .flatten(),
     }
 }
 
@@ -221,6 +244,31 @@ impl Canvas {
         }
         let i = y as usize * self.w as usize + x as usize;
         self.px[i] = self.px[i].blend(c, alpha);
+    }
+
+    /// An arc of the circle of radius `r` (the stroke's middle) around (`cx`, `cy`), `width`
+    /// wide, from angle `start` clockwise (y down) over `sweep` radians, butt ends.
+    fn arc(&mut self, (cx, cy): (f32, f32), r: f32, width: f32, start: f32, sweep: f32, c: Rgb) {
+        use std::f32::consts::TAU;
+        let reach = r + width / 2.0 + 1.0;
+        let (x0, x1) = ((cx - reach).floor() as i64, (cx + reach).ceil() as i64);
+        let (y0, y1) = ((cy - reach).floor() as i64, (cy + reach).ceil() as i64);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                let d = (dx * dx + dy * dy).sqrt();
+                let radial = (width / 2.0 - (d - r).abs() + 0.5).clamp(0.0, 1.0);
+                if radial <= 0.0 {
+                    continue;
+                }
+                let a = (dy.atan2(dx) - start).rem_euclid(TAU);
+                // Anti-aliased ends: a pixel's share of the angle, at its distance.
+                let px_angle = 1.0 / d.max(1.0);
+                let inside = ((sweep - a) / px_angle + 0.5).clamp(0.0, 1.0)
+                    * ((a + px_angle / 2.0) / px_angle).clamp(0.0, 1.0);
+                self.blend(x, y, c, radial * inside);
+            }
+        }
     }
 
     /// A disc of radius `r` in `fill`, with a ring of width `ring.1` inside its edge.
@@ -318,9 +366,7 @@ impl<'a> Typeface<'a> {
 /// Paint `scene` on a `w` x `h` canvas.
 pub fn render(face: &Typeface<'_>, scene: &Scene, w: u32, h: u32) -> Canvas {
     let mut canvas = Canvas::new(w, h, BACKGROUND);
-    let l = layout(w, h, scene.avatar.is_some(), |px| {
-        face.measure(&scene.text, px)
-    });
+    let l = scene_layout(face, scene, w, h);
     if let (Some(a), Some((cx, cy, r))) = (&scene.avatar, l.avatar) {
         let ring = a.ring.map(|c| (c, (2.0 * r) * 0.03 + l.unit));
         canvas.disc(cx, cy, r, a.fill, ring);
@@ -348,7 +394,39 @@ pub fn render(face: &Typeface<'_>, scene: &Scene, w: u32, h: u32) -> Canvas {
         l.baseline,
         TEXT,
     );
+    if let Some((left, top, spinner)) = render_spinner(&l, 0.0) {
+        for y in 0..spinner.h {
+            for x in 0..spinner.w {
+                let i = (top + y) as usize * canvas.w as usize + (left + x) as usize;
+                canvas.px[i] = spinner.get(x, y);
+            }
+        }
+    }
     canvas
+}
+
+/// The layout [`render`] uses for `scene` on a `w` x `h` screen.
+pub fn scene_layout(face: &Typeface<'_>, scene: &Scene, w: u32, h: u32) -> Layout {
+    layout(w, h, scene.avatar.is_some(), |px| {
+        face.measure(&scene.text, px)
+    })
+}
+
+/// The spinner's square of `layout` (see [`Layout::spinner`]) with the arc turned `turn`
+/// radians: what a painter writes over the full picture each frame. `None` without a spinner.
+pub fn render_spinner(layout: &Layout, turn: f32) -> Option<(u32, u32, Canvas)> {
+    let (left, top, side, stroke) = layout.spinner?;
+    let mut canvas = Canvas::new(side, side, BACKGROUND);
+    let mid = side as f32 / 2.0;
+    canvas.arc(
+        (mid, mid),
+        mid - stroke / 2.0,
+        stroke,
+        turn - std::f32::consts::FRAC_PI_2,
+        SPINNER_SWEEP,
+        ACCENT,
+    );
+    Some((left, top, canvas))
 }
 
 /// A 32-bit truecolour framebuffer's pixel layout: the bit offsets of red, green, blue and, if
@@ -437,6 +515,18 @@ pub fn to_fb_bytes(canvas: &Canvas, fmt: PixelFormat, stride: usize, xoffset: us
     out
 }
 
+/// `canvas` as framebuffer rows of `canvas.w` pixels each (no stride padding), for writing a
+/// rectangle into a framebuffer row by row.
+pub fn to_fb_rows(canvas: &Canvas, fmt: PixelFormat) -> Vec<Vec<u8>> {
+    (0..canvas.h)
+        .map(|y| {
+            (0..canvas.w)
+                .flat_map(|x| fmt.pack(canvas.get(x, y)))
+                .collect()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +541,37 @@ mod tests {
             ascent: 0.8 * px,
             descent: 0.2 * px,
         }
+    }
+
+    #[test]
+    fn the_spinner_sits_below_the_line_and_turns() {
+        let l = layout(1920, 1080, true, mono("Loading Sam…"));
+        let (left, top, side, stroke) = l.spinner.unwrap();
+        assert_eq!(side, 56);
+        assert_eq!(stroke, 6.0);
+        assert_eq!(left, (1920 - 56) / 2);
+        assert!(top as f32 >= l.line_top + l.line_height, "below the line");
+        assert!(
+            layout(1920, 1080, false, mono("HinterOS"))
+                .spinner
+                .is_none()
+        );
+
+        // At turn 0 the arc starts at the top and runs clockwise for three quarters: the top,
+        // right and bottom of the ring are drawn, the upper-left quarter is not.
+        let (_, _, sq) = render_spinner(&l, 0.0).unwrap();
+        let ring = |x: f32, y: f32| sq.get(x as u32, y as u32);
+        let (mid, r) = (28.0, 28.0 - 3.0);
+        assert_eq!(ring(mid + 2.0, mid - r), ACCENT, "top");
+        assert_eq!(ring(mid + r, mid), ACCENT, "right");
+        assert_eq!(ring(mid, mid + r), ACCENT, "bottom");
+        let d = r / 2f32.sqrt();
+        assert_eq!(ring(mid - d, mid - d), BACKGROUND, "upper left");
+        assert_eq!(ring(mid, mid), BACKGROUND, "centre");
+        // A quarter turn later the gap is in the upper right.
+        let (_, _, sq) = render_spinner(&l, std::f32::consts::FRAC_PI_2).unwrap();
+        assert_eq!(sq.get((mid + d) as u32, (mid - d) as u32), BACKGROUND);
+        assert_eq!(sq.get((mid - d) as u32, (mid - d) as u32), ACCENT);
     }
 
     #[test]

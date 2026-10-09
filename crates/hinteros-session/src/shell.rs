@@ -738,11 +738,7 @@ impl Shell {
                 (key, name, Target::Command(argv))
             }
             LaunchRequest::Steam(id) => {
-                let name = self
-                    .steam_dir()
-                    .and_then(|dir| library::find_manifest(&dir, id))
-                    .map(|m| m.name)
-                    .unwrap_or_else(|| format!("Steam game {id}"));
+                let name = self.steam_game_name(id);
                 (format!("steam-{id}"), name, Target::Steam(id))
             }
         };
@@ -1114,21 +1110,25 @@ impl Shell {
         }
     }
 
-    /// Track a running Steam game we did not start; `None` if it is tracked already.
-    fn adopt_steam_game(&mut self, steam: u32, now: Instant) -> Option<String> {
-        if self.apps.values().any(|a| a.info.gamescope_app_id == steam) {
-            return None;
-        }
+    /// A Steam game's name: its manifest's, else its non-Steam shortcut's, else its number.
+    fn steam_game_name(&self, steam: u32) -> String {
         let dir = self.steam_dir();
-        let name = dir
-            .as_deref()
+        dir.as_deref()
             .and_then(|dir| library::find_manifest(dir, steam))
             .map(|m| m.name)
             .or_else(|| {
                 dir.as_deref()
                     .and_then(|dir| library::shortcut_name(dir, steam))
             })
-            .unwrap_or_else(|| format!("Steam game {steam}"));
+            .unwrap_or_else(|| format!("Steam game {steam}"))
+    }
+
+    /// Track a running Steam game we did not start; `None` if it is tracked already.
+    fn adopt_steam_game(&mut self, steam: u32, now: Instant) -> Option<String> {
+        if self.apps.values().any(|a| a.info.gamescope_app_id == steam) {
+            return None;
+        }
+        let name = self.steam_game_name(steam);
         info!(steam_app_id = steam, %name, "found running; tracking it");
         let id = format!("steam-{steam}");
         let info = RunningApp {

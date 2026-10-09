@@ -20,10 +20,12 @@
 //!   after the picker the greeter's compositor may still own the display when the splash starts;
 //!   the kernel shows the framebuffer again once it lets go, and logind puts the VT back to text
 //!   mode when the greeter's session ends: the painter repaints and takes graphics mode again.
-//! - It stops when a session controller holds the VT again after it was free (logind's
-//!   `VT_PROCESS` mode: the next compositor took control; fbcon stays off and the picture stays
-//!   until that compositor's first frame), when a newer splash replaces it
-//!   (`/run/hinteros/splash-painter`), or after 5 s. If it set graphics mode and no session holds
+//! - With a profile, the launcher's loading spinner turns below the line (only its square is
+//!   written each frame). Once a session controller holds the VT again after it was free
+//!   (logind's `VT_PROCESS` mode: the next compositor took control; fbcon stays off and the
+//!   picture stays until that compositor's first frame) only the spinner is painted, so the
+//!   wait for that first frame does not look like a hang. It stops when a newer splash replaces
+//!   it (`/run/hinteros/splash-painter`), or after 5 s. If it set graphics mode and no session holds
 //!   the VT when it stops, it writes the line as console text and puts the VT back in text mode:
 //!   a console is never left blank.
 //!
@@ -625,6 +627,22 @@ fn paint(a: &PaintArgs, started: Instant) -> std::io::Result<()> {
         fb.var.xoffset as usize,
     );
     debug_assert_eq!(frame.len(), len);
+    // The spinner turns every frame: only its square is written again.
+    let lay = splashdraw::scene_layout(&face, &scene, fb.var.xres, fb.var.yres);
+    let stride = fb.fix.line_length as u64;
+    let xoffset = fb.var.xoffset as u64;
+    let spin = |turn: f32| -> bool {
+        let Some((left, top, square)) = splashdraw::render_spinner(&lay, turn) else {
+            return true;
+        };
+        splashdraw::to_fb_rows(&square, fb.format)
+            .iter()
+            .enumerate()
+            .all(|(i, row)| {
+                let at = offset + (top as u64 + i as u64) * stride + (left as u64 + xoffset) * 4;
+                fb.file.write_all_at(row, at).is_ok()
+            })
+    };
 
     // The newest painter owns the screen.
     let claim = a.run_dir.join(PAINTER_FILE);
@@ -633,6 +651,7 @@ fn paint(a: &PaintArgs, started: Instant) -> std::io::Result<()> {
     let replaced = || claimed && std::fs::read_to_string(&claim).is_ok_and(|s| s != me);
 
     let (mut frames, mut released, mut set_graphics) = (0u32, false, false);
+    let (mut session, mut turn) = (false, 0.0f32);
     let stop = loop {
         if replaced() {
             break Stop::Replaced;
@@ -641,18 +660,30 @@ fn paint(a: &PaintArgs, started: Instant) -> std::io::Result<()> {
         if !controlled {
             released = true;
         } else if released {
-            break Stop::Session;
+            // The next compositor took control: the picture stays until its first frame,
+            // which takes a moment more. Keep the spinner turning meanwhile (only its square:
+            // nothing else changes, and once that frame is up the framebuffer is not shown).
+            session = true;
         }
-        if vtio::active_vt(&tty).ok() == Some(vt) {
+        turn += splashdraw::SPINNER_STEP;
+        if session {
+            if spin(turn) {
+                frames += 1;
+            }
+        } else if vtio::active_vt(&tty).ok() == Some(vt) {
             if !controlled && vtio::kd_mode(&tty).ok() != Some(vtio::KD_GRAPHICS) {
                 set_graphics |= vtio::set_kd_mode(&tty, vtio::KD_GRAPHICS).is_ok();
             }
-            if fb.file.write_all_at(&frame, offset).is_ok() {
+            if fb.file.write_all_at(&frame, offset).is_ok() && spin(turn) {
                 frames += 1;
             }
         }
         if started.elapsed() >= PAINT_FOR {
-            break Stop::Timeout;
+            break if session {
+                Stop::Session
+            } else {
+                Stop::Timeout
+            };
         }
         std::thread::sleep(PAINT_EVERY);
     };

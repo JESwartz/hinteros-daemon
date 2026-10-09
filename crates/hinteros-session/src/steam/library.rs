@@ -332,12 +332,55 @@ pub fn user_config_dirs(steam: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// The non-Steam games of every Steam user on this account, with the config directory they
-/// came from (for their artwork). The first user listing an app id wins.
+/// The Steam account signed in (or last signed in) on this Steam install, as its `userdata`
+/// directory name (the account id: SteamID64 - 76561197960265728), from
+/// `config/loginusers.vdf`: the user marked `MostRecent`, else the newest `Timestamp`.
+/// `None` when it cannot be told (no file, no users).
+pub fn active_account(steam: &Path) -> Option<u64> {
+    const STEAMID64_BASE: u64 = 76_561_197_960_265_728;
+    let text = fs::read_to_string(steam.join("config/loginusers.vdf")).ok()?;
+    let root = vdf::parse(&text).ok()?;
+    let users = root.obj("users")?;
+    let mut best: Option<(bool, u64, u64)> = None;
+    for (id, user) in users.iter() {
+        let (Ok(id), vdf::Value::Obj(user)) = (id.parse::<u64>(), user) else {
+            continue;
+        };
+        let Some(account) = id.checked_sub(STEAMID64_BASE) else {
+            continue;
+        };
+        let key = (
+            user.str("MostRecent") == Some("1"),
+            user.num::<u64>("Timestamp").unwrap_or(0),
+            account,
+        );
+        if best.is_none_or(|b| (key.0, key.1) > (b.0, b.1)) {
+            best = Some(key);
+        }
+    }
+    best.map(|(_, _, account)| account)
+}
+
+/// The config directories whose non-Steam games are listed: the signed-in Steam account's (a
+/// shortcut of another account on the same install cannot be launched: Steam answers "game
+/// configuration unavailable"), or every account's when that cannot be told.
+fn shortcut_config_dirs(steam: &Path) -> Vec<PathBuf> {
+    let all = user_config_dirs(steam);
+    match active_account(steam) {
+        Some(account) => {
+            let mine = steam.join(format!("userdata/{account}/config"));
+            all.into_iter().filter(|d| *d == mine).collect()
+        }
+        None => all,
+    }
+}
+
+/// The non-Steam games of the signed-in Steam account ([`shortcut_config_dirs`]), with the
+/// config directory they came from (for their artwork). The first one listing an app id wins.
 pub fn all_shortcuts(steam: &Path) -> Vec<(Shortcut, PathBuf)> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
-    for config in user_config_dirs(steam) {
+    for config in shortcut_config_dirs(steam) {
         let Ok(data) = fs::read(config.join("shortcuts.vdf")) else {
             continue;
         };
@@ -677,6 +720,52 @@ pub(crate) mod tests {
                 .ends_with("grid/2396848268p.png")
         );
         assert_eq!(g.artwork.header, None);
+    }
+
+    #[test]
+    fn only_the_signed_in_accounts_non_steam_games() {
+        let steam = tempfile::tempdir().unwrap();
+        fs::create_dir_all(steam.path().join("steamapps")).unwrap();
+        for (account, appid, name) in [
+            (667_535_989u64, 2_396_848_268u32, "Zombie Force"),
+            (265_384_624, 2_147_483_650, "Lua's game"),
+        ] {
+            let config = steam.path().join(format!("userdata/{account}/config"));
+            fs::create_dir_all(&config).unwrap();
+            fs::write(
+                config.join("shortcuts.vdf"),
+                shortcuts_vdf(&[(appid, name, false, 0)]),
+            )
+            .unwrap();
+        }
+        // Without loginusers.vdf: every account's.
+        assert_eq!(scan(steam.path()).len(), 2);
+        // The newest Timestamp is the signed-in one.
+        fs::create_dir_all(steam.path().join("config")).unwrap();
+        let login = |recent: &str| {
+            format!(
+                "\"users\"\n{{\n\t\"76561198627801717\"\n\t{{\n\t\t\"AccountName\"\t\t\"dev\"\n\
+                 \t\t\"Timestamp\"\t\t\"1791579358\"\n{recent}\t}}\n\
+                 \t\"76561198225650352\"\n\t{{\n\t\t\"AccountName\"\t\t\"lua\"\n\
+                 \t\t\"Timestamp\"\t\t\"1791581406\"\n\t}}\n}}\n"
+            )
+        };
+        fs::write(steam.path().join("config/loginusers.vdf"), login("")).unwrap();
+        assert_eq!(active_account(steam.path()), Some(265_384_624));
+        let names: Vec<String> = scan(steam.path()).into_iter().map(|g| g.name).collect();
+        assert_eq!(names, ["Lua's game"]);
+        // MostRecent wins over a newer Timestamp.
+        fs::write(
+            steam.path().join("config/loginusers.vdf"),
+            login("\t\t\"MostRecent\"\t\t\"1\"\n"),
+        )
+        .unwrap();
+        assert_eq!(active_account(steam.path()), Some(667_535_989));
+        assert_eq!(
+            shortcut_name(steam.path(), 2_396_848_268).as_deref(),
+            Some("Zombie Force")
+        );
+        assert_eq!(shortcut_name(steam.path(), 2_147_483_650), None);
     }
 
     #[test]

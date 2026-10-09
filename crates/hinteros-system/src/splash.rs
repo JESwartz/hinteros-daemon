@@ -9,9 +9,12 @@
 //! - The helper (run by pam_exec as root, `session optional`) validates `PAM_TTY` (a virtual
 //!   console, opened without following symlinks), resolves the name and colour, clears the
 //!   console's text in the background colour (what fbcon shows if it ever repaints) and checks
-//!   that `/dev/fb0` is a 32-bit truecolour framebuffer and the font loads. Then it spawns the
-//!   painter (`hinteros-system splash-paint`, stdio on /dev/null, every other descriptor
-//!   close-on-exec, its own session) and exits 0 at once: PAM never waits for the painting.
+//!   that `/dev/fb0` is a 32-bit truecolour framebuffer and the font loads. Then it starts the
+//!   painter (`hinteros-system splash-paint`) as a transient systemd service
+//!   (`hinteros-splash-<pid>.service`: outside every session scope, so a closing session cannot
+//!   take it along; without the bus, a direct child with stdio on /dev/null, every other
+//!   descriptor close-on-exec, in its own session) and exits 0 at once: PAM never waits for the
+//!   painting.
 //! - The painter switches the VT to `KD_GRAPHICS` (fbcon stops drawing on it) and writes the
 //!   picture to `/dev/fb0` every 80 ms, while the VT is the foreground one. On the first login
 //!   after the picker the greeter's compositor may still own the display when the splash starts;
@@ -331,7 +334,12 @@ impl Fb {
     }
 
     fn describe(&self) -> String {
-        format!("{}x{} {:?}", self.var.xres, self.var.yres, self.format)
+        let f = self.format;
+        let alpha = f.alpha.map(|a| format!(" a{a}")).unwrap_or_default();
+        format!(
+            "{}x{}, 32 bpp r{} g{} b{}{alpha}",
+            self.var.xres, self.var.yres, f.red, f.green, f.blue
+        )
     }
 }
 
@@ -373,6 +381,7 @@ pub fn run(
     user: &str,
     pam_tty: Option<&str>,
     font: Option<&Path>,
+    bus: Option<&str>,
     now: i64,
 ) {
     let Some(path) = pam_tty.and_then(tty_path) else {
@@ -406,8 +415,9 @@ pub fn run(
             })
             .and_then(|()| Fb::open(Path::new(FB_PATH)).map_err(|e| format!("{FB_PATH}: {e}")))
             .and_then(|fb| {
-                spawn_painter(&path, font, &paths.run_dir, who.as_ref())
-                    .map(|()| fb.describe())
+                let args = painter_args(&path, font, &paths.run_dir, who.as_ref());
+                start_painter(bus, &args)
+                    .map(|how| format!("{}, painter: {how}", fb.describe()))
                     .map_err(|e| format!("painter: {e}"))
             }),
     };
@@ -449,39 +459,94 @@ pub fn run(
     }
 }
 
-/// Start the painter for `tty` and return at once (see the module docs).
-fn spawn_painter(
+/// The painter's command line after the program.
+pub fn painter_args(
     tty: &Path,
     font: &Path,
     run_dir: &Path,
     who: Option<&Identity>,
-) -> std::io::Result<()> {
-    vtio::cloexec_inherited();
-    let mut cmd = Command::new("/proc/self/exe");
-    cmd.arg("splash-paint")
-        .arg("--tty")
-        .arg(tty)
-        .arg("--font")
-        .arg(font)
-        .arg("--run-dir")
-        .arg(run_dir);
+) -> Vec<String> {
+    let mut args = vec![
+        "splash-paint".to_owned(),
+        format!("--tty={}", tty.display()),
+        format!("--font={}", font.display()),
+        format!("--run-dir={}", run_dir.display()),
+    ];
     if let Some(w) = who {
         // `--name=` so that a name starting with '-' is still the value.
-        cmd.arg(format!("--name={}", sanitize(&w.name)));
+        args.push(format!("--name={}", sanitize(&w.name)));
         if let Some(c) = w.color.as_deref().filter(|c| crate::profiles::is_color(c)) {
-            cmd.arg(format!("--color={c}"));
+            args.push(format!("--color={c}"));
         }
         if w.guest {
-            cmd.arg("--guest");
+            args.push("--guest".to_owned());
         }
     }
-    cmd.env_clear()
-        .current_dir("/")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // Not waited for: when this helper exits the painter is reparented (and reaped) by init.
-    cmd.spawn().map(drop)
+    args
+}
+
+/// Start the painter and return at once (see the module docs): a transient systemd service, so
+/// that it runs outside every session's scope (pam_exec may run this helper in a process that
+/// already belongs to the session being closed, and systemd kills a closing scope's processes);
+/// without the bus, a direct child in its own session. Says which.
+fn start_painter(bus: Option<&str>, args: &[String]) -> std::io::Result<String> {
+    let exe = std::fs::read_link("/proc/self/exe")?;
+    let unit = format!("hinteros-splash-{}.service", std::process::id());
+    match start_unit(bus, &unit, &exe, args) {
+        Ok(()) => Ok(unit),
+        Err(e) => {
+            info!("splash: no transient unit ({e}); spawning the painter");
+            vtio::cloexec_inherited();
+            Command::new(&exe)
+                .args(args)
+                .env_clear()
+                .current_dir("/")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            // Not waited for: when this helper exits the painter is reparented to init.
+            Ok("a detached process".to_owned())
+        }
+    }
+}
+
+/// `StartTransientUnit` for the painter, waiting at most 2 s for systemd to accept it.
+fn start_unit(bus: Option<&str>, unit: &str, exe: &Path, args: &[String]) -> anyhow::Result<()> {
+    use zbus::zvariant::Value;
+    let mut argv = vec![exe.to_string_lossy().into_owned()];
+    argv.extend(args.iter().cloned());
+    let exec = vec![(exe.to_string_lossy().into_owned(), argv, false)];
+    let props: Vec<(&str, Value<'_>)> = vec![
+        ("Description", Value::from("HinterOS handover splash")),
+        ("ExecStart", Value::from(exec)),
+        ("CollectMode", Value::from("inactive-or-failed")),
+        // A hard bound on top of the painter's own 5 s.
+        ("RuntimeMaxUSec", Value::from(15_000_000u64)),
+        ("StandardOutput", Value::from("null")),
+    ];
+    let aux: Vec<(&str, Vec<(&str, Value<'_>)>)> = Vec::new();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let conn = match bus {
+                Some(a) => zbus::connection::Builder::address(a)?.build().await?,
+                None => zbus::Connection::system().await?,
+            };
+            conn.call_method(
+                Some("org.freedesktop.systemd1"),
+                "/org/freedesktop/systemd1",
+                Some("org.freedesktop.systemd1.Manager"),
+                "StartTransientUnit",
+                &(unit, "fail", props, aux),
+            )
+            .await?;
+            anyhow::Ok(())
+        })
+        .await?
+    })
 }
 
 /// The painter's arguments (`hinteros-system splash-paint`).
@@ -519,7 +584,8 @@ enum Stop {
 /// `hinteros-system splash-paint`: paint until the next compositor holds the VT, a newer
 /// splash replaces this one, or [`PAINT_FOR`] passed. Logs, never fails.
 pub fn paint_main(a: &PaintArgs) {
-    // Its own session: nothing of greetd's or PAM's process group or terminal.
+    // Its own session when spawned directly (a systemd service already is one): nothing of
+    // greetd's or PAM's process group or terminal.
     let _ = rustix::process::setsid();
     let started = Instant::now();
     if let Err(e) = paint(a, started) {
@@ -635,6 +701,7 @@ fn paint(a: &PaintArgs, started: Instant) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     const FONT: &[u8] = include_bytes!("../fixtures/AtkinsonHyperlegible-Bold.otf");
 
@@ -748,6 +815,55 @@ mod tests {
             narrow.contains("\x1b[2;1H\x1b[1mLoading\x1b[0m"),
             "{narrow:?}"
         );
+    }
+
+    #[test]
+    fn painter_command_line() {
+        let sam = Identity {
+            name: "-Sam \x1b[2J".into(),
+            color: Some("orange; rm".into()),
+            guest: false,
+        };
+        let a = painter_args(
+            Path::new("/dev/tty1"),
+            Path::new("/f.otf"),
+            Path::new("/run/hinteros"),
+            Some(&sam),
+        );
+        assert_eq!(
+            a,
+            [
+                "splash-paint",
+                "--tty=/dev/tty1",
+                "--font=/f.otf",
+                "--run-dir=/run/hinteros",
+                "--name=-Sam [2J",
+            ]
+        );
+        // What the painter parses back.
+        let cli = crate::config::Cli::try_parse_from(
+            std::iter::once("hinteros-system".to_owned()).chain(a),
+        )
+        .unwrap();
+        let Some(crate::config::Command::SplashPaint(p)) = cli.command else {
+            panic!("not splash-paint");
+        };
+        assert_eq!(p.name.as_deref(), Some("-Sam [2J"));
+        assert_eq!((p.color, p.guest), (None, false));
+        let g = painter_args(
+            Path::new("/dev/tty1"),
+            Path::new("/f.otf"),
+            Path::new("/run/hinteros"),
+            Some(&Identity::guest()),
+        );
+        assert_eq!(g[4..], ["--name=Guest", "--guest"]);
+        let t = painter_args(
+            Path::new("/dev/tty1"),
+            Path::new("/f.otf"),
+            Path::new("/r"),
+            None,
+        );
+        assert_eq!(t.len(), 4);
     }
 
     #[test]

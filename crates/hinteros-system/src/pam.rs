@@ -344,7 +344,7 @@ pub fn main(verb: Verb, ctx: &Ctx, font: Option<&Path>) -> ExitCode {
         let tty = std::env::var("PAM_TTY").ok();
         let paths = &ctx.paths;
         let _ = std::panic::catch_unwind(|| {
-            crate::splash::run(paths, &user, tty.as_deref(), font, now)
+            crate::splash::run(paths, &user, tty.as_deref(), font, ctx.bus.as_deref(), now)
         });
         return ExitCode::SUCCESS;
     }

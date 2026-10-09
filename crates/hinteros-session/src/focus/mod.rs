@@ -55,6 +55,12 @@ pub trait FocusControl: Send {
     fn focus_steam_game(&mut self, app_id: u32) -> anyhow::Result<()> {
         self.focus_app(app_id)
     }
+    /// Show Steam (Big Picture) with the games it started itself (from its library) in front
+    /// ([`baselayer_for_steam_client`]).
+    fn focus_steam_client(&mut self, games: &[u32]) -> anyhow::Result<()> {
+        let _ = games;
+        self.focus_app(hinteros_api::session::STEAM_CLIENT_GAMESCOPE_APP_ID)
+    }
     /// Show or hide the on-screen keyboard's overlay window (see [`crate::osk`]).
     fn set_osk_visible(&mut self, visible: bool) -> anyhow::Result<()>;
 }
@@ -77,6 +83,20 @@ pub fn baselayer_for_steam_game(app_id: u32, launcher_app_id: u32) -> Vec<u32> {
         hinteros_api::session::STEAM_CLIENT_GAMESCOPE_APP_ID,
         launcher_app_id,
     ]
+}
+
+/// The `GAMESCOPECTRL_BASELAYER_APPID` list for Steam (Big Picture) while it runs games it
+/// started itself: those games' windows first (they have their own app ids: the shortcut's,
+/// or the one the game's Steam API reports), then Steam's windows, then the launcher.
+pub fn baselayer_for_steam_client(games: &[u32], launcher_app_id: u32) -> Vec<u32> {
+    games
+        .iter()
+        .copied()
+        .chain([
+            hinteros_api::session::STEAM_CLIENT_GAMESCOPE_APP_ID,
+            launcher_app_id,
+        ])
+        .collect()
 }
 
 /// Focus control when gamescope integration is off (dev desktops): does nothing.
@@ -110,5 +130,10 @@ mod tests {
         assert_eq!(baselayer_for(Some(570), 9), vec![570, 9]);
         assert_eq!(baselayer_for(Some(9), 9), vec![9]);
         assert_eq!(baselayer_for_steam_game(570, 9), vec![570, 769, 9]);
+        assert_eq!(baselayer_for_steam_client(&[], 9), vec![769, 9]);
+        assert_eq!(
+            baselayer_for_steam_client(&[5, 480], 9),
+            vec![5, 480, 769, 9]
+        );
     }
 }

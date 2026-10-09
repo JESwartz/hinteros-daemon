@@ -25,7 +25,8 @@ use x11rb::wrapper::ConnectionExt as _;
 
 use super::dummies;
 use super::{
-    FocusControl, GamescopeEvent, GamescopeState, baselayer_for, baselayer_for_steam_game,
+    FocusControl, GamescopeEvent, GamescopeState, baselayer_for, baselayer_for_steam_client,
+    baselayer_for_steam_game,
 };
 use crate::osk;
 use crate::procs;
@@ -215,6 +216,10 @@ impl FocusControl for GamescopeFocus {
 
     fn focus_steam_game(&mut self, app_id: u32) -> Result<()> {
         self.set_baselayer(baselayer_for_steam_game(app_id, self.launcher_app_id))
+    }
+
+    fn focus_steam_client(&mut self, games: &[u32]) -> Result<()> {
+        self.set_baselayer(baselayer_for_steam_client(games, self.launcher_app_id))
     }
 
     fn set_osk_visible(&mut self, visible: bool) -> Result<()> {

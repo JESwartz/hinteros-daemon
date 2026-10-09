@@ -54,7 +54,8 @@ use tracing::{debug, info, warn};
 use crate::apps::{ChildExit, Spawner};
 use crate::config::{AppConfig, Config, FieldSummon};
 use crate::focus::{
-    FocusControl, GamescopeEvent, GamescopeState, baselayer_for, baselayer_for_steam_game,
+    FocusControl, GamescopeEvent, GamescopeState, baselayer_for, baselayer_for_steam_client,
+    baselayer_for_steam_game,
 };
 use crate::icons::{IconStore, Refresher};
 use crate::input::pointer::{CursorChange, CursorControl, NoCursor, PointerState};
@@ -942,11 +943,57 @@ impl Shell {
     /// it never showed one in time), is in fact still there: Steam's reaper for it is alive,
     /// or, while it never had a window, Steam shows windows of its own (shader pre-caching,
     /// a pre-launch or error dialog). Not for other apps, nor for games being closed.
+    /// The games Steam (Big Picture) runs that it started itself, from its library: no app of
+    /// ours. Each has a Steam reaper with the game's (or shortcut's) app id, and its window
+    /// may carry yet another id (the one its Steam API reports, e.g. 480 for Spacewar), so the
+    /// focusable windows that are nobody else's count too while such a reaper is alive.
+    fn steam_client_games(&mut self) -> Vec<u32> {
+        if !self.apps.contains_key(STEAM_CLIENT_APP_ID) {
+            return Vec::new();
+        }
+        let launcher = self.cfg.launcher_app_id;
+        let ours: Vec<u32> = self
+            .apps
+            .values()
+            .map(|a| a.info.gamescope_app_id)
+            .collect();
+        let foreign = |id: &u32| *id != 0 && *id != launcher && !ours.contains(id);
+        let mut games: Vec<u32> = self
+            .procs
+            .steam_games()
+            .into_iter()
+            .filter(foreign)
+            .collect();
+        if games.is_empty() {
+            return games;
+        }
+        if let Some(state) = &self.gamescope {
+            for id in state.focusable_apps.iter().filter(|id| foreign(id)) {
+                if !games.contains(id) {
+                    games.push(*id);
+                }
+            }
+        }
+        games
+    }
+
     fn steam_game_still_running(&mut self, id: &str, reason: ExitReason) -> bool {
         let Some(app) = self.apps.get(id) else {
             return false;
         };
-        if app.info.source != AppSource::Steam || app.closing.is_some() {
+        if app.closing.is_some() {
+            return false;
+        }
+        if app.info.source == AppSource::SteamClient {
+            // A game Steam started from its library has the screen (its window has its own
+            // app id), so Steam's window went away: Steam is still the app in front.
+            let playing = !self.steam_client_games().is_empty();
+            if playing {
+                debug!(?reason, "no Steam window, but Steam runs a game of its own");
+            }
+            return playing;
+        }
+        if app.info.source != AppSource::Steam {
             return false;
         }
         let (gs_id, launching) = (
@@ -1119,11 +1166,19 @@ impl Shell {
             self.written.pop_front();
         }
         let launcher = self.cfg.launcher_app_id;
+        // Steam with games it started itself: their windows in front of Steam's.
+        let client_games = if self.focused.as_deref() == Some(STEAM_CLIENT_APP_ID) {
+            self.steam_client_games()
+        } else {
+            Vec::new()
+        };
         self.written.push_back(match target {
+            _ if !client_games.is_empty() => baselayer_for_steam_client(&client_games, launcher),
             Some((id, true)) => baselayer_for_steam_game(id, launcher),
             _ => baselayer_for(target.map(|(id, _)| id), launcher),
         });
         let result = match target {
+            _ if !client_games.is_empty() => self.focus.focus_steam_client(&client_games),
             // Steam's own windows (shader pre-caching, launch errors) until the game has one.
             Some((id, true)) => self.focus.focus_steam_game(id),
             Some((id, false)) => self.focus.focus_app(id),
@@ -1997,7 +2052,8 @@ impl Shell {
                     .is_some_and(|a| tracked_by_windows(a.info.source) && !a.seen_focusable);
                 if self.steam_game_still_running(&id, ExitReason::Exited) {
                     // Between windows (a launcher, a loading screen): Steam's windows or the
-                    // launcher show meanwhile; look again later.
+                    // launcher show meanwhile; or Steam runs a game of its own: look again
+                    // later.
                     self.focus_lost_at = Some(now + self.cfg.focus_loss_debounce);
                 } else if native {
                     // Seen only as focused, never as an Xwayland window: losing focus while
@@ -2087,6 +2143,8 @@ mod tests {
         FocusApp(u32),
         /// `[game, 769, launcher]`.
         FocusSteamGame(u32),
+        /// `[games..., 769, launcher]`.
+        FocusSteamClient(Vec<u32>),
         Mode(InterceptMode),
         Spawn {
             key: String,
@@ -2132,6 +2190,10 @@ mod tests {
         }
         fn focus_steam_game(&mut self, app_id: u32) -> anyhow::Result<()> {
             self.0.push(Call::FocusSteamGame(app_id));
+            Ok(())
+        }
+        fn focus_steam_client(&mut self, games: &[u32]) -> anyhow::Result<()> {
+            self.0.push(Call::FocusSteamClient(games.to_vec()));
             Ok(())
         }
         fn set_osk_visible(&mut self, visible: bool) -> anyhow::Result<()> {
@@ -3152,6 +3214,51 @@ mod tests {
         assert_eq!(e.code, ErrorCode::AppNotFound.code());
         t.call("apps.close", json!({"id": launched.id})).unwrap();
         t.launch(json!({"id": "new"}));
+    }
+
+    #[test]
+    fn a_game_steam_starts_itself_keeps_steam_in_front() {
+        let mut t = T::new();
+        t.launch(json!({"id": "steam"}));
+        t.gamescope(Some(769), &[769]);
+        steam_windows(&mut t, &[(10, "Steam Big Picture Mode")]);
+        t.log.take();
+        // A non-Steam shortcut from Steam's library: its reaper has the shortcut's id, its
+        // window the id its Steam API reports (480); Steam's window goes away meanwhile.
+        const SHORTCUT: u32 = 2_396_848_268;
+        t.procs
+            .lock()
+            .unwrap()
+            .steam_reapers
+            .insert(SHORTCUT, vec![500]);
+        steam_windows(&mut t, &[]);
+        t.gamescope(Some(480), &[480]);
+        t.advance(Duration::from_secs(5));
+        assert_eq!(t.shell.focused(), Some("steam"), "not back to the launcher");
+        assert!(!t.log.take().contains(&Call::FocusLauncher));
+        // Home, then Steam again: the game, not Steam's (hidden) library.
+        t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
+        assert_eq!(t.shell.focused(), None);
+        t.gamescope(Some(L), &[480]);
+        t.log.take();
+        t.launch(json!({"id": "steam"}));
+        assert!(
+            t.log
+                .take()
+                .contains(&Call::FocusSteamClient(vec![SHORTCUT, 480]))
+        );
+        t.gamescope(Some(480), &[480]);
+        // The game quits: Steam's window is back, and Steam alone again.
+        t.procs.lock().unwrap().steam_reapers.remove(&SHORTCUT);
+        t.gamescope(Some(769), &[769]);
+        t.advance(Duration::from_secs(5));
+        assert_eq!(t.shell.focused(), Some("steam"));
+        t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
+        t.log.take();
+        t.launch(json!({"id": "steam"}));
+        assert!(t.log.take().contains(&Call::FocusApp(769)));
     }
 
     #[test]

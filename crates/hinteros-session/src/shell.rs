@@ -1992,6 +1992,11 @@ impl Shell {
                 None
             };
             self.set_focus(back);
+        } else if id == STEAM_CLIENT_APP_ID {
+            // Steam writes its own focus order to show itself (its "Shutting down" screen
+            // while something else is in front); once it is gone nothing in that order has a
+            // window and gamescope keeps Steam's last frame: put ours back.
+            self.apply_focus();
         }
     }
 
@@ -3455,7 +3460,10 @@ mod tests {
         t.gamescope(Some(L), &[]);
         steam_windows(&mut t, &[]);
         t.advance(MS(10_000));
-        assert!(!t.log.take().iter().any(|c| matches!(c, Call::Signal(..))));
+        let log = t.log.take();
+        assert!(!log.iter().any(|c| matches!(c, Call::Signal(..))));
+        // Steam wrote its own focus order for its "Shutting down" screen: ours goes back.
+        assert!(log.contains(&Call::FocusLauncher), "{log:?}");
         assert_eq!(
             t.events(),
             [ev(

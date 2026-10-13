@@ -1163,7 +1163,7 @@
     },
     "system.update.apply": {
       "summary": "Relayed to the system service's update.apply. Install the revision found by the last update.check (job). Action org.hinteros.system.update.apply.",
-      "description": "rev must equal the last verified check result's available.rev for the current channel and locked revision, else state_conflict. The job re-verifies it, locks the hinteros input to ?rev=<rev> (never re-fetching the branch) and runs the apply flow.",
+      "description": "rev must equal the last verified check result's available.rev for the current channel and locked revision, else state_conflict. The job re-verifies it, locks the hinteros input to ?rev=<rev> (never re-fetching the branch) and runs the apply flow. On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin, from every profile (the guest's included): pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet; an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root. The PIN is checked before rev is compared with the last check. system.update.check needs no PIN.",
       "since": "0.6",
       "params": {
         "type": "object",
@@ -1174,6 +1174,9 @@
         "properties": {
           "rev": {
             "$ref": "#/$defs/Rev"
+          },
+          "admin_pin": {
+            "$ref": "#/$defs/Pin"
           }
         }
       },
@@ -1188,22 +1191,38 @@
         "rate_limited",
         "job_busy",
         "insufficient_resources",
-        "state_conflict"
+        "state_conflict",
+        "pin_required"
       ],
       "examples": [
         {
           "name": "started",
           "params": {
-            "rev": "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5"
+            "rev": "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5",
+            "admin_pin": "2468"
           },
           "result": {
             "job_id": "3f9a0c2b7e4d1a65"
           }
         },
         {
+          "name": "no admin PIN",
+          "params": {
+            "rev": "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5"
+          },
+          "error": {
+            "code": 3016,
+            "message": "a PIN is needed",
+            "data": {
+              "pin": "admin"
+            }
+          }
+        },
+        {
           "name": "not the checked revision",
           "params": {
-            "rev": "1111111111111111111111111111111111111111"
+            "rev": "1111111111111111111111111111111111111111",
+            "admin_pin": "2468"
           },
           "error": {
             "code": 3007,

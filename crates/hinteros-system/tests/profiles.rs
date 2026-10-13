@@ -30,6 +30,9 @@ const PROFILES: &str = r#"{"version": 1, "next": 3, "profiles": {
 /// The admin profile's PIN in these tests.
 const ADMIN_PIN: &str = "2468";
 
+/// A well-formed revision for `update.apply`.
+const UPDATE_REV: &str = "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5";
+
 fn root_with(profiles: Option<&str>) -> Root {
     let root = Root::create();
     std::fs::write(root.p("etc/hinteros/state.json"), STATE2).unwrap();
@@ -852,7 +855,8 @@ async fn reset_pin_from_the_terminal() {
     .unwrap();
 }
 
-/// Rollback, channel and base switches and hardware re-detect need the admin profile's PIN
+/// Rollback, channel and base switches, hardware re-detect and installing a system update
+/// (update.apply) need the admin profile's PIN
 /// (system API 0.5): missing or wrong is `pin_required {pin: admin}` before anything else
 /// happens; right, the method goes on as before. Without an admin profile (first-boot mode)
 /// they are refused like every admin action; an admin profile without a PIN yet passes.
@@ -870,6 +874,8 @@ async fn box_wide_actions_need_the_admin_pin() {
         // Already on unstable: the PIN is still checked first.
         ("base.set", json!({"base": "unstable"})),
         ("hardware.redetect", json!({})),
+        // Installing a system update, also before the revision is looked at.
+        ("update.apply", json!({"rev": UPDATE_REV})),
     ];
     for (method, params) in &guarded {
         let e = call(&mut c, method, params.clone()).await.unwrap_err();
@@ -912,6 +918,16 @@ async fn box_wide_actions_need_the_admin_pin() {
     assert_eq!(r["job_id"], Value::Null);
     job(&sys, &mut c, "hardware.redetect", with(&guarded[3].1)).await;
     assert!(root.read("facter.log").contains("-o"));
+    // Past the PIN, update.apply looks at the revision: nothing was checked, so it is refused.
+    let e = call(&mut c, "update.apply", with(&guarded[4].1))
+        .await
+        .unwrap_err();
+    assert_ne!(code(&e), ErrorCode::PinRequired.code(), "{e}");
+    assert_ne!(code(&e), ErrorCode::InvalidParams.code(), "{e}");
+    // update.check stays open: no PIN asked.
+    if let Err(e) = call(&mut c, "update.check", json!({})).await {
+        assert_ne!(code(&e), ErrorCode::PinRequired.code(), "{e}");
+    }
     // The audit names the PIN that was checked, never the PIN.
     let audit = sys.audit();
     assert!(audit.iter().any(|e| {
@@ -945,6 +961,10 @@ async fn box_wide_actions_without_an_admin_profile() {
         (
             "base.set",
             json!({"base": "unstable", "admin_pin": ADMIN_PIN}),
+        ),
+        (
+            "update.apply",
+            json!({"rev": UPDATE_REV, "admin_pin": ADMIN_PIN}),
         ),
     ] {
         let e = call(&mut c, method, params).await.unwrap_err();

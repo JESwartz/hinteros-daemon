@@ -659,6 +659,7 @@ impl Request {
             }
             UpdateApply::NAME => {
                 let p: UpdateApplyParams = decode::<UpdateApply>(params)?;
+                check_admin_pin(p.admin_pin.as_deref())?;
                 if !is_rev(&p.rev) {
                     return Err(ErrorObject::invalid_field(
                         "rev",
@@ -1182,6 +1183,8 @@ impl Service {
                 .map_err(internal)
             }
             Request::UpdateApply(p) => {
+                self.check_box_admin(uid, UpdateApply::NAME, p.admin_pin.as_deref())
+                    .await?;
                 let table = self
                     .channel_table()
                     .ok_or_else(|| internal("this system has no update channel table"))?;

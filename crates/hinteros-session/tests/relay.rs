@@ -69,6 +69,15 @@ fn fake_system(
                                     "needs the admin password",
                                     json!({"action": "org.hinteros.system.ssh"}),
                                 )),
+                                // Installing an update needs the admin PIN (system API 0.5).
+                                "update.apply" if params["admin_pin"] == "2468" => {
+                                    Ok(json!({"job_id": "3f9a0c2b7e4d1a65"}))
+                                }
+                                "update.apply" => Err(hinteros_api::ErrorObject::with_data(
+                                    ErrorCode::PinRequired,
+                                    "a PIN is needed",
+                                    json!({"pin": "admin"}),
+                                )),
                                 m => Err(hinteros_api::server::method_not_found(m)),
                             };
                             write_message(&mut w, &jsonrpc::response(&id, outcome)).await.unwrap();
@@ -133,6 +142,26 @@ async fn relays_methods_errors_and_job_events() {
     assert!(methods.iter().any(|(m, _)| m == "subscribe"));
     assert!(methods.contains(&("ssh.set".to_string(), json!({"enabled": true}))));
     assert!(methods.iter().any(|(m, _)| m == "system.info"));
+
+    // system.update.apply carries the admin PIN through, and pin_required back unchanged.
+    let rev = "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5";
+    let e = call(&mut c, "system.update.apply", json!({"rev": rev}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["code"], ErrorCode::PinRequired.code());
+    assert_eq!(e["data"], json!({"pin": "admin"}));
+    let with_pin = json!({"rev": rev, "admin_pin": "2468"});
+    let r = call(&mut c, "system.update.apply", with_pin.clone())
+        .await
+        .unwrap();
+    assert_eq!(r["job_id"], "3f9a0c2b7e4d1a65");
+    let mut applied = Vec::new();
+    while let Ok((m, p)) = seen.try_recv() {
+        if m == "update.apply" {
+            applied.push(p);
+        }
+    }
+    assert_eq!(applied, [json!({"rev": rev}), with_pin]);
 
     // A slow relayed call does not hold up the connection: the launcher can answer a password
     // prompt (auth.respond) on it while system.ssh.set waits. Responses come by id.

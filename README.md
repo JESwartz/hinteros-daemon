@@ -1242,10 +1242,11 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   starter env only after the account's switch; a removal ends the account's processes, switches
   without it, then deletes the home with `datadel`'s no-symlink walk, the PIN, the metadata and the
   app links. Profiles (and the guest) without an env get the starter env while the box is idle.
-- **Admin PIN for box-wide actions** (0.5): `rollback`, `channel.set`, `base.set` and
-  `hardware.redetect` take `admin_pin`; on a schema-2 box it is checked first (`pin_required {pin:
-  admin}` when missing or wrong, or without an admin profile). Not on schema 1, not for root; an
-  admin profile without a PIN yet passes.
+- **Admin PIN for box-wide actions** (0.5): `rollback`, `update.apply`, `channel.set`, `base.set`
+  and `hardware.redetect` take `admin_pin`; on a schema-2 box it is checked first (`pin_required
+  {pin: admin}` when missing or wrong, or without an admin profile), from every profile, the
+  guest included (installing a system update always needs it). Not on schema 1, not for root; an
+  admin profile without a PIN yet passes. `update.check` stays open.
 - **End guest session** (0.5, `guest.rs`, `runner/profiles.rs`): `guest.end` (the guest only;
   job `guest_end`) checks the account (`hinteros-guest`, `--guest-uid` 20000, the uid maps back to
   the name, home `…/hinteros-guest`), hides the guest from the picker and PAM while it runs, ends
@@ -1312,8 +1313,8 @@ Verified here against fakes (`crates/hinteros-system/tests/{apps,profiles}.rs`,
 
 ### What the launcher must do (session API 0.13)
 
-Hello with `0.13`. 0.13: pass `admin_pin` to `system.rollback`, `system.channel.set`,
-`system.base.set` and `system.hardware.redetect` (ask on `pin_required {pin: admin}`); say
+Hello with `0.13`. 0.13: pass `admin_pin` to `system.rollback`, `system.update.apply` (every
+profile, the guest too), `system.channel.set`, `system.base.set` and `system.hardware.redetect` (ask on `pin_required {pin: admin}`); say
 "wiped now" for End guest session; show `readds_features` on the rollback screen. Everything of 0.10 stays. New: the methods and events above (schema:
 `schema/session-api.json`), all `system.*` profile, apps and starter-set relays; the first-boot
 wizard when `profile.current.setup_required`; "Set your PIN" when `!pin_set`; the terms dialog

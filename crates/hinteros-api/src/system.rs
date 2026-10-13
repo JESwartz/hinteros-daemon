@@ -425,7 +425,7 @@ impl Method for Rebuild {
 }
 
 /// 0.5: the admin profile's PIN guards the box-wide actions (`hardware.redetect`, `rollback`,
-/// `channel.set`, `base.set`): `pin_required {pin: admin}` without it or when it is wrong, on a
+/// `update.apply`, `channel.set`, `base.set`): `pin_required {pin: admin}` without it or when it is wrong, on a
 /// schema-2 box whose caller is not root.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -538,6 +538,10 @@ impl Method for UpdateCheck {
 #[serde(deny_unknown_fields)]
 pub struct UpdateApplyParams {
     pub rev: String,
+    /// 0.5: the admin profile's PIN (installing a system update is box-wide: needed from every
+    /// profile, the guest's included).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
 }
 
 pub struct UpdateApply;

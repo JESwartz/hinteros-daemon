@@ -293,7 +293,8 @@ impl Service {
     }
 
     /// The admin PIN of a box-wide action (rollback, channel and base switches, hardware
-    /// re-detect; profiles.md open question 1, owner answer in apps.md). Like every admin
+    /// re-detect; profiles.md open question 1, owner answer in apps.md; and installing a system
+    /// update, from every profile, the guest's included). Like every admin
     /// action: `pin_required {pin: admin}` when it is missing or wrong (no backoff, J4), and
     /// when there is no admin profile (first-boot mode); an admin profile without a PIN yet
     /// (migrated p1) passes. Exempt: a schema-1 box (no profiles or PINs before the

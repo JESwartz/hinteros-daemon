@@ -22,6 +22,13 @@ use common::*;
 
 const LAUNCHER: u32 = 4_100_000_000;
 
+/// The daemon finds Steam's games by their reapers in the host's `/proc`, and while Steam is in
+/// front every live Steam reaper counts as a game Steam started itself (its window goes in
+/// front of Steam's). Tests run in parallel in one process tree, so one test's fake Steam game
+/// (`reaper SteamLaunch AppId=…`) would be another test's "Steam game". The tests that start
+/// such reapers, and those that put Steam in front, take this lock.
+static STEAM_REAPERS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct FakeGamescope {
     xvfb: Child,
     display: String,
@@ -339,6 +346,7 @@ fn start_daemon(gs: &FakeGamescope, extra_config: &str) -> Daemon {
 
 #[tokio::test]
 async fn steam_popups_are_tagged_announced_and_shown() {
+    let _steam = STEAM_REAPERS.lock().await;
     let Some(gs) = FakeGamescope::start() else {
         return;
     };
@@ -463,6 +471,7 @@ async fn steam_popups_are_tagged_announced_and_shown() {
 
 #[tokio::test]
 async fn closing_a_steam_game_ends_its_process_tree() {
+    let _steam = STEAM_REAPERS.lock().await;
     let Some(gs) = FakeGamescope::start() else {
         return;
     };
@@ -820,6 +829,7 @@ fn start_daemon_with_steam(gs: &FakeGamescope, steam: &std::path::Path, extra: &
 /// started after the game.
 #[tokio::test]
 async fn steam_game_launch_survives_shader_precaching_and_is_not_launched_twice() {
+    let _steam = STEAM_REAPERS.lock().await;
     let Some(gs) = FakeGamescope::start() else {
         return;
     };
@@ -946,6 +956,7 @@ async fn steam_game_launch_survives_shader_precaching_and_is_not_launched_twice(
 /// after a launch the user left with Home) gets focus and the pad.
 #[tokio::test]
 async fn steams_answer_over_the_launcher_gets_focus() {
+    let _steam = STEAM_REAPERS.lock().await;
     let Some(gs) = FakeGamescope::start() else {
         return;
     };

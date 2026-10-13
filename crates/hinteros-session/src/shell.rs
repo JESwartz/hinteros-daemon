@@ -138,6 +138,10 @@ pub const METHODS: &[&str] = &[
 /// Steam windows that appear this soon after our own Steam request are Steam's answer to it.
 pub const STEAM_ANSWER_WINDOW: Duration = Duration::from_secs(10);
 
+/// How many gamescope app ids above the launcher's are our command apps' (see
+/// `Shell::own_app_id`): far more apps than ever run at once.
+const OWN_APP_IDS: u32 = 4096;
+
 /// A Guide press older than this no longer starts a chord (its release may have been lost).
 const GUIDE_HOLD_MAX: Duration = Duration::from_secs(10);
 
@@ -997,7 +1001,18 @@ impl Shell {
         games
     }
 
-    /// The app ids of the live Steam reapers that are Steam games (not our own command apps).
+    /// Whether `id` is one we give our command apps ([`Self::allocate_app_id`]: the lowest free
+    /// ids just above the launcher's). Their reapers look like Steam's, so a live one that is
+    /// not in our list (left by the daemon before a restart; in tests, another daemon's) would
+    /// pass for a game Steam runs. Non-Steam shortcuts' ids are spread over 2^31..2^32, so one
+    /// landing in this window is very unlikely.
+    fn own_app_id(&self, id: u32) -> bool {
+        id.checked_sub(self.cfg.launcher_app_id)
+            .is_some_and(|d| (1..=OWN_APP_IDS).contains(&d))
+    }
+
+    /// The app ids of the live Steam reapers that are Steam games (not our own command apps,
+    /// [`Self::own_app_id`]).
     fn steam_reaper_games(&mut self) -> Vec<u32> {
         let launcher = self.cfg.launcher_app_id;
         let commands: Vec<u32> = self
@@ -1009,7 +1024,9 @@ impl Shell {
         self.procs
             .steam_games()
             .into_iter()
-            .filter(|id| *id != 0 && *id != launcher && !commands.contains(id))
+            .filter(|id| {
+                *id != 0 && *id != launcher && !commands.contains(id) && !self.own_app_id(*id)
+            })
             .collect()
     }
 
@@ -1095,8 +1112,8 @@ impl Shell {
             return;
         }
         for steam in self.procs.steam_games() {
-            // Our own command apps run under reapers too, with ids above the launcher's.
-            if steam < self.cfg.launcher_app_id {
+            // Our own command apps run under reapers too, with ids just above the launcher's.
+            if steam != self.cfg.launcher_app_id && !self.own_app_id(steam) {
                 self.adopt_steam_game(steam, now);
             }
         }
@@ -3530,6 +3547,31 @@ mod tests {
         t.gamescope(Some(570), &[570]);
         assert_eq!(t.shell.focused(), Some("steam-570"));
         assert!(t.shell.steam_client_games().contains(&570));
+    }
+
+    #[test]
+    fn our_own_reapers_are_never_steams_games() {
+        // A command app's reaper from before a daemon restart (id above the launcher's, not
+        // ours any more) does not count as a game Steam runs.
+        let mut t = T::new();
+        t.launch(json!({"id": "steam"}));
+        t.gamescope(Some(769), &[769]);
+        t.procs
+            .lock()
+            .unwrap()
+            .steam_reapers
+            .insert(L + 7, vec![600]);
+        assert!(t.shell.steam_client_games().is_empty());
+        t.procs.lock().unwrap().steam_reapers.insert(570, vec![601]);
+        assert_eq!(t.shell.steam_client_games(), vec![570]);
+        // A non-Steam shortcut's id may well be above the launcher's: still Steam's.
+        let shortcut = L + 100_000;
+        t.procs
+            .lock()
+            .unwrap()
+            .steam_reapers
+            .insert(shortcut, vec![602]);
+        assert_eq!(t.shell.steam_client_games(), vec![570, shortcut]);
     }
 
     #[test]

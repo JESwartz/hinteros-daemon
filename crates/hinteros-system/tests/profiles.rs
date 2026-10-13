@@ -94,6 +94,33 @@ async fn settled(sys: &System) {
     }
 }
 
+/// Whether `text` shows `pin` as a token of its own (in a JSON field, a log line, a PHC
+/// field), not as part of a longer run of letters and digits: audit entries carry pids,
+/// timestamps and hashes, and a 4-digit PIN turns up inside those by chance.
+fn shows_pin(text: &str, pin: &str) -> bool {
+    let bytes = text.as_bytes();
+    text.match_indices(pin).any(|(at, _)| {
+        let before = at.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(at + pin.len()).copied();
+        !before.is_some_and(|b| b.is_ascii_alphanumeric())
+            && !after.is_some_and(|b| b.is_ascii_alphanumeric())
+    })
+}
+
+#[test]
+fn a_pin_is_a_whole_token() {
+    assert!(shows_pin(r#"{"pin":"1357"}"#, "1357"));
+    assert!(shows_pin("pin 1357", "1357"));
+    assert!(shows_pin("1357", "1357"));
+    assert!(!shows_pin("1791135790", "1357"), "a timestamp");
+    assert!(!shows_pin("pid=213579", "1357"), "a pid");
+    assert!(
+        !shows_pin("$argon2id$v=19$m=19456$aB1357cd", "1357"),
+        "a hash"
+    );
+    assert!(!shows_pin(r#"{"pin":"***"}"#, "1357"));
+}
+
 fn public(root: &Root) -> Value {
     serde_json::from_str(&root.read("run/profiles-public.json")).unwrap()
 }
@@ -153,7 +180,7 @@ async fn profiles_lifecycle_and_pins() {
     assert_eq!(pf["profiles"]["p3"]["locked"], true);
     assert_eq!(pf["next"], 4);
     let hash = root.read("var/lib/hinteros/pins/p3");
-    assert!(hash.starts_with("$argon2id$") && !hash.contains("1357"));
+    assert!(hash.starts_with("$argon2id$") && !shows_pin(&hash, "1357"));
     assert_eq!(
         std::fs::canonicalize(root.p("nixprofiles/apps/hinteros-p3")).unwrap(),
         root.p("store/env-youtube")
@@ -509,7 +536,7 @@ async fn profiles_lifecycle_and_pins() {
     for entry in &audit {
         for v in entry.values() {
             assert!(
-                !v.contains(ADMIN_PIN) && !v.contains("1357") && !v.contains("8642"),
+                ![ADMIN_PIN, "1357", "8642"].iter().any(|p| shows_pin(v, p)),
                 "{entry:?}"
             );
         }
@@ -800,7 +827,7 @@ async fn reset_pin_from_the_terminal() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     for m in sys.journal.lock().unwrap().iter() {
-        assert!(!m.values().any(|v| v.contains(ADMIN_PIN)), "{m:?}");
+        assert!(!m.values().any(|v| shows_pin(v, ADMIN_PIN)), "{m:?}");
     }
 
     // The picker: enterable without a PIN although still locked.

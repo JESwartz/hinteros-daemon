@@ -851,3 +851,104 @@ async fn reset_pin_from_the_terminal() {
     .await
     .unwrap();
 }
+
+/// Rollback, channel and base switches and hardware re-detect need the admin profile's PIN
+/// (system API 0.5): missing or wrong is `pin_required {pin: admin}` before anything else
+/// happens; right, the method goes on as before. Without an admin profile (first-boot mode)
+/// they are refused like every admin action; an admin profile without a PIN yet passes.
+#[tokio::test(flavor = "multi_thread")]
+async fn box_wide_actions_need_the_admin_pin() {
+    let Some(sys) = System::start(root_with(Some(PROFILES)), &[]).await else {
+        return;
+    };
+    let root = &sys.root;
+    settled(&sys).await;
+    let mut c = sys.subscriber().await;
+    let guarded = [
+        ("rollback", json!({})),
+        ("channel.set", json!({"channel": "beta"})),
+        // Already on unstable: the PIN is still checked first.
+        ("base.set", json!({"base": "unstable"})),
+        ("hardware.redetect", json!({})),
+    ];
+    for (method, params) in &guarded {
+        let e = call(&mut c, method, params.clone()).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{method}: {e}");
+        assert_eq!(e["data"], json!({"pin": "admin"}), "{method}");
+        let mut wrong = params.clone();
+        wrong["admin_pin"] = json!("1111");
+        let e = call(&mut c, method, wrong).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{method}: {e}");
+        assert_eq!(
+            e["data"],
+            json!({"pin": "admin"}),
+            "{method}: no backoff for the admin PIN"
+        );
+        let mut bad = params.clone();
+        bad["admin_pin"] = json!("12");
+        let e = call(&mut c, method, bad).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::InvalidParams.code(), "{method}");
+        assert_eq!(e["data"]["field"], "admin_pin");
+    }
+    // The right PIN: each goes on as before.
+    let with = |p: &Value| {
+        let mut p = p.clone();
+        p["admin_pin"] = json!(ADMIN_PIN);
+        p
+    };
+    let e = call(&mut c, "rollback", with(&guarded[0].1))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        code(&e),
+        ErrorCode::NotFound.code(),
+        "only one generation: {e}"
+    );
+    let e = call(&mut c, "channel.set", with(&guarded[1].1))
+        .await
+        .unwrap_err();
+    assert_ne!(code(&e), ErrorCode::PinRequired.code(), "{e}");
+    let r = call(&mut c, "base.set", with(&guarded[2].1)).await.unwrap();
+    assert_eq!(r["job_id"], Value::Null);
+    job(&sys, &mut c, "hardware.redetect", with(&guarded[3].1)).await;
+    assert!(root.read("facter.log").contains("-o"));
+    // The audit names the PIN that was checked, never the PIN.
+    let audit = sys.audit();
+    assert!(audit.iter().any(|e| {
+        e.get("HINTEROS_METHOD").map(String::as_str) == Some("rollback")
+            && e.get("HINTEROS_PIN_CHECK").map(String::as_str) == Some("admin")
+    }));
+    for entry in &audit {
+        assert!(
+            !entry.values().any(|v| shows_pin(v, ADMIN_PIN)),
+            "{entry:?}"
+        );
+    }
+
+    // An admin profile without a PIN yet (migrated p1) passes without one.
+    std::fs::remove_file(root.p("var/lib/hinteros/pins/p1")).unwrap();
+    let r = call(&mut c, "base.set", json!({"base": "unstable"}))
+        .await
+        .unwrap();
+    assert_eq!(r["job_id"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn box_wide_actions_without_an_admin_profile() {
+    // First-boot mode: no admin profile, so no admin PIN can be given.
+    let Some(sys) = System::start(root_with(None), &[]).await else {
+        return;
+    };
+    let mut c = sys.client().await;
+    for (method, params) in [
+        ("rollback", json!({"admin_pin": ADMIN_PIN})),
+        (
+            "base.set",
+            json!({"base": "unstable", "admin_pin": ADMIN_PIN}),
+        ),
+    ] {
+        let e = call(&mut c, method, params).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{method}: {e}");
+        assert_eq!(e["data"]["pin"], "admin");
+    }
+}

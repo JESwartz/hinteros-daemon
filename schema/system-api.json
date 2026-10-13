@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.4",
+  "version": "0.5",
   "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -36,16 +36,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.4", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.4", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "0.5", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "0.5", "server": { "name": "hinteros-system", "version": "0.1.0" } }
         },
         {
           "name": "mismatch",
           "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 0.1, server 0.4",
-            "data": { "client_api_version": "0.1", "server_api_version": "0.4" }
+            "message": "API version mismatch: client 0.1, server 0.5",
+            "data": { "client_api_version": "0.1", "server_api_version": "0.5" }
           }
         }
       ]
@@ -291,24 +291,34 @@
     },
     "hardware.redetect": {
       "summary": "Regenerate facter.json with nixos-facter and apply it (job). Action org.hinteros.system.rebuild.",
-      "since": "0.2",
-      "params": { "type": "object", "additionalProperties": false },
-      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
-      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources"],
-      "examples": [{ "name": "started", "params": {}, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
-    },
-    "rollback": {
-      "summary": "Switch to an earlier generation (default: the one before the current), then restore /etc/hinteros from its snapshot (job). Action org.hinteros.system.rollback.",
+      "description": "On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root.",
       "since": "0.2",
       "params": {
         "type": "object",
         "additionalProperties": false,
-        "properties": { "generation": { "type": "integer", "minimum": 1, "maximum": 4294967295 } }
+        "properties": { "admin_pin": { "$ref": "#/$defs/Pin" } }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
-      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "not_found"],
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "pin_required"],
       "examples": [
-        { "name": "previous", "params": {}, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "started", "params": { "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "no admin PIN", "params": {}, "error": { "code": 3016, "message": "a PIN is needed", "data": { "pin": "admin" } } }
+      ]
+    },
+    "rollback": {
+      "summary": "Switch to an earlier generation (default: the one before the current), then restore /etc/hinteros from its snapshot (job). Action org.hinteros.system.rollback.",
+      "description": "On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root.",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "generation": { "type": "integer", "minimum": 1, "maximum": 4294967295 }, "admin_pin": { "$ref": "#/$defs/Pin" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "not_found", "pin_required"],
+      "examples": [
+        { "name": "previous", "params": { "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "wrong admin PIN", "params": { "admin_pin": "1111" }, "error": { "code": 3016, "message": "that PIN didn't match", "data": { "pin": "admin" } } },
         { "name": "unknown generation", "params": { "generation": 7 }, "error": { "code": 3010, "message": "generation 7 is not on disk" } }
       ]
     },
@@ -378,7 +388,7 @@
     },
     "channel.set": {
       "summary": "Follow another channel (job). Action org.hinteros.system.channel.",
-      "description": "The URL comes from the running generation's channel table, never from params. The target tip must be signed by an allowed signer. Moving from beta to stable, or to a tip that does not descend from the locked revision, needs acknowledge_downgrade: true (else needs_acknowledgement: at once for beta to stable, in job_finished.error for a non-fast-forward tip). Returns job_id null if the channel is already the current one.",
+      "description": "The URL comes from the running generation's channel table, never from params. The target tip must be signed by an allowed signer. Moving from beta to stable, or to a tip that does not descend from the locked revision, needs acknowledge_downgrade: true (else needs_acknowledgement: at once for beta to stable, in job_finished.error for a non-fast-forward tip). Returns job_id null if the channel is already the current one. On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root.",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -386,18 +396,20 @@
         "additionalProperties": false,
         "properties": {
           "channel": { "$ref": "#/$defs/Channel" },
-          "acknowledge_downgrade": { "type": "boolean" }
+          "acknowledge_downgrade": { "type": "boolean" },
+          "admin_pin": { "$ref": "#/$defs/Pin" }
         }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
-      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "needs_acknowledgement"],
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "needs_acknowledgement", "pin_required"],
       "examples": [
-        { "name": "to beta", "params": { "channel": "beta" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "to beta", "params": { "channel": "beta", "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
         { "name": "to stable without acknowledgement", "params": { "channel": "stable" }, "error": { "code": 3011, "message": "switching from beta to stable is a downgrade" } }
       ]
     },
     "base.set": {
       "summary": "Switch the nixpkgs base (job). Action org.hinteros.system.channel. unstable to stable needs acknowledge_downgrade: true.",
+      "description": "On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root. The PIN is checked before anything else, also when the base is already the requested one.",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -405,13 +417,14 @@
         "additionalProperties": false,
         "properties": {
           "base": { "$ref": "#/$defs/Base" },
-          "acknowledge_downgrade": { "type": "boolean" }
+          "acknowledge_downgrade": { "type": "boolean" },
+          "admin_pin": { "$ref": "#/$defs/Pin" }
         }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
-      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "needs_acknowledgement"],
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "needs_acknowledgement", "pin_required"],
       "examples": [
-        { "name": "to stable, acknowledged", "params": { "base": "stable", "acknowledge_downgrade": true }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "to stable, acknowledged", "params": { "base": "stable", "acknowledge_downgrade": true, "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
         { "name": "already there", "params": { "base": "unstable" }, "result": { "job_id": null } },
         { "name": "downgrade", "params": { "base": "stable" }, "error": { "code": 3011, "message": "unstable to stable is a downgrade" } }
       ]

@@ -290,6 +290,35 @@ impl Service {
         result
     }
 
+    /// The admin PIN of a box-wide action (rollback, channel and base switches, hardware
+    /// re-detect; profiles.md open question 1, owner answer in apps.md). Like every admin
+    /// action: `pin_required {pin: admin}` when it is missing or wrong (no backoff, J4), and
+    /// when there is no admin profile (first-boot mode); an admin profile without a PIN yet
+    /// (migrated p1) passes. Exempt: a schema-1 box (no profiles or PINs before the
+    /// migration, I2) and root (the box's administrator, e.g. a terminal or a bootstrap tool;
+    /// root is past every other check too).
+    pub(super) async fn check_box_admin(
+        &self,
+        uid: u32,
+        method: &str,
+        pin: Option<&str>,
+    ) -> Result<(), ErrorObject> {
+        if uid == 0 {
+            return Ok(());
+        }
+        let (state, _) = self.load_state()?;
+        if !state.is_schema2() {
+            return Ok(());
+        }
+        let file = self.profiles_file();
+        let admin = self.admin_id(&state, &file).ok_or_else(|| {
+            self.audit
+                .pin_check(uid, method, Which::Admin.name(), "no_admin");
+            pin_required(Which::Admin, None, "there is no admin profile")
+        })?;
+        self.check_pin(uid, method, &admin, pin, Which::Admin).await
+    }
+
     /// Whether `id` is the admin profile (of the running accounts).
     pub(super) fn is_admin_profile(&self, id: &str) -> bool {
         let Ok((state, _)) = self.load_state() else {

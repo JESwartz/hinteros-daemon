@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, ErrorObject, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 4);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 5);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/system-api.json");
@@ -417,10 +417,20 @@ impl Method for Rebuild {
     type Result = JobRef;
 }
 
+/// 0.5: the admin profile's PIN guards the box-wide actions (`hardware.redetect`, `rollback`,
+/// `channel.set`, `base.set`): `pin_required {pin: admin}` without it or when it is wrong, on a
+/// schema-2 box whose caller is not root.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HardwareRedetectParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
+}
+
 pub struct HardwareRedetect;
 impl Method for HardwareRedetect {
     const NAME: &'static str = "hardware.redetect";
-    type Params = NoParams;
+    type Params = HardwareRedetectParams;
     type Result = JobRef;
 }
 
@@ -429,6 +439,9 @@ impl Method for HardwareRedetect {
 pub struct RollbackParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<u32>,
+    /// 0.5: the admin profile's PIN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
 }
 
 pub struct Rollback;
@@ -533,6 +546,9 @@ pub struct ChannelSetParams {
     pub channel: Channel,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acknowledge_downgrade: Option<bool>,
+    /// 0.5: the admin profile's PIN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
 }
 
 pub struct ChannelSet;
@@ -548,6 +564,9 @@ pub struct BaseSetParams {
     pub base: Base,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acknowledge_downgrade: Option<bool>,
+    /// 0.5: the admin profile's PIN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
 }
 
 pub struct BaseSet;

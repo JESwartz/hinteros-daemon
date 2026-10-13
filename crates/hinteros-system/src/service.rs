@@ -15,11 +15,12 @@ use hinteros_api::system::{
     self, AppsAcceptTerms, AppsAcceptTermsParams, AppsGenerations, AppsInstall, AppsInstallParams,
     AppsList, AppsRemove, AppsRemoveParams, AppsRollback, AppsRollbackParams, BaseSet,
     BaseSetParams, ChannelSet, ChannelSetParams, EventName, GenerationsList, GenerationsListResult,
-    HardwareRedetect, JobIdParams, JobKind, JobRef, JobsCancel, JobsGet, JobsGetResult, JobsList,
-    JobsListResult, Rebuild, Rollback, RollbackParams, Settings, SettingsGet, SettingsGetResult,
-    SettingsSet, SettingsSetParams, SshInfo, SshSet, SshSetParams, SshSettings, Subscribe,
-    SubscriptionParams, SubscriptionResult, SystemInfo, SystemInfoResult, Unsubscribe, UpdateApply,
-    UpdateApplyParams, UpdateCheck, UpdateCheckReply, UpdateCheckResult, is_job_id, is_rev,
+    HardwareRedetect, HardwareRedetectParams, JobIdParams, JobKind, JobRef, JobsCancel, JobsGet,
+    JobsGetResult, JobsList, JobsListResult, Rebuild, Rollback, RollbackParams, Settings,
+    SettingsGet, SettingsGetResult, SettingsSet, SettingsSetParams, SshInfo, SshSet, SshSetParams,
+    SshSettings, Subscribe, SubscriptionParams, SubscriptionResult, SystemInfo, SystemInfoResult,
+    Unsubscribe, UpdateApply, UpdateApplyParams, UpdateCheck, UpdateCheckReply, UpdateCheckResult,
+    is_job_id, is_rev,
 };
 use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde::de::DeserializeOwned;
@@ -590,7 +591,7 @@ pub(crate) enum Request {
     SettingsSet(SettingsSetParams),
     SshSet(SshSetParams),
     Rebuild,
-    HardwareRedetect,
+    HardwareRedetect(HardwareRedetectParams),
     Rollback(RollbackParams),
     UpdateCheck,
     UpdateApply(UpdateApplyParams),
@@ -622,11 +623,13 @@ impl Request {
                 Self::Rebuild
             }
             HardwareRedetect::NAME => {
-                decode::<HardwareRedetect>(params)?;
-                Self::HardwareRedetect
+                let p: HardwareRedetectParams = decode::<HardwareRedetect>(params)?;
+                check_admin_pin(p.admin_pin.as_deref())?;
+                Self::HardwareRedetect(p)
             }
             Rollback::NAME => {
                 let p: RollbackParams = decode::<Rollback>(params)?;
+                check_admin_pin(p.admin_pin.as_deref())?;
                 if p.generation == Some(0) {
                     return Err(ErrorObject::invalid_field(
                         "generation",
@@ -651,8 +654,16 @@ impl Request {
                 }
                 Self::UpdateApply(p)
             }
-            ChannelSet::NAME => Self::ChannelSet(decode::<ChannelSet>(params)?),
-            BaseSet::NAME => Self::BaseSet(decode::<BaseSet>(params)?),
+            ChannelSet::NAME => {
+                let p: ChannelSetParams = decode::<ChannelSet>(params)?;
+                check_admin_pin(p.admin_pin.as_deref())?;
+                Self::ChannelSet(p)
+            }
+            BaseSet::NAME => {
+                let p: BaseSetParams = decode::<BaseSet>(params)?;
+                check_admin_pin(p.admin_pin.as_deref())?;
+                Self::BaseSet(p)
+            }
             AppsInstall::NAME => {
                 let p: AppsInstallParams = decode::<AppsInstall>(params)?;
                 check_revision(&p.revision)?;
@@ -753,6 +764,18 @@ impl Request {
                 Self::Profiles(r)
             }
         })
+    }
+}
+
+/// An optional `admin_pin` of a box-wide action: 4 to 8 digits when present.
+fn check_admin_pin(pin: Option<&str>) -> Result<(), ErrorObject> {
+    match pin {
+        Some(p) if !crate::pins::is_pin(p) => Err(ErrorObject::invalid_field(
+            "admin_pin",
+            "bad_format",
+            "a PIN is 4 to 8 digits",
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -1025,7 +1048,9 @@ impl Service {
                 );
                 job_ref(Some(self.start(spec).await?))
             }
-            Request::HardwareRedetect => {
+            Request::HardwareRedetect(p) => {
+                self.check_box_admin(uid, HardwareRedetect::NAME, p.admin_pin.as_deref())
+                    .await?;
                 let (state, _) = self.load_state()?;
                 self.preflight()?;
                 let spec = self.spec(
@@ -1040,6 +1065,8 @@ impl Service {
                 job_ref(Some(self.start(spec).await?))
             }
             Request::BaseSet(p) => {
+                self.check_box_admin(uid, BaseSet::NAME, p.admin_pin.as_deref())
+                    .await?;
                 let (mut state, _) = self.load_state()?;
                 let ack = p.acknowledge_downgrade.unwrap_or(false);
                 let Some(base) = state::base_change(state.base, p.base, ack)? else {
@@ -1060,6 +1087,8 @@ impl Service {
                 job_ref(Some(self.start(spec).await?))
             }
             Request::Rollback(p) => {
+                self.check_box_admin(uid, Rollback::NAME, p.admin_pin.as_deref())
+                    .await?;
                 let gens = generations::list(
                     &self.paths.profile,
                     &self.paths.current_system,
@@ -1174,6 +1203,8 @@ impl Service {
                 job_ref(Some(self.start(spec).await?))
             }
             Request::ChannelSet(p) => {
+                self.check_box_admin(uid, ChannelSet::NAME, p.admin_pin.as_deref())
+                    .await?;
                 let table = self
                     .channel_table()
                     .ok_or_else(|| internal("this system has no update channel table"))?;

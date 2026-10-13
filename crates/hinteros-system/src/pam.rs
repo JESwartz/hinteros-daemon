@@ -75,7 +75,8 @@ pub fn unlocked(ctx: &Ctx, user: &str, now: i64) -> bool {
     }
 }
 
-/// `verify` for `user` with `pin`: (exit success, status line).
+/// `verify` for `user` with `pin`: (exit success, status line). A wrong PIN that starts a
+/// backoff wait republishes the public view, so its `locked_until` shows the wait.
 pub fn verify(ctx: &Ctx, user: &str, pin: &str, now: i64) -> (bool, Option<String>) {
     let Some(state) = ctx.state() else {
         return (false, None);
@@ -93,6 +94,8 @@ pub fn verify(ctx: &Ctx, user: &str, pin: &str, now: i64) -> (bool, Option<Strin
     match Pins::new(ctx.paths.pins_dir()).verify_with(&account.id, pin, now, backoff) {
         Ok(Verify::Ok) => (true, None),
         Ok(Verify::Wrong { locked_for }) if locked_for > 0 => {
+            // A new wait: the picker and greeter.list show it (`locked_until`).
+            public::publish(&ctx.paths, &state, &file, now);
             (false, Some(format!("hinteros:locked:{locked_for}")))
         }
         Ok(Verify::Wrong { .. }) => (false, Some("hinteros:wrong".into())),
@@ -489,10 +492,24 @@ mod tests {
                 (false, Some("hinteros:wrong".into()))
             );
         }
+        let public = || -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(c.paths.public_json()).unwrap()).unwrap()
+        };
+        let p2_until = |v: &serde_json::Value| {
+            v["profiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == "p2")
+                .unwrap()["locked_until"]
+                .clone()
+        };
         assert_eq!(
             verify(&c, "hinteros-p2", "1111", 10),
             (false, Some("hinteros:locked:1".into()))
         );
+        // The wait is in the public view at once.
+        assert_eq!(p2_until(&public()), serde_json::json!(11));
         assert_eq!(
             verify(&c, "hinteros-p2", "2468", 10),
             (false, Some("hinteros:locked:1".into()))

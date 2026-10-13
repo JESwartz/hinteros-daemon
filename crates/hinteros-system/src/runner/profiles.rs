@@ -140,8 +140,7 @@ impl Runner {
     fn guest_wipe(&mut self, j: &GuestEndJob, state: Option<&State>) -> Outcome {
         let paths = self.spec.paths.clone();
         // The account again (the service checked it when the request came in).
-        let account =
-            guest::account(&paths.users, j.uid).map_err(|why| self.fail(why.to_string()))?;
+        let account = guest::account(&paths.users, j.uid).map_err(|why| self.fail(&why))?;
         if account.home != j.home {
             return Err(self.fail("the guest's home changed since the request"));
         }

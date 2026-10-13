@@ -222,7 +222,12 @@ async fn changes_are_pushed_by_us_and_found_by_polling() {
     call(&mut c, "audio.volume", json!({"percent": 45}))
         .await
         .unwrap();
-    let ev = event_named(&mut watcher, "audio_changed").await;
+    // (A poll that read the old state just before may report it first, when the daemon took
+    // longer than a poll interval to start.)
+    let mut ev = event_named(&mut watcher, "audio_changed").await;
+    if ev["volume"] == 60 {
+        ev = event_named(&mut watcher, "audio_changed").await;
+    }
     assert_eq!(ev["volume"], 45);
     assert_eq!(output(&ev, HDMI)["default"], true);
 

@@ -9,6 +9,8 @@
 //! - An app has focus: gamescope shows that app as soon as it has a window (the launcher until
 //!   then), InputPlumber is in `Pass` mode, so input goes to the app (through Steam Input).
 //! - Home (Guide, or SIGUSR1): `home_pressed`, then the launcher gets focus. Apps keep running.
+//!   Guide held for [`GUIDE_LONG_PRESS`] while Steam or a Steam game is in front goes to Steam
+//!   instead (one Guide tap on the virtual pad: its in-game or Big Picture menu), no Home.
 //! - If the focused app's windows go away for longer than the debounce (it closed its window,
 //!   or a Steam game quit), the launcher gets focus.
 //! - Steam itself is the app `steam` (gamescope app id 769): opened as Big Picture through
@@ -138,6 +140,31 @@ pub const STEAM_ANSWER_WINDOW: Duration = Duration::from_secs(10);
 
 /// A Guide press older than this no longer starts a chord (its release may have been lost).
 const GUIDE_HOLD_MAX: Duration = Duration::from_secs(10);
+
+/// Guide held this long while Steam (or a Steam game) is in front is a long press: Steam gets
+/// a Guide tap (its in-game menu, or Big Picture's main menu) instead of Home. Half a second
+/// is well above a deliberate tap (100-250 ms) and the usual long-press threshold (Android,
+/// the Steam Deck's own buttons), yet short enough that the menu feels like it answers the
+/// hold.
+pub const GUIDE_LONG_PRESS: Duration = Duration::from_millis(500);
+
+/// Guide events this soon after our Guide tap to Steam are ignored: should InputPlumber ever
+/// hand the injected tap back to us (it must not, see [`InputControl::guide_tap`]), it would
+/// otherwise be a short press, i.e. Home.
+const GUIDE_TAP_ECHO: Duration = Duration::from_millis(750);
+
+/// Guide is held.
+#[derive(Debug, Clone)]
+struct GuideHold {
+    since: Instant,
+    /// It was used for the on-screen keyboard chord (its release is not Home).
+    chord: bool,
+    /// The pad it came from (a D-Bus target), for the Guide tap to Steam.
+    source: String,
+    /// When the hold becomes a long press for Steam (`None`: it cannot, or no longer can:
+    /// Steam was not in front at the press, or another button was pressed meanwhile).
+    steam_at: Option<Instant>,
+}
 
 /// How long after a text field loses focus an automatically shown keyboard hides: moving to
 /// the next field (or into a frame) reports `none` and then `text` again.
@@ -326,8 +353,11 @@ pub struct Shell {
     osk_auto_hide_at: Option<Instant>,
     /// Whether the keyboard is up for a password field (the last `osk_visibility.password`).
     osk_password: bool,
-    /// Guide is held: since when, and whether it was used for a chord.
-    guide: Option<(Instant, bool)>,
+    /// Guide is held (see [`GuideHold`]).
+    guide: Option<GuideHold>,
+    /// When we last sent Steam a Guide tap (a long press): Guide events right after it are
+    /// not ours ([`GUIDE_TAP_ECHO`]).
+    guide_tap_at: Option<Instant>,
     /// Navigation buttons currently held (as far as we can see them).
     held: BTreeSet<NavAction>,
     /// Releases to drop (buttons used in a chord).
@@ -401,6 +431,7 @@ impl Shell {
             osk_auto_hide_at: None,
             osk_password: false,
             guide: None,
+            guide_tap_at: None,
             held: BTreeSet::new(),
             swallow: BTreeSet::new(),
             raw_names: BTreeMap::new(),
@@ -1677,27 +1708,57 @@ impl Shell {
         self.set_focus(None);
     }
 
-    /// Guide pressed or released. Without a summon chord, Home on press. With one, Home on
-    /// release unless the summon button was pressed while Guide was held (then the on-screen
-    /// keyboard toggles instead). In `Pass` mode InputPlumber only sends us Guide, and switches
-    /// to `All` by itself on the press, so the chord button pressed *after* Guide reaches us.
+    /// Whether a long Guide press goes to Steam now: Steam (Big Picture) or a Steam game (one
+    /// we launched, or one Steam started itself) has focus with the pad (`Pass`), and no
+    /// on-screen keyboard is up. Not when the launcher (or a non-Steam app) is in front with
+    /// Steam in the background: Steam's menu would open behind the launcher, unseen, and from
+    /// the launcher Steam is one press away anyway.
+    fn steam_takes_guide(&self) -> bool {
+        self.route() == Route::App
+            && self.focused_app().is_some_and(|app| {
+                app.info.id == STEAM_CLIENT_APP_ID
+                    || matches!(app.info.source, AppSource::Steam | AppSource::SteamClient)
+            })
+    }
+
+    /// Guide pressed or released.
+    ///
+    /// - A short press (released within [`GUIDE_LONG_PRESS`]) is Home.
+    /// - Held past [`GUIDE_LONG_PRESS`] while Steam or a Steam game is in front
+    ///   ([`Self::steam_takes_guide`]) and Steam runs, Steam gets one Guide tap through
+    ///   InputPlumber ([`Self::long_guide`], from [`Shell::tick`]) and there is no Home.
+    ///   Otherwise a long press is Home too.
+    /// - With a summon chord configured, Guide + the summon button toggles the on-screen
+    ///   keyboard (never Home, never Steam).
+    ///
+    /// Without a chord configured and nothing for Steam, Home happens at once on the press;
+    /// otherwise on the release. In `Pass` mode InputPlumber only sends us Guide, and switches
+    /// to `All` by itself on the press, so the buttons pressed *after* Guide reach us.
     ///
     /// Every step is logged at info level with the raw `ui_*` names, so that a pad whose
     /// buttons arrive under other names than expected shows in the journal.
-    fn guide(&mut self, pressed: bool, now: Instant) {
-        let summon = self.cfg.osk_summon.filter(|_| self.cfg.osk_enabled);
-        let Some(summon) = summon else {
-            if pressed {
-                info!("guide pressed → Home (no chord configured)");
-                self.home();
-            }
+    fn guide(&mut self, pressed: bool, source: &str, now: Instant) {
+        if self
+            .guide_tap_at
+            .is_some_and(|at| now.duration_since(at) < GUIDE_TAP_ECHO)
+        {
+            info!(pressed, "guide right after our Guide tap to Steam: ignored");
+            self.guide = None;
             return;
-        };
+        }
+        let summon = self.cfg.osk_summon.filter(|_| self.cfg.osk_enabled);
         if pressed {
+            let steam = self.steam_takes_guide();
+            if summon.is_none() && !steam {
+                info!("guide pressed → Home (no chord configured, Steam not in front)");
+                self.guide = None;
+                self.home();
+                return;
+            }
             self.guide_others.clear();
             // The button already held (visible to us in `All` mode) also makes a chord.
-            let chord = self.held.contains(&summon);
-            if chord {
+            let chord = summon.is_some_and(|summon| self.held.contains(&summon));
+            if let Some(summon) = summon.filter(|_| chord) {
                 let raw = self.raw_names.get(&summon).cloned().unwrap_or_default();
                 info!(
                     button = %raw,
@@ -1705,19 +1766,27 @@ impl Shell {
                     nav_name(summon)
                 );
                 self.toggle_osk();
-            } else {
+            } else if let Some(summon) = summon {
                 info!(
+                    steam,
                     "guide pressed: chord started (guide+{} toggles the on-screen keyboard)",
                     nav_name(summon)
                 );
+            } else {
+                info!("guide pressed with Steam in front: Home on release, Steam's Guide if held");
             }
-            self.guide = Some((now, chord));
-        } else if let Some((_, chord)) = self.guide.take() {
+            self.guide = Some(GuideHold {
+                since: now,
+                chord,
+                source: source.to_string(),
+                steam_at: (steam && !chord).then(|| now + GUIDE_LONG_PRESS),
+            });
+        } else if let Some(hold) = self.guide.take() {
             let others = std::mem::take(&mut self.guide_others);
-            if chord {
+            if hold.chord {
                 info!("guide released after the chord: no Home");
             } else if others.is_empty() {
-                info!("guide released alone → Home");
+                info!(held = ?now.duration_since(hold.since), "guide released alone → Home");
                 self.home();
             } else {
                 info!(buttons = ?others, "guide released (no chord) → Home");
@@ -1728,14 +1797,46 @@ impl Shell {
         }
     }
 
-    /// A button pressed while Guide is held that is not the chord button.
-    fn guide_other(&mut self, raw: &str, action: Option<NavAction>, now: Instant) {
-        let held = self
-            .guide
-            .is_some_and(|(since, _)| now.duration_since(since) < GUIDE_HOLD_MAX);
-        if !held || self.cfg.osk_summon.is_none() || !self.cfg.osk_enabled {
+    /// Guide held for [`GUIDE_LONG_PRESS`]: Steam's Guide if Steam (or a Steam game) is still
+    /// in front and Steam runs; otherwise the release is Home.
+    fn long_guide(&mut self, now: Instant) {
+        let Some(hold) = self.guide.as_mut() else {
+            return;
+        };
+        hold.steam_at = None;
+        let source = hold.source.clone();
+        if !self.steam_takes_guide() {
+            info!("guide held, but Steam is no longer in front → Home on release");
             return;
         }
+        if !self.procs.steam_running() {
+            info!("guide held, but Steam is not running → Home on release");
+            return;
+        }
+        info!(
+            held = ?GUIDE_LONG_PRESS,
+            app = ?self.focused,
+            "guide held → Guide to Steam (no Home)"
+        );
+        // The pad is in `All` now (InputPlumber switched on the press); the tap puts it back
+        // in the focused app's mode first, so that the tap reaches Steam.
+        self.input.guide_tap(&source, self.intercept_mode());
+        self.guide = None;
+        self.guide_others.clear();
+        self.guide_tap_at = Some(now);
+    }
+
+    /// A button pressed while Guide is held that is not the chord button: no long press for
+    /// Steam any more (it is Home on release, as before).
+    fn guide_other(&mut self, raw: &str, action: Option<NavAction>, now: Instant) {
+        let Some(hold) = self
+            .guide
+            .as_mut()
+            .filter(|hold| now.duration_since(hold.since) < GUIDE_HOLD_MAX)
+        else {
+            return;
+        };
+        hold.steam_at = None;
         let name = action.map_or_else(|| "unmapped".to_string(), nav_name);
         info!(button = %raw, "guide+{name} → ignored (not a chord)");
         self.guide_others.push(raw.to_string());
@@ -1751,7 +1852,7 @@ impl Shell {
         };
         let pressed = input.pressed();
         let action = match intent {
-            Intent::Home => return self.guide(pressed, now),
+            Intent::Home => return self.guide(pressed, &input.source, now),
             Intent::Pointer => {
                 if pressed && self.pointer_app() {
                     let change = self.pointer.motion();
@@ -1771,14 +1872,18 @@ impl Shell {
         if pressed {
             let guide_held = self
                 .guide
-                .is_some_and(|(since, _)| now.duration_since(since) < GUIDE_HOLD_MAX);
+                .as_ref()
+                .is_some_and(|hold| now.duration_since(hold.since) < GUIDE_HOLD_MAX);
             if guide_held && self.cfg.osk_summon == Some(action) && self.cfg.osk_enabled {
                 info!(
                     button = %input.event,
                     "chord guide+{} → on-screen keyboard",
                     nav_name(action)
                 );
-                self.guide = self.guide.map(|(since, _)| (since, true));
+                if let Some(hold) = self.guide.as_mut() {
+                    hold.chord = true;
+                    hold.steam_at = None;
+                }
                 self.swallow.insert(action);
                 self.toggle_osk();
                 return;
@@ -2102,10 +2207,19 @@ impl Shell {
             .chain(self.focus_lost_at)
             .chain(self.focus_retry_at)
             .chain(self.osk_auto_hide_at)
+            .chain(self.guide.as_ref().and_then(|hold| hold.steam_at))
             .min()
     }
 
     pub fn tick(&mut self, now: Instant) {
+        if self
+            .guide
+            .as_ref()
+            .and_then(|hold| hold.steam_at)
+            .is_some_and(|at| now >= at)
+        {
+            self.long_guide(now);
+        }
         if self.focus_retry_at.is_some_and(|at| now >= at) {
             self.focus_retry_at = None;
             self.apply_focus();
@@ -2271,6 +2385,8 @@ mod tests {
         Click(bool),
         RightClick(bool),
         Cursor(bool),
+        /// A Guide tap to Steam, the pad first in this mode.
+        GuideTap(InterceptMode),
     }
 
     #[derive(Clone, Default)]
@@ -2341,6 +2457,9 @@ mod tests {
                 MouseButton::Left => Call::Click(pressed),
                 MouseButton::Right => Call::RightClick(pressed),
             });
+        }
+        fn guide_tap(&mut self, _source: &str, mode: InterceptMode) {
+            self.0.push(Call::GuideTap(mode));
         }
     }
 
@@ -3438,8 +3557,10 @@ mod tests {
         // Big Picture's window appears (tagged 769 by the watcher): seen, no attention.
         t.gamescope(Some(769), &[769]);
         steam_windows(&mut t, &[(10, "Steam Big Picture Mode")]);
-        // Home: Steam stays in the background; its window does not ask for attention.
+        // Home (on the release: Steam is in front): Steam stays in the background; its window
+        // does not ask for attention.
         t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
         assert_eq!(t.shell.focused(), None);
         t.gamescope(Some(L), &[769]);
         t.events();
@@ -3567,6 +3688,7 @@ mod tests {
         // Seen via steam.focus, then Home: still open, but no longer asking.
         t.call("steam.focus", json!({})).unwrap();
         t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
         t.events();
         assert_eq!(
             t.call("steam.attention", json!({})).unwrap(),
@@ -3838,6 +3960,183 @@ mod tests {
         t.input("ui_guide", 0.0);
         assert_eq!(t.shell.focused(), None);
         assert_eq!(t.events()[0], ev(EventName::HomePressed, json!({})));
+    }
+
+    /// The Steam game `portal` in front, Steam running; log and events cleared.
+    fn steam_game_in_front(f: impl FnOnce(&mut ShellConfig)) -> T {
+        let mut t = T::with(f);
+        t.procs.lock().unwrap().steam_running = true;
+        t.launch(json!({"id": "portal"}));
+        t.gamescope(Some(400), &[400]);
+        t.events();
+        t.log.take();
+        t
+    }
+
+    fn home_pressed(events: &[(EventName, Value)]) -> bool {
+        events.iter().any(|(n, _)| *n == EventName::HomePressed)
+    }
+
+    #[test]
+    fn guide_short_press_with_steam_in_front_is_home() {
+        let mut t = steam_game_in_front(|_| {});
+        // Held, but not long enough: nothing yet (Home waits for the release).
+        t.input("ui_guide", 1.0);
+        t.advance(GUIDE_LONG_PRESS - MS(1));
+        assert!(t.events().is_empty());
+        assert_eq!(t.shell.focused(), Some("portal"));
+        t.input("ui_guide", 0.0);
+        assert_eq!(t.shell.focused(), None);
+        assert!(home_pressed(&t.events()));
+        assert_eq!(
+            t.log.take(),
+            [Call::FocusLauncher, Call::Mode(InterceptMode::All)]
+        );
+        // Nothing left to happen later.
+        t.advance(Duration::from_secs(2));
+        assert!(t.log.take().is_empty());
+    }
+
+    #[test]
+    fn guide_long_press_goes_to_steam() {
+        let mut t = steam_game_in_front(|_| {});
+        t.input("ui_guide", 1.0);
+        t.advance(GUIDE_LONG_PRESS - MS(1));
+        assert!(t.log.take().is_empty());
+        // At the threshold, still held: one Guide tap for Steam, the pad back in Pass first.
+        t.advance(MS(1));
+        assert_eq!(t.log.take(), [Call::GuideTap(InterceptMode::Pass)]);
+        // The release (if it reaches us at all): no Home.
+        t.advance(MS(300));
+        t.input("ui_guide", 0.0);
+        assert!(t.events().is_empty());
+        assert_eq!(t.shell.focused(), Some("portal"));
+        assert!(t.log.take().is_empty());
+
+        // Should the injected tap ever come back to us as ui_guide, it is not ours: no Home,
+        // no second tap.
+        t.input("ui_guide", 1.0);
+        t.advance(MS(80));
+        t.input("ui_guide", 0.0);
+        t.advance(Duration::from_secs(1));
+        assert!(t.events().is_empty());
+        assert_eq!(t.shell.focused(), Some("portal"));
+        assert!(t.log.take().is_empty());
+
+        // Later Guide presses are ours again.
+        t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
+        assert_eq!(t.shell.focused(), None);
+        assert!(home_pressed(&t.events()));
+    }
+
+    #[test]
+    fn guide_long_press_in_big_picture_goes_to_steam() {
+        let mut t = T::new();
+        t.procs.lock().unwrap().steam_running = true;
+        t.launch(json!({"id": "steam"}));
+        t.gamescope(Some(769), &[769]);
+        t.events();
+        t.log.take();
+        t.input("ui_guide", 1.0);
+        t.advance(GUIDE_LONG_PRESS);
+        t.input("ui_guide", 0.0);
+        assert_eq!(t.log.take(), [Call::GuideTap(InterceptMode::Pass)]);
+        assert_eq!(t.shell.focused(), Some("steam"));
+        assert!(t.events().is_empty());
+    }
+
+    #[test]
+    fn guide_long_press_without_steam_is_home() {
+        // Steam not running (the game's Steam went away): a long press is Home, on release.
+        let mut t = steam_game_in_front(|_| {});
+        t.procs.lock().unwrap().steam_running = false;
+        t.input("ui_guide", 1.0);
+        t.advance(Duration::from_secs(2));
+        assert!(t.log.take().is_empty());
+        assert_eq!(t.shell.focused(), Some("portal"));
+        t.input("ui_guide", 0.0);
+        assert_eq!(t.shell.focused(), None);
+        assert!(home_pressed(&t.events()));
+        assert!(!t.log.take().contains(&Call::GuideTap(InterceptMode::Pass)));
+
+        // A non-Steam app in front (Steam running in the background): Home on the press, as
+        // always, and nothing for Steam however long Guide is held.
+        let mut t = T::new();
+        t.procs.lock().unwrap().steam_running = true;
+        t.launch(json!({"id": "jellyfin"}));
+        t.events();
+        t.log.take();
+        t.input("ui_guide", 1.0);
+        assert_eq!(t.shell.focused(), None);
+        assert!(home_pressed(&t.events()));
+        t.advance(Duration::from_secs(2));
+        t.input("ui_guide", 0.0);
+        assert_eq!(
+            t.log.take(),
+            [Call::FocusLauncher, Call::Mode(InterceptMode::All)]
+        );
+
+        // The launcher in front, Steam in the background: Home, nothing for Steam.
+        t.input("ui_guide", 1.0);
+        t.advance(Duration::from_secs(2));
+        t.input("ui_guide", 0.0);
+        assert!(home_pressed(&t.events()));
+        assert!(!t.log.take().contains(&Call::GuideTap(InterceptMode::Pass)));
+    }
+
+    #[test]
+    fn guide_long_press_with_the_osk_up_is_home() {
+        // The on-screen keyboard over a Steam game has the pad: Home (which hides it).
+        let mut t = steam_game_in_front(|_| {});
+        t.call("osk.show", json!({})).unwrap();
+        t.log.take();
+        t.input("ui_guide", 1.0);
+        t.advance(Duration::from_secs(1));
+        t.input("ui_guide", 0.0);
+        assert!(!t.log.take().contains(&Call::GuideTap(InterceptMode::Pass)));
+        assert!(!t.shell.osk_visible());
+        assert_eq!(t.shell.focused(), None);
+    }
+
+    #[test]
+    fn guide_chord_within_the_threshold_is_the_keyboard_not_steam() {
+        let mut t = steam_game_in_front(|c| c.osk_summon = Some(NavAction::Context));
+        t.input("ui_guide", 1.0);
+        t.advance(MS(200));
+        t.input("ui_context", 1.0);
+        assert!(t.shell.osk_visible());
+        // Held well past the threshold: still only the keyboard.
+        t.advance(Duration::from_secs(1));
+        t.input("ui_context", 0.0);
+        t.input("ui_guide", 0.0);
+        assert_eq!(
+            t.log.take(),
+            [Call::Osk(true), Call::Mode(InterceptMode::All)]
+        );
+        assert_eq!(t.shell.focused(), Some("portal"));
+        assert!(!home_pressed(&t.events()));
+        t.call("osk.hide", json!({})).unwrap();
+        t.log.take();
+        t.events();
+
+        // With the chord configured, Guide alone, held, is still Steam's.
+        t.input("ui_guide", 1.0);
+        t.advance(GUIDE_LONG_PRESS);
+        assert_eq!(t.log.take(), [Call::GuideTap(InterceptMode::Pass)]);
+        t.input("ui_guide", 0.0);
+        assert!(t.events().is_empty());
+
+        // Another button within the threshold: no Steam Guide, Home on release (as before).
+        t.advance(Duration::from_secs(1));
+        t.input("ui_guide", 1.0);
+        t.input("ui_accept", 1.0);
+        t.input("ui_accept", 0.0);
+        t.advance(Duration::from_secs(1));
+        assert!(t.log.take().is_empty());
+        t.input("ui_guide", 0.0);
+        assert_eq!(t.shell.focused(), None);
+        assert!(home_pressed(&t.events()));
     }
 
     impl T {

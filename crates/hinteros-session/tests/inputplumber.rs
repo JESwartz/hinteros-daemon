@@ -165,14 +165,44 @@ impl Composite {
         }
         *self.profile.lock().unwrap() = name;
     }
-    async fn send_event(&self, event: String, value: zbus::zvariant::Value<'_>) {
+    /// Like InputPlumber 0.81's (`write_send_event` → `write_event`): no Guide intercept (that
+    /// only looks at the physical pad's events), but `All` sends everything, and
+    /// `GamepadOnly` gamepad events, to the D-Bus target, i.e. back to the daemon. Gamepad
+    /// events are logged with where they went.
+    async fn send_event(
+        &self,
+        event: String,
+        value: zbus::zvariant::Value<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) {
         self.faults.gate().await;
         let pressed = matches!(value, zbus::zvariant::Value::Bool(true));
-        self.calls
-            .log
-            .lock()
-            .unwrap()
-            .push(format!("{event} {pressed}"));
+        let mut entry = format!("{event} {pressed}");
+        if event.starts_with("Gamepad:") {
+            let mode = self.mode.load(Ordering::SeqCst);
+            if mode == 2 || mode == 3 {
+                entry.push_str(" → D-Bus");
+                let name = match event.as_str() {
+                    "Gamepad:Button:Guide" => "ui_guide",
+                    _ => "ui_other",
+                };
+                for target in &self.targets {
+                    let value = if pressed { 1.0 } else { 0.0 };
+                    conn.emit_signal(
+                        None::<BusName<'_>>,
+                        target.as_str(),
+                        "org.shadowblip.Input.DBusDevice",
+                        "InputEvent",
+                        &(name, value),
+                    )
+                    .await
+                    .unwrap();
+                }
+            } else {
+                entry.push_str(" → pad");
+            }
+        }
+        self.calls.log.lock().unwrap().push(entry);
         if self.faults.hang_send_event.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
@@ -1008,4 +1038,85 @@ async fn inputplumber_name_before_its_manager() {
         "{}",
         d.log()
     );
+}
+
+/// A long Guide press while Steam is in front: the daemon taps Guide on the virtual pad for
+/// Steam. InputPlumber switched the pad to ALL on the user's Guide press; a `SendEvent` in ALL
+/// would come straight back to us as `ui_guide` (a short press: Home). So the pad goes back to
+/// PASS first, then the tap: it reaches the pad, and nothing comes back to the daemon.
+#[tokio::test(flavor = "multi_thread")]
+async fn guide_tap_for_steam_reaches_the_pad_not_us() {
+    use hinteros_session::input::inputplumber::{self, PointerProfile, Settings};
+    use hinteros_session::input::{InputControl, InterceptMode, LabelSwap, pointer};
+
+    let Some(bus) = Bus::start() else { return };
+    let fake = Fake::start(&bus.address).await;
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let mut input = inputplumber::spawn(
+        Settings {
+            bus: Some(bus.address.clone()),
+            initial: InterceptMode::Pass,
+            swap: LabelSwap::Off,
+            profile: PointerProfile {
+                yaml: pointer::profile_yaml(600, 0.1),
+            },
+            call_timeout: std::time::Duration::from_secs(5),
+            // No watchdog in the way: the tap itself must set the mode.
+            watchdog: std::time::Duration::from_secs(600),
+        },
+        tx,
+    );
+    // A Steam game in front: PASS.
+    ready(&fake, 0, 1).await;
+
+    // The user's Guide press: InputPlumber switches to ALL by itself. The fake behaves like
+    // InputPlumber there: a Guide sent in ALL comes back as ui_guide.
+    fake.modes[0].store(2, Ordering::SeqCst);
+    let conn = zbus::connection::Builder::address(bus.address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let proxy = zbus::Proxy::new(
+        &conn,
+        SERVICE,
+        device(0),
+        "org.shadowblip.Input.CompositeDevice",
+    )
+    .await
+    .unwrap();
+    proxy
+        .call::<_, _, ()>(
+            "SendEvent",
+            &("Gamepad:Button:Guide", zbus::zvariant::Value::Bool(true)),
+        )
+        .await
+        .unwrap();
+    let echo = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((echo.event.as_str(), echo.value), ("ui_guide", 1.0));
+    assert_eq!(fake.calls.take(), ["Gamepad:Button:Guide true → D-Bus"]);
+
+    // A tap that would loop (the routing is ALL) is not sent at all.
+    input.guide_tap(TARGET, InterceptMode::All);
+    // The daemon's tap: PASS first, then press and release, both to the pad.
+    input.guide_tap(TARGET, InterceptMode::Pass);
+    eventually("the Guide tap", async || {
+        let calls = fake.calls.log.lock().unwrap().clone();
+        (calls.len() == 2).then_some(())
+    })
+    .await;
+    assert_eq!(
+        fake.calls.take(),
+        [
+            "Gamepad:Button:Guide true → pad",
+            "Gamepad:Button:Guide false → pad"
+        ]
+    );
+    assert_eq!(fake.mode(0), 1, "the pad is left in PASS, for the game");
+    // Nothing came back to the daemon.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(events.try_recv().is_err(), "the tap came back as input");
 }

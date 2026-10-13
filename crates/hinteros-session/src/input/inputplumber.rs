@@ -49,7 +49,10 @@ use zbus::zvariant::{ObjectPath, OwnedObjectPath, Value};
 use zbus::{Connection, MatchRule, MessageStream, Proxy};
 
 use super::pointer::{self, MouseButton};
-use super::{InputControl, InterceptMode, LabelSwap, RawInput, swap_xbox_label, xbox_layout};
+use super::{
+    GUIDE_CAPABILITY, GUIDE_TAP_HOLD, InputControl, InterceptMode, LabelSwap, RawInput,
+    swap_xbox_label, xbox_layout,
+};
 
 pub const SERVICE: &str = "org.shadowblip.InputPlumber";
 /// Where InputPlumber's ObjectManager lives; all its objects are below.
@@ -97,6 +100,10 @@ enum Command {
         button: MouseButton,
         pressed: bool,
     },
+    GuideTap {
+        source: String,
+        mode: InterceptMode,
+    },
 }
 
 /// [`InputControl`] backed by the InputPlumber task: the latest routing wins; mouse buttons
@@ -128,6 +135,13 @@ impl InputControl for InputPlumber {
             source: source.into(),
             button,
             pressed,
+        });
+    }
+
+    fn guide_tap(&mut self, source: &str, mode: InterceptMode) {
+        let _ = self.commands.send(Command::GuideTap {
+            source: source.into(),
+            mode,
         });
     }
 }
@@ -162,6 +176,7 @@ async fn connect(bus: Option<&str>, timeout: Duration) -> zbus::Result<Connectio
 #[derive(Debug)]
 enum Op {
     Button { button: MouseButton, pressed: bool },
+    GuideTap { mode: InterceptMode },
 }
 
 /// One composite device (pad): its worker and what the signal loop needs to know.
@@ -278,6 +293,7 @@ async fn run(
                 Command::Button { source, button, pressed } => {
                     task.button(&source, button, pressed).await;
                 }
+                Command::GuideTap { source, mode } => task.guide_tap(&source, mode).await,
             },
             Some(change) = owner_changes.next() => {
                 task.devices.clear();
@@ -539,6 +555,16 @@ impl Task {
     /// Press or release a mouse button on the pad behind `source` (the first pad if unknown):
     /// queued to that pad's worker.
     async fn button(&mut self, source: &str, button: MouseButton, pressed: bool) {
+        self.send(source, Op::Button { button, pressed }).await;
+    }
+
+    /// Tap Guide on the virtual pad of the pad behind `source` (the first pad if unknown),
+    /// after putting it in `mode`: queued to that pad's worker.
+    async fn guide_tap(&mut self, source: &str, mode: InterceptMode) {
+        self.send(source, Op::GuideTap { mode }).await;
+    }
+
+    async fn send(&mut self, source: &str, op: Op) {
         let path = match self.device_of(source).await {
             Some(p) => p,
             None => match self.devices.keys().next() {
@@ -547,7 +573,7 @@ impl Task {
             },
         };
         if let Some(device) = self.devices.get(&path) {
-            let _ = device.ops.send(Op::Button { button, pressed });
+            let _ = device.ops.send(op);
         }
     }
 }
@@ -583,6 +609,7 @@ impl Worker {
                 biased;
                 Some(op) = ops.recv() => match op {
                     Op::Button { button, pressed } => self.button(button, pressed).await,
+                    Op::GuideTap { mode } => self.guide_tap(mode).await,
                 },
                 changed = self.routing.changed() => {
                     if changed.is_err() {
@@ -759,6 +786,53 @@ impl Worker {
                 warn!(device = %self.path, ?button, pressed, "mouse button: {e}");
                 self.dirty = true;
             }
+        }
+    }
+}
+
+impl Worker {
+    /// Tap Guide on the virtual pad, for Steam (see [`InputControl::guide_tap`]): set the
+    /// intercept mode (InputPlumber switched the pad to `All` on the user's Guide press), then
+    /// press and release Guide with `SendEvent`. Both go through the composite device's one
+    /// command queue in the order we await them, so the mode is in place before the press.
+    /// If the mode cannot be set, or is one in which the tap would come back to us, no tap.
+    async fn guide_tap(&mut self, mode: InterceptMode) {
+        if !mode.reaches_pad() {
+            warn!(device = %self.path, ?mode, "no Guide tap: it would come back as ui_guide");
+            return;
+        }
+        let proxy = match device_proxy(&self.conn, &self.path).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(device = %self.path, "Guide tap: {e}");
+                self.dirty = true;
+                return;
+            }
+        };
+        if let Err(e) = proxy.set_property("InterceptMode", mode as u32).await {
+            warn!(device = %self.path, ?mode, "Guide tap: setting InterceptMode: {e}; no tap");
+            self.dirty = true;
+            return;
+        }
+        let send = async |pressed: bool| {
+            proxy
+                .call::<_, _, ()>("SendEvent", &(GUIDE_CAPABILITY, Value::Bool(pressed)))
+                .await
+        };
+        let pressed = send(true).await;
+        tokio::time::sleep(GUIDE_TAP_HOLD).await;
+        // Released even if the press failed: it may have arrived (a timeout).
+        let released = send(false).await;
+        match (pressed, released) {
+            (Ok(()), Ok(())) => info!(device = %self.path, ?mode, "Guide tap sent to Steam"),
+            (p, r) => {
+                warn!(device = %self.path, press = ?p.err(), release = ?r.err(), "Guide tap failed");
+                self.dirty = true;
+            }
+        }
+        // The routing may have changed meanwhile (the next apply sets it), or not be `mode`.
+        if self.routing.borrow().mode != mode {
+            self.dirty = true;
         }
     }
 }

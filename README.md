@@ -41,7 +41,8 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   `input_nav`, with key repeat for held directions), and PASS while an app has focus (the pad
   goes to Steam/the game; Guide still comes to us), except for keyboard-profile apps and while
   the on-screen keyboard is up (both ALL, see below). Guide sends `home_pressed` and brings the
-  launcher back (on release, since Guide also starts the on-screen keyboard chord). Re-applies everything when InputPlumber restarts or a pad appears. Without
+  launcher back (on release, since Guide also starts the on-screen keyboard chord), except for
+  a long press with Steam in front (below). Re-applies everything when InputPlumber restarts or a pad appears. Without
   InputPlumber it logs and carries on. `--dev-gamepad` reads
   pads directly instead, for desktop previews only (see "Desktop preview").
   Latency: every InputPlumber method and property read is a polkit check, so the signal loop
@@ -180,8 +181,24 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   Chord: InputPlumber has no chord events, but in PASS mode it switches the pad to ALL on the
   Guide press, so Y pressed while Guide is held reaches the daemon in every mode (Y held first
   only works where the daemon already sees Y). Because Guide may start a chord, Home happens on
-  Guide *release*; `summon = "none"` puts it back on the press. The keyboard button (`ui_osk`,
-  on pads that have one) also toggles it in keyboard-profile apps.
+  Guide *release*; `summon = "none"` puts it back on the press (unless Steam is in front, see
+  below). The keyboard button (`ui_osk`, on pads that have one) also toggles it in
+  keyboard-profile apps.
+  Long press for Steam: Guide held for 500 ms (`GUIDE_LONG_PRESS` in `shell.rs`) while Steam
+  (Big Picture) or a Steam game (launched by us or by Steam) has focus with the pad (PASS, no
+  on-screen keyboard up) and Steam runs gives Steam one Guide tap instead of Home: its in-game
+  menu over a game, its main menu in Big Picture, and from there Steam's controller settings.
+  It fires at the threshold, while Guide is still held. A shorter press is Home (on release);
+  a long press anywhere else (the launcher, a non-Steam app, Steam not running) is Home as
+  before. A chord before the threshold (Guide+Y for the keyboard, or any other button) is
+  never Steam's: Guide+Y is the keyboard, any other button makes the release Home. The tap:
+  InputPlumber switched the pad to ALL on the Guide press, so the pad's worker first sets the
+  focused app's mode (PASS) back, then `CompositeDevice.SendEvent("Gamepad:Button:Guide")`
+  true, 80 ms, false. `SendEvent` writes straight to the virtual pad, past PASS's Guide
+  intercept (which only sees the physical pad's events), but in ALL or GAMEPAD_ONLY it would
+  go to D-Bus and come back to us as `ui_guide`, so the tap is only ever sent in PASS/NONE.
+  Guide events within 750 ms of the tap are ignored anyway. The user's own Guide release then
+  goes to the virtual pad too (a stray release for Steam, harmless), not to us.
   Xbox pads (xpad): InputPlumber maps positionally, so physical Y arrives as `ui_action` and X as
   `ui_context`; the daemon swaps them per composite device (`[input] xbox_label_swap`, detection
   by the xpad driver of the sources, else the "Microsoft X-Box ..." config name; Bluetooth Xbox
@@ -753,6 +770,9 @@ Verified here: the key planning and pacing (unit tests), the input method client
 fake compositor speaking the protocol XML (wayland-server), the overlay atoms and opacity on an
 Xvfb standing in for gamescope's Xwayland, keyboard-profile translation, `input_nav` routing
 and the Guide chord against the fake InputPlumber with a fake keyboard (`--fake-keyboard`),
+the long-press Guide tap for Steam (shell unit tests; against the fake InputPlumber, which
+loops a `SendEvent` in ALL back as `ui_guide` the way 0.81 does: the tap sets PASS first and
+nothing comes back),
 and creating the real uinput device (`HINTEROS_TEST_UINPUT=1`). The automatic keyboard: host
 framing and forwarding (unit tests), the focus state machine (shell unit tests with fakes), and
 an app starting the installed-name host the way Firefox does, end to end
@@ -762,7 +782,9 @@ uinput typing reaches Firefox, that `gamescope_input_method` types Unicode into 
 `GAMESCOPE_EXTERNAL_OVERLAY` window toggled by opacity draws over Firefox without taking focus.
 
 Needs real gamescope and a pad: the overlay's size and position at the output resolution, the
-Flutter OSK's transparent window, Guide+Y reaching the daemon with Steam running, that a held
+Flutter OSK's transparent window, Guide+Y reaching the daemon with Steam running, that Steam
+opens its in-game / Big Picture menu on the injected Guide tap (and whether it wants a longer
+tap than 80 ms), that a held
 Guide flips the pad to ALL before Y (InputPlumber behaviour, spike 4), YouTube TV's and
 Crunchyroll's reaction to the keys (YouTube TV may want `back_key = "backspace"`), and the
 input method on hardware.

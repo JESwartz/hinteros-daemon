@@ -41,6 +41,30 @@ pub trait InputControl: Send {
     fn set_pointer(&mut self, _on: bool) {}
     /// Press or release a mouse button on the pointer of the pad `source` (a D-Bus target).
     fn mouse_button(&mut self, _source: &str, _button: MouseButton, _pressed: bool) {}
+    /// Tap Guide (press, [`GUIDE_TAP_HOLD`], release) on the virtual pad of the pad `source`,
+    /// for Steam: a long Guide press while Steam is in front. The pad is first put in `mode`
+    /// (the focused app's, `Pass`), which InputPlumber left for `All` on the user's Guide
+    /// press; only then the tap, so that it goes to the virtual pad and not back to us.
+    /// InputPlumber's `SendEvent` writes straight to the targets, past the `Pass` mode's Guide
+    /// intercept (that only looks at events from the physical pad), but it still honours
+    /// `All`/`GamepadOnly`, which would send the tap to us as a new `ui_guide`. So the tap is
+    /// only sent in `Pass` or `None`.
+    fn guide_tap(&mut self, _source: &str, _mode: InterceptMode) {}
+}
+
+/// How long the Guide tap to Steam holds the button (InputPlumber's own chords space their
+/// events 80 ms apart; Steam must see the press in at least one of its polls).
+pub const GUIDE_TAP_HOLD: Duration = Duration::from_millis(80);
+
+/// InputPlumber's capability name for the Guide button (`SendEvent`).
+pub const GUIDE_CAPABILITY: &str = "Gamepad:Button:Guide";
+
+impl InterceptMode {
+    /// Whether an event written to the pad's targets in this mode reaches the virtual pad
+    /// (rather than going to D-Bus, i.e. to us).
+    pub fn reaches_pad(self) -> bool {
+        matches!(self, InterceptMode::None | InterceptMode::Pass)
+    }
 }
 
 /// Input control when InputPlumber integration is off: does nothing.

@@ -34,6 +34,9 @@ pub const P1_USER: &str = "hinteros";
 /// The guest account.
 pub const GUEST_USER: &str = "hinteros-guest";
 
+/// The guest account's uid (profiles.nix).
+pub const GUEST_UID: u32 = 20000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct State {

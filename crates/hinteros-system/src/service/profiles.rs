@@ -76,6 +76,7 @@ pub enum ProfilesRequest {
     SwitchCancel,
     Unlock(PinParams),
     GuestSet(GuestSetParams),
+    GuestEnd,
     SaveMode(DisplaySaveModeParams),
     SaveOutput(AudioSaveOutputParams),
     StarterSet(StarterSetSetParams),
@@ -180,6 +181,7 @@ impl ProfilesRequest {
             R::SwitchCancel => Ok(()),
             R::Unlock(p) => check_pin_field(&p.pin, "pin"),
             R::GuestSet(p) => check_pin_field(&p.admin_pin, "admin_pin"),
+            R::GuestEnd => Ok(()),
             R::SaveMode(p) => {
                 if p.display.is_empty()
                     || p.display.chars().count() > 128
@@ -871,6 +873,47 @@ impl Service {
                     }),
                 );
                 job_ref(Some(self.start(spec).await?))
+            }
+            R::GuestEnd => {
+                let (state, _) = self.require_schema2()?;
+                let caller = self.caller(uid, &state);
+                if caller.role != Role::Guest {
+                    return Err(ErrorObject::with_data(
+                        ErrorCode::PermissionDenied,
+                        "only the guest can end the guest session",
+                        json!({ "action": PROFILES_ACTION, "reason": "profile" }),
+                    ));
+                }
+                // The account, before anything of it is touched: exactly the guest, and the
+                // caller is it.
+                let account =
+                    crate::guest::account(&self.users, self.args.guest_uid).map_err(|why| {
+                        warn!("guest.end refused: {why}");
+                        internal(format!("the guest account is not as expected: {why}"))
+                    })?;
+                if account.uid != uid {
+                    return Err(internal("the caller is not the guest account's uid"));
+                }
+                let tmp_dirs = if self.args.guest_tmp_dirs.is_empty() {
+                    ["/tmp", "/var/tmp", "/dev/shm"]
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect()
+                } else {
+                    self.args.guest_tmp_dirs.clone()
+                };
+                let spec = self.spec(
+                    JobKind::GuestEnd,
+                    uid,
+                    Action::GuestEnd(job::GuestEndJob {
+                        uid: account.uid,
+                        home: account.home,
+                        tmp_dirs,
+                    }),
+                );
+                let job_id = self.start(spec).await?;
+                info!(job = %job_id, "ending the guest session");
+                job_ref(Some(job_id))
             }
             R::StarterSet(p) => {
                 let (state, _) = self.require_schema2()?;

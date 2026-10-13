@@ -541,6 +541,7 @@ impl Root {
             "pkgs/a/bin",
             "pkgs/b/bin",
             "home",
+            "tmp",
             "policy/terms",
         ] {
             std::fs::create_dir_all(r.p(d)).unwrap();
@@ -728,6 +729,9 @@ impl System {
             // Never a real home: data deletion only ever sees this directory.
             "--test-profile-home".into(),
             r("home"),
+            // guest.end never looks at this machine's /tmp.
+            "--guest-tmp-dir".into(),
+            r("tmp"),
         ];
         // Generous rate limits unless the test sets its own (clap refuses a flag given twice).
         for (flag, value) in [("--rate-per-minute", "1000"), ("--rate-burst", "1000")] {

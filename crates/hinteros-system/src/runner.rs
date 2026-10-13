@@ -97,6 +97,7 @@ fn run(dir: &Path) -> anyhow::Result<()> {
         Action::MigrateApps(m) => r.migrate(&m),
         Action::ProfileCreate(j) => r.profile_create(&j),
         Action::ProfileRemove(j) => r.profile_remove(&j),
+        Action::GuestEnd(j) => r.guest_end(&j),
     };
     let staging = r.spec.paths.staging();
     let status = match outcome {

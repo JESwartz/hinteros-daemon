@@ -164,6 +164,7 @@ fn startup(args: &ServeArgs) {
         crate::appreg::Registry::reconcile(&paths, &state);
         crate::appreg::publish(&paths, &state);
     }
+    crate::guest::boot_cleanup(&paths);
 }
 
 /// Follow the running job and broadcast its events (at most 4 per second).
@@ -184,11 +185,16 @@ async fn monitor(svc: Arc<Service>) {
             let _ = svc.events.send(e);
         }
         if let Some(f) = finished {
+            if f.job.kind == JobKind::GuestEnd {
+                // The guest may need the starter env again (when the job could not give it).
+                svc.env_tried.lock().unwrap().remove("guest");
+            }
             if matches!(
                 f.job.kind,
                 JobKind::ProfilesCreate
                     | JobKind::ProfilesRemove
                     | JobKind::GuestSet
+                    | JobKind::GuestEnd
                     | JobKind::MigrateApps
                     | JobKind::Rollback
             ) {
@@ -757,6 +763,10 @@ impl Request {
                         P::Unlock(decode::<system::ProfilesUnlock>(params)?)
                     }
                     system::GuestSet::NAME => P::GuestSet(decode::<system::GuestSet>(params)?),
+                    system::GuestEnd::NAME => {
+                        decode::<system::GuestEnd>(params)?;
+                        P::GuestEnd
+                    }
                     system::DisplaySaveMode::NAME => {
                         P::SaveMode(decode::<system::DisplaySaveMode>(params)?)
                     }
@@ -825,6 +835,7 @@ fn profiles_method_name(r: &profiles::ProfilesRequest) -> &'static str {
         P::SwitchCancel => system::ProfilesSwitchCancel::NAME,
         P::Unlock(_) => system::ProfilesUnlock::NAME,
         P::GuestSet(_) => system::GuestSet::NAME,
+        P::GuestEnd => system::GuestEnd::NAME,
         P::SaveMode(_) => system::DisplaySaveMode::NAME,
         P::SaveOutput(_) => system::AudioSaveOutput::NAME,
         P::StarterSet(_) => system::StarterSetSet::NAME,

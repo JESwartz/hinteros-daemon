@@ -2849,6 +2849,49 @@
       ],
       "relay": true
     },
+    "system.guest.end": {
+      "summary": "Relayed to the system service's guest.end. End guest session (0.5): end the guest's session and wipe the guest now (job). Only the guest itself. Action org.hinteros.system.profiles.",
+      "description": "Only a caller that is the guest account (hinteros-guest, while the guest is on) may call it; anyone else gets permission_denied {reason: profile}. The service checks the account first: the name hinteros-guest, the expected guest uid (20000 on a box), no other account with that uid, a home that is an absolute path ending in /hinteros-guest; otherwise internal_error and nothing is touched. The job (kind guest_end) hides the guest from the picker (profiles-public.json guest.enabled false; PAM refuses the guest) while it runs, ends the guest's session itself (logind TerminateUser, its user slice, then SIGKILL for anything left of the uid; it fails at stage preparing if processes remain, before anything is deleted), then deletes everything the guest uid owns in its home (the home directory itself stays), in /tmp, /var/tmp and /dev/shm (top-level entries owned by the uid; no symlink is followed, no other filesystem entered, nothing owned by another uid touched), the guest's app env link (then given the starter env again), its terms acceptances (by hinteros-guest), its usage entry and a switch hint that targets it. The boot-time wipe stays. The caller's own session ends while the job runs: call it last.",
+      "since": "0.13",
+      "params": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "result": {
+        "$ref": "#/$defs/JobRef",
+        "type": "object"
+      },
+      "errors": [
+        "system_unavailable",
+        "permission_denied",
+        "authentication_required",
+        "rate_limited",
+        "job_busy",
+        "unavailable"
+      ],
+      "examples": [
+        {
+          "name": "started",
+          "params": {},
+          "result": {
+            "job_id": "3f9a0c2b7e4d1a65"
+          }
+        },
+        {
+          "name": "not the guest",
+          "params": {},
+          "error": {
+            "code": 3002,
+            "message": "only the guest can end the guest session",
+            "data": {
+              "action": "org.hinteros.system.profiles",
+              "reason": "profile"
+            }
+          }
+        }
+      ],
+      "relay": true
+    },
     "network.status": {
       "summary": "Wired and Wi-Fi state, the SSID joined and the IP address.",
       "description": "Runtime settings (NetworkManager over D-Bus, as the session user). The same object comes with every network_changed event.",
@@ -3596,7 +3639,8 @@
       ]
     },
     "session.end_guest": {
-      "summary": "Guest only: end the guest session now (like a switch, to the picker). The guest's home and apps are wiped at the next boot.",
+      "summary": "Guest only: end the guest session now (like a switch, to the picker) and wipe the guest now.",
+      "description": "Answers {} at once; switch_progress events follow as on a switch (closing_apps, closing_steam, ending; switch_wait, switch_force_close and switch_cancel work the same). Once every app is closed the daemon calls system.guest.end (0.13): that job ends this session itself and wipes the guest's home, app env (back to the starter set), terms acceptances and usage; the boot-time wipe stays. While another job runs the daemon retries for 15 s; if the wipe cannot start it ends the session anyway and the guest is wiped at the next boot.",
       "since": "0.12",
       "params": {
         "type": "object",
@@ -5232,7 +5276,8 @@
         "migrate_apps",
         "profiles_create",
         "profiles_remove",
-        "guest_set"
+        "guest_set",
+        "guest_end"
       ]
     },
     "ProfileId": { "description": "A profile id.", "type": "string", "pattern": "^p[1-9][0-9]{0,2}$" },

@@ -57,7 +57,8 @@ pub fn unlocked(ctx: &Ctx, user: &str, now: i64) -> bool {
     };
     let file = ctx.file();
     if user == state::GUEST_USER {
-        return state.guest_enabled();
+        // Not while End guest session wipes it.
+        return state.guest_enabled() && !crate::guest::ending(&ctx.paths);
     }
     let Some(account) = state.accounts().into_iter().find(|a| a.user == user) else {
         return false;

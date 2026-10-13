@@ -39,6 +39,11 @@ pub const METHODS: &[&str] = &[
 /// How often a running switch renews its hint (the service keeps it 60 s).
 const RENEW_EVERY: Duration = Duration::from_secs(25);
 
+/// How long End guest session retries `system.guest.end` while another job runs.
+const GUEST_END_BUSY_WAIT: Duration = Duration::from_secs(15);
+/// How long the session waits for the guest_end job to end it before ending it itself.
+const GUEST_END_GRACE: Duration = Duration::from_secs(20);
+
 /// What a switch waits for.
 #[derive(Debug, Clone)]
 pub struct SwitchConfig {
@@ -152,7 +157,7 @@ impl Profiles {
             SessionSwitchProfile::NAME => {
                 let p = decode_params::<SessionSwitchProfile>(params)?;
                 let pin = p.pin.map(zeroize::Zeroizing::new);
-                self.switch(Some(p.id), pin).await?;
+                self.switch(Some(p.id), pin, false).await?;
                 encode_result::<SessionSwitchProfile>(ProfileEmpty {})
             }
             SessionEndGuest::NAME => {
@@ -165,7 +170,9 @@ impl Profiles {
                         json!({"action": "org.hinteros.system.profiles", "reason": "profile"}),
                     ));
                 }
-                self.switch(None, None).await?;
+                // Close everything like a switch, then the system service ends this session and
+                // wipes the guest now (system.guest.end).
+                self.switch(None, None, true).await?;
                 encode_result::<SessionEndGuest>(ProfileEmpty {})
             }
             SessionSwitchWait::NAME => {
@@ -240,6 +247,7 @@ impl Profiles {
         &self,
         target: Option<String>,
         pin: Option<zeroize::Zeroizing<String>>,
+        end_guest: bool,
     ) -> Result<(), ErrorObject> {
         if self.inner.switch.lock().unwrap().is_some() {
             return Err(invalid("id", "busy", "a switch is already running"));
@@ -264,7 +272,9 @@ impl Profiles {
         tokio::spawn(async move {
             let ended = me.run_switch(rx, target).await;
             *me.inner.switch.lock().unwrap() = None;
-            if ended {
+            if ended && end_guest {
+                me.end_guest().await;
+            } else if ended {
                 me.end_session().await;
             }
         });
@@ -479,6 +489,50 @@ impl Profiles {
             Ok(()) => info!("session ended for the switch"),
             Err(e) => warn!("cannot end the session: {e}"),
         }
+    }
+
+    /// End guest session, once every app is closed: `system.guest.end` ends this session and
+    /// wipes the guest now (a job outside this session). While another job runs it is retried
+    /// for a while; if it cannot start, or this session is still there long after it started,
+    /// the session ends as on a switch and the guest is wiped at the next boot instead.
+    async fn end_guest(&self) {
+        let _ = self
+            .shell(|reply| Msg::Request {
+                method: hinteros_api::session::OskHide::NAME.into(),
+                params: None,
+                reply,
+            })
+            .await;
+        let give_up = Instant::now() + GUEST_END_BUSY_WAIT;
+        loop {
+            match self
+                .inner
+                .relay
+                .call(system::GuestEnd::NAME, Some(json!({})))
+                .await
+            {
+                Ok(v) => {
+                    info!(job = %v["job_id"], "the guest is being wiped; the job ends this session");
+                    if !self.inner.cfg.end_session {
+                        return;
+                    }
+                    tokio::time::sleep(GUEST_END_GRACE).await;
+                    warn!("still running after guest.end; ending the session");
+                    break;
+                }
+                Err(e) if e.kind() == Some(ErrorCode::JobBusy) && Instant::now() < give_up => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    warn!(
+                        "cannot wipe the guest now ({}); it is wiped at the next restart",
+                        e.message
+                    );
+                    break;
+                }
+            }
+        }
+        self.end_session().await;
     }
 
     /// Before the box sleeps: a locked profile's launcher comes to the front in lock mode.

@@ -8,10 +8,11 @@ use tracing::{info, warn};
 
 use super::{Outcome, Runner};
 use crate::appreg::{self, Owner, Registry};
-use crate::job::{self, Apply, ProfileCreateJob, ProfileRemoveJob};
+use crate::job::{self, Apply, GuestEndJob, ProfileCreateJob, ProfileRemoveJob};
 use crate::pins::Pins;
 use crate::profiles::ProfilesFile;
-use crate::{datadel, pam, public, usage};
+use crate::state::{GUEST_USER, State};
+use crate::{datadel, guest, pam, public, usage};
 
 impl Runner {
     pub(super) fn profile_create(&mut self, j: &ProfileCreateJob) -> Outcome {
@@ -111,6 +112,124 @@ impl Runner {
         appreg::publish(&paths, &j.state);
         info!(profile = %j.id, user = %j.user, freed_bytes = freed, "profile removed");
         Ok(outcome)
+    }
+}
+
+impl Runner {
+    /// End guest session: hide the guest, end its session, then wipe it. Nothing is deleted
+    /// unless the account is still exactly the guest and none of its processes are left.
+    pub(super) fn guest_end(&mut self, j: &GuestEndJob) -> Outcome {
+        self.set_stage(Stage::Preparing);
+        let paths = self.spec.paths.clone();
+        if let Err(e) = guest::mark(&paths, &self.spec.id) {
+            warn!("cannot mark the guest as ending: {e}");
+        }
+        let state = State::load(&paths.state_json()).ok().map(|(s, _)| s);
+        let republish = |state: &Option<State>| {
+            if let (Some(s), Ok(file)) = (state, ProfilesFile::load(&paths.profiles_json())) {
+                public::publish(&paths, s, &file, job::now());
+            }
+        };
+        republish(&state);
+        let outcome = self.guest_wipe(j, state.as_ref());
+        guest::unmark(&paths);
+        republish(&state);
+        outcome
+    }
+
+    fn guest_wipe(&mut self, j: &GuestEndJob, state: Option<&State>) -> Outcome {
+        let paths = self.spec.paths.clone();
+        // The account again (the service checked it when the request came in).
+        let account =
+            guest::account(&paths.users, j.uid).map_err(|why| self.fail(why.to_string()))?;
+        if account.home != j.home {
+            return Err(self.fail("the guest's home changed since the request"));
+        }
+        // Its session and every process of the uid go first.
+        let ctx = pam::Ctx {
+            paths: paths.clone(),
+            users: paths.users.clone(),
+            bus: self.spec.bus.clone(),
+        };
+        for attempt in 0..3 {
+            if pam::processes_of(&paths.proc_dir, j.uid).is_empty() {
+                break;
+            }
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            pam::end_uid(&ctx, GUEST_USER, j.uid, &paths.proc_dir);
+        }
+        let left = pam::processes_of(&paths.proc_dir, j.uid);
+        if !left.is_empty() {
+            return Err(self.fail(format!(
+                "the guest is still logged in ({} processes left); nothing was deleted",
+                left.len()
+            )));
+        }
+        self.set_stage(Stage::Finishing);
+        // The home's contents (the directory stays: tmpfiles made it, 0700 for the guest).
+        let mut removed = 0;
+        let mut problems: Vec<String> = Vec::new();
+        match datadel::wipe_owned(&j.home, j.uid, true) {
+            Ok(w) => {
+                removed += w.removed;
+                problems.extend(w.failed);
+            }
+            Err(datadel::Refused::BadHome(_, why)) if !j.home.exists() => {
+                info!("the guest has no home yet: {why}");
+            }
+            Err(e) => problems.push(e.to_string()),
+        }
+        for dir in &j.tmp_dirs {
+            match datadel::wipe_owned(dir, j.uid, false) {
+                Ok(w) => {
+                    removed += w.removed;
+                    problems.extend(w.failed);
+                }
+                Err(e) => warn!(dir = %dir.display(), "not cleared: {e}"),
+            }
+        }
+        // The app env: the guest's link goes, and it starts from the starter env again.
+        let link = paths.guest_link();
+        match fs::remove_file(&link) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => problems.push(format!("{}: {e}", link.display())),
+        }
+        if state.is_some_and(State::guest_enabled)
+            && let Some(starter) = appreg::current(&Owner::Starter, &paths)
+            && let Err(super::Failure::Error(e)) = self.set_env(&Owner::Guest, &starter.env)
+        {
+            warn!("the guest did not get the starter env again: {}", e.message);
+        }
+        // Per-guest state: terms it accepted, its usage entry, a switch hint into it.
+        match guest::drop_terms(&paths.terms_accepted()) {
+            Ok(n) if n > 0 => info!(dropped = n, "the guest's terms acceptances removed"),
+            Ok(_) => {}
+            Err(e) => problems.push(format!("terms: {e}")),
+        }
+        let mut u = usage::load(&paths.usage_json());
+        if u.remove("guest").is_some()
+            && let Ok(bytes) = serde_json::to_vec_pretty(&u)
+        {
+            let _ = crate::fsutil::write_atomic(&paths.usage_json(), &bytes, 0o600);
+        }
+        if public::SwitchHint::load(&paths.switch_json()).is_some_and(|h| h.target == "guest") {
+            let _ = fs::remove_file(paths.switch_json());
+        }
+        if let Some(s) = state {
+            Registry::reconcile(&paths, s);
+            appreg::publish(&paths, s);
+        }
+        if !problems.is_empty() {
+            return Err(self.fail(format!(
+                "the guest was only partly wiped: {}",
+                problems.join("; ")
+            )));
+        }
+        info!(removed, "guest session ended and wiped");
+        Ok((None, false))
     }
 }
 

@@ -855,6 +855,7 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<RelayProfilesSwitchCancel>(),
         MethodInfo::of::<RelayProfilesUnlock>(),
         MethodInfo::of::<RelayGuestSet>(),
+        MethodInfo::of::<RelayGuestEnd>(),
         MethodInfo::of::<RelayDisplaySaveMode>(),
         MethodInfo::of::<RelayAudioSaveOutput>(),
         MethodInfo::of::<RelayStarterSetGet>(),
@@ -1000,6 +1001,7 @@ relay! {
     RelayProfilesSwitchCancel = "system.profiles.switch_cancel" => crate::system::ProfilesSwitchCancel;
     RelayProfilesUnlock = "system.profiles.unlock" => crate::system::ProfilesUnlock;
     RelayGuestSet = "system.guest.set" => crate::system::GuestSet;
+    RelayGuestEnd = "system.guest.end" => crate::system::GuestEnd;
     RelayDisplaySaveMode = "system.display.save_mode" => crate::system::DisplaySaveMode;
     RelayAudioSaveOutput = "system.audio.save_output" => crate::system::AudioSaveOutput;
     RelayStarterSetGet = "system.starter_set.get" => crate::system::StarterSetGet;

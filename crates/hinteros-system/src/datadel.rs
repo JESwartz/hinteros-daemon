@@ -164,11 +164,174 @@ fn remove_tree(
     Ok(())
 }
 
+/// What [`wipe_owned`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Wiped {
+    /// Files, links and directories removed.
+    pub removed: u64,
+    /// Entries left alone: owned by another uid, or on another filesystem.
+    pub left: u64,
+    /// Entries that could not be removed, and why.
+    pub failed: Vec<String>,
+}
+
+/// Delete everything `uid` owns in `dir` (End guest session): every entry owned by `uid`,
+/// with its whole subtree as far as `uid` owns it, without following a symlink anywhere and
+/// without entering another filesystem. Entries of other uids (and what is below them) are
+/// left alone, as is `dir` itself. `dir_owned`: `dir` must belong to `uid` (a home); else
+/// it is a shared directory such as `/tmp`, scanned for `uid`'s top-level entries.
+pub fn wipe_owned(dir: &Path, uid: u32, dir_owned: bool) -> Result<Wiped, Refused> {
+    let shown = dir.display().to_string();
+    if !dir.is_absolute() || dir == Path::new("/") {
+        return Err(Refused::BadHome(shown, "not an absolute directory".into()));
+    }
+    let fd = rustix::fs::open(dir, DIR_FLAGS, Mode::empty())
+        .map_err(|e| Refused::BadHome(shown.clone(), e.to_string()))?;
+    let st = fstat(&fd).map_err(|e| Refused::BadHome(shown.clone(), e.to_string()))?;
+    if dir_owned && st.st_uid != uid {
+        return Err(Refused::BadHome(shown, format!("not owned by uid {uid}")));
+    }
+    let mut w = Wiped::default();
+    wipe_children(&fd, st.st_dev, uid, &shown, &mut w)?;
+    Ok(w)
+}
+
+/// The entries of the open directory `fd`, without `.` and `..`.
+fn children(fd: &OwnedFd, shown: &str) -> Result<Vec<CString>, Refused> {
+    let dup = rustix::io::dup(fd).map_err(|e| Refused::Io(shown.to_owned(), e))?;
+    let mut entries = Dir::new(dup).map_err(|e| Refused::Io(shown.to_owned(), e))?;
+    let mut out = Vec::new();
+    while let Some(entry) = entries.read() {
+        let entry = entry.map_err(|e| Refused::Io(shown.to_owned(), e))?;
+        let n = entry.file_name();
+        if n.to_bytes() != b"." && n.to_bytes() != b".." {
+            out.push(n.to_owned());
+        }
+    }
+    Ok(out)
+}
+
+/// Remove what `uid` owns below the open directory `fd` (on device `dev`).
+fn wipe_children(
+    fd: &OwnedFd,
+    dev: u64,
+    uid: u32,
+    shown: &str,
+    w: &mut Wiped,
+) -> Result<(), Refused> {
+    for n in children(fd, shown)? {
+        let child = format!("{shown}/{}", n.to_string_lossy());
+        let st = match statat(fd, n.as_c_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(st) => st,
+            Err(Errno::NOENT) => continue,
+            Err(e) => {
+                w.failed.push(format!("{child}: {e}"));
+                continue;
+            }
+        };
+        if st.st_uid != uid {
+            w.left += 1;
+            continue;
+        }
+        if FileType::from_raw_mode(st.st_mode) != FileType::Directory {
+            match unlinkat(fd, n.as_c_str(), AtFlags::empty()) {
+                Ok(()) => w.removed += 1,
+                Err(Errno::NOENT) => {}
+                Err(e) => w.failed.push(format!("{child}: {e}")),
+            }
+            continue;
+        }
+        let sub = match openat(fd, n.as_c_str(), DIR_FLAGS, Mode::empty()) {
+            Ok(sub) => sub,
+            Err(Errno::NOENT) => continue,
+            Err(Errno::LOOP | Errno::NOTDIR) => {
+                // Swapped for a link or file since we looked: that goes, never its target.
+                match unlinkat(fd, n.as_c_str(), AtFlags::empty()) {
+                    Ok(()) => w.removed += 1,
+                    Err(e) => w.failed.push(format!("{child}: {e}")),
+                }
+                continue;
+            }
+            Err(e) => {
+                w.failed.push(format!("{child}: {e}"));
+                continue;
+            }
+        };
+        let sst = fstat(&sub).map_err(|e| Refused::Io(child.clone(), e))?;
+        if sst.st_dev != dev || sst.st_uid != uid {
+            // A mount (or a directory swapped in by someone else): left alone.
+            w.left += 1;
+            continue;
+        }
+        wipe_children(&sub, dev, uid, &child, w)?;
+        drop(sub);
+        match unlinkat(fd, n.as_c_str(), AtFlags::REMOVEDIR) {
+            Ok(()) => w.removed += 1,
+            // Something of another uid is still inside (counted already).
+            Err(Errno::NOTEMPTY | Errno::EXIST | Errno::NOENT) => {}
+            Err(e) => w.failed.push(format!("{child}: {e}")),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn wipes_what_the_uid_owns_and_nothing_else() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("hinteros-guest");
+        let outside = d.path().join("outside");
+        fs::create_dir_all(home.join(".local/share/Steam/config")).unwrap();
+        fs::write(home.join(".local/share/Steam/config/loginusers.vdf"), "x").unwrap();
+        fs::write(home.join(".bash_history"), "x").unwrap();
+        // Names a data path would refuse are wiped too.
+        fs::write(home.join("we*ird\\name"), "x").unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("precious"), "keep").unwrap();
+        symlink(&outside, home.join("link-out")).unwrap();
+        let w = wipe_owned(&home, me(), true).unwrap();
+        assert!(w.failed.is_empty(), "{w:?}");
+        assert_eq!(w.left, 0);
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 0, "the home is empty");
+        assert!(home.is_dir(), "the home itself stays");
+        assert_eq!(
+            fs::read_to_string(outside.join("precious")).unwrap(),
+            "keep"
+        );
+
+        // A shared directory: only the uid's top-level entries are looked at; a directory of
+        // another uid (root's /, here: anything not ours) is never entered. The test can only
+        // own files itself, so "another uid" is checked with uid + 1: nothing goes.
+        let tmp = d.path().join("tmp");
+        fs::create_dir_all(tmp.join("sub")).unwrap();
+        fs::write(tmp.join("f"), "x").unwrap();
+        let w = wipe_owned(&tmp, me() + 1, false).unwrap();
+        assert_eq!((w.removed, w.left), (0, 2));
+        assert!(tmp.join("sub").is_dir() && tmp.join("f").exists());
+        // The home must belong to the uid; a link as the directory is refused.
+        assert!(matches!(
+            wipe_owned(&home, me() + 1, true),
+            Err(Refused::BadHome(..))
+        ));
+        let linked = d.path().join("linked");
+        symlink(&home, &linked).unwrap();
+        assert!(matches!(
+            wipe_owned(&linked, me(), true),
+            Err(Refused::BadHome(..))
+        ));
+        assert!(matches!(
+            wipe_owned(Path::new("/"), 0, false),
+            Err(Refused::BadHome(..))
+        ));
+        let w = wipe_owned(&tmp, me(), false).unwrap();
+        assert_eq!(w.removed, 2);
+        assert_eq!(fs::read_dir(&tmp).unwrap().count(), 0);
+    }
 
     fn me() -> u32 {
         rustix::process::getuid().as_raw()

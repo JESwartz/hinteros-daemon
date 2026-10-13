@@ -952,3 +952,165 @@ async fn box_wide_actions_without_an_admin_profile() {
         assert_eq!(e["data"]["pin"], "admin");
     }
 }
+
+/// The test's uid as the guest (p1 moves to another uid), with a home under the root.
+fn become_the_guest(root: &Root) -> std::path::PathBuf {
+    let home = root.p("guesthomes/hinteros-guest");
+    std::fs::create_dir_all(&home).unwrap();
+    let passwd = root
+        .read("passwd")
+        .lines()
+        .map(|l| {
+            if l.starts_with("hinteros:") {
+                format!("hinteros:x:20001:100::{}:/bin/sh", root.p("home").display())
+            } else if l.starts_with("hinteros-guest:") {
+                format!("hinteros-guest:x:{}:100::{}:/bin/sh", me(), home.display())
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(root.p("passwd"), passwd + "\n").unwrap();
+    home
+}
+
+/// End guest session (system API 0.5): the guest ends its own session and the job wipes it now:
+/// its home (never following a link out of it), its entries in the shared temp directories,
+/// its app env (back to the starter env), its terms, usage entry and a switch hint into it.
+#[tokio::test(flavor = "multi_thread")]
+async fn end_guest_session_wipes_now() {
+    let root = root_with(Some(PROFILES));
+    let home = become_the_guest(&root);
+    std::fs::create_dir_all(home.join(".local/share/Steam/config")).unwrap();
+    std::fs::write(home.join(".local/share/Steam/config/loginusers.vdf"), "x").unwrap();
+    std::fs::create_dir_all(home.join(".mozilla/firefox")).unwrap();
+    std::fs::write(home.join(".mozilla/firefox/cookies.sqlite"), "x").unwrap();
+    std::fs::create_dir_all(root.p("outside")).unwrap();
+    std::fs::write(root.p("outside/keep"), "keep").unwrap();
+    std::os::unix::fs::symlink(root.p("outside"), home.join("link-out")).unwrap();
+    std::fs::write(root.p("tmp/guest-file"), "x").unwrap();
+    std::fs::write(
+        root.p("var/lib/hinteros/terms-accepted.json"),
+        r#"{"steam": [{"version": "1", "accepted_at": "2026-10-01T00:00:00Z", "by": "hinteros-guest"},
+                      {"version": "1", "accepted_at": "2026-10-01T00:00:00Z", "by": "hinteros", "profile": "p1"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.p("var/lib/hinteros/usage.json"),
+        r#"{"guest": {"total_bytes": 5, "steam_games_bytes": 0, "at": 1}}"#,
+    )
+    .unwrap();
+    // This is a new boot for the service: the boot clean-up must not run before the test.
+    std::fs::write(root.p("run/guest-boot-clean"), "").unwrap();
+    let me_s = me().to_string();
+    let Some(sys) = System::start(root, &["--guest-uid", &me_s]).await else {
+        return;
+    };
+    let root = &sys.root;
+    settled(&sys).await;
+    let mut c = sys.subscriber().await;
+    let l = call(&mut c, "profiles.list", json!({})).await.unwrap();
+    assert_eq!(l["caller"]["guest"], true, "{l}");
+    // The guest installed something: its link points at another env.
+    let own = root.p("store/env-guest-own");
+    std::fs::create_dir_all(own.join("share/hinteros")).unwrap();
+    std::fs::write(
+        own.join("share/hinteros/apps.json"),
+        r#"{"version":1,"ids":["moonlight","youtube"],"apps":[],"box":[]}"#,
+    )
+    .unwrap();
+    std::fs::remove_file(root.p("run/apps/hinteros-guest")).unwrap();
+    std::os::unix::fs::symlink(&own, root.p("run/apps/hinteros-guest")).unwrap();
+    std::fs::write(
+        root.p("run/switch.json"),
+        format!(
+            r#"{{"target": "guest", "from": "p1", "expires": {}, "token": null}}"#,
+            i64::MAX / 2
+        ),
+    )
+    .unwrap();
+
+    let r = job(&sys, &mut c, "guest.end", json!({})).await;
+    assert!(r["job_id"].is_string());
+    assert!(home.is_dir(), "the home itself stays");
+    assert_eq!(
+        std::fs::read_dir(&home).unwrap().count(),
+        0,
+        "the home is empty"
+    );
+    assert_eq!(
+        root.read("outside/keep"),
+        "keep",
+        "the link was not followed"
+    );
+    assert!(!root.p("tmp/guest-file").exists());
+    assert_eq!(
+        std::fs::canonicalize(root.p("run/apps/hinteros-guest")).unwrap(),
+        root.p("store/env-youtube"),
+        "the starter env again"
+    );
+    let terms: Value =
+        serde_json::from_str(&root.read("var/lib/hinteros/terms-accepted.json")).unwrap();
+    assert_eq!(terms["steam"].as_array().unwrap().len(), 1);
+    assert_eq!(terms["steam"][0]["by"], "hinteros");
+    let usage: Value = serde_json::from_str(&root.read("var/lib/hinteros/usage.json")).unwrap();
+    assert!(usage.get("guest").is_none());
+    assert!(!root.p("run/switch.json").exists());
+    assert!(!root.p("run/guest-ending").exists());
+    assert_eq!(public(root)["guest"]["enabled"], true, "the guest is back");
+    assert!(pam_ok(root, "unlocked", "hinteros-guest"));
+    // While a guest_end job runs, the picker hides the guest and PAM refuses it.
+    let id = "0123456789abcdef";
+    std::fs::create_dir_all(root.p(&format!("run/jobs/{id}"))).unwrap();
+    std::fs::write(root.p("run/guest-ending"), id).unwrap();
+    assert!(!pam_ok(root, "unlocked", "hinteros-guest"));
+    std::fs::write(root.p(&format!("run/jobs/{id}/status.json")), "{}").unwrap();
+    assert!(
+        pam_ok(root, "unlocked", "hinteros-guest"),
+        "a finished job's marker is stale"
+    );
+}
+
+/// guest.end only for the guest, and only for exactly the guest account.
+#[tokio::test(flavor = "multi_thread")]
+async fn end_guest_session_refusals() {
+    // A profile (p1) may not.
+    let Some(sys) = System::start(root_with(Some(PROFILES)), &[]).await else {
+        return;
+    };
+    settled(&sys).await;
+    let mut c = sys.client().await;
+    let e = call(&mut c, "guest.end", json!({})).await.unwrap_err();
+    assert_eq!(code(&e), ErrorCode::PermissionDenied.code(), "{e}");
+    assert_eq!(e["data"]["reason"], "profile");
+    drop(c);
+    drop(sys);
+
+    // The guest, but its uid is not the box's guest uid (20000 here): nothing is touched.
+    let root = root_with(Some(PROFILES));
+    let home = become_the_guest(&root);
+    std::fs::write(home.join("keep"), "x").unwrap();
+    std::fs::write(root.p("tmp/keep"), "x").unwrap();
+    let Some(sys) = System::start(root, &[]).await else {
+        return;
+    };
+    let mut c = sys.client().await;
+    let e = call(&mut c, "guest.end", json!({})).await.unwrap_err();
+    assert_eq!(code(&e), ErrorCode::InternalError.code(), "{e}");
+    assert!(
+        e["message"].as_str().unwrap().contains("expected 20000"),
+        "{e}"
+    );
+    assert!(home.join("keep").exists());
+    assert!(sys.root.p("tmp/keep").exists());
+    let jobs = call(&mut c, "jobs.list", json!({})).await.unwrap();
+    assert!(
+        jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|j| j["kind"] != "guest_end"),
+        "{jobs}"
+    );
+}

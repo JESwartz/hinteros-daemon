@@ -16,6 +16,7 @@ pub mod datadel;
 pub mod flake;
 pub mod fsutil;
 pub mod generations;
+pub mod guest;
 pub mod job;
 pub mod jobs;
 pub mod nixlog;

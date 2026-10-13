@@ -95,6 +95,9 @@ pub enum Action {
     /// An account's processes ended, the apply flow without it, then its home, PIN, metadata
     /// and app links deleted.
     ProfileRemove(ProfileRemoveJob),
+    /// End guest session: the guest's processes ended, then its home, app env and per-guest
+    /// state wiped; the guest gets the starter env again.
+    GuestEnd(GuestEndJob),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -109,6 +112,17 @@ pub struct ProfileCreateJob {
     pub pin_hash: String,
     /// Created from the greeter: a one-time token lets the greeter enter it.
     pub token: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestEndJob {
+    /// The guest account's uid, checked by the service (and again by the job).
+    pub uid: u32,
+    /// Its home (from the user database).
+    pub home: PathBuf,
+    /// Shared directories cleared of the guest's entries (`/tmp`, `/var/tmp`, `/dev/shm`).
+    pub tmp_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

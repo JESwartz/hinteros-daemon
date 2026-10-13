@@ -1513,6 +1513,18 @@
         }
       ]
     },
+    "guest.end": {
+      "summary": "End guest session (0.5): end the guest's session and wipe the guest now (job). Only the guest itself. Action org.hinteros.system.profiles.",
+      "description": "Only a caller that is the guest account (hinteros-guest, while the guest is on) may call it; anyone else gets permission_denied {reason: profile}. The service checks the account first: the name hinteros-guest, the expected guest uid (20000 on a box), no other account with that uid, a home that is an absolute path ending in /hinteros-guest; otherwise internal_error and nothing is touched. The job (kind guest_end) hides the guest from the picker (profiles-public.json guest.enabled false; PAM refuses the guest) while it runs, ends the guest's session itself (logind TerminateUser, its user slice, then SIGKILL for anything left of the uid; it fails at stage preparing if processes remain, before anything is deleted), then deletes everything the guest uid owns in its home (the home directory itself stays), in /tmp, /var/tmp and /dev/shm (top-level entries owned by the uid; no symlink is followed, no other filesystem entered, nothing owned by another uid touched), the guest's app env link (then given the starter env again), its terms acceptances (by hinteros-guest), its usage entry and a switch hint that targets it. The boot-time wipe stays. The caller's own session ends while the job runs: call it last.",
+      "since": "0.5",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "unavailable"],
+      "examples": [
+        { "name": "started", "params": {}, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "not the guest", "params": {}, "error": { "code": 3002, "message": "only the guest can end the guest session", "data": { "action": "org.hinteros.system.profiles", "reason": "profile" } } }
+      ]
+    },
     "display.save_mode": {
       "summary": "Make a display mode the box's (0.4): stored in runtime.json, published as /run/hinteros/gamescope-modes for every profile's session. Action org.hinteros.system.settings.",
       "since": "0.4",
@@ -2150,7 +2162,7 @@
     "PolkitAction": { "type": "string", "pattern": "^org\\.hinteros\\.system\\.[a-z.]+$" },
     "Channel": { "enum": ["stable", "beta"] },
     "Base": { "enum": ["stable", "unstable"] },
-    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "migrate_apps", "profiles_create", "profiles_remove", "guest_set"] },
+    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "migrate_apps", "profiles_create", "profiles_remove", "guest_set", "guest_end"] },
     "ProfileId": { "description": "A profile id.", "type": "string", "pattern": "^p[1-9][0-9]{0,2}$" },
     "ProfileName": { "description": "A display name: 1 to 32 characters, trimmed, no control or format characters.", "type": "string", "minLength": 1, "maxLength": 128 },
     "ProfileColor": { "enum": ["teal", "blue", "purple", "pink", "red", "orange", "yellow", "green"] },

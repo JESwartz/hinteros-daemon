@@ -102,6 +102,8 @@ pub enum JobKind {
     ProfilesRemove,
     /// 0.4: the guest account on or off (a rebuild).
     GuestSet,
+    /// 0.5: the guest session ended and the guest wiped now (home, app env, sign-ins).
+    GuestEnd,
 }
 
 impl JobKind {
@@ -123,6 +125,7 @@ impl JobKind {
         JobKind::ProfilesCreate,
         JobKind::ProfilesRemove,
         JobKind::GuestSet,
+        JobKind::GuestEnd,
     ];
 }
 
@@ -983,6 +986,16 @@ impl Method for GuestSet {
     type Result = JobRef;
 }
 
+/// 0.5: End guest session. Only the guest may call it (from its own session); the job ends the
+/// guest's session itself (every process of the guest account), then wipes the guest's home,
+/// app env, terms acceptances, usage entry and switch hint, and gives it the starter env again.
+pub struct GuestEnd;
+impl Method for GuestEnd {
+    const NAME: &'static str = "guest.end";
+    type Params = NoParams;
+    type Result = JobRef;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DisplaySaveModeParams {
@@ -1260,6 +1273,7 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<ProfilesSwitchCancel>(),
         MethodInfo::of::<ProfilesUnlock>(),
         MethodInfo::of::<GuestSet>(),
+        MethodInfo::of::<GuestEnd>(),
         MethodInfo::of::<DisplaySaveMode>(),
         MethodInfo::of::<AudioSaveOutput>(),
         MethodInfo::of::<StarterSetGet>(),
@@ -1305,6 +1319,7 @@ pub const MUTATING: &[&str] = &[
     ProfilesSwitchCancel::NAME,
     ProfilesUnlock::NAME,
     GuestSet::NAME,
+    GuestEnd::NAME,
     DisplaySaveMode::NAME,
     AudioSaveOutput::NAME,
     StarterSetSet::NAME,
@@ -1349,7 +1364,8 @@ pub fn polkit_action(method: &str) -> Option<&'static str> {
         | ProfilesRemove::NAME
         | ProfilesSwitch::NAME
         | ProfilesSwitchCancel::NAME
-        | ProfilesUnlock::NAME => "org.hinteros.system.profiles",
+        | ProfilesUnlock::NAME
+        | GuestEnd::NAME => "org.hinteros.system.profiles",
         GuestSet::NAME | StarterSetSet::NAME => "org.hinteros.system.starter",
         DisplaySaveMode::NAME | AudioSaveOutput::NAME => "org.hinteros.system.settings",
         _ => return None,

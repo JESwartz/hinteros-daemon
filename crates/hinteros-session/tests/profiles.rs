@@ -31,6 +31,11 @@ const LIST: &str = r#"{"profiles": [
 /// A fake system service answering the profile methods; records calls; after `profiles.rename`
 /// it sends `profiles_changed`.
 fn fake_system(path: &Path, calls: Calls) -> tokio::task::JoinHandle<()> {
+    fake_system_with(path, calls, LIST)
+}
+
+/// The fake with another `profiles.list` answer (the caller as the guest).
+fn fake_system_with(path: &Path, calls: Calls, list: &'static str) -> tokio::task::JoinHandle<()> {
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path).unwrap();
     tokio::spawn(async move {
@@ -56,7 +61,8 @@ fn fake_system(path: &Path, calls: Calls) -> tokio::task::JoinHandle<()> {
                                 .push((req.method.clone(), params.clone()));
                             let outcome: Result<Value, ErrorObject> = match req.method.as_str() {
                                 "subscribe" => Ok(params.clone()),
-                                "profiles.list" => Ok(serde_json::from_str(LIST).unwrap()),
+                                "profiles.list" => Ok(serde_json::from_str(list).unwrap()),
+                                "guest.end" => Ok(json!({"job_id": "3f9a0c2b7e4d1a65"})),
                                 "profiles.switch" if params["pin"] == "0000" => {
                                     Err(ErrorObject::with_data(
                                         hinteros_api::ErrorCode::PinRequired,
@@ -288,5 +294,58 @@ async fn switch_closes_apps_and_never_kills_silently() {
     {
         let _ = rustix::process::kill_process(p, rustix::process::Signal::KILL);
     }
+    task.abort();
+}
+
+const GUEST_LIST: &str = r#"{"profiles": [
+  {"id": "p1", "name": "James", "color": "teal", "user": "hinteros", "admin": true, "locked": true,
+   "locked_until": null, "active": false, "last_used_at": null, "usage": null, "pin_set": true}],
+  "guest": {"enabled": true, "usage": null}, "max": 8, "first_boot": false,
+  "caller": {"id": null, "user": "hinteros-guest", "guest": true, "spare": false}}"#;
+
+/// End guest session: the apps close as on a switch, then the daemon asks the system service
+/// to end the session and wipe the guest now (system.guest.end, session API 0.13).
+#[tokio::test(flavor = "multi_thread")]
+async fn end_guest_session_asks_for_the_wipe() {
+    let d = daemon();
+    let calls: Calls = Arc::default();
+    let task = fake_system_with(&d.dir.path().join("system.sock"), calls.clone(), GUEST_LIST);
+    let mut c = d.client().await;
+    call(&mut c, "subscribe", json!({"events": ["switch_progress"]}))
+        .await
+        .unwrap();
+    let cur = eventually("the relay", async || {
+        call(&mut c, "profile.current", json!({})).await.ok()
+    })
+    .await;
+    assert_eq!(cur["guest"], true);
+    let (_, pid) = launch(&mut c, "sleep 60").await;
+    call(&mut c, "session.end_guest", json!({})).await.unwrap();
+    assert_eq!(
+        event_named(&mut c, "switch_progress").await["stage"],
+        "closing_apps"
+    );
+    assert_eq!(
+        event_named(&mut c, "switch_progress").await["stage"],
+        "ending"
+    );
+    eventually("guest.end called", async || {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, p)| m == "guest.end" && *p == json!({}))
+            .then_some(())
+    })
+    .await;
+    assert!(!alive(pid), "the apps were closed first");
+    // Never a switch hint: the session goes to the picker.
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, _)| m == "profiles.switch")
+    );
     task.abort();
 }

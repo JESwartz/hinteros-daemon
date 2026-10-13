@@ -220,6 +220,14 @@ pub struct ServeArgs {
     /// instead of the homes from the user database (so a test never touches a real home)
     #[arg(long, hide = true)]
     pub test_profile_home: Option<PathBuf>,
+    /// The guest account's uid (profiles.nix: 20000). `guest.end` wipes only an account named
+    /// hinteros-guest with exactly this uid
+    #[arg(long, default_value_t = crate::state::GUEST_UID)]
+    pub guest_uid: u32,
+    /// Shared directories `guest.end` clears of the guest's entries (repeatable)
+    /// [default: /tmp, /var/tmp, /dev/shm]
+    #[arg(long = "guest-tmp-dir")]
+    pub guest_tmp_dirs: Vec<PathBuf>,
     /// The running generation's App Store catalog index
     /// [default: <current-system>/sw/share/hinteros/catalog.json]
     #[arg(long)]

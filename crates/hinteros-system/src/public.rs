@@ -166,7 +166,8 @@ pub fn view(paths: &Paths, state: &State, file: &ProfilesFile, now: i64) -> Publ
         version: 1,
         profiles,
         guest: PublicGuest {
-            enabled: state.guest_enabled(),
+            // Hidden while a guest_end job wipes it.
+            enabled: state.guest_enabled() && !crate::guest::ending(paths),
             user: state::GUEST_USER.into(),
         },
         first_boot: file.first_boot(state),

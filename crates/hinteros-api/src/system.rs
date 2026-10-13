@@ -347,6 +347,10 @@ pub struct Generation {
     /// The accounts in that generation's `state.json` (0.4); `None` when it cannot be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profiles: Option<Vec<GenerationProfile>>,
+    /// 0.5: box features a rollback to this generation would turn back on (the profiles' apps
+    /// need them, its `state.json` lacks them). Absent when none, or unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readds_features: Option<Vec<String>>,
 }
 
 /// A profile of a generation's `state.json`, with its current name (`None`: not a profile now).
@@ -1065,6 +1069,10 @@ pub struct AppliedResult {
     /// generation, which still works). Absent when every env was rebuilt or there was none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apps_not_updated: Option<Vec<AppNotUpdated>>,
+    /// 0.5: box features a rollback turned back on because the profiles' apps need them and the
+    /// restored generation lacked them (a `box` stage after the rollback). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features_readded: Option<Vec<String>>,
 }
 
 /// An owner's env that the `apps` stage left at its old generation.

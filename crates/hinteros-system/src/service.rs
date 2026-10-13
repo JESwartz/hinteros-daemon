@@ -454,12 +454,20 @@ async fn dispatch(
         GenerationsList::NAME => {
             decode::<GenerationsList>(params)?;
             let p = &svc.paths;
+            // The box features the profiles' apps need now (schema 2): a rollback re-adds those a
+            // generation lacks.
+            let needed = State::load(&p.state_json())
+                .ok()
+                .map(|(s, _)| s)
+                .filter(State::is_schema2)
+                .map(|s| crate::appreg::Registry::scan(p, &s).needed_features());
             encode::<GenerationsList>(GenerationsListResult {
                 generations: generations::list(
                     &p.profile,
                     &p.current_system,
                     &p.booted_system,
                     &p.profiles_json(),
+                    needed.as_ref(),
                 ),
             })
         }
@@ -1094,6 +1102,7 @@ impl Service {
                     &self.paths.current_system,
                     &self.paths.booted_system,
                     &self.paths.profiles_json(),
+                    None,
                 );
                 let current = generations::current_generation(&self.paths.profile);
                 let target = match p.generation {

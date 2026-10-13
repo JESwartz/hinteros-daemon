@@ -1,5 +1,6 @@
 //! System generations: the `<profile>-<N>-link` symlinks next to the system profile.
 
+use std::collections::BTreeSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -63,12 +64,14 @@ pub fn current_generation(profile: &Path) -> Option<u32> {
         .ok()
 }
 
-/// `generations.list`. `profiles_json` gives the profiles' current names.
+/// `generations.list`. `profiles_json` gives the profiles' current names; `needed`, the box
+/// features the profiles' apps need now (schema 2), gives `readds_features`.
 pub fn list(
     profile: &Path,
     current_system: &Path,
     booted_system: &Path,
     profiles_json: &Path,
+    needed: Option<&BTreeSet<String>>,
 ) -> Vec<Generation> {
     let current = std::fs::canonicalize(current_system).ok();
     let booted = std::fs::canonicalize(booted_system).ok();
@@ -81,26 +84,37 @@ pub fn list(
                     .ok()
                     .and_then(|lock| lock.rev)
             });
+            let state = l
+                .toplevel
+                .as_ref()
+                .and_then(|t| State::load(&t.join("hinteros/state.json")).ok())
+                .map(|(s, _)| s);
+            let readds_features = needed
+                .zip(state.as_ref().filter(|s| s.is_schema2()))
+                .map(|(n, s)| {
+                    n.iter()
+                        .filter(|f| !s.requirements().contains(f))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .filter(|m| !m.is_empty());
             Generation {
                 generation: l.generation,
                 date: l.date,
                 rev,
                 current: l.toplevel.is_some() && l.toplevel == current,
                 booted: l.toplevel.is_some() && l.toplevel == booted,
-                profiles: l
-                    .toplevel
-                    .as_ref()
-                    .and_then(|t| State::load(&t.join("hinteros/state.json")).ok())
-                    .map(|(state, _)| {
-                        state
-                            .accounts()
-                            .into_iter()
-                            .map(|a| GenerationProfile {
-                                name: names.profiles.get(&a.id).map(|m| m.name.clone()),
-                                id: a.id,
-                            })
-                            .collect()
-                    }),
+                readds_features,
+                profiles: state.map(|state| {
+                    state
+                        .accounts()
+                        .into_iter()
+                        .map(|a| GenerationProfile {
+                            name: names.profiles.get(&a.id).map(|m| m.name.clone()),
+                            id: a.id,
+                        })
+                        .collect()
+                }),
             }
         })
         .collect()
@@ -151,6 +165,24 @@ mod tests {
             &d.join("current"),
             &d.join("booted"),
             &d.join("profiles.json"),
+            None,
+        );
+        assert!(gens.iter().all(|g| g.readds_features.is_none()));
+        let needed: BTreeSet<String> = ["graphics32".to_string()].into();
+        let with_needed = list(
+            &profile,
+            &d.join("current"),
+            &d.join("booted"),
+            &d.join("profiles.json"),
+            Some(&needed),
+        );
+        assert_eq!(
+            with_needed[1].readds_features,
+            Some(vec!["graphics32".to_string()])
+        );
+        assert_eq!(
+            with_needed[2].readds_features, None,
+            "no state.json: unknown"
         );
         let nums: Vec<u32> = gens.iter().map(|g| g.generation).collect();
         assert_eq!(nums, [10, 2, 1]);

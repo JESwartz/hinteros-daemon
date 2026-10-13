@@ -521,3 +521,96 @@ async fn migration_is_resumable_and_idempotent() {
         p1_link(root)
     );
 }
+
+/// A system rollback to a generation from before Steam's box features (apps.md open question
+/// 2): the job switches back, rebuilds the envs, then turns the features the envs still need
+/// back on in a `box` stage (a new generation). generations.list says so beforehand.
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_readds_needed_box_features() {
+    let root = Root::create();
+    std::fs::write(root.p("etc/hinteros/state.json"), STATE2).unwrap();
+    // Generation 1 already had schema 2, without box features.
+    std::fs::write(root.p("store/gen1/hinteros/state.json"), STATE2).unwrap();
+    std::fs::write(root.p("var/lib/hinteros/profiles.json"), PROFILES).unwrap();
+    std::fs::write(root.p("policy/catalog.json"), CATALOG3).unwrap();
+    let Some(sys) = System::start(root, &[]).await else {
+        return;
+    };
+    let root = &sys.root;
+    let mut c = sys.subscriber().await;
+    let rev = apps_list(&mut c).await["revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    run_job(
+        &sys,
+        &mut c,
+        "apps.install",
+        json!({"ids": ["steam"], "revision": rev, "accepted_terms": {"steam": "2026-09-10"}}),
+    )
+    .await;
+    assert_eq!(
+        root.etc_state()["requirements"],
+        json!(["graphics32", "steam-devices"])
+    );
+    // Generation 2 has the features; a rollback to 1 would re-add them.
+    let gens = call(&mut c, "generations.list", json!({})).await.unwrap();
+    let generation = |n: u64| {
+        gens["generations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["generation"] == n)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        generation(1)["readds_features"],
+        json!(["graphics32", "steam-devices"])
+    );
+    assert!(generation(2).get("readds_features").is_none(), "{gens}");
+
+    let r = run_job(&sys, &mut c, "rollback", json!({"generation": 1})).await;
+    let stages = r["stages"].as_array().unwrap();
+    let apps_at = stages.iter().position(|s| s == "apps");
+    let box_at = stages.iter().rposition(|s| s == "box");
+    assert!(
+        apps_at.is_some() && box_at.is_some() && apps_at < box_at,
+        "the box stage follows the apps stage: {r}"
+    );
+    let result = &r["finished"]["result"];
+    assert_eq!(
+        result["features_readded"],
+        json!(["graphics32", "steam-devices"]),
+        "{r}"
+    );
+    // The restored configuration, with the features back on, as a new generation.
+    assert_eq!(
+        root.etc_state()["requirements"],
+        json!(["graphics32", "steam-devices"])
+    );
+    assert_eq!(result["generation"], 3, "{r}");
+    assert_eq!(env_of(root, &p1_link(root)).unwrap(), "env-steam");
+}
+
+/// A rollback to a generation that already has every needed feature builds nothing more.
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_without_missing_features_builds_once() {
+    let root = Root::create();
+    std::fs::write(root.p("etc/hinteros/state.json"), STATE2).unwrap();
+    std::fs::write(root.p("store/gen1/hinteros/state.json"), STATE2).unwrap();
+    std::fs::write(root.p("var/lib/hinteros/profiles.json"), PROFILES).unwrap();
+    std::fs::write(root.p("policy/catalog.json"), CATALOG3).unwrap();
+    let Some(sys) = System::start(root, &[]).await else {
+        return;
+    };
+    let mut c = sys.subscriber().await;
+    run_job(&sys, &mut c, "rebuild", json!({})).await;
+    let r = run_job(&sys, &mut c, "rollback", json!({"generation": 1})).await;
+    assert!(
+        !r["stages"].as_array().unwrap().contains(&json!("box")),
+        "{r}"
+    );
+    assert!(r["finished"]["result"].get("features_readded").is_none());
+    assert_eq!(r["finished"]["result"]["generation"], 1);
+}

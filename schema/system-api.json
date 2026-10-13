@@ -307,7 +307,7 @@
     },
     "rollback": {
       "summary": "Switch to an earlier generation (default: the one before the current), then restore /etc/hinteros from its snapshot (job). Action org.hinteros.system.rollback.",
-      "description": "On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root.",
+      "description": "On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root. After the switch and the apps stage (schema 2), box features that the owners' current app envs need and the restored generation lacks are turned back on in a box stage: the apply flow on the restored configuration with requirements = what the envs need (a second, mostly cached build; a new generation). The result then lists them in features_readded; generations.list names them beforehand per generation (readds_features). If that build fails the job fails at stage box (the rollback itself stays).",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -2204,6 +2204,12 @@
           "description": "The accounts in that generation's state.json with their current names (null: no longer a profile); absent if its state.json cannot be read (since 0.4). The rollback screen lists the profiles a rollback would drop or bring back empty.",
           "type": "array",
           "items": { "$ref": "#/$defs/GenerationProfile" }
+        },
+        "readds_features": {
+          "description": "0.5: box features a rollback to this generation would turn back on: the profiles' apps need them and its state.json lacks them (the rollback job re-adds them in a box stage; the rollback screen says so). Absent when there are none or it is unknown (schema 1, unreadable state.json).",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/BoxFeature" }
         }
       }
     },
@@ -2279,6 +2285,12 @@
               "reason": { "type": "string", "maxLength": 300 }
             }
           }
+        },
+        "features_readded": {
+          "description": "0.5 (rollback jobs): box features turned back on after the rollback, because the profiles' apps need them and the restored generation lacked them. Absent when there were none.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/BoxFeature" }
         }
       }
     },

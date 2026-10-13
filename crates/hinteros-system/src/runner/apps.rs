@@ -232,6 +232,7 @@ impl Runner {
             generation: after.generation,
             rev: after.rev,
             apps_not_updated,
+            features_readded: None,
         })
     }
 
@@ -470,6 +471,65 @@ impl Runner {
         };
         Ok((result, restart))
     }
+}
+
+impl Runner {
+    /// After a system rollback (and its `apps` stage): box features the owners' current envs
+    /// need that the restored generation lacks are turned back on in a `box` stage, the apply
+    /// flow on the restored configuration with `requirements` = what the envs need (a second
+    /// build, mostly cached; apps.md open question 2). Nothing to do on a schema-1 target or
+    /// when every needed feature is on (features nobody needs stay until the next rebuild).
+    pub(super) fn readd_features(&mut self, outcome: (Option<JobResult>, bool)) -> Outcome {
+        let Some(state) = self.config_state().filter(State::is_schema2) else {
+            return Ok(outcome);
+        };
+        let needed = Registry::scan(&self.spec.paths, &state).needed_features();
+        let missing = missing_features(&state, &needed);
+        if missing.is_empty() {
+            return Ok(outcome);
+        }
+        info!(features = ?missing, "the rolled-back generation lacks box features the apps need; re-adding them");
+        let mut new = state.clone();
+        new.requirements = Some(needed.into_iter().collect());
+        self.override_stage(Stage::Box);
+        let applied = self.apply(&Apply {
+            state: Some(new),
+            ..Default::default()
+        });
+        self.end_override();
+        let (_, restart) = applied.map_err(|f| match f {
+            Failure::Error(mut e) => {
+                e.message = format!(
+                    "rolled back, but {} could not be turned back on: {}",
+                    missing.join(", "),
+                    e.message
+                );
+                Failure::Error(e)
+            }
+            other => other,
+        })?;
+        let (result, restarted) = outcome;
+        let after = self.snapshot();
+        let result = match result {
+            Some(JobResult::Applied(a)) => Some(JobResult::Applied(AppliedResult {
+                generation: after.generation,
+                rev: after.rev,
+                features_readded: Some(missing),
+                ..a
+            })),
+            other => other,
+        };
+        Ok((result, restart || restarted))
+    }
+}
+
+/// Features in `needed` that `state` does not turn on (sorted).
+pub fn missing_features(state: &State, needed: &std::collections::BTreeSet<String>) -> Vec<String> {
+    needed
+        .iter()
+        .filter(|f| !state.requirements().contains(f))
+        .cloned()
+        .collect()
 }
 
 trait Hint {

@@ -87,7 +87,7 @@ fn run(dir: &Path) -> anyhow::Result<()> {
             rebuild_apps,
         } => r.rollback(generation).and_then(|o| {
             if rebuild_apps {
-                r.with_apps_stage(o)
+                r.with_apps_stage(o).and_then(|o| r.readd_features(o))
             } else {
                 Ok(o)
             }
@@ -262,6 +262,12 @@ impl Runner {
             .create_new(true)
             .mode(0o600)
             .open(self.dir.join(job::ACTIVATING));
+        // A second activation in the same job (a rollback's `box` stage): already past the
+        // point of no cancelling.
+        let created = match created {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            other => other.map(drop),
+        };
         if let Err(e) = created {
             return Err(self.fail(format!("cannot mark activation: {e}")));
         }
@@ -692,6 +698,7 @@ impl Runner {
                 generation: after.generation,
                 rev: after.rev,
                 apps_not_updated: None,
+                features_readded: None,
             })),
             restart,
         ))
@@ -795,6 +802,7 @@ impl Runner {
                 generation: after.generation,
                 rev: after.rev,
                 apps_not_updated: None,
+                features_readded: None,
             })),
             restart,
         ))

@@ -441,9 +441,39 @@ async fn migration_is_resumable_and_idempotent() {
     )
     .unwrap();
     root.touch("switch-fail");
+    // The switch waits until this is gone: the job is running meanwhile.
+    root.touch("switch-hold");
     let Some(sys) = System::start(root, &[]).await else {
         return;
     };
+    // While the job runs, the public view already follows the new profiles.json: no longer
+    // first boot, p1 listed (the greeter must not offer first-boot setup meanwhile).
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let public: Value =
+            serde_json::from_str(&sys.root.read("run/profiles-public.json")).unwrap_or_default();
+        if public["first_boot"] == false && public["profiles"][0]["id"] == "p1" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "public view during the migration: {public}\n{}",
+            sys.log()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let mut c = sys.client().await;
+    let jobs = call(&mut c, "jobs.list", json!({})).await.unwrap();
+    assert!(
+        jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|j| j["kind"] == "migrate_apps" && j["state"] == "running"),
+        "{jobs}"
+    );
+    drop(c);
+    sys.root.rm("switch-hold");
     let first = wait_for_job(&sys, "migrate_apps", None).await;
     assert_eq!(first["state"], "failed", "{first}");
     let root = &sys.root;

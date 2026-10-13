@@ -433,7 +433,11 @@ impl Service {
         if !pf.exists() {
             let file = profiles::migrated_file(&state, job::now());
             match file.save(&pf) {
-                Ok(()) => info!("profiles.json created: p1 is the admin profile"),
+                Ok(()) => {
+                    info!("profiles.json created: p1 is the admin profile");
+                    // The public view at once: no longer first boot, while the job runs.
+                    self.profiles_changed();
+                }
                 Err(e) => warn!("cannot write {}: {e}", pf.display()),
             }
         }

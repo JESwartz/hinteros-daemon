@@ -433,6 +433,7 @@ cat > "$out/bin/switch-to-configuration" <<'EOF'
 #!/bin/sh
 top=$(dirname "$(dirname "$0")")
 echo "$top $1" >> "$FAKE_ROOT/switch.log"
+while [ "$1" = switch ] && [ -e "$FAKE_ROOT/switch-hold" ]; do sleep 0.05; done
 if [ "$1" = switch ] && [ -e "$FAKE_ROOT/switch-fail" ]; then exit 1; fi
 if [ "$1" = switch ]; then ln -sfn "$top" "$FAKE_ROOT/current"; fi
 exit 0

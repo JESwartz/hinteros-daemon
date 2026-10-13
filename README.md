@@ -1213,7 +1213,9 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   `/nix/var/nix/profiles/hinteros/apps/<user>` (`--apps-profiles-dir`), the starter set's
   `…/starter`, the guest's a single link `/run/hinteros/apps/hinteros-guest` (an indirect GC root
   via `nix-store --add-root --indirect --realise`). The service publishes
-  `/run/hinteros/apps/<user>` → the profile's Nix profile at start and after every job. An env
+  `/run/hinteros/apps/<user>` → the profile's Nix profile at start and after every job.
+  `/run/hinteros/apps` is 0750 root:hinteros, not the 0755 of the M7 design (D4): every
+  session account is in `hinteros`, and other users cannot list who has which apps. An env
   is built by `config.hinteros.appEnv.build ids` of `/etc/hinteros` (`nix eval --impure --json
   --expr` over a list of id lists, all of a job's envs in one evaluation, then `nix build
   <drv>^out … --keep-going`) and set with `nix-env -p <profile> --set` (skipped when it is

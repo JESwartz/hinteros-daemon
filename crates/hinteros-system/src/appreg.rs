@@ -253,13 +253,21 @@ impl Registry {
     }
 }
 
+/// The mode of `/run/hinteros/apps` (see [`publish`]).
+pub const APPS_RUN_DIR_MODE: u32 = 0o750;
+
 /// Make `/run/hinteros/apps/<user>` point at each account's Nix profile (and drop links of users
 /// that are no longer accounts; the guest's own link stays).
+///
+/// The directory is 0750, group `hinteros` (the service's group), not the 0755 of the M7 design
+/// note (DECISIONS D4): every account that runs a session is in `hinteros`, so nobody who needs
+/// it loses it, and other users cannot list who has which apps. The service's `UMask=0007`
+/// would make a 0755 request 0750 anyway; asking for 0750 says it on purpose.
 pub fn publish(paths: &Paths, state: &State) {
     let dir = paths.apps_run_dir();
     if let Err(e) = std::fs::DirBuilder::new()
         .recursive(true)
-        .mode(0o755)
+        .mode(APPS_RUN_DIR_MODE)
         .create(&dir)
     {
         warn!("cannot create {}: {e}", dir.display());
@@ -437,6 +445,18 @@ mod tests {
                 .unwrap()
                 .ids,
             ["steam", "youtube"]
+        );
+        // Created 0750 (group hinteros on the box: the service's group).
+        std::fs::remove_dir_all(p.apps_run_dir()).unwrap();
+        publish(&p, &state);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(p.apps_run_dir())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            APPS_RUN_DIR_MODE
         );
         let c = current(
             &Owner::Profile {

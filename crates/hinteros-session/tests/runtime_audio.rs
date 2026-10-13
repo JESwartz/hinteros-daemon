@@ -270,3 +270,96 @@ async fn pactl_missing_or_the_sound_server_down() {
     std::fs::remove_file(state.join("broken")).unwrap();
     call(&mut c, "audio.outputs", json!({})).await.unwrap();
 }
+
+/// Start the daemon with the box-wide output file holding `content` (written before start).
+fn start_with_shared(content: Option<&str>) -> (Daemon, PathBuf) {
+    let mut state = PathBuf::new();
+    let d = Daemon::start_env(
+        |_| Vec::new(),
+        |dir| {
+            let pactl = fake_pactl(dir);
+            state = dir.join("pactl-state");
+            let file = dir.join("audio-output");
+            if let Some(c) = content {
+                std::fs::write(&file, c).unwrap();
+            }
+            vec![
+                ("HINTEROS_PACTL".into(), pactl.into_os_string()),
+                ("HINTEROS_AUDIO_OUTPUT_FILE".into(), file.into_os_string()),
+            ]
+        },
+    );
+    (d, state)
+}
+
+async fn eventually_default(state: &Path, want: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let now = std::fs::read_to_string(state.join("default")).unwrap_or_default();
+        if now.trim() == want {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "default stays {now:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The box-wide output (`/run/hinteros/audio-output`, any profile's choice) becomes the default
+/// sink when the session starts, without any client.
+#[tokio::test]
+async fn the_shared_output_is_the_default_at_start() {
+    let (_d, state) = start_with_shared(Some(&format!("{USB}\n")));
+    eventually_default(&state, USB).await;
+    assert!(calls(&state).contains(&format!("set-default-sink {USB}")));
+}
+
+/// A sink that appears later (headphones reconnecting) is still picked up while the session
+/// starts; one that is already the default is left alone; no file or junk changes nothing.
+#[tokio::test]
+async fn the_shared_output_waits_for_its_sink() {
+    let gone = "bluez_output.AA_BB_CC_DD_EE_09.1";
+    let (_d, state) = start_with_shared(Some(&format!("{gone}\n")));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        std::fs::read_to_string(state.join("default"))
+            .unwrap()
+            .trim(),
+        HDMI,
+        "not there: the default stays"
+    );
+    // It shows up: the fake lists BT as itself, so point the file's node at BT's name by
+    // making the fake answer for it (rename the sink in the fake's list).
+    let pactl = state.parent().unwrap().join("pactl");
+    let script = std::fs::read_to_string(&pactl).unwrap().replace(BT, gone);
+    let tmp = state.parent().unwrap().join("pactl.new");
+    std::fs::write(&tmp, script).unwrap();
+    std::fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::rename(&tmp, &pactl).unwrap();
+    for f in ["volume", "mute"] {
+        std::fs::copy(
+            state.join(format!("{f}-{BT}")),
+            state.join(format!("{f}-{gone}")),
+        )
+        .unwrap();
+    }
+    eventually_default(&state, gone).await;
+
+    for content in [
+        None,
+        Some(format!("{HDMI}\n")),
+        Some("x y; rm -rf /\n".to_string()),
+    ] {
+        let (_d, state) = start_with_shared(content.as_deref());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            calls(&state)
+                .iter()
+                .all(|c| !c.starts_with("set-default-sink")),
+            "{content:?}: {:?}",
+            calls(&state)
+        );
+    }
+}

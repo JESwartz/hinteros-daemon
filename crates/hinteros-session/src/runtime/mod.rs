@@ -150,6 +150,7 @@ impl Runtime {
             tokio::spawn(network::watch(ctx.clone()));
             tokio::spawn(bluetooth::watch(ctx.clone()));
             tokio::spawn(audio::watch(ctx.clone()));
+            tokio::spawn(audio::apply_shared(ctx.clone()));
             info!("runtime settings on");
         } else {
             info!("runtime settings off");

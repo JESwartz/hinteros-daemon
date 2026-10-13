@@ -209,6 +209,10 @@ pub struct Cli {
     #[arg(long, env = "HINTEROS_PACTL")]
     pub pactl: Option<PathBuf>,
 
+    /// The box-wide audio output file [default: /run/hinteros/audio-output]
+    #[arg(long, env = "HINTEROS_AUDIO_OUTPUT_FILE")]
+    pub audio_output_file: Option<PathBuf>,
+
     /// Don't register a polkit authentication agent (desktop previews)
     #[arg(long)]
     pub no_auth_agent: bool,
@@ -411,6 +415,9 @@ pub struct AudioConfig {
     pub pactl: PathBuf,
     /// How often changes made elsewhere are looked for (only while a client is connected).
     pub poll_ms: u64,
+    /// The box-wide audio output the system service publishes (`audio.save_output` of any
+    /// profile): made the default sink when the session starts, once it exists.
+    pub shared_output: Option<PathBuf>,
 }
 
 impl Default for AudioConfig {
@@ -418,6 +425,7 @@ impl Default for AudioConfig {
         Self {
             pactl: "pactl".into(),
             poll_ms: 2000,
+            shared_output: Some("/run/hinteros/audio-output".into()),
         }
     }
 }
@@ -1159,6 +1167,9 @@ impl Config {
         }
         if let Some(pactl) = &cli.pactl {
             self.audio.pactl = pactl.clone();
+        }
+        if let Some(f) = &cli.audio_output_file {
+            self.audio.shared_output = Some(f.clone());
         }
         if cli.no_auth_agent {
             self.auth.enable = false;

@@ -270,6 +270,64 @@ pub async fn mute(ctx: &Ctx, p: AudioMuteParams) -> Result<AudioState, ErrorObje
     .await
 }
 
+/// How long the session start waits for the shared output to appear (PipeWire starting, an
+/// HDMI sink after the display's modeset, Bluetooth headphones reconnecting).
+const SHARED_WAIT: Duration = Duration::from_secs(60);
+const SHARED_RETRY: Duration = Duration::from_secs(2);
+
+/// The node name in the shared output file (`<node>\n`), if it is one.
+pub fn shared_node(text: &str) -> Option<&str> {
+    let node = text.trim();
+    let ok = (1..=128).contains(&node.len())
+        && node
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
+    ok.then_some(node)
+}
+
+/// At session start: make the box-wide output (`/run/hinteros/audio-output`, written by the
+/// system service when any profile picks an output) this session's default sink, as soon as
+/// that sink exists. Headphones picked in one profile are used by all; volume stays per profile.
+/// Without the file, or when the sink never shows up, WirePlumber's own choice stays.
+pub async fn apply_shared(ctx: Arc<Ctx>) {
+    let Some(path) = ctx.audio.shared_output.clone() else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        debug!(file = %path.display(), "no shared audio output");
+        return;
+    };
+    let Some(node) = shared_node(&text).map(str::to_owned) else {
+        tracing::warn!(file = %path.display(), "the shared audio output is not a node name");
+        return;
+    };
+    let give_up = tokio::time::Instant::now() + SHARED_WAIT;
+    loop {
+        match sinks(&ctx).await {
+            Ok(list) if list.iter().any(|s| s.id == node) => {
+                if default_sink(&ctx).await.ok().as_deref() == Some(node.as_str()) {
+                    debug!(%node, "the shared audio output is already the default");
+                    return;
+                }
+                match change(&ctx, &["set-default-sink", &node]).await {
+                    Ok(_) => tracing::info!(%node, "the shared audio output is the default sink"),
+                    Err(e) => {
+                        tracing::warn!(%node, "cannot use the shared audio output: {}", e.message)
+                    }
+                }
+                return;
+            }
+            Ok(_) => debug!(%node, "the shared audio output is not there (yet)"),
+            Err(e) => debug!("audio not ready: {}", e.message),
+        }
+        if tokio::time::Instant::now() >= give_up {
+            tracing::info!(%node, "the shared audio output did not appear; keeping the default");
+            return;
+        }
+        sleep(SHARED_RETRY).await;
+    }
+}
+
 /// Look for changes made elsewhere (the TV's volume keys through HDMI-CEC, other apps).
 pub async fn watch(ctx: Arc<Ctx>) {
     let interval = Duration::from_millis(ctx.audio.poll_ms.max(250));

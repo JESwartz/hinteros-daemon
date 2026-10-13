@@ -77,6 +77,11 @@ impl Daemon {
                 format!("unix:path={}/no-bus", dir.path().display()),
             )
             .env("HINTEROS_PACTL", dir.path().join("no-pactl"))
+            // Never this machine's shared audio output.
+            .env(
+                "HINTEROS_AUDIO_OUTPUT_FILE",
+                dir.path().join("no-audio-output"),
+            )
             // The polkit agent never registers on this desktop's system bus, session.restart never
             // reaches its user manager, store.list reads no real catalog.
             .env(

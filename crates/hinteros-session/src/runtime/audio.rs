@@ -285,6 +285,26 @@ pub fn shared_node(text: &str) -> Option<&str> {
     ok.then_some(node)
 }
 
+/// What [`apply_shared`] needs from the sound server (the seam for its tests).
+trait SharedAudio {
+    /// The sinks' node names.
+    async fn sinks(&self) -> Result<Vec<String>, ErrorObject>;
+    async fn default_sink(&self) -> Result<String, ErrorObject>;
+    async fn set_default(&self, node: &str) -> Result<(), ErrorObject>;
+}
+
+impl SharedAudio for Ctx {
+    async fn sinks(&self) -> Result<Vec<String>, ErrorObject> {
+        Ok(sinks(self).await?.into_iter().map(|s| s.id).collect())
+    }
+    async fn default_sink(&self) -> Result<String, ErrorObject> {
+        default_sink(self).await
+    }
+    async fn set_default(&self, node: &str) -> Result<(), ErrorObject> {
+        change(self, &["set-default-sink", node]).await.map(|_| ())
+    }
+}
+
 /// At session start: make the box-wide output (`/run/hinteros/audio-output`, written by the
 /// system service when any profile picks an output) this session's default sink, as soon as
 /// that sink exists. Headphones picked in one profile are used by all; volume stays per profile.
@@ -301,30 +321,72 @@ pub async fn apply_shared(ctx: Arc<Ctx>) {
         tracing::warn!(file = %path.display(), "the shared audio output is not a node name");
         return;
     };
-    let give_up = tokio::time::Instant::now() + SHARED_WAIT;
+    make_default(&*ctx, &node, SHARED_WAIT, SHARED_RETRY).await;
+}
+
+/// Make `node` the default sink, trying every `retry` for up to `wait`; returns whether it is.
+///
+/// The sink can be listed before WirePlumber's default metadata is ready: `set-default-sink`
+/// then fails ("Not supported") and works a moment later, or seems to work and the default
+/// stays another sink. So a failure is retried like a missing sink, and a success is checked
+/// by reading the default back. Only giving up is logged above debug.
+async fn make_default(
+    audio: &impl SharedAudio,
+    node: &str,
+    wait: Duration,
+    retry: Duration,
+) -> bool {
+    let give_up = tokio::time::Instant::now() + wait;
+    let mut set = false;
+    let mut last_error: Option<String> = None;
     loop {
-        match sinks(&ctx).await {
-            Ok(list) if list.iter().any(|s| s.id == node) => {
-                if default_sink(&ctx).await.ok().as_deref() == Some(node.as_str()) {
-                    debug!(%node, "the shared audio output is already the default");
-                    return;
+        match audio.sinks().await {
+            Ok(list) if list.iter().any(|s| s == node) => {
+                if audio.default_sink().await.ok().as_deref() == Some(node) {
+                    if set {
+                        tracing::info!(%node, "the shared audio output is the default sink");
+                    } else {
+                        debug!(%node, "the shared audio output is already the default");
+                    }
+                    return true;
                 }
-                match change(&ctx, &["set-default-sink", &node]).await {
-                    Ok(_) => tracing::info!(%node, "the shared audio output is the default sink"),
+                match audio.set_default(node).await {
+                    Ok(()) => {
+                        set = true;
+                        match audio.default_sink().await {
+                            Ok(default) if default == node => {
+                                tracing::info!(%node, "the shared audio output is the default sink");
+                                return true;
+                            }
+                            Ok(default) => {
+                                debug!(%node, %default, "set the shared audio output, but the default is still another sink");
+                                last_error = Some(format!("the default stayed {default}"));
+                            }
+                            Err(e) => {
+                                debug!(%node, "reading the default sink: {}", e.message);
+                                last_error = Some(e.message);
+                            }
+                        }
+                    }
                     Err(e) => {
-                        tracing::warn!(%node, "cannot use the shared audio output: {}", e.message)
+                        debug!(%node, "cannot use the shared audio output yet: {}", e.message);
+                        last_error = Some(e.message);
                     }
                 }
-                return;
             }
             Ok(_) => debug!(%node, "the shared audio output is not there (yet)"),
             Err(e) => debug!("audio not ready: {}", e.message),
         }
         if tokio::time::Instant::now() >= give_up {
-            tracing::info!(%node, "the shared audio output did not appear; keeping the default");
-            return;
+            match last_error {
+                Some(e) => tracing::warn!(%node, "cannot use the shared audio output: {e}"),
+                None => {
+                    tracing::info!(%node, "the shared audio output did not appear; keeping the default")
+                }
+            }
+            return false;
         }
-        sleep(SHARED_RETRY).await;
+        sleep(retry).await;
     }
 }
 
@@ -347,6 +409,77 @@ pub async fn watch(ctx: Arc<Ctx>) {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Mutex;
+
+    /// A sound server whose `set-default-sink` fails the first `failures` times (WirePlumber's
+    /// default metadata not ready yet), then works.
+    struct FakeAudio {
+        default: Mutex<String>,
+        failures: Mutex<u32>,
+        /// Accepted, but the default stays (another way of not being ready).
+        ignored: Mutex<u32>,
+        calls: Mutex<u32>,
+    }
+
+    impl FakeAudio {
+        fn new(failures: u32, ignored: u32) -> Self {
+            Self {
+                default: Mutex::new("hinteros_sink_a".into()),
+                failures: Mutex::new(failures),
+                ignored: Mutex::new(ignored),
+                calls: Mutex::new(0),
+            }
+        }
+    }
+
+    impl SharedAudio for FakeAudio {
+        async fn sinks(&self) -> Result<Vec<String>, ErrorObject> {
+            Ok(vec!["hinteros_sink_a".into(), "hinteros_sink_b".into()])
+        }
+        async fn default_sink(&self) -> Result<String, ErrorObject> {
+            Ok(self.default.lock().unwrap().clone())
+        }
+        async fn set_default(&self, node: &str) -> Result<(), ErrorObject> {
+            *self.calls.lock().unwrap() += 1;
+            let mut failures = self.failures.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(failed("pactl_failed", "pactl: Failure: Not supported"));
+            }
+            let mut ignored = self.ignored.lock().unwrap();
+            if *ignored > 0 {
+                *ignored -= 1;
+                return Ok(());
+            }
+            *self.default.lock().unwrap() = node.into();
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_shared_output_is_retried_until_the_default_takes() {
+        // Fails first, then works.
+        let audio = FakeAudio::new(1, 0);
+        assert!(make_default(&audio, "hinteros_sink_b", SHARED_WAIT, SHARED_RETRY).await);
+        assert_eq!(*audio.default.lock().unwrap(), "hinteros_sink_b");
+        assert_eq!(*audio.calls.lock().unwrap(), 2);
+        // Seems to work, but the default stays: tried again.
+        let audio = FakeAudio::new(0, 2);
+        assert!(make_default(&audio, "hinteros_sink_b", SHARED_WAIT, SHARED_RETRY).await);
+        assert_eq!(*audio.calls.lock().unwrap(), 3);
+        // Already the default: nothing to do.
+        let audio = FakeAudio::new(0, 0);
+        *audio.default.lock().unwrap() = "hinteros_sink_b".into();
+        assert!(make_default(&audio, "hinteros_sink_b", SHARED_WAIT, SHARED_RETRY).await);
+        assert_eq!(*audio.calls.lock().unwrap(), 0);
+        // Never works: gives up after the wait (every retry tried).
+        let audio = FakeAudio::new(u32::MAX, 0);
+        let start = tokio::time::Instant::now();
+        assert!(!make_default(&audio, "hinteros_sink_b", SHARED_WAIT, SHARED_RETRY).await);
+        assert!(start.elapsed() >= SHARED_WAIT);
+        assert_eq!(*audio.calls.lock().unwrap(), 31);
+        assert_eq!(*audio.default.lock().unwrap(), "hinteros_sink_a");
+    }
 
     #[test]
     fn volume_is_the_loudest_channel_capped_at_100() {

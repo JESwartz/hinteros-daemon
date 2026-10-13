@@ -769,8 +769,8 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.4 (0.4: profiles and per-profile apps, see
-"Profiles and per-profile apps" below)
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.5 (0.4: profiles and per-profile apps; 0.5: the admin PIN for
+box-wide actions, `guest.end`, rollback re-adds box features; see "Profiles and per-profile apps" below)
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
 trust.
@@ -1176,7 +1176,7 @@ order), and:
   (the short rev when it is absent), and `available.security_summary`, when non-null, under the
   severity on the security notice and the update screen.
 
-## Profiles and per-profile apps (system API 0.4, session API 0.12; M7)
+## Profiles and per-profile apps (system API 0.5, session API 0.13; M7)
 
 Design: `hinteros-docs/design/profiles.md` and `apps.md`. Cross-repo contracts (paths, file
 formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
@@ -1210,6 +1210,10 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   so unneeded features go only then. Update, channel, base and rollback jobs end with an `apps`
   stage that rebuilds every owner's env against the new system (tombstoned ids dropped); an env
   that fails keeps its generation and is listed in `apps_not_updated`, the job still succeeds.
+- **Rollback re-adds features** (0.5): after a rollback's `apps` stage, features the envs need that
+  the restored generation lacks are turned back on in a `box` stage (the apply flow on the restored
+  configuration with `requirements` = what the envs need; a new generation). The result lists
+  them in `features_readded`; `generations.list` entries name them beforehand (`readds_features`).
 - **v1 → v2** (`service/apps.rs` `maybe_migrate`, `runner/apps.rs` `migrate`): on a schema-1 box
   whose running generation's `release.json` says `"stateSchema": 2`, the service creates
   `profiles.json` (p1: the admin profile, name from schema 1 or "Profile 1", unlocked, no PIN)
@@ -1238,6 +1242,16 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   starter env only after the account's switch; a removal ends the account's processes, switches
   without it, then deletes the home with `datadel`'s no-symlink walk, the PIN, the metadata and the
   app links. Profiles (and the guest) without an env get the starter env while the box is idle.
+- **Admin PIN for box-wide actions** (0.5): `rollback`, `channel.set`, `base.set` and
+  `hardware.redetect` take `admin_pin`; on a schema-2 box it is checked first (`pin_required {pin:
+  admin}` when missing or wrong, or without an admin profile). Not on schema 1, not for root; an
+  admin profile without a PIN yet passes.
+- **End guest session** (0.5, `guest.rs`, `runner/profiles.rs`): `guest.end` (the guest only;
+  job `guest_end`) checks the account (`hinteros-guest`, `--guest-uid` 20000, the uid maps back to
+  the name, home `…/hinteros-guest`), hides the guest from the picker and PAM while it runs, ends
+  the guest's processes, then deletes what the uid owns in its home and in `--guest-tmp-dir`s
+  (`/tmp`, `/var/tmp`, `/dev/shm`) with `datadel::wipe_owned` (no symlinks, one filesystem, other
+  uids left), resets its app link to the starter env and drops its terms, usage and switch hint.
 - `profiles.switch {id, pin?}`: a locked target (other than the caller's own) needs its PIN (`pin_required
   {pin: target}`, backoff unless it is the admin profile); right, the hint gets a one-time token for
   the target user (60 s, single use in `pin unlocked`), so `greet` enters it with no UI. Without
@@ -1276,9 +1290,12 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
 - `profile.current`, `session.switch_profile` (+ `switch_wait`, `switch_force_close`,
   `switch_cancel`; events `switch_progress {stage: closing_apps|closing_steam|ending|cancelled}`,
   `switch_blocked {app, waited_s}`; `[switch] wait_s = 10`, `steam_wait_s = 15`; nothing is
-  killed without `switch_force_close`), `session.end_guest`, the sleep lock (logind delay
+  killed without `switch_force_close`), `session.end_guest` (closes the apps, then `system.guest.end` ends the session and wipes the guest
+  now), the sleep lock (logind delay
   inhibitor; `lock_state`, `session.lock_state`, `session.unlock`), `profiles_changed {profiles}`.
-  `display.keep` and `audio.set_output` also save the mode/output for every profile.
+  `display.keep` and `audio.set_output` also save the mode/output for every profile; at start the
+  published `/run/hinteros/audio-output` (`[audio] shared_output`) becomes the default sink once
+  that sink exists (retried for 60 s).
 - `hinteros-session greet [--config FILE] -- <picker…>` and `hinteros-session --greeter`
   (`greeter.list/login/pin/cancel/create`, `greeter_prompt`, `greeter_result`; `[greeter] public,
   socket, session_command`). `greet` decides before any compositor runs: a live hint with `fast`
@@ -1293,9 +1310,11 @@ Verified here against fakes (`crates/hinteros-system/tests/{apps,profiles}.rs`,
 (profiles-*, apps-*, first-boot, guest, starter-set): real greetd/PAM, logind's sleep signal,
 `end-others` killing a real profile's processes, real `appEnv.build`.
 
-### What the launcher must do (session API 0.12)
+### What the launcher must do (session API 0.13)
 
-Hello with `0.12`. Everything of 0.10 stays. New: the methods and events above (schema:
+Hello with `0.13`. 0.13: pass `admin_pin` to `system.rollback`, `system.channel.set`,
+`system.base.set` and `system.hardware.redetect` (ask on `pin_required {pin: admin}`); say
+"wiped now" for End guest session; show `readds_features` on the rollback screen. Everything of 0.10 stays. New: the methods and events above (schema:
 `schema/session-api.json`), all `system.*` profile, apps and starter-set relays; the first-boot
 wizard when `profile.current.setup_required`; "Set your PIN" when `!pin_set`; the terms dialog
 for `apps.list` entries with `needs_terms`; on schema-2 boxes pass `system.apps.list`'s
@@ -1314,7 +1333,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.12","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.13","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

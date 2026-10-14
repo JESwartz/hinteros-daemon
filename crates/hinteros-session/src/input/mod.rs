@@ -10,7 +10,6 @@
 
 pub mod devpad;
 pub mod inputplumber;
-pub mod keyboard;
 pub mod pointer;
 
 use std::time::{Duration, Instant};

@@ -71,6 +71,9 @@ pub struct Service {
     check_rate: RateLimit,
     jobs: Mutex<Jobs>,
     events: broadcast::Sender<Broadcast>,
+    /// Ctrl + Super + D ([`crate::keyboard`]): the uid that gets `keyboard_home` (the seat0 owner
+    /// at the time of the press; only its connections, never the greeter socket's).
+    keyboard_home: broadcast::Sender<u32>,
     connections: Mutex<HashMap<u32, usize>>,
     users: crate::users::Users,
     /// Owners `ensure_envs` already gave the starter env to (once per service run).
@@ -94,6 +97,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
 
     let paths = args.paths();
     let (events, _) = broadcast::channel(256);
+    let (keyboard_home, _) = broadcast::channel(16);
     let zone = State::load(&paths.state_json())
         .ok()
         .map(|(s, _)| crate::timezone::effective(&paths.zoneinfo_dir, &s, job::now()).zone);
@@ -105,6 +109,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         check_rate: RateLimit::new(args.rate_per_minute, args.rate_burst),
         jobs: Mutex::new(Jobs::load(paths.clone())),
         events,
+        keyboard_home,
         connections: Mutex::new(HashMap::new()),
         users: args.users(),
         env_tried: Mutex::new(BTreeSet::new()),
@@ -138,6 +143,17 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
             }
         });
     }
+    match bind_keyboard(&svc.args) {
+        Ok(Some(l)) => {
+            tokio::spawn(serve_keyboard(svc.clone(), l));
+        }
+        Ok(None) => {}
+        Err(e) => warn!("no keyboard socket: {e:#}"),
+    }
+    // Inactive profile sessions frozen (`crate::freeze`): at once, so a restart re-applies it.
+    let freezer = svc.args.freeze_inactive.then(|| {
+        crate::freeze::Freezer::spawn(svc.args.bus.clone(), svc.users.clone(), svc.paths.clone())
+    });
     if let Some(id) = svc.jobs.lock().unwrap().busy() {
         info!(job = id, "re-attached to a running job");
     }
@@ -163,6 +179,11 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         }
     }
     info!("shutting down (running jobs continue in their own units)");
+    // Nobody is left frozen while no service watches the seat (a stopped service, a rollback to
+    // one that does not freeze); a restarted service freezes again at once.
+    if let Some(f) = freezer {
+        f.thaw_all().await;
+    }
     let _ = std::fs::remove_file(&svc.args.socket);
     Ok(())
 }
@@ -214,19 +235,68 @@ impl Drop for Slot<'_> {
 
 /// `greeter.sock` (0660, group `hinteros-greeter`): the greeter's own few methods.
 fn bind_greeter(args: &ServeArgs) -> Result<Option<tokio::net::UnixListener>> {
-    let Some(path) = &args.greeter_socket else {
+    bind_for_group(args, &args.greeter_socket, &args.greeter_group, "greeter")
+}
+
+/// `keyboard.sock` (0660, group `hinteros-keyboard`): the keyboard reader's `home` lines.
+fn bind_keyboard(args: &ServeArgs) -> Result<Option<tokio::net::UnixListener>> {
+    bind_for_group(
+        args,
+        &args.keyboard_socket,
+        &args.keyboard_group,
+        "keyboard",
+    )
+}
+
+/// A socket only root and `group` may connect to; none without a path or the group.
+fn bind_for_group(
+    args: &ServeArgs,
+    path: &Option<std::path::PathBuf>,
+    group: &str,
+    what: &str,
+) -> Result<Option<tokio::net::UnixListener>> {
+    let Some(path) = path else {
         return Ok(None);
     };
-    let Some(gid) = args.users().group_gid(&args.greeter_group) else {
-        info!(group = %args.greeter_group, "no greeter group; no greeter socket");
+    let Some(gid) = args.users().group_gid(group) else {
+        info!(group, "no {what} group; no {what} socket");
         return Ok(None);
     };
     let l = server::bind_unix(path, 0o660, 0o755)
         .with_context(|| format!("binding {}", path.display()))?;
     rustix::fs::chown(path, None, Some(rustix::fs::Gid::from_raw(gid)))
         .with_context(|| format!("giving {} to group {gid}", path.display()))?;
-    info!(socket = %path.display(), "listening for the greeter");
+    info!(socket = %path.display(), "listening for the {what}");
     Ok(Some(l))
+}
+
+/// The keyboard reader's connections ([`crate::keyboard`]): one `home` line per Ctrl + Super + D.
+/// Anything else closes the connection.
+async fn serve_keyboard(svc: Arc<Service>, listener: tokio::net::UnixListener) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let svc = svc.clone();
+                tokio::spawn(async move {
+                    let (r, _w) = stream.into_split();
+                    let mut reader = LineReader::with_limit(r, 64);
+                    loop {
+                        match reader.next_line().await {
+                            Ok(Some(line)) if line == crate::keyboard::HOME_LINE => {
+                                svc.keyboard_home().await;
+                            }
+                            Ok(Some(_)) | Err(_) => {
+                                warn!("keyboard socket: unexpected input; closing");
+                                break;
+                            }
+                            Ok(None) => break,
+                        }
+                    }
+                });
+            }
+            Err(e) => warn!("keyboard accept failed: {e}"),
+        }
+    }
 }
 
 async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<()> {
@@ -264,6 +334,7 @@ async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<
     let mut conn = Connection::new(system::VERSION, ApiPeer::new(NAME, VERSION));
     let mut subscriptions: BTreeSet<EventName> = BTreeSet::new();
     let mut events = svc.events.subscribe();
+    let mut keyboard_home = svc.keyboard_home.subscribe();
     // Answers of mutating requests, which run as tasks (responses may come out of order; JSON-RPC
     // clients match them by id).
     let (answers_tx, mut answers) = tokio::sync::mpsc::unbounded_channel::<Value>();
@@ -323,6 +394,13 @@ async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<
                 debug!(uid = peer.uid, "no hello in time; closing");
                 break;
             }
+            home = keyboard_home.recv() => match home {
+                Ok(uid) if uid == peer.uid && !greeter && subscriptions.contains(&EventName::KeyboardHome) => {
+                    write_message(&mut w, &jsonrpc::notification(EventName::KeyboardHome.wire_name(), json!({}))).await?;
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
             event = events.recv() => match event {
                 Ok((name, params)) if subscriptions.contains(&name) => {
                     write_message(&mut w, &jsonrpc::notification(name.wire_name(), params)).await?;
@@ -860,6 +938,22 @@ fn job_ref(id: Option<String>) -> Result<Value, ErrorObject> {
 }
 
 impl Service {
+    /// Ctrl + Super + D: `keyboard_home` to the session of whoever owns seat0's active session
+    /// now (nobody on a text console without a session; the picker ignores it).
+    async fn keyboard_home(&self) {
+        match authz::seat_owner(&self.bus).await {
+            Ok(Some(uid)) => {
+                info!(uid, "Ctrl+Super+D: keyboard_home");
+                let _ = self.keyboard_home.send(uid);
+            }
+            Ok(None) => debug!("Ctrl+Super+D: no active session"),
+            Err(e) => {
+                warn!("Ctrl+Super+D: cannot ask logind: {e}");
+                self.bus.reset().await;
+            }
+        }
+    }
+
     /// Follow the running job: broadcast its events and, once its result is in, act on its end.
     /// The monitor calls it 4 times a second; a request that a running job would refuse calls it
     /// first, so a job that has just written its result no longer counts as running.

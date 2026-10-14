@@ -16,7 +16,8 @@ mod common;
 use common::*;
 
 /// A fake system service: answers `subscribe`, `system.info` and `ssh.set` (with
-/// `authentication_required`), sends `job_started` after a subscription, and reports every
+/// `authentication_required`), sends `job_started`, `time_zone_changed` and `keyboard_home` after
+/// a subscription, and reports every
 /// request it saw.
 fn fake_system(
     path: &Path,
@@ -100,6 +101,9 @@ fn fake_system(
                                     }),
                                 );
                                 write_message(&mut w, &ev).await.unwrap();
+                                // 0.9: Ctrl+Super+D, read by the system.
+                                let ev = jsonrpc::notification("keyboard_home", json!({}));
+                                write_message(&mut w, &ev).await.unwrap();
                             }
                         }
                     }
@@ -126,7 +130,7 @@ async fn relays_methods_errors_and_job_events() {
     call(
         &mut launcher,
         "subscribe",
-        json!({"events": ["job_started", "job_finished", "time_zone_changed"]}),
+        json!({"events": ["job_started", "job_finished", "time_zone_changed", "home_pressed"]}),
     )
     .await
     .unwrap();
@@ -150,6 +154,9 @@ async fn relays_methods_errors_and_job_events() {
     assert_eq!(name, "time_zone_changed");
     assert_eq!(params["zone"], "America/Chicago");
     assert_eq!(params["offset_valid_until"], 1793516400);
+    // keyboard_home is not relayed: it is Home (home_pressed), like SIGUSR1.
+    let (name, _) = next_event(&mut launcher).await;
+    assert_eq!(name, "home_pressed");
 
     // Errors come back unchanged (one 3xxx code space); params go through as given.
     let e = call(&mut c, "system.ssh.set", json!({"enabled": true}))

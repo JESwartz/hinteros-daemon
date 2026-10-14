@@ -1,8 +1,10 @@
 //! Test harness: the real `hinteros-system` binary against a temporary root.
 //!
-//! - A private `dbus-daemon` with fake logind (seat0's active session, inhibitors), polkit
+//! - A private `dbus-daemon` with fake logind (seat0's active session, inhibitors, users' states),
+//!   polkit
 //!   (`CheckAuthorization` answers per action, records subjects) and systemd (`StartUnit`
-//!   of `hinteros-job@<id>.service` runs `hinteros-system job <id>` as a child of the test).
+//!   of `hinteros-job@<id>.service` runs `hinteros-system job <id>` as a child of the test;
+//!   the profiles' slices with their `FreezerState`, `FreezeUnit` and `ThawUnit`).
 //! - A fake root: `/etc/hinteros`, `/var/lib/hinteros`, `/run/hinteros`, a system profile with
 //!   generations, `/run/current-system`, the update policy, and fake `nix`, `nix-env`,
 //!   `nixos-facter` and `switch-to-configuration` scripts that log what they were asked to do.
@@ -149,6 +151,14 @@ pub struct FakeState {
     pub tz_result: Option<String>,
     /// Jobs started so far (their ids).
     pub next_job: u32,
+    /// logind's `State` per uid (absent: `NoSuchUser`).
+    pub user_states: HashMap<u32, String>,
+    /// `FreezerState` per loaded unit (absent: not loaded).
+    pub slices: HashMap<String, String>,
+    /// `ActiveState` per unit (absent: `active`).
+    pub active_states: HashMap<String, String>,
+    /// `FreezeUnit` / `ThawUnit` calls: (method, unit).
+    pub freezer_calls: Vec<(String, String)>,
 }
 
 /// How the fake systemd runs a job: binary, run dir, extra environment.
@@ -199,6 +209,13 @@ struct Manager(Shared);
 
 #[zbus::interface(name = "org.freedesktop.login1.Manager")]
 impl Manager {
+    fn get_user(&self, uid: u32) -> zbus::fdo::Result<OwnedObjectPath> {
+        if !self.0.lock().unwrap().user_states.contains_key(&uid) {
+            return Err(zbus::fdo::Error::Failed(format!("NoSuchUser {uid}")));
+        }
+        Ok(OwnedObjectPath::try_from(format!("/org/freedesktop/login1/user/_{uid}")).unwrap())
+    }
+
     fn inhibit(
         &self,
         _what: String,
@@ -210,6 +227,53 @@ impl Manager {
         let f = std::fs::File::open("/dev/null").unwrap();
         zbus::zvariant::OwnedFd::from(std::os::fd::OwnedFd::from(f))
     }
+}
+
+/// The uids with a logind user object (the accounts of the fake root).
+pub const FAKE_UIDS: [u32; 2] = [20000, 20002];
+
+struct LoginUser(Shared, u32);
+
+#[zbus::interface(name = "org.freedesktop.login1.User")]
+impl LoginUser {
+    #[zbus(property)]
+    fn state(&self) -> String {
+        let s = self.0.lock().unwrap();
+        s.user_states.get(&self.1).cloned().unwrap_or_default()
+    }
+}
+
+struct Unit(Shared, String);
+
+#[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
+impl Unit {
+    #[zbus(property)]
+    fn freezer_state(&self) -> String {
+        let s = self.0.lock().unwrap();
+        s.slices.get(&self.1).cloned().unwrap_or_default()
+    }
+
+    #[zbus(property)]
+    fn active_state(&self) -> String {
+        let s = self.0.lock().unwrap();
+        s.active_states
+            .get(&self.1)
+            .cloned()
+            .unwrap_or_else(|| "active".into())
+    }
+}
+
+/// systemd's object path of a unit (`user-20002.slice` -> `.../unit/user_2d20002_2eslice`).
+fn unit_path(name: &str) -> String {
+    let mut p = String::from("/org/freedesktop/systemd1/unit/");
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() {
+            p.push(b as char);
+        } else {
+            p.push_str(&format!("_{b:02x}"));
+        }
+    }
+    p
 }
 
 struct Authority(Shared);
@@ -262,6 +326,21 @@ struct Systemd(Shared);
 impl Systemd {
     fn subscribe(&self) {}
 
+    fn get_unit(&self, name: String) -> zbus::fdo::Result<OwnedObjectPath> {
+        if !self.0.lock().unwrap().slices.contains_key(&name) {
+            return Err(zbus::fdo::Error::Failed(format!("NoSuchUnit {name}")));
+        }
+        Ok(OwnedObjectPath::try_from(unit_path(&name)).unwrap())
+    }
+
+    fn freeze_unit(&self, name: String) -> zbus::fdo::Result<()> {
+        self.freezer("FreezeUnit", name, "frozen")
+    }
+
+    fn thaw_unit(&self, name: String) -> zbus::fdo::Result<()> {
+        self.freezer("ThawUnit", name, "running")
+    }
+
     async fn start_unit(
         &self,
         name: String,
@@ -294,6 +373,20 @@ impl Systemd {
         s.children.push(child);
         s.units.push(name);
         Ok(OwnedObjectPath::try_from("/org/freedesktop/systemd1/job/1").unwrap())
+    }
+}
+
+impl Systemd {
+    fn freezer(&self, method: &str, name: String, to: &str) -> zbus::fdo::Result<()> {
+        let mut s = self.0.lock().unwrap();
+        s.freezer_calls.push((method.into(), name.clone()));
+        match s.slices.get_mut(&name) {
+            Some(state) => {
+                *state = to.into();
+                Ok(())
+            }
+            None => Err(zbus::fdo::Error::Failed(format!("NoSuchUnit {name}"))),
+        }
     }
 }
 
@@ -364,6 +457,21 @@ pub async fn serve_fakes(address: &str, state: Shared) -> zbus::Connection {
         .at("/org/freedesktop/login1", Manager(state.clone()))
         .await
         .unwrap();
+    for uid in FAKE_UIDS.into_iter().chain([me()]) {
+        server
+            .at(
+                format!("/org/freedesktop/login1/user/_{uid}"),
+                LoginUser(state.clone(), uid),
+            )
+            .await
+            .unwrap();
+        for unit in [format!("user-{uid}.slice"), format!("user@{uid}.service")] {
+            server
+                .at(unit_path(&unit), Unit(state.clone(), unit))
+                .await
+                .unwrap();
+        }
+    }
     server
         .at(
             "/org/freedesktop/PolicyKit1/Authority",
@@ -679,8 +787,9 @@ impl Root {
         std::fs::write(
             r.p("group"),
             format!(
-                "hinteros:x:990:hinteros,hinteros-p2,hinteros-guest\nhinteros-greeter:x:{}:\n",
-                rustix::process::getgid().as_raw()
+                "hinteros:x:990:hinteros,hinteros-p2,hinteros-guest\nhinteros-greeter:x:{gid}:\n\
+                 hinteros-keyboard:x:{gid}:\n",
+                gid = rustix::process::getgid().as_raw()
             ),
         )
         .unwrap();
@@ -842,6 +951,8 @@ impl System {
             r("group"),
             "--greeter-socket".into(),
             r("run/greeter.sock"),
+            "--keyboard-socket".into(),
+            r("run/keyboard.sock"),
             // Never this machine's processes: a removed profile's are looked up here.
             "--test-proc-dir".into(),
             r("proc"),

@@ -2164,6 +2164,12 @@
     }
   },
   "events": {
+    "keyboard_home": {
+      "summary": "0.9: Ctrl + Super + D was pressed on a keyboard: go Home. The service reads no keyboard itself: hinteros-system keyboard-home (its own sandboxed unit, the only reader of keyboards) reports the chord on the keyboard socket. Sent only to connections of the uid owning seat0's active session; never to the greeter socket.",
+      "since": "0.9",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "examples": [{ "name": "home", "params": {} }]
+    },
     "time_zone_changed": {
       "summary": "The box's time zone changed (time_zone.set, or a rollback restored another zone): the new zone and its offsets, as time_zone.get.",
       "since": "0.8",
@@ -2567,7 +2573,7 @@
         "version": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
     },
-    "EventName": { "enum": ["job_started", "job_progress", "job_finished", "profiles_changed", "time_zone_changed"] },
+    "EventName": { "enum": ["job_started", "job_progress", "job_finished", "profiles_changed", "time_zone_changed", "keyboard_home"] },
     "SubscriptionParams": {
       "type": "object",
       "required": ["events"],

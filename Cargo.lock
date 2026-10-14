@@ -737,6 +737,7 @@ dependencies = [
  "argon2",
  "base64 0.22.1",
  "clap",
+ "evdev",
  "futures-util",
  "hinteros-api",
  "nix 0.31.3",

@@ -234,6 +234,8 @@ pub enum EventName {
     ProfilesChanged,
     /// 0.8: the box's time zone changed (`time_zone.set`, or a rollback restored another).
     TimeZoneChanged,
+    /// 0.9: Ctrl + Super + D on a keyboard: Home (only to the seat0 owner's connections).
+    KeyboardHome,
 }
 
 impl EventName {
@@ -243,6 +245,7 @@ impl EventName {
         EventName::JobFinished,
         EventName::ProfilesChanged,
         EventName::TimeZoneChanged,
+        EventName::KeyboardHome,
     ];
 
     pub const fn wire_name(self) -> &'static str {
@@ -252,6 +255,7 @@ impl EventName {
             EventName::JobFinished => JobFinished::NAME,
             EventName::ProfilesChanged => ProfilesChanged::NAME,
             EventName::TimeZoneChanged => TimeZoneChanged::NAME,
+            EventName::KeyboardHome => KeyboardHome::NAME,
         }
     }
 }
@@ -1518,6 +1522,22 @@ impl Event for TimeZoneChanged {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Keyboard Home (0.9)
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyboardHomeParams {}
+
+/// `keyboard_home`: Ctrl + Super + D was pressed on a keyboard. Only `hinteros-system
+/// keyboard-home` (its own unit) reads keyboards; the service sends this to the connections of
+/// the uid owning seat0's active session, never to the greeter socket.
+pub struct KeyboardHome;
+impl Event for KeyboardHome {
+    const NAME: &'static str = "keyboard_home";
+    type Params = KeyboardHomeParams;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Jobs
 
 /// Result of a job that changed the system.
@@ -1885,6 +1905,7 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<JobFinished>(),
         EventInfo::of::<ProfilesChanged>(),
         EventInfo::of::<TimeZoneChanged>(),
+        EventInfo::of::<KeyboardHome>(),
     ],
     errors: ErrorCode::SYSTEM,
 };

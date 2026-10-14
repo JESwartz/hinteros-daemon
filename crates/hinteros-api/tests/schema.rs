@@ -507,6 +507,20 @@ fn system_schema_rejects_what_it_should() {
             "/methods/channel.set/params",
             r#"{"channel":"beta","url":"https://x"}"#,
         ),
+        // 0.9: the confirmed revision, not an acknowledgement of whatever the tip is.
+        (
+            "/methods/channel.set/params",
+            r#"{"channel":"stable","acknowledge_downgrade":true}"#,
+        ),
+        (
+            "/methods/channel.set/params",
+            r#"{"channel":"stable","rev":"HEAD"}"#,
+        ),
+        (
+            "/methods/channel.check/params",
+            r#"{"channel":"beta","url":"https://x"}"#,
+        ),
+        ("/methods/channel.check/params", r#"{}"#),
         ("/methods/base.set/params", r#"{"base":"23.11"}"#),
         ("/methods/update.apply/params", r#"{"rev":"HEAD"}"#),
         (

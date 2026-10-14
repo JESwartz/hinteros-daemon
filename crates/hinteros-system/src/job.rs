@@ -86,8 +86,11 @@ pub enum Action {
         #[serde(default)]
         rebuild_apps: bool,
     },
-    /// Fetch and verify the channel tip.
+    /// Fetch and verify the channel tip (and record the other channels' verified tips).
     UpdateCheck(UpdateSource),
+    /// Fetch and verify another channel's tip before `channel.set` (it may be older than the
+    /// locked revision, never older than the recorded tip of its branch).
+    ChannelCheck(UpdateSource),
     /// Change one owner's app env (install, remove, rollback, starter set, new profile).
     Apps(AppsJob),
     /// The v1 → v2 migration (apps.md): per-profile envs from the box-wide apps, then
@@ -305,6 +308,10 @@ pub struct UpdateSource {
     /// `update.check` only: compare the catalogs of the running and the target generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogCheck>,
+    /// `update.check` only: the other channel branches of the table, fetched and verified to
+    /// record their newest tips (`channel-tips.json`) before a switch to them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub others: Vec<String>,
 }
 
 /// What `update.check` needs to name the apps an update adds or removes.
@@ -325,9 +332,8 @@ pub struct CatalogCheck {
 pub enum NotFastForward {
     /// `update_verification_failed {reason: not_fast_forward}` (updates within a channel).
     Reject,
-    /// `needs_acknowledgement` (a channel switch without `acknowledge_downgrade`).
-    NeedsAcknowledgement,
-    /// Acknowledged.
+    /// A channel switch to the revision the owner confirmed after `channel.check` (it may be
+    /// older than the locked one; never older than the recorded tip of its branch).
     Allow,
 }
 

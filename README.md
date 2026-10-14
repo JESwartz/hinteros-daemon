@@ -799,7 +799,7 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.8 (0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.9 (0.9: channel switches to a verified, confirmed revision, see "Channel switches" below; 0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
 box-wide actions, `guest.end`, rollback re-adds box features; see "Profiles and per-profile apps" below)
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
@@ -808,7 +808,7 @@ trust.
 - **Methods:** read-only `system.info`, `settings.get`, `generations.list`, `jobs.get`,
   `jobs.list`; mutating `settings.set {revision, changes}` (closed, typed `changes`; empty in
   0.2), `ssh.set {enabled}`, `rebuild`, `hardware.redetect`, `rollback {generation?}`,
-  `update.check`, `update.apply {rev}`, `channel.set {channel, acknowledge_downgrade?}`,
+  `update.check`, `update.apply {rev}`, `channel.check {channel}` (0.9), `channel.set {channel, rev?}`,
   `base.set {base, acknowledge_downgrade?}`, `apps.install {ids, revision, accepted_terms?}`,
   `apps.remove {ids, revision, delete_data}` (0.3, see "Store backend" below), `jobs.cancel {job_id}`. Events `job_started`,
   `job_progress`, `job_finished {…, session_restart_required}` after `subscribe`.
@@ -872,8 +872,8 @@ trust.
   `update.apply {rev}` only accepts the last verified result for the current channel and
   revision, re-verifies, and locks `?ref=<branch>&rev=<rev>` with
   `nix flake lock --override-input`. `channel.set` rewrites `flake.nix`'s input URL (it must
-  appear exactly once, as `"git+<repo>?ref=<branch>"`) and locks the verified tip of the new
-  branch; beta → stable, or a tip that isn't a fast-forward, needs `acknowledge_downgrade`.
+  appear exactly once, as `"git+<repo>?ref=<branch>"`) and locks the revision `channel.check`
+  verified on the new branch (0.9; see "Channel switches" below).
   `base.set` edits `state.json` (unstable → stable needs the acknowledgement).
 - **Rollback**: `nix-env --switch-generation N` + `switch-to-configuration switch`, then
   `/etc/hinteros`'s `flake.nix`, `flake.lock` and `state.json` from the generation's snapshot
@@ -888,7 +888,7 @@ All paths default to the box's; tests point them at a temporary root.
 |---|---|
 | `--socket` (`HINTEROS_SYSTEM_SOCKET`) | `/run/hinteros/system.sock` |
 | `--config-dir` | `/etc/hinteros` |
-| `--state-dir` | `/var/lib/hinteros` (`staging/`, `git/`, `update-check.json`) |
+| `--state-dir` | `/var/lib/hinteros` (`staging/`, `git/`, `update-check.json`, `channel-check.json`, `channel-tips.json`) |
 | `--run-dir` (`HINTEROS_RUN_DIR`) | `/run/hinteros` (`jobs/`) |
 | `--profile` | `/nix/var/nix/profiles/system` |
 | `--current-system`, `--booted-system` | `/run/current-system`, `/run/booted-system` |
@@ -921,7 +921,7 @@ For `daemon.nix` (and the VM tests) in the system repo:
   `RuntimeDirectory=hinteros` with `RuntimeDirectoryMode=0755` and
   **`RuntimeDirectoryPreserve=yes`** (the job directories in `/run/hinteros/jobs` must survive a
   restart of the service during a switch), `UMask=0077` or `0007`. It reads `/etc/hinteros`,
-  `/var/lib/hinteros/update-check.json`, `/proc`, the profile links and `/run/current-system`;
+  `/var/lib/hinteros/update-check.json` and `channel-check.json`, `/proc`, the profile links and `/run/current-system`;
   writes only `/run/hinteros`. So: `ProtectSystem=strict`, `ReadWritePaths=/run/hinteros`,
   `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`,
   `RestrictAddressFamilies=AF_UNIX` (D-Bus, journal), `SystemCallFilter=@system-service`,
@@ -1467,7 +1467,7 @@ included).
 `subject` (in `job_started`, `job_finished`, `Job`) is filled in by the service from its own
 state when the job is created (catalog names from the running generation's catalog, profile
 names from `profiles.json`, the running release version); the job may refine it (a channel
-switch learns its target `rev` and `version` once verified: one `job_progress` then carries the
+check learns its target `rev` and `version` once verified: one `job_progress` then carries the
 whole new `subject`, which `jobs.get` and `job_finished` keep). Fields, each optional:
 `owner` (profile id, `guest`, `starter`), `profile {id, name}`, `apps [{id, name}]`,
 `delete_data`, `from_owner`, `generation`, `from_generation`, `rev`, `version`, `channel`,
@@ -1480,7 +1480,8 @@ whole new `subject`, which `jobs.get` and `job_finished` keep). Fields, each opt
 | `ssh`, `guest_set` | `enabled` |
 | `update_check` | `channel`, `from_rev` |
 | `update_apply` | `rev`, `version`, `channel`, `from_rev`, `from_version` |
-| `channel` | `channel` (target), `from_channel`, `from_rev`, `from_version`; `rev`, `version` once verified |
+| `channel_check` (0.9) | `channel` (target), `from_channel`, `from_rev`; `rev`, `version` once verified |
+| `channel` | `channel` (target), `from_channel`, `from_rev`, `from_version`, `rev`, `version` (0.9: the confirmed revision, from the start) |
 | `base` | `base`, `from_base` |
 | `rollback` | `generation`, `from_generation` |
 | `apps_install` | `owner`, `profile` (a profile), `apps` (only the new ones); the automatic starter env of a new profile or the guest (uid 0): `owner`, `profile`?, `from_owner: starter` |
@@ -1580,6 +1581,48 @@ standard_offset_seconds}]}`; `system.time_zone.set {zone, admin_pin?}` → the n
 `time_zone_changed` (a `TimeZoneInfo`): subscribe to it. The clock shows UTC plus
 `offset_seconds` and gets the zone again at `offset_valid_until` and on `time_zone_changed`.
 
+## Channel switches (system API 0.9, session API 0.17)
+
+Code: `update.rs` (`SeenTips`, `Rejection::OlderThanSeen`), `runner.rs` (`update_check`,
+`channel_check`, `apply`), `service.rs` (`channel.check`, `channel.set`).
+
+Before 0.9 `channel.set {acknowledge_downgrade: true}` (needed for every beta → stable switch)
+locked whatever signed commit the target branch pointed at: a server that served an old
+release with a known hole on that branch got it installed.
+
+- **Newest verified tips** (`/var/lib/hinteros/channel-tips.json`, root only, `{"<branch>":
+  "<rev>"}`): every job that verifies a channel tip records it there, but only forward (a
+  revision that descends from the recorded one). `update.check` also fetches and verifies the
+  other branches of the channel table (one extra `git fetch` each; failures are only logged), so
+  the record exists before a switch. Rollbacks and switches never lower it.
+- Every verification (`update.check`, `update.apply`, `channel.check`, `channel.set`) also
+  requires the revision to descend from (or equal) the recorded tip of its branch, else
+  `update_verification_failed {reason: older_than_seen}`. Within the followed channel the
+  fast-forward rule from the locked revision stays as it was.
+- `channel.check {channel}` (polkit `org.hinteros.system.update.check`, no PIN; job
+  `channel_check`; `job_id` null for the current channel): fetches and verifies the target's tip.
+  It may be older than the locked revision. Result `ChannelCheckResult {channel, current_rev,
+  target: AvailableUpdate, older, checked_at}` (`older`: `target.rev` does not descend from the
+  locked revision; `new_apps`/`removed_apps` are null), also kept in
+  `/var/lib/hinteros/channel-check.json`. The job's subject gets `rev` and `version`.
+- `channel.set {channel, rev?, admin_pin?}`: the admin PIN first; `job_id` null for the current
+  channel; otherwise `rev` must be the last `channel.check` result's `target.rev` for that channel
+  and the locked revision (`state_conflict {reason: channel_rev}`). The job re-verifies `rev`
+  (signer and record), locks it on the target branch and runs the apply flow. The subject has
+  `rev` and `version` from the start. `acknowledge_downgrade` is gone (an unknown field).
+- The promote flow never trips the record: `promote` only fast-forwards `beta` and `stable`
+  (hotfixes are released onto `stable`), and `main` is not a channel. A branch that is ever
+  rewound on the server is refused by every box that saw the newer tip.
+
+### What the launcher must do (session API 0.17)
+
+Hello with `0.17`. To switch channels: `system.channel.check {channel}`, wait for its job, show
+`result.target.version` and `result.target.date` (and, when `result.older`, that the version is
+older than the one on the box), and on confirm call `system.channel.set {channel, rev:
+result.target.rev, admin_pin}`. `update_verification_failed {reason: older_than_seen}` (from either
+job): the server offers an older version than one the box already saw; nothing changed.
+`state_conflict {reason: channel_rev}`: check again. Job kind `channel_check`.
+
 ## Development
 
 ```sh
@@ -1593,7 +1636,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.16","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.17","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

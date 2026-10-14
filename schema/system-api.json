@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.8",
+  "version": "0.9",
   "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -36,16 +36,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.8", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.8", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "0.9", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "0.9", "server": { "name": "hinteros-system", "version": "0.1.0" } }
         },
         {
           "name": "mismatch",
           "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 0.1, server 0.8",
-            "data": { "client_api_version": "0.1", "server_api_version": "0.8" }
+            "message": "API version mismatch: client 0.1, server 0.9",
+            "data": { "client_api_version": "0.1", "server_api_version": "0.9" }
           }
         }
       ]
@@ -324,7 +324,7 @@
     },
     "update.check": {
       "summary": "Look for a newer signed revision of the channel (job), or, within 60 s of the last check, return that result without a job. Action org.hinteros.system.update.check.",
-      "description": "The job lists the channel branch (git ls-remote of the URL from the running generation's channel table), fetches it into a root-owned bare repo, verifies the tip's SSH signature against the allowed signers shipped in the running generation, requires it to descend from the locked revision, and reads the highest Security: <low|medium|high|critical> trailer among the new commits. The job's result is an UpdateCheckResult; failures are job_failed, update_unreachable or update_verification_failed in job_finished.error.",
+      "description": "The job lists the channel branch (git ls-remote of the URL from the running generation's channel table), fetches it into a root-owned bare repo, verifies the tip's SSH signature against the allowed signers shipped in the running generation, requires it to descend from the locked revision, and reads the highest Security: <low|medium|high|critical> trailer among the new commits. (0.9) It also requires the tip to descend from the newest verified tip this box saw on the branch (older_than_seen), and fetches and verifies the other channels' branches of the table to record their newest verified tips (root-only state that rollbacks and channel switches never lower; their failures do not fail the check). The job's result is an UpdateCheckResult; failures are job_failed, update_unreachable or update_verification_failed in job_finished.error.",
       "since": "0.2",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
@@ -387,9 +387,26 @@
         }
       ]
     },
+    "channel.check": {
+      "summary": "0.9: verify the tip of another channel before switching to it (job). Action org.hinteros.system.update.check (no PIN).",
+      "description": "The job fetches the target channel's branch (URL from the running generation's channel table), verifies the tip's SSH signature against the allowed signers shipped in the running generation, and requires it to descend from (or equal) the newest verified tip this box saw on that branch (update_verification_failed {reason: older_than_seen} otherwise). It does not need to descend from the locked revision: older is true when it does not (the switch may go back to an older version). The job's result is a ChannelCheckResult; the launcher shows target.version and target.date and asks the owner to confirm, then calls channel.set with target.rev. Returns job_id null if the channel is already the current one. Failures are job_failed, update_unreachable or update_verification_failed in job_finished.error.",
+      "since": "0.9",
+      "params": {
+        "type": "object",
+        "required": ["channel"],
+        "additionalProperties": false,
+        "properties": { "channel": { "$ref": "#/$defs/Channel" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy"],
+      "examples": [
+        { "name": "to stable", "params": { "channel": "stable" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "the current channel", "params": { "channel": "beta" }, "result": { "job_id": null } }
+      ]
+    },
     "channel.set": {
-      "summary": "Follow another channel (job). Action org.hinteros.system.channel.",
-      "description": "The URL comes from the running generation's channel table, never from params. The target tip must be signed by an allowed signer. Moving from beta to stable, or to a tip that does not descend from the locked revision, needs acknowledge_downgrade: true (else needs_acknowledgement: at once for beta to stable, in job_finished.error for a non-fast-forward tip). Returns job_id null if the channel is already the current one. On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root.",
+      "summary": "Follow another channel (job), at the revision channel.check verified. Action org.hinteros.system.channel.",
+      "description": "The URL comes from the running generation's channel table, never from params. Returns job_id null if the channel is already the current one. Otherwise (0.9) rev is needed and must equal the last channel.check result's target.rev for this channel and the locked revision, else state_conflict {reason: channel_rev}: the owner confirmed that version. The job re-verifies rev (an allowed signer; it must descend from the newest verified tip this box saw on the target branch, else update_verification_failed {reason: older_than_seen}), locks the hinteros input to it on the target branch and runs the apply flow. rev may be older than the locked revision (beta to stable). Before 0.9 the target was the branch tip and acknowledge_downgrade allowed any older signed tip. On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root. The PIN is checked first.",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -397,15 +414,20 @@
         "additionalProperties": false,
         "properties": {
           "channel": { "$ref": "#/$defs/Channel" },
-          "acknowledge_downgrade": { "type": "boolean" },
+          "rev": { "$ref": "#/$defs/Rev" },
           "admin_pin": { "$ref": "#/$defs/Pin" }
         }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
-      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "needs_acknowledgement", "pin_required"],
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "state_conflict", "pin_required"],
       "examples": [
-        { "name": "to beta", "params": { "channel": "beta", "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
-        { "name": "to stable without acknowledgement", "params": { "channel": "stable" }, "error": { "code": 3011, "message": "switching from beta to stable is a downgrade" } }
+        { "name": "to stable", "params": { "channel": "stable", "rev": "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5", "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "the current channel", "params": { "channel": "beta", "admin_pin": "2468" }, "result": { "job_id": null } },
+        {
+          "name": "not the checked revision",
+          "params": { "channel": "stable", "rev": "1111111111111111111111111111111111111111", "admin_pin": "2468" },
+          "error": { "code": 3007, "message": "rev is not the last verified channel check", "data": { "reason": "channel_rev" } }
+        }
       ]
     },
     "base.set": {
@@ -2432,12 +2454,12 @@
     "state_conflict": {
       "code": 3007,
       "since": "0.2",
-      "summary": "Stale settings revision, or update.apply's rev is not the last verified check result.",
+      "summary": "Stale settings revision, update.apply's rev is not the last verified check result (update_rev), or (0.9) channel.set's rev is not the last verified channel.check result for that channel (channel_rev).",
       "data": {
         "type": "object",
         "required": ["reason"],
         "additionalProperties": false,
-        "properties": { "reason": { "enum": ["revision", "update_rev"] } }
+        "properties": { "reason": { "enum": ["revision", "update_rev", "channel_rev"] } }
       }
     },
     "update_unreachable": {
@@ -2454,16 +2476,16 @@
     "update_verification_failed": {
       "code": 3009,
       "since": "0.2",
-      "summary": "The channel tip is unsigned, signed by an unknown signer, or does not descend from the locked revision.",
+      "summary": "The channel tip is unsigned, signed by an unknown signer, does not descend from the locked revision (not_fast_forward), or (0.9) does not descend from the newest verified tip this box saw on that channel branch (older_than_seen: an older signed release served again).",
       "data": {
         "type": "object",
         "required": ["reason"],
         "additionalProperties": false,
-        "properties": { "reason": { "enum": ["unsigned", "unknown_signer", "not_fast_forward"] } }
+        "properties": { "reason": { "enum": ["unsigned", "unknown_signer", "not_fast_forward", "older_than_seen"] } }
       }
     },
     "not_found": { "code": 3010, "since": "0.2", "summary": "Unknown generation or job; apps.install: an id that is not in the running generation's catalog; apps.remove: an id that is not installed; storage.tree (0.6): nothing measured yet, or that home was not measured." },
-    "needs_acknowledgement": { "code": 3011, "since": "0.2", "summary": "A downgrading channel or base switch without acknowledge_downgrade: true." },
+    "needs_acknowledgement": { "code": 3011, "since": "0.2", "summary": "A downgrading base switch without acknowledge_downgrade: true. (Before 0.9 also channel.set; since 0.9 channel.set takes the rev the owner confirmed after channel.check instead.)" },
     "authentication_required": {
       "code": 3012,
       "since": "0.2",
@@ -2564,7 +2586,7 @@
     "PolkitAction": { "type": "string", "pattern": "^org\\.hinteros\\.system\\.[a-z.]+$" },
     "Channel": { "enum": ["stable", "beta"] },
     "Base": { "enum": ["stable", "unstable"] },
-    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "migrate_apps", "profiles_create", "profiles_remove", "guest_set", "guest_end", "storage_measure", "cleanup_system", "cleanup_profiles", "cleanup_set"] },
+    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "migrate_apps", "profiles_create", "profiles_remove", "guest_set", "guest_end", "storage_measure", "cleanup_system", "cleanup_profiles", "cleanup_set", "channel_check"] },
     "ProfileId": { "description": "A profile id.", "type": "string", "pattern": "^p[1-9][0-9]{0,2}$" },
     "ProfileName": { "description": "A display name: 1 to 32 characters, trimmed, no control or format characters.", "type": "string", "minLength": 1, "maxLength": 128 },
     "ProfileColor": { "enum": ["teal", "blue", "purple", "pink", "red", "orange", "yellow", "green"] },
@@ -2679,6 +2701,19 @@
         "checked_at": { "type": "integer" }
       }
     },
+    "ChannelCheckResult": {
+      "description": "0.9: a channel_check job's result: the verified tip of the target channel.",
+      "type": "object",
+      "required": ["channel", "current_rev", "target", "older", "checked_at"],
+      "additionalProperties": false,
+      "properties": {
+        "channel": { "description": "The target channel.", "$ref": "#/$defs/Channel" },
+        "current_rev": { "description": "The locked revision when the check ran.", "oneOf": [{ "$ref": "#/$defs/Rev" }, { "type": "null" }] },
+        "target": { "description": "The target's verified tip; commits and security count the commits the locked revision does not have. new_apps and removed_apps are null (not read).", "$ref": "#/$defs/AvailableUpdate" },
+        "older": { "description": "target.rev does not descend from the locked revision: the switch may go back to an older version.", "type": "boolean" },
+        "checked_at": { "type": "integer" }
+      }
+    },
     "AppliedResult": {
       "type": "object",
       "required": ["generation", "rev"],
@@ -2709,8 +2744,8 @@
       }
     },
     "JobResult": {
-      "description": "update_check jobs: an UpdateCheckResult; jobs that change the system: an AppliedResult; storage_measure (0.6): a MeasuredResult; cleanup_system and cleanup_profiles (0.6): a CleanedResult.",
-      "oneOf": [{ "$ref": "#/$defs/UpdateCheckResult" }, { "$ref": "#/$defs/AppliedResult" }, { "$ref": "#/$defs/MeasuredResult" }, { "$ref": "#/$defs/CleanedResult" }]
+      "description": "update_check jobs: an UpdateCheckResult; jobs that change the system: an AppliedResult; storage_measure (0.6): a MeasuredResult; cleanup_system and cleanup_profiles (0.6): a CleanedResult; channel_check (0.9): a ChannelCheckResult.",
+      "oneOf": [{ "$ref": "#/$defs/UpdateCheckResult" }, { "$ref": "#/$defs/AppliedResult" }, { "$ref": "#/$defs/MeasuredResult" }, { "$ref": "#/$defs/CleanedResult" }, { "$ref": "#/$defs/ChannelCheckResult" }]
     },
     "Keep": { "description": "Generations to keep (the running, booted and current ones always stay).", "type": "integer", "minimum": 1, "maximum": 10 },
     "CleanupParams": {

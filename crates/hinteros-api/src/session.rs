@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 16);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 17);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -837,6 +837,7 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<RelayRollback>(),
         MethodInfo::of::<RelayUpdateCheck>(),
         MethodInfo::of::<RelayUpdateApply>(),
+        MethodInfo::of::<RelayChannelCheck>(),
         MethodInfo::of::<RelayChannelSet>(),
         MethodInfo::of::<RelayBaseSet>(),
         MethodInfo::of::<RelayAppsInstall>(),
@@ -994,6 +995,7 @@ relay! {
     RelayRollback = "system.rollback" => crate::system::Rollback;
     RelayUpdateCheck = "system.update.check" => crate::system::UpdateCheck;
     RelayUpdateApply = "system.update.apply" => crate::system::UpdateApply;
+    RelayChannelCheck = "system.channel.check" => crate::system::ChannelCheck;
     RelayChannelSet = "system.channel.set" => crate::system::ChannelSet;
     RelayBaseSet = "system.base.set" => crate::system::BaseSet;
     RelayAppsInstall = "system.apps.install" => crate::system::AppsInstall;

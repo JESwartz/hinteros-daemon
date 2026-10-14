@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use hinteros_api::system::{Base, Channel, CleanupFrequency, MAX_KEEP};
+use hinteros_api::system::{Base, CleanupFrequency, MAX_KEEP};
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -529,26 +529,6 @@ pub fn base_change(from: Base, to: Base, acknowledged: bool) -> Result<Option<Ba
     Ok(Some(to))
 }
 
-/// `channel.set`: `Ok(None)` if `to` is the current channel; beta → stable is a downgrade.
-/// (A target tip that does not descend from the locked revision also needs the
-/// acknowledgement; the job checks that after fetching.)
-pub fn channel_change(
-    from: Option<Channel>,
-    to: Channel,
-    acknowledged: bool,
-) -> Result<Option<Channel>, ErrorObject> {
-    if from == Some(to) {
-        return Ok(None);
-    }
-    if from == Some(Channel::Beta) && to == Channel::Stable && !acknowledged {
-        return Err(ErrorObject::new(
-            ErrorCode::NeedsAcknowledgement,
-            "switching from beta to stable is a downgrade",
-        ));
-    }
-    Ok(Some(to))
-}
-
 /// A serde "unknown field" message as `invalid_params` data, so clients learn which field.
 pub fn serde_error(msg: &str) -> ErrorObject {
     let field = msg
@@ -810,29 +790,6 @@ mod tests {
         assert_eq!(
             base_change(Base::Unstable, Base::Stable, true).unwrap(),
             Some(Base::Stable)
-        );
-
-        assert_eq!(
-            channel_change(Some(Channel::Beta), Channel::Beta, false).unwrap(),
-            None
-        );
-        assert_eq!(
-            channel_change(Some(Channel::Stable), Channel::Beta, false).unwrap(),
-            Some(Channel::Beta)
-        );
-        assert_eq!(
-            channel_change(Some(Channel::Beta), Channel::Stable, false)
-                .unwrap_err()
-                .kind(),
-            Some(ErrorCode::NeedsAcknowledgement)
-        );
-        assert_eq!(
-            channel_change(Some(Channel::Beta), Channel::Stable, true).unwrap(),
-            Some(Channel::Stable)
-        );
-        assert_eq!(
-            channel_change(None, Channel::Stable, false).unwrap(),
-            Some(Channel::Stable)
         );
     }
 

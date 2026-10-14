@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, ErrorObject, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 6);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 7);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/system-api.json");
@@ -1442,6 +1442,90 @@ pub struct Job {
     #[serde(deserialize_with = "nullable")]
     pub result: Option<JobResult>,
     pub session_restart_required: bool,
+    /// 0.7: what the job is about.
+    pub subject: JobSubject,
+    /// 0.7: when the job's process started (`created_at` until it has).
+    pub started_at: i64,
+    /// 0.7: the latest percent (running jobs; null when finished).
+    #[serde(deserialize_with = "nullable")]
+    pub percent: Option<u8>,
+    /// 0.7: the latest progress detail (running jobs; null when finished).
+    #[serde(deserialize_with = "nullable")]
+    pub detail: Option<ProgressDetail>,
+    /// 0.7: the last time the job's process produced output (running jobs).
+    #[serde(deserialize_with = "nullable")]
+    pub last_activity_at: Option<i64>,
+}
+
+/// 0.7: a profile a job is for, with its display name when the job started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubjectProfile {
+    pub id: String,
+    pub name: String,
+}
+
+/// 0.7: what a job is about. Every field is optional; which ones each kind sets is in the
+/// README ("What a job is about").
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobSubject {
+    /// Apps jobs: whose apps (a profile id, `guest` or `starter`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// The profile the job is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<SubjectProfile>,
+    /// Apps installed (the new ones), removed, the new starter set or the migrated apps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps: Option<Vec<CatalogApp>>,
+    /// Apps remove: their data is deleted too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_data: Option<bool>,
+    /// An app env copied from another owner (`starter`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_owner: Option<String>,
+    /// Rollbacks: the target generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
+    /// Rollbacks: the generation before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_generation: Option<u32>,
+    /// Update and channel switch: the target revision (a channel switch: once verified).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    /// The target's release version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// The (target) channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<Channel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_channel: Option<Channel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_rev: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<Base>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_base: Option<Base>,
+    /// The new on/off value (ssh, guest, automatic clean-up).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Clean-ups: generations kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency: Option<CleanupFrequency>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_system: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_profiles: Option<u32>,
+}
+
+impl JobSubject {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1490,6 +1574,10 @@ pub struct JobStartedParams {
     pub job_id: String,
     pub kind: JobKind,
     pub uid: u32,
+    /// 0.7.
+    pub subject: JobSubject,
+    /// 0.7.
+    pub started_at: i64,
 }
 
 pub struct JobStarted;
@@ -1509,6 +1597,30 @@ pub struct ProgressDetail {
     pub bytes_done: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_total: Option<u64>,
+    /// 0.7: derivations built so far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builds_done: Option<u64>,
+    /// 0.7: derivations nix expects to build (may grow).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builds_total: Option<u64>,
+    /// 0.7: derivations building at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builds_running: Option<u64>,
+    /// 0.7: the most recently started derivation that is still building.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub building: Option<Building>,
+}
+
+/// 0.7: a derivation being built.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Building {
+    /// From the `.drv` name, e.g. `hinteros-daemon`.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Nix's build phase without `Phase` (`unpack`, `configure`, `build`, `install`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
 }
 
 impl ProgressDetail {
@@ -1520,11 +1632,21 @@ impl ProgressDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobProgressParams {
     pub job_id: String,
+    /// 0.7.
+    pub kind: JobKind,
     pub stage: Stage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<ProgressDetail>,
+    /// 0.7.
+    pub started_at: i64,
+    /// 0.7: the last time the job's process produced output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<i64>,
+    /// 0.7: the job's subject, only when it changed during the job (replaces the old one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<JobSubject>,
 }
 
 pub struct JobProgress;
@@ -1544,6 +1666,12 @@ pub struct JobFinishedParams {
     pub result: Option<JobResult>,
     /// The switch replaced the system service or the session daemon: offer a session restart.
     pub session_restart_required: bool,
+    /// 0.7.
+    pub subject: JobSubject,
+    /// 0.7.
+    pub started_at: i64,
+    /// 0.7.
+    pub finished_at: i64,
 }
 
 pub struct JobFinished;

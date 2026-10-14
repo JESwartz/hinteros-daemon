@@ -73,7 +73,7 @@ async fn run_job(sys: &System, c: &mut Client, method: &str, params: Value) -> V
         sys.job_log(&id),
         sys.log()
     );
-    json!({ "finished": done, "stages": events.iter()
+    json!({ "finished": done, "subject": events[0].1["subject"], "stages": events.iter()
         .filter(|(n, _)| n == "job_progress")
         .map(|(_, p)| p["stage"].clone())
         .collect::<Vec<_>>() })
@@ -139,6 +139,11 @@ async fn profile_apps_install_remove_rollback() {
         json!({"ids": ["moonlight"], "revision": rev0}),
     )
     .await;
+    let p1 = json!({"owner": "p1", "profile": {"id": "p1", "name": "Dev"}});
+    let mut want = p1.clone();
+    want["apps"] = json!([{"id": "moonlight", "name": "Moonlight"}]);
+    assert_eq!(r["subject"], want);
+    assert_eq!(r["finished"]["subject"], want);
     assert!(!r["stages"].as_array().unwrap().contains(&json!("box")));
     assert_eq!(root.read("switch.log"), switches, "no system switch");
     assert_eq!(env_of(root, &p1_link(root)).unwrap(), "env-moonlight");
@@ -199,13 +204,17 @@ async fn profile_apps_install_remove_rollback() {
     )
     .unwrap();
     let switches = root.read("switch.log");
-    run_job(
+    let r = run_job(
         &sys,
         &mut c,
         "apps.remove",
         json!({"ids": ["moonlight"], "revision": rev2, "delete_data": true}),
     )
     .await;
+    let mut want = p1.clone();
+    want["apps"] = json!([{"id": "moonlight", "name": "Moonlight"}]);
+    want["delete_data"] = json!(true);
+    assert_eq!(r["subject"], want);
     assert!(
         !root
             .p("home/.config/Moonlight Game Streaming Project")
@@ -229,7 +238,11 @@ async fn profile_apps_install_remove_rollback() {
         .await
         .unwrap_err();
     assert_eq!(code(&e), ErrorCode::NotFound.code());
-    run_job(&sys, &mut c, "apps.rollback", json!({"generation": 1})).await;
+    let r = run_job(&sys, &mut c, "apps.rollback", json!({"generation": 1})).await;
+    let mut want = p1.clone();
+    want["generation"] = json!(1);
+    want["from_generation"] = json!(3);
+    assert_eq!(r["subject"], want);
     let l = apps_list(&mut c).await;
     assert_eq!(l["ids"], json!(["moonlight"]));
     assert_eq!(l["generation"], 1);

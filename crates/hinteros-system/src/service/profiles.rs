@@ -7,11 +7,11 @@ use std::collections::BTreeSet;
 
 use hinteros_api::system::{
     AudioSaveOutputParams, CallerInfo, DisplaySaveModeParams, Empty, GuestInfo, GuestSetParams,
-    JobKind, PinParams, ProfileIdResult, ProfileInfo, ProfileUsage, ProfilesCreateParams,
-    ProfilesCreateResult, ProfilesListResult, ProfilesRemoveParams, ProfilesRenameParams,
-    ProfilesResetPinParams, ProfilesSetAppearanceParams, ProfilesSetLockedParams,
-    ProfilesSetPinParams, ProfilesSetupAdminParams, ProfilesSwitchParams, StarterSetGetResult,
-    StarterSetSetParams,
+    JobKind, JobSubject, PinParams, ProfileIdResult, ProfileInfo, ProfileUsage,
+    ProfilesCreateParams, ProfilesCreateResult, ProfilesListResult, ProfilesRemoveParams,
+    ProfilesRenameParams, ProfilesResetPinParams, ProfilesSetAppearanceParams,
+    ProfilesSetLockedParams, ProfilesSetPinParams, ProfilesSetupAdminParams, ProfilesSwitchParams,
+    StarterSetGetResult, StarterSetSetParams, SubjectProfile,
 };
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde_json::{Value, json};
@@ -548,6 +548,7 @@ impl Service {
                     last_used_at: None,
                     appearance: Appearance::default(),
                 };
+                let subject_name = meta.name.clone();
                 let spec = self.spec(
                     JobKind::ProfilesCreate,
                     uid,
@@ -560,6 +561,13 @@ impl Service {
                         token: from_greeter,
                     }),
                 );
+                let spec = spec.about(JobSubject {
+                    profile: Some(SubjectProfile {
+                        id: id.clone(),
+                        name: subject_name,
+                    }),
+                    ..Default::default()
+                });
                 let job_id = self.start(spec).await?;
                 info!(job = %job_id, profile = %id, "creating a profile");
                 serde_json::to_value(ProfilesCreateResult { job_id, id }).map_err(internal)
@@ -753,6 +761,10 @@ impl Service {
                             .filter(|h| h != std::path::Path::new("/")),
                     }),
                 );
+                let spec = spec.about(JobSubject {
+                    profile: Some(self.subject_profile(&p.id)),
+                    ..Default::default()
+                });
                 let job_id = self.start(spec).await?;
                 info!(job = %job_id, profile = %p.id, user = %account.user, "removing a profile");
                 job_ref(Some(job_id))
@@ -873,6 +885,10 @@ impl Service {
                         ..Default::default()
                     }),
                 );
+                let spec = spec.about(JobSubject {
+                    enabled: Some(p.enabled),
+                    ..Default::default()
+                });
                 job_ref(Some(self.start(spec).await?))
             }
             R::GuestEnd => {
@@ -912,6 +928,10 @@ impl Service {
                         tmp_dirs,
                     }),
                 );
+                let spec = spec.about(JobSubject {
+                    owner: Some(Owner::Guest.key()),
+                    ..Default::default()
+                });
                 let job_id = self.start(spec).await?;
                 info!(job = %job_id, "ending the guest session");
                 job_ref(Some(job_id))
@@ -951,6 +971,11 @@ impl Service {
                     self.preflight()?;
                 }
                 let by = self.caller(uid, &state).user_name();
+                let subject = JobSubject {
+                    owner: Some(Owner::Starter.key()),
+                    apps: Some(self.subject_apps(&ids)),
+                    ..Default::default()
+                };
                 let spec = self.spec(
                     JobKind::StarterSet,
                     uid,
@@ -968,6 +993,7 @@ impl Service {
                         }),
                     }),
                 );
+                let spec = spec.about(subject);
                 job_ref(Some(self.start(spec).await?))
             }
         }
@@ -1022,6 +1048,10 @@ impl Service {
                     starter: None,
                 }),
             );
+            let spec = spec.about(JobSubject {
+                from_owner: Some(Owner::Starter.key()),
+                ..self.owner_subject(&owner)
+            });
             match self.start(spec).await {
                 Ok(id) => info!(job = %id, owner = %owner.key(), "giving the starter env"),
                 Err(e) => warn!(owner = %owner.key(), "cannot give the starter env: {}", e.message),

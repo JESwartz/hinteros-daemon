@@ -376,10 +376,21 @@ async fn settings_ssh_rebuild_rollback() {
     let id = r["job_id"].as_str().unwrap().to_owned();
     let events = until_finished(&mut c, &id).await;
     assert_eq!(events[0].0, "job_started");
+    let started_at = events[0].1["started_at"].as_i64().unwrap();
     assert_eq!(
         events[0].1,
-        json!({"job_id": id, "kind": "ssh", "uid": me()})
+        json!({
+            "job_id": id, "kind": "ssh", "uid": me(),
+            "subject": {"enabled": true}, "started_at": started_at
+        })
     );
+    // Every event names the job and when it started; the end says when it finished.
+    for (_, p) in &events {
+        assert_eq!(p["started_at"], started_at);
+    }
+    let end = finished(&events);
+    assert_eq!(end["subject"], json!({"enabled": true}));
+    assert!(end["finished_at"].as_i64().unwrap() >= started_at);
     let stages: Vec<&str> = events
         .iter()
         .filter(|(n, _)| n == "job_progress")
@@ -473,7 +484,12 @@ async fn settings_ssh_rebuild_rollback() {
     .await
     .unwrap();
     let id = r["job_id"].as_str().unwrap().to_owned();
-    assert_eq!(finished(&until_finished(&mut c, &id).await)["ok"], true);
+    let events = until_finished(&mut c, &id).await;
+    assert_eq!(
+        events[0].1["subject"],
+        json!({"base": "stable", "from_base": "unstable"})
+    );
+    assert_eq!(finished(&events)["ok"], true);
     assert_eq!(root.etc_state()["base"], "stable");
     assert_eq!(
         call(&mut c, "base.set", json!({"base": "stable"}))
@@ -603,7 +619,12 @@ async fn settings_ssh_rebuild_rollback() {
         .await
         .unwrap();
     let id = r["job_id"].as_str().unwrap().to_owned();
-    let done = finished(&until_finished(&mut c, &id).await).clone();
+    let events = until_finished(&mut c, &id).await;
+    assert_eq!(
+        events[0].1["subject"],
+        json!({"generation": 1, "from_generation": current})
+    );
+    let done = finished(&events).clone();
     assert_eq!(done["ok"], true, "{}", sys.job_log(&id));
     assert_eq!(done["result"]["generation"], 1);
     assert_eq!(root.current(), root.p("store/gen1"));
@@ -616,6 +637,94 @@ async fn settings_ssh_rebuild_rollback() {
     // Finished jobs are listed (the running one and the last ten).
     let list = call(&mut c, "jobs.list", json!({})).await.unwrap();
     assert!(list["jobs"].as_array().unwrap().len() >= 8);
+}
+
+/// While nix compiles: what is building, the count, heartbeats with a moving
+/// `last_activity_at`, and the same state from `jobs.get` for a client that connects later.
+#[tokio::test(flavor = "multi_thread")]
+async fn build_progress_heartbeat_and_reconnect() {
+    let Some(sys) = System::start(Root::create(), &[]).await else {
+        return;
+    };
+    let root = &sys.root;
+    let mut c = sys.subscriber().await;
+    root.touch("compile-hold");
+    let r = call(&mut c, "rebuild", json!({})).await.unwrap();
+    let id = r["job_id"].as_str().unwrap().to_owned();
+    let building = json!({"name": "hinteros-daemon", "version": "0.7.1", "phase": "build"});
+    // The compile starts.
+    let first = loop {
+        let (name, p) = next_event(&mut c).await;
+        assert_ne!(name, "job_finished", "{p}");
+        if name == "job_progress" && p["detail"]["building"] == building {
+            break p;
+        }
+    };
+    assert_eq!(first["kind"], "rebuild");
+    assert_eq!(first["stage"], "building");
+    assert_eq!(first["detail"]["builds_done"], 0);
+    assert_eq!(first["detail"]["builds_total"], 2);
+    assert_eq!(first["detail"]["builds_running"], 1);
+    assert_eq!(first["percent"], 50, "downloads done, no build yet");
+
+    // Nothing countable changes while it compiles, yet job_progress keeps coming, and the
+    // activity time moves (the build prints log lines).
+    let t0 = Instant::now();
+    let mut beats = Vec::new();
+    while t0.elapsed() < Duration::from_millis(5500) {
+        let (name, p) = next_event(&mut c).await;
+        assert_eq!(name, "job_progress", "{p}");
+        assert_eq!(p["detail"]["building"], building);
+        beats.push((t0.elapsed(), p));
+    }
+    assert!(beats.len() >= 2, "heartbeats: {beats:?}");
+    let gaps: Vec<Duration> = std::iter::once(Duration::ZERO)
+        .chain(beats.iter().map(|(t, _)| *t))
+        .collect::<Vec<_>>()
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .collect();
+    assert!(
+        gaps.iter().all(|g| *g < Duration::from_millis(3000)),
+        "at most ~2 s apart: {gaps:?}"
+    );
+    let activity = |p: &Value| p["last_activity_at"].as_i64().unwrap();
+    assert!(
+        activity(&beats.last().unwrap().1) > activity(&first),
+        "{beats:?}"
+    );
+
+    // A client that connects now sees the same state.
+    let mut late = sys.client().await;
+    let job = call(&mut late, "jobs.get", json!({"job_id": id}))
+        .await
+        .unwrap()["job"]
+        .clone();
+    assert_eq!(job["state"], "running");
+    assert_eq!(job["stage"], "building");
+    assert_eq!(job["percent"], 50);
+    assert_eq!(job["detail"]["building"], building);
+    assert_eq!(job["detail"]["builds_total"], 2);
+    assert_eq!(job["subject"], json!({}));
+    assert_eq!(job["started_at"], first["started_at"]);
+    assert!(job["last_activity_at"].as_i64().unwrap() >= activity(&first));
+    let list = call(&mut late, "jobs.list", json!({})).await.unwrap();
+    assert_eq!(list["jobs"][0]["job_id"], id.as_str());
+    assert_eq!(list["jobs"][0]["detail"]["building"], building);
+
+    root.rm("compile-hold");
+    let events = until_finished(&mut c, &id).await;
+    let done = finished(&events);
+    assert_eq!(done["ok"], true, "{done} {}", sys.job_log(&id));
+    assert_eq!(done["subject"], json!({}));
+    let job = call(&mut late, "jobs.get", json!({"job_id": id}))
+        .await
+        .unwrap()["job"]
+        .clone();
+    assert_eq!(job["state"], "succeeded");
+    assert_eq!(job["percent"], Value::Null);
+    assert_eq!(job["detail"], Value::Null);
+    assert_eq!(job["finished_at"], done["finished_at"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -666,6 +775,10 @@ async fn updates_are_verified() {
     assert_eq!(r["result"], Value::Null);
     let id = r["job_id"].as_str().unwrap().to_owned();
     let events = until_finished(&mut c, &id).await;
+    assert_eq!(
+        events[0].1["subject"],
+        json!({"channel": "stable", "from_rev": c1})
+    );
     let done = finished(&events);
     assert_eq!(done["ok"], true, "{done} {}", sys.job_log(&id));
     let result = &done["result"];
@@ -717,7 +830,14 @@ async fn updates_are_verified() {
         .await
         .unwrap();
     let id = r["job_id"].as_str().unwrap().to_owned();
-    let done = finished(&until_finished(&mut c, &id).await).clone();
+    let events = until_finished(&mut c, &id).await;
+    let update = json!({
+        "rev": c3, "version": "0.2.1", "channel": "stable",
+        "from_rev": c1, "from_version": "0.1.0-test"
+    });
+    assert_eq!(events[0].1["subject"], update);
+    let done = finished(&events).clone();
+    assert_eq!(done["subject"], update);
     assert_eq!(done["ok"], true, "{done} {}", sys.job_log(&id));
     assert_eq!(done["result"]["rev"], c3.as_str());
     let lock = root.read("etc/hinteros/flake.lock");
@@ -767,7 +887,28 @@ async fn updates_are_verified() {
         .await
         .unwrap();
     let id = r["job_id"].as_str().unwrap().to_owned();
-    let done = finished(&until_finished(&mut c, &id).await).clone();
+    let events = until_finished(&mut c, &id).await;
+    let before = json!({
+        "channel": "beta", "from_channel": "stable",
+        "from_rev": c3, "from_version": "0.1.0-test"
+    });
+    assert_eq!(events[0].1["subject"], before);
+    // The target is known once verified: one job_progress carries the new subject.
+    let mut after = before.clone();
+    after["rev"] = json!(b1);
+    after["version"] = json!("0.2.1");
+    let updates: Vec<&Value> = events
+        .iter()
+        .filter(|(n, p)| n == "job_progress" && p.get("subject").is_some())
+        .map(|(_, p)| &p["subject"])
+        .collect();
+    assert_eq!(updates, [&after]);
+    let done = finished(&events).clone();
+    assert_eq!(done["subject"], after);
+    let job = call(&mut c, "jobs.get", json!({"job_id": id}))
+        .await
+        .unwrap();
+    assert_eq!(job["job"]["subject"], after);
     assert_eq!(done["ok"], true, "{done} {}", sys.job_log(&id));
     let flake = root.read("etc/hinteros/flake.nix");
     assert!(

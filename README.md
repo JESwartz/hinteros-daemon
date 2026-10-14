@@ -791,7 +791,7 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.6 (0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.7 (0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
 box-wide actions, `guest.end`, rollback re-adds box features; see "Profiles and per-profile apps" below)
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
@@ -833,8 +833,9 @@ trust.
   root-only spec to `/run/hinteros/jobs/<id>/spec.json` and starts `hinteros-job@<id>.service`
   (systemd `StartUnit` over D-Bus), which runs `hinteros-system job <id>`; a switch that
   restarts the service doesn't touch it, and a restarted service re-attaches to it. The job
-  reports through `progress.ndjson` (stages; nix `internal-json` turned into paths/bytes and a
-  download percent) and `status.json`; the service turns them into events (at most 4/s) and
+  reports through `progress.ndjson` (stages; nix `internal-json` turned into paths, bytes,
+  builds, the derivation building and a percent; see "Job progress" below) and `status.json`;
+  the service turns them into events (at most 4/s, and a heartbeat at least every 2 s) and
   keeps the last 10 finished jobs. Apply flow: memory (2 GiB) and disk (4 GiB on the store's
   filesystem) preflight → copy `/etc/hinteros` to `/var/lib/hinteros/staging` → edit (state,
   flake input, lock, facter) → `nix build …#nixosConfigurations.hinteros.config.system.build.toplevel`
@@ -1417,6 +1418,90 @@ are the launcher's; profile names from `profiles.list`); entering the caller's o
 `system.cleanup.set` (admin PIN). New job kinds `storage_measure`, `cleanup_system`,
 `cleanup_profiles`, `cleanup_set`; new stages `measuring`, `cleaning`, `collecting`.
 
+## Job progress (system API 0.7, session API 0.15)
+
+A job's page must say what is going on at every moment, also while nix compiles on the box for
+many minutes, and the launcher lets the person leave the page while the job runs (a top-bar
+indicator), so the whole state is readable at any time.
+
+### Building (`nixlog.rs`)
+
+The job's `nix build --log-format internal-json -v` output gives, in `ProgressDetail`:
+`builds_done` / `builds_total` (the builds activity's progress, and the plan nix prints first:
+`these N derivations will be built`; `these N paths will be fetched` likewise seeds
+`paths_total`), `builds_running`, and `building {name, version?, phase?}`: the most recently
+started derivation still building, its `.drv` name split by nix's rule (the version starts at
+the first `-` followed by a non-letter: `hinteros-daemon-0.7.1` → `hinteros-daemon` / `0.7.1`)
+and its phase (`setPhase`, without `Phase`: `unpack`, `configure`, `build`, `install`, …).
+`percent` is now given while downloading and building: the mean of the known parts (paths, else
+bytes; builds), each weighted equally; it never goes back (when nix finds more work it holds,
+then covers the rest of the way) and stays below 100 until nix ends. It is rough: derivations
+differ hugely in build time, so the count is what the launcher shows prominently.
+
+### Heartbeat (`runner.rs`, `jobs.rs`)
+
+The job writes a progress line at once on a stage change, at most 4 per second otherwise (a
+held-back line is written later, never lost), and, while a child process prints output but
+nothing countable changes, the last line again every 2 s with the new `activity_at`. The service
+emits `job_progress` for every line it reads and, when it has emitted nothing for 2 s while the
+job runs, repeats the last one. Every `job_progress` carries `kind`, `started_at` and
+`last_activity_at` (the last time the job's process printed anything, nix build log lines
+included).
+
+### What a job is about (`service/subject.rs`)
+
+`subject` (in `job_started`, `job_finished`, `Job`) is filled in by the service from its own
+state when the job is created (catalog names from the running generation's catalog, profile
+names from `profiles.json`, the running release version); the job may refine it (a channel
+switch learns its target `rev` and `version` once verified: one `job_progress` then carries the
+whole new `subject`, which `jobs.get` and `job_finished` keep). Fields, each optional:
+`owner` (profile id, `guest`, `starter`), `profile {id, name}`, `apps [{id, name}]`,
+`delete_data`, `from_owner`, `generation`, `from_generation`, `rev`, `version`, `channel`,
+`from_channel`, `from_rev`, `from_version`, `base`, `from_base`, `enabled`, `keep`, `frequency`,
+`keep_system`, `keep_profiles`. Per kind:
+
+| kind | subject |
+|---|---|
+| `settings`, `rebuild`, `hardware_redetect`, `storage_measure` | `{}` |
+| `ssh`, `guest_set` | `enabled` |
+| `update_check` | `channel`, `from_rev` |
+| `update_apply` | `rev`, `version`, `channel`, `from_rev`, `from_version` |
+| `channel` | `channel` (target), `from_channel`, `from_rev`, `from_version`; `rev`, `version` once verified |
+| `base` | `base`, `from_base` |
+| `rollback` | `generation`, `from_generation` |
+| `apps_install` | `owner`, `profile` (a profile), `apps` (only the new ones); the automatic starter env of a new profile or the guest (uid 0): `owner`, `profile`?, `from_owner: starter` |
+| `apps_remove` | `owner`, `profile`?, `apps`, `delete_data` (schema 1: `apps`, `delete_data`) |
+| `apps_rollback` | `owner`, `profile`?, `generation`, `from_generation` |
+| `starter_set` | `owner: starter`, `apps` (the whole new set) |
+| `migrate_apps` | `apps` |
+| `profiles_create`, `profiles_remove` | `profile` |
+| `guest_end` | `owner: guest` |
+| `cleanup_system`, `cleanup_profiles` | `keep` |
+| `cleanup_set` | `enabled`, `frequency`, `keep_system`, `keep_profiles` |
+
+`Job` also has `started_at` (equals `created_at`) and, for a running job, the latest `percent`,
+`detail` and `last_activity_at` (null once finished); `job_finished` has `started_at` and
+`finished_at`. The job's spec and `status.json` carry the subject, so it survives a restart of the
+service.
+
+### What the launcher must do (session API 0.15)
+
+Hello with `0.15` (system relays need the session built against system 0.7). On the job page and
+in the top-bar indicator: name the job from `kind` + `subject` (an update as
+`{version}.{rev[..7]} {channel}`, e.g. `0.7.1.c6b69ce beta`; "Installing Moonlight for Sam";
+"Removing …"; the profile, generation, base or channel concerned); show elapsed time from
+`started_at` (no time-left estimate); while `stage` is `building` show "Building
+<building.name> (n of m)" with n = `builds_done + 1` capped at `builds_total`, the count
+prominent and the name small (`building.version` / `phase` optional, small); `percent` when
+present. Treat each `job_progress` as "alive"; if none came for well over 2 s, or
+`now - last_activity_at` grows long, say the job is quiet rather than stalled. On (re)connect or
+when opening the page later, call `system.jobs.list` (the running job is first) or
+`system.jobs.get {job_id}` for the full state, then follow `job_progress` / `job_finished` by
+`job_id`; a `job_progress` with `subject` replaces the job's subject. New required event fields:
+`job_started {subject, started_at}`, `job_progress {kind, started_at}`, `job_finished {subject,
+started_at, finished_at}`; new `Job` fields `subject`, `started_at`, `percent`, `detail`,
+`last_activity_at`.
+
 ## Development
 
 ```sh
@@ -1430,7 +1515,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.14","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.15","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

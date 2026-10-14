@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use hinteros_api::system::{
     AppGeneration, AppsAcceptTermsParams, AppsGenerationsResult, AppsInstallParams, AppsListResult,
-    AppsRemoveParams, AppsRollbackParams, Empty, JobKind,
+    AppsRemoveParams, AppsRollbackParams, Empty, JobKind, JobSubject,
 };
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde_json::Value;
@@ -198,18 +198,24 @@ impl Service {
             .collect();
         let box_state = self.box_state(&state, &index.box_features(&plan.new));
         let ids = appreg::normalize(installed.into_iter().chain(plan.new.iter().cloned()));
-        let spec = self.spec(
-            JobKind::AppsInstall,
-            peer.uid,
-            Action::Apps(AppsJob {
-                owner: owner.clone(),
-                op: AppsOp::Set { ids },
-                box_state,
-                terms: terms.clone(),
-                delete_data: None,
-                starter: None,
-            }),
-        );
+        let subject = JobSubject {
+            apps: Some(self.subject_apps(&plan.new)),
+            ..self.owner_subject(&owner)
+        };
+        let spec = self
+            .spec(
+                JobKind::AppsInstall,
+                peer.uid,
+                Action::Apps(AppsJob {
+                    owner: owner.clone(),
+                    op: AppsOp::Set { ids },
+                    box_state,
+                    terms: terms.clone(),
+                    delete_data: None,
+                    starter: None,
+                }),
+            )
+            .about(subject);
         let id = self.start(spec).await?;
         for t in &terms {
             self.audit
@@ -272,18 +278,25 @@ impl Service {
             }
             _ => None,
         };
-        let spec = self.spec(
-            JobKind::AppsRemove,
-            peer.uid,
-            Action::Apps(AppsJob {
-                owner: owner.clone(),
-                op: AppsOp::Set { ids },
-                box_state: None,
-                terms: Vec::new(),
-                delete_data,
-                starter: None,
-            }),
-        );
+        let subject = JobSubject {
+            apps: Some(self.subject_apps(&removing)),
+            delete_data: Some(p.delete_data),
+            ..self.owner_subject(&owner)
+        };
+        let spec = self
+            .spec(
+                JobKind::AppsRemove,
+                peer.uid,
+                Action::Apps(AppsJob {
+                    owner: owner.clone(),
+                    op: AppsOp::Set { ids },
+                    box_state: None,
+                    terms: Vec::new(),
+                    delete_data,
+                    starter: None,
+                }),
+            )
+            .about(subject);
         let id = self.start(spec).await?;
         info!(job = %id, owner = %owner.key(), apps = ?removing, delete_data = p.delete_data, "removing apps");
         job_ref(Some(id))
@@ -321,20 +334,27 @@ impl Service {
         if box_state.is_some() {
             self.preflight()?;
         }
-        let spec = self.spec(
-            JobKind::AppsRollback,
-            peer.uid,
-            Action::Apps(AppsJob {
-                owner,
-                op: AppsOp::Rollback {
-                    generation: p.generation,
-                },
-                box_state,
-                terms: Vec::new(),
-                delete_data: None,
-                starter: None,
-            }),
-        );
+        let subject = JobSubject {
+            generation: Some(p.generation),
+            from_generation: gens.iter().find(|g| g.current).map(|g| g.generation),
+            ..self.owner_subject(&owner)
+        };
+        let spec = self
+            .spec(
+                JobKind::AppsRollback,
+                peer.uid,
+                Action::Apps(AppsJob {
+                    owner,
+                    op: AppsOp::Rollback {
+                        generation: p.generation,
+                    },
+                    box_state,
+                    terms: Vec::new(),
+                    delete_data: None,
+                    starter: None,
+                }),
+            )
+            .about(subject);
         job_ref(Some(self.start(spec).await?))
     }
 
@@ -485,16 +505,22 @@ impl Service {
                 }
             }
         }
-        let spec = self.spec(
-            JobKind::MigrateApps,
-            0,
-            Action::MigrateApps(MigrateJob {
-                ids,
-                owners,
-                from: state,
-                terms,
-            }),
-        );
+        let subject = JobSubject {
+            apps: Some(self.subject_apps(&ids)),
+            ..Default::default()
+        };
+        let spec = self
+            .spec(
+                JobKind::MigrateApps,
+                0,
+                Action::MigrateApps(MigrateJob {
+                    ids,
+                    owners,
+                    from: state,
+                    terms,
+                }),
+            )
+            .about(subject);
         match self.start(spec).await {
             Ok(id) => info!(job = %id, "migrating to per-profile apps (state.json schema 2)"),
             Err(e) => warn!("cannot start the migration: {}", e.message),

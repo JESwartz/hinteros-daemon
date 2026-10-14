@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.6",
+  "version": "0.7",
   "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -36,16 +36,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.6", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.6", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "0.7", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "0.7", "server": { "name": "hinteros-system", "version": "0.1.0" } }
         },
         {
           "name": "mismatch",
           "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 0.1, server 0.6",
-            "data": { "client_api_version": "0.1", "server_api_version": "0.6" }
+            "message": "API version mismatch: client 0.1, server 0.7",
+            "data": { "client_api_version": "0.1", "server_api_version": "0.7" }
           }
         }
       ]
@@ -1974,7 +1974,35 @@
               "finished_at": 1791300300,
               "error": { "code": 3003, "message": "the job failed while building", "data": { "stage": "building", "log_hint": "error: builder for '/nix/store/...-foo.drv' failed" } },
               "result": null,
-              "session_restart_required": false
+              "session_restart_required": false,
+              "subject": {},
+              "started_at": 1791300000,
+              "percent": null,
+              "detail": null,
+              "last_activity_at": null
+            }
+          }
+        },
+        {
+          "name": "app install, building",
+          "params": { "job_id": "3f9a0c2b7e4d1a65" },
+          "result": {
+            "job": {
+              "job_id": "3f9a0c2b7e4d1a65",
+              "kind": "apps_install",
+              "uid": 1001,
+              "state": "running",
+              "stage": "building",
+              "created_at": 1791300000,
+              "finished_at": null,
+              "error": null,
+              "result": null,
+              "session_restart_required": false,
+              "subject": { "owner": "p1", "profile": { "id": "p1", "name": "Sam" }, "apps": [{ "id": "moonlight", "name": "Moonlight" }] },
+              "started_at": 1791300000,
+              "percent": 37,
+              "detail": { "paths_done": 40, "paths_total": 40, "builds_done": 2, "builds_total": 12, "builds_running": 1, "building": { "name": "moonlight-qt", "version": "6.1.0", "phase": "build" } },
+              "last_activity_at": 1791300421
             }
           }
         },
@@ -2008,7 +2036,18 @@
                 "finished_at": null,
                 "error": null,
                 "result": null,
-                "session_restart_required": false
+                "session_restart_required": false,
+                "subject": {
+                  "rev": "c6b69ce0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6",
+                  "version": "0.7.1",
+                  "channel": "beta",
+                  "from_rev": "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5",
+                  "from_version": "0.7.0"
+                },
+                "started_at": 1791300000,
+                "percent": 40,
+                "detail": { "paths_done": 12, "paths_total": 30 },
+                "last_activity_at": 1791300095
               }
             ]
           }
@@ -2040,53 +2079,111 @@
       "examples": [{ "name": "changed", "params": {} }]
     },
     "job_started": {
-      "summary": "A job was started (by any caller).",
+      "summary": "A job was started (by any caller). 0.7: subject (what the job is about) and started_at.",
       "since": "0.2",
       "params": {
         "type": "object",
-        "required": ["job_id", "kind", "uid"],
+        "required": ["job_id", "kind", "uid", "subject", "started_at"],
         "additionalProperties": false,
         "properties": {
           "job_id": { "$ref": "#/$defs/JobId" },
           "kind": { "$ref": "#/$defs/JobKind" },
-          "uid": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
-        }
-      },
-      "examples": [{ "name": "rebuild", "params": { "job_id": "3f9a0c2b7e4d1a65", "kind": "rebuild", "uid": 1000 } }]
-    },
-    "job_progress": {
-      "summary": "A job reached a stage or made progress (at most 4 per second). percent only where meaningful (downloading).",
-      "since": "0.2",
-      "params": {
-        "type": "object",
-        "required": ["job_id", "stage"],
-        "additionalProperties": false,
-        "properties": {
-          "job_id": { "$ref": "#/$defs/JobId" },
-          "stage": { "$ref": "#/$defs/Stage" },
-          "percent": { "type": "integer", "minimum": 0, "maximum": 100 },
-          "detail": { "$ref": "#/$defs/ProgressDetail" }
+          "uid": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+          "subject": { "$ref": "#/$defs/JobSubject" },
+          "started_at": { "type": "integer" }
         }
       },
       "examples": [
-        { "name": "stage", "params": { "job_id": "3f9a0c2b7e4d1a65", "stage": "evaluating" } },
+        { "name": "rebuild", "params": { "job_id": "3f9a0c2b7e4d1a65", "kind": "rebuild", "uid": 1000, "subject": {}, "started_at": 1791300000 } },
+        {
+          "name": "app install",
+          "params": {
+            "job_id": "3f9a0c2b7e4d1a65",
+            "kind": "apps_install",
+            "uid": 1001,
+            "subject": { "owner": "p1", "profile": { "id": "p1", "name": "Sam" }, "apps": [{ "id": "moonlight", "name": "Moonlight" }] },
+            "started_at": 1791300000
+          }
+        }
+      ]
+    },
+    "job_progress": {
+      "summary": "A job reached a stage or made progress (at most 4 per second), and 0.7: at least every 2 s while the job runs (a heartbeat repeats the latest values). percent where meaningful: downloading and building (0.7; never goes back within a stage run, below 100 while nix runs), measuring. last_activity_at: the last time the job's process printed anything (nix log lines included). subject only when it changed during the job (it replaces the one from job_started).",
+      "since": "0.2",
+      "params": {
+        "type": "object",
+        "required": ["job_id", "kind", "stage", "started_at"],
+        "additionalProperties": false,
+        "properties": {
+          "job_id": { "$ref": "#/$defs/JobId" },
+          "kind": { "$ref": "#/$defs/JobKind" },
+          "stage": { "$ref": "#/$defs/Stage" },
+          "percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "detail": { "$ref": "#/$defs/ProgressDetail" },
+          "started_at": { "type": "integer" },
+          "last_activity_at": { "type": "integer" },
+          "subject": { "$ref": "#/$defs/JobSubject" }
+        }
+      },
+      "examples": [
+        { "name": "stage", "params": { "job_id": "3f9a0c2b7e4d1a65", "kind": "rebuild", "stage": "evaluating", "started_at": 1791300000 } },
         {
           "name": "downloading",
           "params": {
             "job_id": "3f9a0c2b7e4d1a65",
+            "kind": "update_apply",
             "stage": "downloading",
             "percent": 40,
-            "detail": { "paths_done": 12, "paths_total": 30, "bytes_done": 41943040, "bytes_total": 104857600 }
+            "detail": { "paths_done": 12, "paths_total": 30, "bytes_done": 41943040, "bytes_total": 104857600 },
+            "started_at": 1791300000,
+            "last_activity_at": 1791300031
+          }
+        },
+        {
+          "name": "building",
+          "params": {
+            "job_id": "3f9a0c2b7e4d1a65",
+            "kind": "update_apply",
+            "stage": "building",
+            "percent": 58,
+            "detail": {
+              "paths_done": 30,
+              "paths_total": 30,
+              "builds_done": 2,
+              "builds_total": 12,
+              "builds_running": 1,
+              "building": { "name": "hinteros-daemon", "version": "0.7.1", "phase": "build" }
+            },
+            "started_at": 1791300000,
+            "last_activity_at": 1791300412
+          }
+        },
+        {
+          "name": "channel switch target verified",
+          "params": {
+            "job_id": "3f9a0c2b7e4d1a65",
+            "kind": "channel",
+            "stage": "verifying",
+            "started_at": 1791300000,
+            "last_activity_at": 1791300004,
+            "subject": {
+              "rev": "c6b69ce0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6",
+              "version": "0.7.1",
+              "channel": "beta",
+              "from_channel": "stable",
+              "from_rev": "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5",
+              "from_version": "0.7.0"
+            }
           }
         }
       ]
     },
     "job_finished": {
-      "summary": "A job ended. session_restart_required: the switch replaced the system service's API or the session daemon, so the launcher should offer a session restart.",
+      "summary": "A job ended. session_restart_required: the switch replaced the system service's API or the session daemon, so the launcher should offer a session restart. 0.7: subject (as the job last knew it), started_at, finished_at.",
       "since": "0.2",
       "params": {
         "type": "object",
-        "required": ["job_id", "kind", "ok", "session_restart_required"],
+        "required": ["job_id", "kind", "ok", "session_restart_required", "subject", "started_at", "finished_at"],
         "additionalProperties": false,
         "properties": {
           "job_id": { "$ref": "#/$defs/JobId" },
@@ -2094,7 +2191,10 @@
           "ok": { "type": "boolean" },
           "error": { "$ref": "#/$defs/ErrorObject" },
           "result": { "$ref": "#/$defs/JobResult" },
-          "session_restart_required": { "type": "boolean" }
+          "session_restart_required": { "type": "boolean" },
+          "subject": { "$ref": "#/$defs/JobSubject" },
+          "started_at": { "type": "integer" },
+          "finished_at": { "type": "integer" }
         }
       },
       "examples": [
@@ -2105,7 +2205,10 @@
             "kind": "update_apply",
             "ok": true,
             "result": { "generation": 43, "rev": "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5" },
-            "session_restart_required": true
+            "session_restart_required": true,
+            "subject": { "rev": "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5", "version": "0.7.1", "channel": "stable", "from_rev": "1a2b3c4d5e6f708192a3b4c59a8b7c6d5e4f3021", "from_version": "0.7.0" },
+            "started_at": 1791300000,
+            "finished_at": 1791300900
           }
         },
         {
@@ -2115,7 +2218,10 @@
             "kind": "update_check",
             "ok": false,
             "error": { "code": 3009, "message": "the channel tip is not signed", "data": { "reason": "unsigned" } },
-            "session_restart_required": false
+            "session_restart_required": false,
+            "subject": { "channel": "stable", "from_rev": "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5" },
+            "started_at": 1791300000,
+            "finished_at": 1791300009
           }
         },
         {
@@ -2125,7 +2231,10 @@
             "kind": "update_check",
             "ok": false,
             "error": { "code": 3008, "message": "cannot reach the update server", "data": { "host": "justsomeshed.com" } },
-            "session_restart_required": false
+            "session_restart_required": false,
+            "subject": { "channel": "stable" },
+            "started_at": 1791300000,
+            "finished_at": 1791300030
           }
         },
         {
@@ -2135,7 +2244,10 @@
             "kind": "rebuild",
             "ok": false,
             "error": { "code": 3003, "message": "cancelled", "data": { "stage": "building", "log_hint": "cancelled" } },
-            "session_restart_required": false
+            "session_restart_required": false,
+            "subject": {},
+            "started_at": 1791300000,
+            "finished_at": 1791300120
           }
         }
       ]
@@ -2632,7 +2744,59 @@
         "paths_done": { "type": "integer", "minimum": 0 },
         "paths_total": { "type": "integer", "minimum": 0 },
         "bytes_done": { "type": "integer", "minimum": 0 },
-        "bytes_total": { "type": "integer", "minimum": 0 }
+        "bytes_total": { "type": "integer", "minimum": 0 },
+        "builds_done": { "description": "0.7: derivations built so far in this nix run.", "type": "integer", "minimum": 0 },
+        "builds_total": { "description": "0.7: derivations nix expects to build (may grow while nix discovers more).", "type": "integer", "minimum": 0 },
+        "builds_running": { "description": "0.7: derivations building at once.", "type": "integer", "minimum": 0 },
+        "building": { "$ref": "#/$defs/Building" }
+      }
+    },
+    "Building": {
+      "description": "0.7: the most recently started derivation that is still building. name and version from the .drv name (nix's rule: the version starts at the first dash followed by a non-letter); phase is nix's build phase without the Phase suffix (unpack, patch, configure, build, check, install, fixup, ...), absent until nix reports one.",
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "maxLength": 320 },
+        "version": { "type": "string", "maxLength": 320 },
+        "phase": { "type": "string", "maxLength": 160 }
+      }
+    },
+    "SubjectProfile": {
+      "description": "0.7: a profile a job is for, with its display name when the job started (the id when it has none).",
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "maxLength": 32 },
+        "name": { "type": "string", "maxLength": 160 }
+      }
+    },
+    "JobSubject": {
+      "description": "0.7: what a job is about. Every field optional; which ones each kind sets: README, What a job is about.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "owner": { "description": "Apps jobs: whose apps (a profile id, guest or starter).", "type": "string", "maxLength": 32 },
+        "profile": { "$ref": "#/$defs/SubjectProfile" },
+        "apps": { "description": "Apps installed (the new ones), removed, the new starter set or the migrated apps; names from the running catalog.", "type": "array", "items": { "$ref": "#/$defs/CatalogApp" } },
+        "delete_data": { "type": "boolean" },
+        "from_owner": { "description": "An app env copied from another owner (starter).", "type": "string", "maxLength": 32 },
+        "generation": { "description": "Rollbacks: the target generation.", "type": "integer", "minimum": 0 },
+        "from_generation": { "type": "integer", "minimum": 0 },
+        "rev": { "$ref": "#/$defs/Rev" },
+        "version": { "description": "The target's release version (AvailableUpdate.version rule).", "type": "string", "maxLength": 64 },
+        "channel": { "$ref": "#/$defs/Channel" },
+        "from_channel": { "$ref": "#/$defs/Channel" },
+        "from_rev": { "$ref": "#/$defs/Rev" },
+        "from_version": { "type": "string", "maxLength": 64 },
+        "base": { "$ref": "#/$defs/Base" },
+        "from_base": { "$ref": "#/$defs/Base" },
+        "enabled": { "description": "The new on/off value (ssh, guest_set, cleanup_set).", "type": "boolean" },
+        "keep": { "description": "Clean-ups: generations kept.", "type": "integer", "minimum": 0 },
+        "frequency": { "$ref": "#/$defs/CleanupFrequency" },
+        "keep_system": { "type": "integer", "minimum": 0 },
+        "keep_profiles": { "type": "integer", "minimum": 0 }
       }
     },
     "ErrorObject": {
@@ -2648,7 +2812,7 @@
     },
     "Job": {
       "type": "object",
-      "required": ["job_id", "kind", "uid", "state", "stage", "created_at", "finished_at", "error", "result", "session_restart_required"],
+      "required": ["job_id", "kind", "uid", "state", "stage", "created_at", "finished_at", "error", "result", "session_restart_required", "subject", "started_at", "percent", "detail", "last_activity_at"],
       "additionalProperties": false,
       "properties": {
         "job_id": { "$ref": "#/$defs/JobId" },
@@ -2660,7 +2824,12 @@
         "finished_at": { "oneOf": [{ "type": "integer" }, { "type": "null" }] },
         "error": { "oneOf": [{ "$ref": "#/$defs/ErrorObject" }, { "type": "null" }] },
         "result": { "oneOf": [{ "$ref": "#/$defs/JobResult" }, { "type": "null" }] },
-        "session_restart_required": { "type": "boolean" }
+        "session_restart_required": { "type": "boolean" },
+        "subject": { "$ref": "#/$defs/JobSubject" },
+        "started_at": { "description": "0.7: when the job was started (equals created_at).", "type": "integer" },
+        "percent": { "description": "0.7: the latest percent of a running job (null when finished or unknown).", "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 100 }, { "type": "null" }] },
+        "detail": { "description": "0.7: the latest progress detail of a running job.", "oneOf": [{ "$ref": "#/$defs/ProgressDetail" }, { "type": "null" }] },
+        "last_activity_at": { "description": "0.7: the last time a running job's process printed anything.", "oneOf": [{ "type": "integer" }, { "type": "null" }] }
       }
     }
   }

@@ -7,10 +7,11 @@ use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use hinteros_api::system::{
     EventName, Job, JobFinishedParams, JobKind, JobProgressParams, JobStartedParams, JobState,
-    Stage, is_job_id,
+    JobSubject, Stage, is_job_id,
 };
 use hinteros_api::{ErrorCode, ErrorObject};
 use rustix::fs::{FlockOperation, flock};
@@ -25,6 +26,8 @@ use crate::job::{self, JobSpec, ProgressLine, Status};
 pub const KEEP_FINISHED: usize = 10;
 /// A job that has not taken its lock this long after being created is considered lost.
 const START_GRACE_S: i64 = 60;
+/// While a job runs, a `job_progress` at least this often (a heartbeat repeats the last one).
+pub const HEARTBEAT: Duration = Duration::from_secs(2);
 
 struct Active {
     id: String,
@@ -33,6 +36,27 @@ struct Active {
     created_at: i64,
     offset: u64,
     stage: Option<Stage>,
+    subject: JobSubject,
+    /// The latest progress (what a heartbeat repeats and `jobs.get` shows).
+    last: Option<JobProgressParams>,
+    /// When the last `job_progress` was emitted.
+    emitted_at: Option<Instant>,
+}
+
+impl Active {
+    fn new(spec: &JobSpec) -> Self {
+        Self {
+            id: spec.id.clone(),
+            kind: spec.kind,
+            uid: spec.uid,
+            created_at: spec.created_at,
+            offset: 0,
+            stage: None,
+            subject: spec.subject.clone(),
+            last: None,
+            emitted_at: None,
+        }
+    }
 }
 
 /// A finished job, for the audit log.
@@ -83,14 +107,7 @@ impl Jobs {
                         // Two unfinished jobs: the older one is lost.
                         jobs.lose(&prev.id, prev.stage, "superseded");
                     }
-                    jobs.active = Some(Active {
-                        id: id.clone(),
-                        kind: spec.kind,
-                        uid: spec.uid,
-                        created_at: spec.created_at,
-                        offset: 0,
-                        stage: None,
-                    });
+                    jobs.active = Some(Active::new(&spec));
                 }
             }
         }
@@ -135,14 +152,7 @@ impl Jobs {
             .create_new(true)
             .mode(0o600)
             .open(dir.join(job::PROGRESS))?;
-        self.active = Some(Active {
-            id: spec.id.clone(),
-            kind: spec.kind,
-            uid: spec.uid,
-            created_at: spec.created_at,
-            offset: 0,
-            stage: None,
-        });
+        self.active = Some(Active::new(spec));
         Ok(())
     }
 
@@ -159,6 +169,8 @@ impl Jobs {
             job_id: spec.id.clone(),
             kind: spec.kind,
             uid: spec.uid,
+            subject: spec.subject.clone(),
+            started_at: spec.created_at,
         };
         (
             EventName::JobStarted,
@@ -169,6 +181,11 @@ impl Jobs {
     /// Follow the active job: new progress lines become `job_progress`, a status (or a job
     /// that died without one) `job_finished`.
     pub fn poll(&mut self) -> (Vec<(EventName, Value)>, Option<Finished>) {
+        self.poll_at(Instant::now())
+    }
+
+    /// [`Self::poll`] at `now` (heartbeats are due [`HEARTBEAT`] after the last `job_progress`).
+    pub fn poll_at(&mut self, now: Instant) -> (Vec<(EventName, Value)>, Option<Finished>) {
         let mut events = Vec::new();
         let Some(active) = self.active.as_mut() else {
             return (events, None);
@@ -193,21 +210,41 @@ impl Jobs {
             }
         }
         let last = lines.len().saturating_sub(1);
+        let mut subject_changed = false;
         for (i, line) in lines.into_iter().enumerate() {
             let stage_change = active.stage != Some(line.stage);
             active.stage = Some(line.stage);
+            if let Some(s) = line.subject
+                && s != active.subject
+            {
+                active.subject = s;
+                subject_changed = true;
+            }
+            let p = JobProgressParams {
+                job_id: active.id.clone(),
+                kind: active.kind,
+                stage: line.stage,
+                percent: line.percent,
+                detail: line.detail,
+                started_at: active.created_at,
+                last_activity_at: line
+                    .activity_at
+                    .or(active.last.as_ref().and_then(|l| l.last_activity_at)),
+                subject: None,
+            };
             if stage_change || i == last {
-                let p = JobProgressParams {
-                    job_id: active.id.clone(),
-                    stage: line.stage,
-                    percent: line.percent,
-                    detail: line.detail,
-                };
+                let mut p = p.clone();
+                if subject_changed {
+                    p.subject = Some(active.subject.clone());
+                    subject_changed = false;
+                }
                 events.push((
                     EventName::JobProgress,
                     serde_json::to_value(p).unwrap_or_default(),
                 ));
+                active.emitted_at = Some(now);
             }
+            active.last = Some(p);
         }
 
         let status = match job::read_json::<Status>(&dir.join(job::STATUS)) {
@@ -233,16 +270,29 @@ impl Jobs {
             None => None,
         };
         let Some(status) = status else {
+            // Running: a heartbeat when nothing was emitted for a while.
+            if let Some(last) = &active.last
+                && active
+                    .emitted_at
+                    .is_none_or(|t| now.saturating_duration_since(t) >= HEARTBEAT)
+            {
+                events.push((
+                    EventName::JobProgress,
+                    serde_json::to_value(last).unwrap_or_default(),
+                ));
+                active.emitted_at = Some(now);
+            }
             return (events, None);
         };
         let active = self.active.take().expect("active job");
-        let spec_like = (
-            active.id.clone(),
+        let job = finished_job(
+            &active.id,
             active.kind,
             active.uid,
             active.created_at,
+            &active.subject,
+            &status,
         );
-        let job = job_from(&spec_like, &status);
         let p = JobFinishedParams {
             job_id: active.id.clone(),
             kind: active.kind,
@@ -250,6 +300,9 @@ impl Jobs {
             error: status.error.clone(),
             result: status.result.clone(),
             session_restart_required: status.session_restart_required,
+            subject: job.subject.clone(),
+            started_at: job.started_at,
+            finished_at: status.finished_at,
         };
         events.push((
             EventName::JobFinished,
@@ -358,28 +411,49 @@ fn running(a: &Active) -> Job {
         error: None,
         result: None,
         session_restart_required: false,
+        subject: a.subject.clone(),
+        started_at: a.created_at,
+        percent: a.last.as_ref().and_then(|l| l.percent),
+        detail: a.last.as_ref().and_then(|l| l.detail.clone()),
+        last_activity_at: a.last.as_ref().and_then(|l| l.last_activity_at),
     }
 }
 
 fn to_job(spec: &JobSpec, status: &Status) -> Job {
-    job_from(
-        &(spec.id.clone(), spec.kind, spec.uid, spec.created_at),
+    finished_job(
+        &spec.id,
+        spec.kind,
+        spec.uid,
+        spec.created_at,
+        &spec.subject,
         status,
     )
 }
 
-fn job_from((id, kind, uid, created_at): &(String, JobKind, u32, i64), status: &Status) -> Job {
+fn finished_job(
+    id: &str,
+    kind: JobKind,
+    uid: u32,
+    created_at: i64,
+    subject: &JobSubject,
+    status: &Status,
+) -> Job {
     Job {
-        job_id: id.clone(),
-        kind: *kind,
-        uid: *uid,
+        job_id: id.to_owned(),
+        kind,
+        uid,
         state: status.state,
         stage: status.stage,
-        created_at: *created_at,
+        created_at,
         finished_at: Some(status.finished_at),
         error: status.error.clone(),
         result: status.result.clone(),
         session_restart_required: status.session_restart_required,
+        subject: status.subject.clone().unwrap_or_else(|| subject.clone()),
+        started_at: created_at,
+        percent: None,
+        detail: None,
+        last_activity_at: None,
     }
 }
 
@@ -448,6 +522,7 @@ mod tests {
             },
             bus: None,
             action: Action::Apply(Apply::default()),
+            subject: Default::default(),
         }
     }
 
@@ -504,6 +579,113 @@ mod tests {
         let jobs = Jobs::load(paths(d.path()));
         assert_eq!(jobs.list()[0].job_id, "0123456789abcdef");
         assert!(jobs.busy().is_none());
+    }
+
+    fn append(path: &Path, line: &str) {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
+    /// While the job runs: a `job_progress` at least every [`HEARTBEAT`] (repeating the last
+    /// one), the latest progress and subject in `jobs.get`, also after a service restart.
+    #[test]
+    fn heartbeat_and_latest_progress() {
+        let d = tempfile::tempdir().unwrap();
+        let mut jobs = Jobs::load(paths(d.path()));
+        let mut s = spec(d.path(), "0123456789abcdef");
+        s.subject.enabled = Some(true);
+        jobs.create(&s).unwrap();
+        let jd = d.path().join("run/jobs/0123456789abcdef");
+        // The job process: holds the lock.
+        let lock = fs::File::create(jd.join(job::LOCK)).unwrap();
+        flock(&lock, FlockOperation::NonBlockingLockExclusive).unwrap();
+        fs::write(jd.join(job::PID), "1").unwrap();
+        let ms = |n: u64| Duration::from_millis(n);
+        let t0 = Instant::now();
+
+        // Nothing written yet: nothing to repeat.
+        assert!(jobs.poll_at(t0).0.is_empty());
+        assert!(jobs.poll_at(t0 + ms(5000)).0.is_empty());
+        let t0 = t0 + ms(5000);
+
+        append(
+            &jd.join(job::PROGRESS),
+            r#"{"stage":"building","percent":50,"detail":{"builds_done":0,"builds_total":2,"building":{"name":"hinteros-daemon","phase":"build"}},"activity_at":100}"#,
+        );
+        let (ev, _) = jobs.poll_at(t0);
+        assert_eq!(ev.len(), 1);
+        let p = &ev[0].1;
+        assert_eq!(ev[0].0, EventName::JobProgress);
+        assert_eq!(p["kind"], "rebuild");
+        assert_eq!(p["started_at"], s.created_at);
+        assert_eq!(p["last_activity_at"], 100);
+        assert_eq!(p["detail"]["building"]["name"], "hinteros-daemon");
+        assert!(p.get("subject").is_none());
+        let first = p.clone();
+
+        // Nothing new: quiet until 2 s, then the same event again, every 2 s.
+        assert!(jobs.poll_at(t0 + ms(250)).0.is_empty());
+        assert!(jobs.poll_at(t0 + ms(1999)).0.is_empty());
+        let (ev, _) = jobs.poll_at(t0 + ms(2000));
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].1, first);
+        assert!(jobs.poll_at(t0 + ms(3000)).0.is_empty());
+        assert_eq!(jobs.poll_at(t0 + ms(4100)).0.len(), 1);
+
+        // A new line (no activity time: the last one stays) with a refined subject; the clock
+        // restarts from it.
+        append(
+            &jd.join(job::PROGRESS),
+            r#"{"stage":"building","percent":60,"subject":{"enabled":false}}"#,
+        );
+        let (ev, _) = jobs.poll_at(t0 + ms(4500));
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].1["percent"], 60);
+        assert_eq!(ev[0].1["last_activity_at"], 100);
+        assert_eq!(ev[0].1["subject"], json!({"enabled": false}));
+        assert!(jobs.poll_at(t0 + ms(6000)).0.is_empty());
+        let (ev, _) = jobs.poll_at(t0 + ms(6500));
+        assert_eq!(ev.len(), 1);
+        assert!(
+            ev[0].1.get("subject").is_none(),
+            "a heartbeat repeats no subject"
+        );
+
+        let check = |jobs: &Jobs| {
+            let j = jobs.get("0123456789abcdef").unwrap();
+            assert_eq!(j.state, JobState::Running);
+            assert_eq!(j.stage, Some(Stage::Building));
+            assert_eq!(j.percent, Some(60));
+            assert_eq!(j.detail, None, "the latest line had none");
+            assert_eq!(j.last_activity_at, Some(100));
+            assert_eq!(j.subject.enabled, Some(false));
+            assert_eq!(j.started_at, s.created_at);
+            assert_eq!(jobs.list()[0], j);
+        };
+        check(&jobs);
+
+        // The service restarts while the job runs: the same state once it has read the lines.
+        let mut jobs = Jobs::load(paths(d.path()));
+        jobs.poll_at(t0 + ms(7000));
+        check(&jobs);
+
+        // The job ends: the subject it last knew, no progress any more.
+        drop(lock);
+        let status = Status::lost(Some(Stage::Building), "x");
+        fs::write(jd.join(job::STATUS), serde_json::to_vec(&status).unwrap()).unwrap();
+        let (ev, fin) = jobs.poll_at(t0 + ms(7100));
+        let fin = fin.unwrap();
+        assert_eq!(fin.job.subject.enabled, Some(false));
+        assert_eq!(fin.job.percent, None);
+        let (name, p) = ev.last().unwrap();
+        assert_eq!(*name, EventName::JobFinished);
+        assert_eq!(p["subject"], json!({"enabled": false}));
+        assert_eq!(p["finished_at"], status.finished_at);
+        assert!(
+            jobs.poll_at(t0 + ms(20_000)).0.is_empty(),
+            "no heartbeat after the end"
+        );
     }
 
     #[test]

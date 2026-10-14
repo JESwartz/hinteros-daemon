@@ -173,6 +173,13 @@ async fn profiles_lifecycle_and_pins() {
     )
     .await;
     assert_eq!(r["id"], "p3", "the counter skips the existing p2");
+    let got = call(&mut c, "jobs.get", json!({"job_id": r["job_id"]}))
+        .await
+        .unwrap();
+    assert_eq!(
+        got["job"]["subject"],
+        json!({"profile": {"id": "p3", "name": "Sam"}})
+    );
     let state = root.etc_state();
     assert_eq!(
         state["profiles"][2],
@@ -1053,6 +1060,10 @@ async fn end_guest_session_wipes_now() {
 
     let r = job(&sys, &mut c, "guest.end", json!({})).await;
     assert!(r["job_id"].is_string());
+    let j = call(&mut c, "jobs.get", json!({"job_id": r["job_id"]}))
+        .await
+        .unwrap();
+    assert_eq!(j["job"]["subject"], json!({"owner": "guest"}));
     assert!(home.is_dir(), "the home itself stays");
     assert_eq!(
         std::fs::read_dir(&home).unwrap().count(),

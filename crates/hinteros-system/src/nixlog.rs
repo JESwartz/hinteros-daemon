@@ -1,12 +1,14 @@
 //! Nix's `--log-format internal-json` (lines `@nix {...}` on stderr) turned into job progress.
 //!
 //! Activity types (nix `ActivityType`): 100 copy path, 101 file transfer, 102 realise,
-//! 103 copy paths, 104 builds, 105 build, 108 substitute. Result types: 105 progress
-//! `[done, expected, running, failed]`, 106 set expected `[activity type, expected]`.
+//! 103 copy paths, 104 builds, 105 build, 108 substitute. Result types: 101 build log line,
+//! 104 set phase `[phase]`, 105 progress `[done, expected, running, failed]`, 106 set expected
+//! `[activity type, expected]`. A build activity (105) starts with
+//! `fields: [drv path, machine, round, rounds]` and text `building '<drv path>'`.
 
 use std::collections::HashMap;
 
-use hinteros_api::system::{ProgressDetail, Stage};
+use hinteros_api::system::{Building, ProgressDetail, Stage};
 use serde_json::Value;
 
 const ACT_COPY_PATH: u64 = 100;
@@ -15,11 +17,26 @@ const ACT_COPY_PATHS: u64 = 103;
 const ACT_BUILDS: u64 = 104;
 const ACT_BUILD: u64 = 105;
 const ACT_SUBSTITUTE: u64 = 108;
+const RES_SET_PHASE: u64 = 104;
 const RES_PROGRESS: u64 = 105;
 const RES_SET_EXPECTED: u64 = 106;
 
 /// Longest error line kept for `log_hint`.
 const MAX_HINT: usize = 400;
+/// Longest derivation name or version kept.
+const MAX_NAME: usize = 80;
+/// The percent stays below this until the nix run has ended.
+const MAX_RUNNING_PERCENT: u8 = 99;
+
+/// A derivation being built.
+#[derive(Debug, Clone)]
+struct Build {
+    /// Start order (the most recent running build is shown).
+    seq: u64,
+    name: String,
+    version: Option<String>,
+    phase: Option<String>,
+}
 
 #[derive(Debug, Default)]
 pub struct Progress {
@@ -27,18 +44,78 @@ pub struct Progress {
     activities: HashMap<u64, u64>,
     /// Per-activity byte progress of copies and transfers: id → (done, expected).
     bytes: HashMap<u64, (u64, u64)>,
+    /// Running build activities.
+    builds: HashMap<u64, Build>,
+    seq: u64,
     pub paths_done: u64,
     pub paths_total: u64,
     pub builds_done: u64,
     pub builds_total: u64,
+    pub builds_running: u64,
     pub stage: Option<Stage>,
+    /// The percent shown so far (it never goes back), exact and floored.
+    shown: Option<f64>,
+    best: Option<u8>,
+    /// Where the fraction last dropped: (fraction, percent held then).
+    base: Option<(f64, f64)>,
+    /// Totals from nix's plan (`these N derivations will be built`, `these N paths will be
+    /// fetched`), printed before the work starts.
+    planned_builds: u64,
+    planned_paths: u64,
     /// The last error message nix printed (for `log_hint`).
     pub last_error: Option<String>,
+}
+
+/// Split a store derivation path (`/nix/store/<hash>-<name>-<version>.drv`) into a short name
+/// and version, by nix's rule: the version starts at the first `-` followed by a non-letter.
+pub fn drv_name(path: &str) -> Option<(String, Option<String>)> {
+    let base = path.rsplit('/').next()?;
+    let base = base.strip_suffix(".drv").unwrap_or(base);
+    // A store path's hash part: 32 base-32 characters and a dash.
+    let full = match base.split_once('-') {
+        Some((hash, rest))
+            if hash.len() == 32 && hash.bytes().all(|b| b.is_ascii_alphanumeric()) =>
+        {
+            rest
+        }
+        _ => base,
+    };
+    if full.is_empty() || full.chars().any(char::is_control) {
+        return None;
+    }
+    let bytes = full.as_bytes();
+    let split = (0..bytes.len())
+        .find(|&i| bytes[i] == b'-' && bytes.get(i + 1).is_some_and(|c| !c.is_ascii_alphabetic()));
+    let clip = |s: &str| s.chars().take(MAX_NAME).collect::<String>();
+    Some(match split {
+        Some(i) if i > 0 => (
+            clip(&full[..i]),
+            Some(clip(&full[i + 1..])).filter(|v| !v.is_empty()),
+        ),
+        _ => (clip(full), None),
+    })
+}
+
+/// `unpackPhase` → `unpack`; other names as they are (clipped).
+fn phase_name(phase: &str) -> String {
+    let p = phase
+        .strip_suffix("Phase")
+        .filter(|p| !p.is_empty())
+        .unwrap_or(phase);
+    p.chars().filter(|c| !c.is_control()).take(40).collect()
 }
 
 impl Progress {
     /// Feed one stderr line; returns whether anything visible changed.
     pub fn line(&mut self, line: &str) -> bool {
+        let changed = self.parse(line);
+        if changed {
+            self.update_best();
+        }
+        changed
+    }
+
+    fn parse(&mut self, line: &str) -> bool {
         let Some(json) = line.strip_prefix("@nix ") else {
             if line.starts_with("error:") {
                 self.last_error = Some(clip(line));
@@ -55,6 +132,26 @@ impl Progress {
                 if self.activities.len() < 100_000 {
                     self.activities.insert(id, ty);
                 }
+                let mut changed = false;
+                if ty == ACT_BUILD && self.builds.len() < 10_000 {
+                    let drv = v["fields"][0]
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| drv_from_text(v["text"].as_str().unwrap_or("")));
+                    if let Some((name, version)) = drv.as_deref().and_then(drv_name) {
+                        self.seq += 1;
+                        self.builds.insert(
+                            id,
+                            Build {
+                                seq: self.seq,
+                                name,
+                                version,
+                                phase: None,
+                            },
+                        );
+                        changed = true;
+                    }
+                }
                 let stage = match ty {
                     ACT_BUILDS | ACT_BUILD => Some(Stage::Building),
                     ACT_COPY_PATHS | ACT_COPY_PATH | ACT_SUBSTITUTE | ACT_FILE_TRANSFER => {
@@ -70,14 +167,26 @@ impl Progress {
                     self.stage = Some(s);
                     return true;
                 }
-                false
+                changed
             }
             Some("stop") => {
                 self.activities.remove(&id);
-                false
+                // A finished download's bytes stay counted (the totals stay honest).
+                self.builds.remove(&id).is_some()
             }
             Some("result") => {
                 let ty = v["type"].as_u64().unwrap_or(0);
+                if ty == RES_SET_PHASE {
+                    let Some(build) = self.builds.get_mut(&id) else {
+                        return false;
+                    };
+                    let phase = v["fields"][0].as_str().map(phase_name);
+                    if phase.is_some() && build.phase != phase {
+                        build.phase = phase;
+                        return true;
+                    }
+                    return false;
+                }
                 let fields: Vec<u64> = v["fields"]
                     .as_array()
                     .map(|a| a.iter().filter_map(Value::as_u64).collect())
@@ -92,6 +201,7 @@ impl Progress {
                     (RES_PROGRESS, Some(ACT_BUILDS)) if fields.len() >= 2 => {
                         self.builds_done = fields[0];
                         self.builds_total = fields[1];
+                        self.builds_running = fields.get(2).copied().unwrap_or(0);
                         true
                     }
                     (RES_PROGRESS, Some(ACT_COPY_PATH | ACT_FILE_TRANSFER))
@@ -108,19 +218,51 @@ impl Progress {
                         }
                         false
                     }
+                    (RES_SET_EXPECTED, Some(ACT_BUILDS)) if fields.len() >= 2 => {
+                        if fields[0] == ACT_BUILD && fields[1] > self.builds_total {
+                            self.builds_total = fields[1];
+                            return true;
+                        }
+                        false
+                    }
                     _ => false,
                 }
             }
             Some("msg") => {
-                if v["level"].as_u64() == Some(0)
-                    && let Some(msg) = v["msg"].as_str()
-                {
-                    self.last_error = Some(clip(&strip_ansi(msg)));
+                let Some(msg) = v["msg"].as_str() else {
+                    return false;
+                };
+                let msg = strip_ansi(msg);
+                if v["level"].as_u64() == Some(0) {
+                    self.last_error = Some(clip(&msg));
+                    return false;
                 }
-                false
+                match plan(&msg) {
+                    Some(Plan::Builds(n)) if n > self.planned_builds => {
+                        self.planned_builds = n;
+                        true
+                    }
+                    Some(Plan::Paths(n)) if n > self.planned_paths => {
+                        self.planned_paths = n;
+                        true
+                    }
+                    _ => false,
+                }
             }
             _ => false,
         }
+    }
+
+    /// The most recently started build that is still running.
+    fn building(&self) -> Option<Building> {
+        self.builds
+            .values()
+            .max_by_key(|b| b.seq)
+            .map(|b| Building {
+                name: b.name.clone(),
+                version: b.version.clone(),
+                phase: b.phase.clone(),
+            })
     }
 
     pub fn detail(&self) -> ProgressDetail {
@@ -129,29 +271,104 @@ impl Progress {
                 (d.saturating_add(*bd), t.saturating_add(*bt))
             });
         let nz = |n: u64| (n > 0).then_some(n);
+        let running = self.builds_running.max(self.builds.len() as u64);
+        let paths_total = self.paths_total.max(self.planned_paths);
+        let builds_total = self.builds_total.max(self.planned_builds);
         ProgressDetail {
-            paths_done: nz(self.paths_total).map(|_| self.paths_done),
-            paths_total: nz(self.paths_total),
+            paths_done: nz(paths_total).map(|_| self.paths_done),
+            paths_total: nz(paths_total),
             bytes_done: nz(bytes_total).map(|_| bytes_done),
             bytes_total: nz(bytes_total),
+            builds_done: nz(builds_total).map(|_| self.builds_done),
+            builds_total: nz(builds_total),
+            builds_running: nz(running),
+            building: self.building(),
         }
     }
 
-    /// Percent while downloading (paths, else bytes); `None` elsewhere.
-    pub fn percent(&self) -> Option<u8> {
-        if self.stage != Some(Stage::Downloading) {
-            return None;
-        }
+    /// The fraction done right now: the mean of the known parts (downloaded paths, else bytes;
+    /// built derivations), each weighted equally. Can go down when nix raises a total.
+    fn fraction(&self) -> Option<f64> {
         let d = self.detail();
-        let (done, total) = match (d.paths_done, d.paths_total, d.bytes_done, d.bytes_total) {
-            (Some(done), Some(total), _, _) => (done, total),
-            (_, _, Some(done), Some(total)) => (done, total),
-            _ => return None,
+        let part = |done: Option<u64>, total: Option<u64>| match (done, total) {
+            (Some(done), Some(total)) if total > 0 => Some(done.min(total) as f64 / total as f64),
+            _ => None,
         };
-        (total > 0).then(|| {
-            u8::try_from(u128::from(done.min(total)) * 100 / u128::from(total)).unwrap_or(100)
-        })
+        let download =
+            part(d.paths_done, d.paths_total).or_else(|| part(d.bytes_done, d.bytes_total));
+        let build = part(d.builds_done, d.builds_total);
+        match (download, build) {
+            (Some(a), Some(b)) => Some((a + b) / 2.0),
+            (a, b) => a.or(b),
+        }
     }
+
+    /// The shown percent follows the fraction, but never goes back: when the fraction drops
+    /// (nix found more work), the percent holds and from then on covers the rest of the way
+    /// (`fraction` from where it dropped to 1 maps to the held percent up to 100).
+    fn update_best(&mut self) {
+        let Some(f) = self.fraction() else { return };
+        let held = self.shown.unwrap_or(0.0);
+        let p = match self.base {
+            None => f * 100.0,
+            Some((f0, p0)) if f0 < 1.0 => p0 + (100.0 - p0) * (f - f0) / (1.0 - f0),
+            Some((_, p0)) => p0,
+        };
+        let p = if p < held {
+            self.base = Some((f, held));
+            held
+        } else {
+            p
+        };
+        // Below 100 while nix runs.
+        let p = p.min(f64::from(MAX_RUNNING_PERCENT));
+        self.shown = Some(p);
+        self.best = Some(p.floor() as u8);
+    }
+
+    /// Percent while downloading or building (see [`Self::fraction`]); never lower than a
+    /// percent reported before, below 100 while nix runs; `None` before anything is countable
+    /// and outside those stages.
+    pub fn percent(&self) -> Option<u8> {
+        match self.stage {
+            Some(Stage::Downloading | Stage::Building) => self.best,
+            _ => None,
+        }
+    }
+}
+
+/// What nix plans to do, from the message it prints before starting.
+#[derive(Debug, PartialEq, Eq)]
+enum Plan {
+    Builds(u64),
+    Paths(u64),
+}
+
+/// `this derivation will be built:` / `these 5 derivations will be built:` /
+/// `this path will be fetched (…)` / `these 12 paths will be fetched (…)` (the first line).
+fn plan(msg: &str) -> Option<Plan> {
+    let first = msg.lines().next()?.trim();
+    let count = |rest: &str| -> Option<u64> {
+        if rest.starts_with("this ") {
+            Some(1)
+        } else {
+            rest.strip_prefix("these ")?.split(' ').next()?.parse().ok()
+        }
+    };
+    if first.contains(" will be built") && first.contains("derivation") {
+        count(first).map(Plan::Builds)
+    } else if first.contains(" will be fetched") || first.contains(" will be downloaded") {
+        count(first).map(Plan::Paths)
+    } else {
+        None
+    }
+}
+
+/// The drv path from a build activity's text (`building '/nix/store/...drv'`).
+fn drv_from_text(text: &str) -> Option<String> {
+    let start = text.find("'/")? + 1;
+    let end = start + text[start..].find('\'')?;
+    Some(text[start..end].to_owned())
 }
 
 fn clip(s: &str) -> String {
@@ -199,13 +416,14 @@ mod tests {
                 paths_done: Some(4),
                 paths_total: Some(10),
                 bytes_done: Some(512),
-                bytes_total: Some(2048)
+                bytes_total: Some(2048),
+                ..Default::default()
             }
         );
         assert_eq!(p.percent(), Some(40));
         p.line(r#"@nix {"action":"start","id":3,"type":105,"text":"building foo"}"#);
         assert_eq!(p.stage, Some(Stage::Building));
-        assert_eq!(p.percent(), None);
+        assert_eq!(p.percent(), Some(40), "still the download's percent");
         p.line(r#"@nix {"action":"start","id":4,"type":100}"#);
         assert_eq!(p.stage, Some(Stage::Building), "building is not undone");
         p.line(
@@ -226,11 +444,214 @@ mod tests {
             "@nix []",
             r#"@nix {"action":"result","id":99,"type":105,"fields":[1]}"#,
             r#"@nix {"action":"result","id":1,"type":105,"fields":["a","b"]}"#,
+            r#"@nix {"action":"result","id":7,"type":104,"fields":["buildPhase"]}"#,
+            r#"@nix {"action":"start","id":8,"type":105,"text":"building","fields":[]}"#,
         ] {
             p.line(l);
         }
-        assert_eq!(p.stage, None);
+        assert_eq!(p.stage, Some(Stage::Building));
         assert!(p.detail().is_empty());
         assert_eq!(p.percent(), None);
+    }
+
+    #[test]
+    fn derivation_names() {
+        let n = |p: &str| drv_name(p);
+        assert_eq!(
+            n("/nix/store/0c1mfwi4vbb6m2s0q5zk9n7f8f8b8z3v-hinteros-daemon-0.7.0.drv"),
+            Some(("hinteros-daemon".into(), Some("0.7.0".into())))
+        );
+        assert_eq!(
+            n("/nix/store/0c1mfwi4vbb6m2s0q5zk9n7f8f8b8z3v-etc.drv"),
+            Some(("etc".into(), None))
+        );
+        assert_eq!(
+            n(
+                "/nix/store/0c1mfwi4vbb6m2s0q5zk9n7f8f8b8z3v-nixos-system-hinteros-25.11.20261001.abcdef0.drv"
+            ),
+            Some((
+                "nixos-system-hinteros".into(),
+                Some("25.11.20261001.abcdef0".into())
+            ))
+        );
+        assert_eq!(
+            n(
+                "/nix/store/0c1mfwi4vbb6m2s0q5zk9n7f8f8b8z3v-hinteros-launcher-0.7.1-vendor.tar.gz.drv"
+            ),
+            Some((
+                "hinteros-launcher".into(),
+                Some("0.7.1-vendor.tar.gz".into())
+            ))
+        );
+        assert_eq!(
+            n("/nix/store/0c1mfwi4vbb6m2s0q5zk9n7f8f8b8z3v-unit-script-hinteros-job-start.drv"),
+            Some(("unit-script-hinteros-job-start".into(), None))
+        );
+        assert_eq!(n("/nix/store/0c1mfwi4vbb6m2s0q5zk9n7f8f8b8z3v-.drv"), None);
+        assert_eq!(phase_name("unpackPhase"), "unpack");
+        assert_eq!(phase_name("Phase"), "Phase");
+        assert_eq!(phase_name("custom"), "custom");
+    }
+
+    /// A system rebuild as `nix build --log-format internal-json -v` prints it: substitutions,
+    /// then builds of two derivations (one long compile with log lines and phases).
+    #[test]
+    fn follows_a_build() {
+        let drv = |h: &str, n: &str| format!("/nix/store/{h:a<32}-{n}.drv");
+        let daemon = drv("d", "hinteros-daemon-0.7.1");
+        let etc = drv("e", "etc");
+        let toplevel = drv("t", "nixos-system-hinteros-25.11");
+        let mut lines = vec![
+            r#"@nix {"action":"start","id":10,"level":0,"parent":0,"text":"","type":104,"fields":[]}"#.to_string(),
+            r#"@nix {"action":"start","id":11,"level":0,"parent":0,"text":"","type":103,"fields":[]}"#.into(),
+            r#"@nix {"action":"result","id":10,"type":105,"fields":[0,3,0,0]}"#.into(),
+            r#"@nix {"action":"result","id":11,"type":105,"fields":[0,4,0,0]}"#.into(),
+            r#"@nix {"action":"start","id":12,"level":4,"parent":0,"text":"copying path","type":100,"fields":["/nix/store/x","https://cache.nixos.org"]}"#.into(),
+            r#"@nix {"action":"result","id":11,"type":105,"fields":[2,4,1,0]}"#.into(),
+            r#"@nix {"action":"result","id":11,"type":105,"fields":[4,4,0,0]}"#.into(),
+            r#"@nix {"action":"stop","id":12}"#.into(),
+        ];
+        lines.push(format!(
+            r#"@nix {{"action":"start","id":20,"level":3,"parent":0,"text":"building '{daemon}'","type":105,"fields":["{daemon}","",1,1]}}"#
+        ));
+        lines.push(r#"@nix {"action":"result","id":10,"type":105,"fields":[0,3,1,0]}"#.into());
+        let mut p = Progress::default();
+        let mut percents = Vec::new();
+        for l in &lines {
+            p.line(l);
+            percents.extend(p.percent());
+        }
+        assert_eq!(p.stage, Some(Stage::Building));
+        let d = p.detail();
+        assert_eq!(
+            (d.builds_done, d.builds_total, d.builds_running),
+            (Some(0), Some(3), Some(1))
+        );
+        assert_eq!(
+            d.building,
+            Some(Building {
+                name: "hinteros-daemon".into(),
+                version: Some("0.7.1".into()),
+                phase: None
+            })
+        );
+        assert_eq!(p.percent(), Some(50), "downloads done, no build yet");
+
+        // Phases and build log lines (log lines change nothing visible).
+        assert!(p.line(r#"@nix {"action":"result","id":20,"type":104,"fields":["unpackPhase"]}"#));
+        assert!(!p.line(
+            r#"@nix {"action":"result","id":20,"type":101,"fields":["   Compiling serde v1.0"]}"#
+        ));
+        assert!(p.line(r#"@nix {"action":"result","id":20,"type":104,"fields":["buildPhase"]}"#));
+        assert!(!p.line(r#"@nix {"action":"result","id":20,"type":104,"fields":["buildPhase"]}"#));
+        assert_eq!(p.detail().building.unwrap().phase.as_deref(), Some("build"));
+
+        // A second, parallel build is the one shown; when it stops the first one is again.
+        p.line(&format!(
+            r#"@nix {{"action":"start","id":21,"type":105,"text":"building '{etc}'","fields":[]}}"#
+        ));
+        assert_eq!(p.detail().building.unwrap().name, "etc");
+        assert_eq!(p.detail().builds_running, Some(2));
+        p.line(r#"@nix {"action":"stop","id":21}"#);
+        p.line(r#"@nix {"action":"result","id":10,"type":105,"fields":[1,3,1,0]}"#);
+        assert_eq!(p.detail().building.unwrap().name, "hinteros-daemon");
+        percents.extend(p.percent());
+
+        // Nix discovers more work: the total grows, the percent holds.
+        p.line(r#"@nix {"action":"result","id":10,"type":105,"fields":[1,6,1,0]}"#);
+        percents.extend(p.percent());
+        assert_eq!(p.detail().builds_total, Some(6));
+        p.line(r#"@nix {"action":"stop","id":20}"#);
+        p.line(&format!(
+            r#"@nix {{"action":"start","id":22,"type":105,"text":"building '{toplevel}'","fields":["{toplevel}","",1,1]}}"#
+        ));
+        p.line(r#"@nix {"action":"result","id":10,"type":105,"fields":[5,6,1,0]}"#);
+        percents.extend(p.percent());
+        p.line(r#"@nix {"action":"result","id":10,"type":105,"fields":[6,6,0,0]}"#);
+        p.line(r#"@nix {"action":"stop","id":22}"#);
+        percents.extend(p.percent());
+        assert!(p.detail().building.is_none());
+        assert!(
+            percents.windows(2).all(|w| w[0] <= w[1]),
+            "percent never goes back: {percents:?}"
+        );
+        assert_eq!(p.percent(), Some(99), "below 100 while nix runs");
+        assert_eq!(
+            percents[percents.len() - 3],
+            66,
+            "1 of 3 built, downloads done"
+        );
+    }
+
+    #[test]
+    fn plan_messages() {
+        assert_eq!(
+            plan("this derivation will be built:\n  /nix/store/a.drv"),
+            Some(Plan::Builds(1))
+        );
+        assert_eq!(
+            plan("these 12 derivations will be built:\n  /nix/store/a.drv"),
+            Some(Plan::Builds(12))
+        );
+        assert_eq!(
+            plan("these 30 paths will be fetched (41.20 MiB download, 180.00 MiB unpacked):"),
+            Some(Plan::Paths(30))
+        );
+        assert_eq!(
+            plan("this path will be fetched (0.10 MiB download, 0.50 MiB unpacked):"),
+            Some(Plan::Paths(1))
+        );
+        assert_eq!(plan("evaluating derivation 'path:/etc/hinteros#...'"), None);
+        assert_eq!(plan("these many derivations will be built:"), None);
+    }
+
+    /// The plan nix prints first gives both totals before any work, so the percent counts
+    /// builds from the start; when nix finds more work later the percent holds, then covers
+    /// the rest of the way.
+    #[test]
+    fn percent_from_the_plan_never_goes_back() {
+        let mut p = Progress::default();
+        let mut seen = Vec::new();
+        for l in [
+            r#"@nix {"action":"msg","level":3,"msg":"these 2 derivations will be built:\n  /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-hinteros-daemon-0.7.1.drv"}"#,
+            r#"@nix {"action":"msg","level":3,"msg":"these 4 paths will be fetched (1.00 MiB download, 2.00 MiB unpacked):\n  /nix/store/x"}"#,
+            r#"@nix {"action":"start","id":1,"type":103,"text":"","fields":[]}"#,
+            r#"@nix {"action":"start","id":2,"type":104,"text":"","fields":[]}"#,
+            r#"@nix {"action":"result","id":1,"type":105,"fields":[0,0,0,0]}"#,
+            r#"@nix {"action":"result","id":1,"type":105,"fields":[2,4,1,0]}"#,
+            r#"@nix {"action":"result","id":1,"type":105,"fields":[4,4,0,0]}"#,
+            r#"@nix {"action":"result","id":2,"type":105,"fields":[1,2,1,0]}"#,
+            r#"@nix {"action":"result","id":2,"type":105,"fields":[1,4,1,0]}"#,
+            r#"@nix {"action":"result","id":2,"type":105,"fields":[3,4,1,0]}"#,
+            r#"@nix {"action":"result","id":2,"type":105,"fields":[4,4,0,0]}"#,
+        ] {
+            p.line(l);
+            seen.push(p.percent());
+        }
+        assert_eq!(p.detail().paths_total, Some(4));
+        assert_eq!(
+            seen,
+            [
+                None,
+                None,
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(25),
+                Some(50),
+                Some(75),
+                Some(75),
+                Some(91),
+                Some(99)
+            ]
+        );
+        // A download that finished before nix knew of the builds: 99 holds.
+        let mut p = Progress::default();
+        p.line(r#"@nix {"action":"start","id":1,"type":103,"text":"","fields":[]}"#);
+        p.line(r#"@nix {"action":"result","id":1,"type":105,"fields":[4,4,0,0]}"#);
+        assert_eq!(p.percent(), Some(99));
+        p.line(r#"@nix {"action":"start","id":2,"type":104,"text":"","fields":[]}"#);
+        p.line(r#"@nix {"action":"result","id":2,"type":105,"fields":[0,2,1,0]}"#);
+        assert_eq!(p.percent(), Some(99));
     }
 }

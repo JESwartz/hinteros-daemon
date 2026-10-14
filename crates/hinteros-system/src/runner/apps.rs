@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use super::{Failure, Outcome, Runner, record_terms};
 use crate::appreg::{self, Owner, Registry};
-use crate::job::{self, Apply, AppsJob, AppsOp, MigrateJob, ProgressLine};
+use crate::job::{self, Apply, AppsJob, AppsOp, MigrateJob};
 use crate::nixlog;
 use crate::state::State;
 use crate::{fsutil, generations};
@@ -127,14 +127,7 @@ impl Runner {
             let mut progress = nixlog::Progress::default();
             let built = self.exec(cmd, true, &mut |r, line| {
                 if progress.line(line) {
-                    let stage = progress.stage.unwrap_or(Stage::Evaluating);
-                    let detail = progress.detail();
-                    r.set_stage(stage);
-                    r.report(ProgressLine {
-                        stage,
-                        percent: progress.percent(),
-                        detail: (!detail.is_empty()).then_some(detail),
-                    });
+                    r.nix_progress(&progress);
                 }
             });
             match built {

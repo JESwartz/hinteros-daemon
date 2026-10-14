@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hinteros_api::system::{
-    Channel, JobKind, JobResult, JobState, ProgressDetail, Stage, is_job_id,
+    Channel, JobKind, JobResult, JobState, JobSubject, ProgressDetail, Stage, is_job_id,
 };
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,9 @@ pub struct JobSpec {
     /// D-Bus address for logind inhibitors (`None`: the system bus).
     pub bus: Option<String>,
     pub action: Action,
+    /// What the job is about (API 0.7; the runner may refine it, see [`ProgressLine::subject`]).
+    #[serde(default)]
+    pub subject: JobSubject,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -349,6 +352,12 @@ pub struct ProgressLine {
     pub percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<ProgressDetail>,
+    /// The last time the job's process produced output (Unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_at: Option<i64>,
+    /// The job's subject, when the job learnt more about it (replaces the spec's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<JobSubject>,
 }
 
 /// Generation and locked revision at one point.
@@ -371,6 +380,9 @@ pub struct Status {
     pub before: Snapshot,
     #[serde(default)]
     pub after: Option<Snapshot>,
+    /// The subject as the job last knew it (`None`: the spec's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<JobSubject>,
 }
 
 impl Status {
@@ -385,6 +397,7 @@ impl Status {
             finished_at: now(),
             before: Snapshot::default(),
             after: None,
+            subject: None,
         }
     }
 }
@@ -406,4 +419,12 @@ pub fn job_failed(stage: Stage, hint: &str) -> ErrorObject {
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+impl JobSpec {
+    /// The spec with what the job is about.
+    pub fn about(mut self, subject: JobSubject) -> Self {
+        self.subject = subject;
+        self
+    }
 }

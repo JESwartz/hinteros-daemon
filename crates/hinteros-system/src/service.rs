@@ -45,6 +45,7 @@ use crate::store;
 mod apps;
 mod profiles;
 mod storage;
+mod subject;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -975,6 +976,7 @@ impl Service {
             tools: self.tools.clone(),
             bus: self.args.bus.clone(),
             action,
+            subject: system::JobSubject::default(),
         }
     }
 
@@ -1078,14 +1080,19 @@ impl Service {
                 state.settings.ssh.enable = p.enabled;
                 let state = self.requirements_update(&state).unwrap_or(state);
                 self.preflight()?;
-                let spec = self.spec(
-                    JobKind::Ssh,
-                    uid,
-                    Action::Apply(Apply {
-                        state: Some(state),
+                let spec = self
+                    .spec(
+                        JobKind::Ssh,
+                        uid,
+                        Action::Apply(Apply {
+                            state: Some(state),
+                            ..Default::default()
+                        }),
+                    )
+                    .about(system::JobSubject {
+                        enabled: Some(p.enabled),
                         ..Default::default()
-                    }),
-                );
+                    });
                 job_ref(Some(self.start(spec).await?))
             }
             Request::Rebuild => {
@@ -1125,18 +1132,25 @@ impl Service {
                 let Some(base) = state::base_change(state.base, p.base, ack)? else {
                     return job_ref(None);
                 };
+                let from_base = state.base;
                 state.base = base;
                 let state = self.requirements_update(&state).unwrap_or(state);
                 self.preflight()?;
-                let spec = self.spec(
-                    JobKind::Base,
-                    uid,
-                    Action::Apply(Apply {
-                        rebuild_apps: state.is_schema2(),
-                        state: Some(state),
+                let spec = self
+                    .spec(
+                        JobKind::Base,
+                        uid,
+                        Action::Apply(Apply {
+                            rebuild_apps: state.is_schema2(),
+                            state: Some(state),
+                            ..Default::default()
+                        }),
+                    )
+                    .about(system::JobSubject {
+                        base: Some(base),
+                        from_base: Some(from_base),
                         ..Default::default()
-                    }),
-                );
+                    });
                 job_ref(Some(self.start(spec).await?))
             }
             Request::Rollback(p) => {
@@ -1170,14 +1184,20 @@ impl Service {
                 if let Some(e) = self.jobs.lock().unwrap().busy_error() {
                     return Err(e);
                 }
-                let spec = self.spec(
-                    JobKind::Rollback,
-                    uid,
-                    Action::Rollback {
-                        generation: target,
-                        rebuild_apps: true,
-                    },
-                );
+                let spec = self
+                    .spec(
+                        JobKind::Rollback,
+                        uid,
+                        Action::Rollback {
+                            generation: target,
+                            rebuild_apps: true,
+                        },
+                    )
+                    .about(system::JobSubject {
+                        generation: Some(target),
+                        from_generation: current,
+                        ..Default::default()
+                    });
                 job_ref(Some(self.start(spec).await?))
             }
             Request::UpdateCheck => {
@@ -1207,7 +1227,14 @@ impl Service {
                         .unwrap_or_default(),
                     input_url: table.input_url(&source.branch, None),
                 });
-                let spec = self.spec(JobKind::UpdateCheck, uid, Action::UpdateCheck(source));
+                let subject = system::JobSubject {
+                    channel: Some(channel),
+                    from_rev: lock.rev.clone(),
+                    ..Default::default()
+                };
+                let spec = self
+                    .spec(JobKind::UpdateCheck, uid, Action::UpdateCheck(source))
+                    .about(subject);
                 let id = self.start(spec).await?;
                 serde_json::to_value(UpdateCheckReply {
                     job_id: Some(id),
@@ -1228,34 +1255,44 @@ impl Service {
                 let verified = self
                     .last_check(channel, lock.rev.as_deref())
                     .and_then(|c| c.available)
-                    .is_some_and(|a| a.rev == p.rev);
-                if !verified {
+                    .filter(|a| a.rev == p.rev);
+                let Some(verified) = verified else {
                     return Err(ErrorObject::with_data(
                         ErrorCode::StateConflict,
                         "rev is not the last verified update",
                         json!({ "reason": "update_rev" }),
                     ));
-                }
+                };
                 self.preflight()?;
                 let source = self.update_source(&table, channel, lock.rev.clone())?;
                 let update = ApplyUpdate {
                     input_url: table.input_url(&source.branch, None),
                     source,
-                    rev: Some(p.rev),
+                    rev: Some(p.rev.clone()),
                     not_fast_forward: NotFastForward::Reject,
                     retarget_from: None,
                 };
+                let subject = system::JobSubject {
+                    rev: Some(p.rev),
+                    version: verified.version,
+                    channel: Some(channel),
+                    from_rev: lock.rev.clone(),
+                    from_version: self.running_version(),
+                    ..Default::default()
+                };
                 let state = self.load_state().ok().map(|(s, _)| s);
-                let spec = self.spec(
-                    JobKind::UpdateApply,
-                    uid,
-                    Action::Apply(Apply {
-                        update: Some(update),
-                        state: state.as_ref().and_then(|s| self.requirements_update(s)),
-                        rebuild_apps: state.as_ref().is_some_and(State::is_schema2),
-                        ..Default::default()
-                    }),
-                );
+                let spec = self
+                    .spec(
+                        JobKind::UpdateApply,
+                        uid,
+                        Action::Apply(Apply {
+                            update: Some(update),
+                            state: state.as_ref().and_then(|s| self.requirements_update(s)),
+                            rebuild_apps: state.as_ref().is_some_and(State::is_schema2),
+                            ..Default::default()
+                        }),
+                    )
+                    .about(subject);
                 job_ref(Some(self.start(spec).await?))
             }
             Request::ChannelSet(p) => {
@@ -1288,17 +1325,26 @@ impl Service {
                         NotFastForward::NeedsAcknowledgement
                     },
                 };
+                let subject = system::JobSubject {
+                    channel: Some(to),
+                    from_channel: from,
+                    from_rev: lock.rev.clone(),
+                    from_version: self.running_version(),
+                    ..Default::default()
+                };
                 let state = self.load_state().ok().map(|(s, _)| s);
-                let spec = self.spec(
-                    JobKind::Channel,
-                    uid,
-                    Action::Apply(Apply {
-                        update: Some(update),
-                        state: state.as_ref().and_then(|s| self.requirements_update(s)),
-                        rebuild_apps: state.as_ref().is_some_and(State::is_schema2),
-                        ..Default::default()
-                    }),
-                );
+                let spec = self
+                    .spec(
+                        JobKind::Channel,
+                        uid,
+                        Action::Apply(Apply {
+                            update: Some(update),
+                            state: state.as_ref().and_then(|s| self.requirements_update(s)),
+                            rebuild_apps: state.as_ref().is_some_and(State::is_schema2),
+                            ..Default::default()
+                        }),
+                    )
+                    .about(subject);
                 job_ref(Some(self.start(spec).await?))
             }
             Request::AppsInstall(p) => {
@@ -1340,15 +1386,22 @@ impl Service {
                     .apps
                     .get_or_insert_with(Vec::new)
                     .extend(plan.new.iter().cloned());
-                let spec = self.spec(
-                    JobKind::AppsInstall,
-                    uid,
-                    Action::Apply(Apply {
-                        state: Some(state),
-                        terms: terms.clone(),
-                        ..Default::default()
-                    }),
-                );
+                let subject = system::JobSubject {
+                    profile: profile.as_deref().map(|p| self.subject_profile(p)),
+                    apps: Some(self.subject_apps(&plan.new)),
+                    ..Default::default()
+                };
+                let spec = self
+                    .spec(
+                        JobKind::AppsInstall,
+                        uid,
+                        Action::Apply(Apply {
+                            state: Some(state),
+                            terms: terms.clone(),
+                            ..Default::default()
+                        }),
+                    )
+                    .about(subject);
                 let id = self.start(spec).await?;
                 for t in &terms {
                     self.audit
@@ -1391,15 +1444,22 @@ impl Service {
                     _ => None,
                 };
                 self.preflight()?;
-                let spec = self.spec(
-                    JobKind::AppsRemove,
-                    uid,
-                    Action::Apply(Apply {
-                        state: Some(state),
-                        delete_data,
-                        ..Default::default()
-                    }),
-                );
+                let subject = system::JobSubject {
+                    apps: Some(self.subject_apps(&removing)),
+                    delete_data: Some(p.delete_data),
+                    ..Default::default()
+                };
+                let spec = self
+                    .spec(
+                        JobKind::AppsRemove,
+                        uid,
+                        Action::Apply(Apply {
+                            state: Some(state),
+                            delete_data,
+                            ..Default::default()
+                        }),
+                    )
+                    .about(subject);
                 let id = self.start(spec).await?;
                 info!(job = %id, apps = ?removing, delete_data = p.delete_data, "removing apps");
                 job_ref(Some(id))

@@ -18,7 +18,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hinteros_api::system::{
-    AppliedResult, CatalogApp, JobResult, JobState, RemovedApp, Stage, UpdateCheckResult, is_job_id,
+    AppliedResult, CatalogApp, JobResult, JobState, JobSubject, RemovedApp, Stage,
+    UpdateCheckResult, is_job_id,
 };
 use hinteros_api::{ErrorCode, ErrorObject};
 use rustix::fs::{FlockOperation, flock};
@@ -39,6 +40,9 @@ mod storage;
 
 /// Files of a config dir that belong to a generation (the snapshot; device-config.nix).
 pub const MANAGED: &[&str] = &["flake.nix", "flake.lock", "state.json"];
+
+/// Progress lines within a stage at most this often.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
 pub fn main(run_dir: &Path, id: &str) -> ExitCode {
     if !is_job_id(id) {
@@ -102,6 +106,7 @@ fn run(dir: &Path) -> anyhow::Result<()> {
         Action::StorageMeasure(j) => r.storage_measure(&j),
         Action::Cleanup(j) => r.cleanup(&j),
     };
+    let subject = (r.subject != r.spec.subject).then(|| r.subject.clone());
     let staging = r.spec.paths.staging();
     let status = match outcome {
         Ok((result, restart)) => Status {
@@ -113,6 +118,7 @@ fn run(dir: &Path) -> anyhow::Result<()> {
             finished_at: job::now(),
             before,
             after: Some(r.snapshot()),
+            subject: subject.clone(),
         },
         Err(Failure::Cancelled) => {
             let _ = fsutil::remove(&staging);
@@ -129,6 +135,7 @@ fn run(dir: &Path) -> anyhow::Result<()> {
                 finished_at: job::now(),
                 before,
                 after: None,
+                subject: subject.clone(),
             }
         }
         Err(Failure::Error(e)) => {
@@ -143,6 +150,7 @@ fn run(dir: &Path) -> anyhow::Result<()> {
                 finished_at: job::now(),
                 before,
                 after: Some(r.snapshot()),
+                subject: subject.clone(),
             }
         }
     };
@@ -171,7 +179,14 @@ struct Runner {
     dir: PathBuf,
     stage: Option<Stage>,
     progress: Option<fs::File>,
+    /// The last line written and when.
     last_progress: Option<(Instant, ProgressLine)>,
+    /// A line held back by the rate limit (written by [`Runner::tick`]).
+    pending: Option<ProgressLine>,
+    /// The last time a child process printed anything (Unix seconds).
+    activity_at: Option<i64>,
+    /// What the job is about (the spec's, refined as the job learns more).
+    subject: JobSubject,
     /// logind inhibitor (delay, then block during activation); dropped at the end.
     inhibitor: Option<OwnedFd>,
     /// Report every stage as this one (the `box` stage wraps a whole apply flow).
@@ -187,11 +202,14 @@ impl Runner {
             .open(dir.join(job::PROGRESS))
             .ok();
         Self {
+            subject: spec.subject.clone(),
             spec,
             dir,
             stage: None,
             progress,
             last_progress: None,
+            pending: None,
+            activity_at: None,
             inhibitor: None,
             stage_override: None,
         }
@@ -221,22 +239,36 @@ impl Runner {
                 stage,
                 percent: None,
                 detail: None,
+                activity_at: None,
+                subject: None,
             });
         }
     }
 
-    fn report(&mut self, mut line: ProgressLine) {
+    fn report(&mut self, line: ProgressLine) {
+        self.report_at(line, Instant::now());
+    }
+
+    /// Stage changes and subject updates are written at once; progress within a stage at most
+    /// every [`PROGRESS_INTERVAL`] (a held-back line is written by [`Self::tick_at`]).
+    fn report_at(&mut self, mut line: ProgressLine, now: Instant) {
         if let Some(s) = self.stage_override {
             line.stage = s;
         }
-        let now = Instant::now();
-        // Stage changes always; progress within a stage at most 4 times a second.
+        line.activity_at = self.activity_at;
         if let Some((at, last)) = &self.last_progress
             && last.stage == line.stage
-            && now.duration_since(*at) < Duration::from_millis(250)
+            && line.subject.is_none()
+            && now.saturating_duration_since(*at) < PROGRESS_INTERVAL
         {
+            self.pending = Some(line);
             return;
         }
+        self.write_line(line, now);
+    }
+
+    fn write_line(&mut self, line: ProgressLine, now: Instant) {
+        self.pending = None;
         if let Some(f) = self.progress.as_mut()
             && let Ok(mut text) = serde_json::to_string(&line)
         {
@@ -244,6 +276,80 @@ impl Runner {
             let _ = f.write_all(text.as_bytes());
         }
         self.last_progress = Some((now, line));
+    }
+
+    /// A child process printed something.
+    fn touch(&mut self) {
+        self.activity_at = Some(job::now());
+    }
+
+    /// Called while a child runs: write a held-back line once the rate limit allows, and
+    /// otherwise, every [`jobs::HEARTBEAT`], the last line again when there was output since
+    /// (so `last_activity_at` stays current while nix compiles quietly).
+    fn tick_at(&mut self, now: Instant) {
+        let Some((at, last)) = &self.last_progress else {
+            return;
+        };
+        let since = now.saturating_duration_since(*at);
+        if let Some(line) = self.pending.take() {
+            if since >= PROGRESS_INTERVAL {
+                let line = ProgressLine {
+                    activity_at: self.activity_at,
+                    ..line
+                };
+                self.write_line(line, now);
+            } else {
+                self.pending = Some(line);
+            }
+            return;
+        }
+        if since >= crate::jobs::HEARTBEAT && last.activity_at < self.activity_at {
+            let line = ProgressLine {
+                activity_at: self.activity_at,
+                subject: None,
+                ..last.clone()
+            };
+            self.write_line(line, now);
+        }
+    }
+
+    /// The job learnt more about what it does (e.g. the verified target of a channel switch).
+    fn set_subject(&mut self, f: impl FnOnce(&mut JobSubject)) {
+        let mut subject = self.subject.clone();
+        f(&mut subject);
+        if subject == self.subject {
+            return;
+        }
+        self.subject = subject.clone();
+        let base = self.last_progress.as_ref().map(|(_, l)| l.clone());
+        let line = match base {
+            Some(l) => ProgressLine {
+                subject: Some(subject),
+                ..l
+            },
+            None => ProgressLine {
+                stage: self.stage.unwrap_or(Stage::Preparing),
+                percent: None,
+                detail: None,
+                activity_at: None,
+                subject: Some(subject),
+            },
+        };
+        self.report(line);
+    }
+
+    /// Report nix's progress (a build or download stage).
+    fn nix_progress(&mut self, progress: &nixlog::Progress) {
+        let stage = progress.stage.unwrap_or(Stage::Evaluating);
+        let detail = progress.detail();
+        self.set_stage(stage);
+        self.report(ProgressLine {
+            stage,
+            percent: progress.percent(),
+            detail: (!detail.is_empty()).then_some(detail),
+            activity_at: None,
+            subject: None,
+        });
     }
 
     fn cancel_requested(&self) -> bool {
@@ -390,10 +496,14 @@ impl Runner {
                             }
                         }
                     }
+                    self.touch();
                     on_line(self, &line);
+                    self.tick_at(Instant::now());
                     continue;
                 }
-                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {}
+                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                    self.tick_at(Instant::now());
+                }
             }
             if cancellable && !cancelled && self.cancel_requested() {
                 cancelled = true;
@@ -423,6 +533,9 @@ impl Runner {
             }
         };
         let _ = err_thread.join();
+        if let Some(line) = self.pending.take() {
+            self.write_line(line, Instant::now());
+        }
         let out = out_thread.join().unwrap_or_default();
         if cancelled {
             return Err(Failure::Cancelled);
@@ -594,13 +707,21 @@ impl Runner {
                     .map_err(|e| self.git_error(&u.source, e, u.not_fast_forward))?,
             };
             let require_ff = u.not_fast_forward != NotFastForward::Allow;
-            git.describe(
-                &rev,
-                u.source.current_rev.as_deref(),
-                require_ff,
-                &u.source.allowed_signers,
-            )
-            .map_err(|e| self.git_error(&u.source, e, u.not_fast_forward))?;
+            let described = git
+                .describe(
+                    &rev,
+                    u.source.current_rev.as_deref(),
+                    require_ff,
+                    &u.source.allowed_signers,
+                )
+                .map_err(|e| self.git_error(&u.source, e, u.not_fast_forward))?;
+            // The verified target names the job (a channel switch learns it only now).
+            self.set_subject(|s| {
+                s.rev = Some(rev.clone());
+                if described.version.is_some() {
+                    s.version = described.version.clone();
+                }
+            });
             lock_url = Some(format!("{}&rev={rev}", u.input_url));
         }
 
@@ -666,14 +787,7 @@ impl Runner {
         let mut progress = nixlog::Progress::default();
         let out = self.exec(cmd, true, &mut |r, line| {
             if progress.line(line) {
-                let stage = progress.stage.unwrap_or(Stage::Evaluating);
-                let detail = progress.detail();
-                r.set_stage(stage);
-                r.report(ProgressLine {
-                    stage,
-                    percent: progress.percent(),
-                    detail: (!detail.is_empty()).then_some(detail),
-                });
+                r.nix_progress(&progress);
             }
         });
         let out = match out {
@@ -1035,6 +1149,119 @@ pub fn rfc3339(secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_runner(d: &Path) -> Runner {
+        let paths = crate::config::Paths {
+            config_dir: d.join("etc"),
+            state_dir: d.join("var"),
+            run_dir: d.join("run"),
+            profile: d.join("profiles/system"),
+            current_system: d.join("current"),
+            booted_system: d.join("booted"),
+            apps_profiles: d.join("nixprofiles"),
+            catalog_index: None,
+            users: Default::default(),
+            proc_dir: "/proc".into(),
+        };
+        let tools = crate::config::Tools {
+            nix: "nix".into(),
+            nix_env: "nix-env".into(),
+            git: "git".into(),
+            ssh_keygen: "ssh-keygen".into(),
+            nixos_facter: "nixos-facter".into(),
+            nix_store: "nix-store".into(),
+        };
+        let spec = JobSpec {
+            id: "0123456789abcdef".into(),
+            kind: hinteros_api::system::JobKind::Rebuild,
+            uid: 1000,
+            created_at: 0,
+            paths,
+            tools,
+            bus: None,
+            action: Action::Apply(Apply::default()),
+            subject: JobSubject::default(),
+        };
+        Runner::new(spec, d.to_owned())
+    }
+
+    fn written(d: &Path) -> Vec<ProgressLine> {
+        fs::read_to_string(d.join(job::PROGRESS))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    /// Progress within a stage is rate limited but never lost; while a child prints output
+    /// and nothing countable changes, the last line is repeated every 2 s with the new
+    /// activity time.
+    #[test]
+    fn progress_rate_limit_and_heartbeat() {
+        let d = tempfile::tempdir().unwrap();
+        let mut r = test_runner(d.path());
+        let ms = |n: u64| Duration::from_millis(n);
+        let t0 = Instant::now();
+        let line = |p: u8| ProgressLine {
+            stage: Stage::Building,
+            percent: Some(p),
+            detail: None,
+            activity_at: None,
+            subject: None,
+        };
+        r.report_at(line(10), t0);
+        r.report_at(line(20), t0 + ms(100));
+        assert_eq!(written(d.path()).len(), 1, "held back");
+        r.tick_at(t0 + ms(200));
+        assert_eq!(written(d.path()).len(), 1);
+        r.tick_at(t0 + ms(250));
+        assert_eq!(
+            written(d.path())[1].percent,
+            Some(20),
+            "written once allowed"
+        );
+        // No output: no heartbeat.
+        r.tick_at(t0 + ms(3000));
+        assert_eq!(written(d.path()).len(), 2);
+        // Output (nix compiling): the last line again, with the activity time.
+        r.activity_at = Some(123);
+        r.tick_at(t0 + ms(3100));
+        let lines = written(d.path());
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[2].percent, Some(20));
+        assert_eq!(lines[2].activity_at, Some(123));
+        // No new output since: nothing more.
+        r.tick_at(t0 + ms(4000));
+        r.tick_at(t0 + ms(5000));
+        assert_eq!(written(d.path()).len(), 3);
+        r.activity_at = Some(125);
+        r.tick_at(t0 + ms(5000));
+        assert_eq!(
+            written(d.path()).len(),
+            3,
+            "less than 2 s since the last line"
+        );
+        r.tick_at(t0 + ms(5100));
+        assert_eq!(written(d.path())[3].activity_at, Some(125));
+        // A stage change is written at once; a subject update too, with the last values.
+        r.report_at(
+            ProgressLine {
+                stage: Stage::Activating,
+                ..line(0)
+            },
+            t0 + ms(5150),
+        );
+        r.set_subject(|s| s.rev = Some("c6b69ce".into()));
+        let lines = written(d.path());
+        assert_eq!(lines[4].stage, Stage::Activating);
+        assert_eq!(lines[5].stage, Stage::Activating);
+        assert_eq!(
+            lines[5].subject.as_ref().unwrap().rev.as_deref(),
+            Some("c6b69ce")
+        );
+        r.set_subject(|s| s.rev = Some("c6b69ce".into()));
+        assert_eq!(written(d.path()).len(), 6, "no change, no line");
+    }
 
     #[test]
     fn catalog_changes_between_generations() {

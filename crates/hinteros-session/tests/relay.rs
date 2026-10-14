@@ -84,7 +84,11 @@ fn fake_system(
                             if req.method == "subscribe" {
                                 let ev = jsonrpc::notification(
                                     "job_started",
-                                    json!({"job_id": "0123456789abcdef", "kind": "rebuild", "uid": 1000}),
+                                    json!({
+                                        "job_id": "0123456789abcdef", "kind": "apps_install",
+                                        "uid": 1000, "started_at": 1791300000,
+                                        "subject": {"owner": "p1", "apps": [{"id": "moonlight", "name": "Moonlight"}]}
+                                    }),
                                 );
                                 write_message(&mut w, &ev).await.unwrap();
                             }
@@ -128,6 +132,10 @@ async fn relays_methods_errors_and_job_events() {
     let (name, params) = next_event(&mut launcher).await;
     assert_eq!(name, "job_started");
     assert_eq!(params["job_id"], "0123456789abcdef");
+    assert_eq!(
+        params["subject"]["apps"][0]["name"], "Moonlight",
+        "relayed unchanged"
+    );
 
     // Errors come back unchanged (one 3xxx code space); params go through as given.
     let e = call(&mut c, "system.ssh.set", json!({"enabled": true}))

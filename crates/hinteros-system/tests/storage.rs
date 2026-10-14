@@ -404,6 +404,7 @@ async fn clean_up_the_system() {
     .await;
     let done = finished(&events);
     assert_eq!(done["kind"], "cleanup_system");
+    assert_eq!(done["subject"], json!({"keep": 1}));
     assert_eq!(done["result"]["generations_removed"], 3, "{done}");
     assert!(done["result"]["freed_bytes"].is_u64());
     let stages: Vec<&str> = events
@@ -494,6 +495,7 @@ async fn clean_up_profiles() {
     .await;
     let done = finished(&events);
     assert_eq!(done["kind"], "cleanup_profiles");
+    assert_eq!(done["subject"], json!({"keep": 2}));
     assert_eq!(done["result"]["generations_removed"], 1, "{done}");
     let log = sys.root.read("nix-env.log");
     assert!(
@@ -586,6 +588,10 @@ async fn the_automatic_clean_up_setting() {
     // A change: a rebuild that writes settings.cleanup.
     let events = job(&sys, &mut c, "cleanup.set", with_pin(set.clone())).await;
     assert_eq!(finished(&events)["kind"], "cleanup_set");
+    assert_eq!(
+        finished(&events)["subject"],
+        json!({"enabled": false, "frequency": "monthly", "keep_system": 3, "keep_profiles": 2})
+    );
     assert_eq!(
         sys.root.etc_state()["settings"]["cleanup"],
         json!({"enable": false, "frequency": "monthly", "keepSystem": 3, "keepProfiles": 2})

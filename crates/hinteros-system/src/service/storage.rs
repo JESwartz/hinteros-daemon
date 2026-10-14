@@ -185,6 +185,10 @@ impl Service {
                         owners: Vec::new(),
                     }),
                 );
+                let spec = spec.about(system::JobSubject {
+                    keep: Some(p.keep),
+                    ..Default::default()
+                });
                 let id = self.start(spec).await?;
                 info!(job = %id, keep = p.keep, "system clean-up");
                 job_ref(Some(id))
@@ -209,6 +213,10 @@ impl Service {
                             .collect(),
                     }),
                 );
+                let spec = spec.about(system::JobSubject {
+                    keep: Some(p.keep),
+                    ..Default::default()
+                });
                 let id = self.start(spec).await?;
                 info!(job = %id, keep = p.keep, "profiles clean-up");
                 job_ref(Some(id))
@@ -238,6 +246,13 @@ impl Service {
                         ..Default::default()
                     }),
                 );
+                let spec = spec.about(system::JobSubject {
+                    enabled: Some(p.enable),
+                    frequency: Some(p.frequency),
+                    keep_system: Some(p.keep_system),
+                    keep_profiles: Some(p.keep_profiles),
+                    ..Default::default()
+                });
                 let id = self.start(spec).await?;
                 info!(job = %id, ?wanted, "automatic clean-up set");
                 job_ref(Some(id))

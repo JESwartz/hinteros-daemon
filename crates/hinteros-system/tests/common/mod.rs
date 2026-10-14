@@ -378,6 +378,8 @@ build)
   esac
   for a in "$@"; do last="$a"; done
   dir="${last#path:}"; dir="${dir%%#*}"
+  # The plan nix prints before starting (both totals up front).
+  printf '%s\n' '@nix {"action":"msg","level":3,"msg":"these 2 derivations will be built:\n  /nix/store/0c1mfwi4vbb6m2s0q5zk9n7f8f8b8z3v-hinteros-daemon-0.7.1.drv"}' >&2
   echo '@nix {"action":"start","id":1,"level":3,"type":103,"text":""}' >&2
   echo '@nix {"action":"result","id":1,"type":105,"fields":[1,4,0,0]}' >&2
   while [ -e "$FAKE_ROOT/build-hold" ]; do sleep 0.05; done
@@ -386,7 +388,18 @@ build)
     exit 1
   fi
   echo '@nix {"action":"result","id":1,"type":105,"fields":[4,4,0,0]}' >&2
-  echo '@nix {"action":"start","id":2,"level":3,"type":105,"text":"building"}' >&2
+  # Builds: one derivation, its phases, and build log lines while `compile-hold` exists.
+  drv=/nix/store/0c1mfwi4vbb6m2s0q5zk9n7f8f8b8z3v-hinteros-daemon-0.7.1.drv
+  echo '@nix {"action":"start","id":3,"level":0,"type":104,"text":"","fields":[]}' >&2
+  echo '@nix {"action":"result","id":3,"type":105,"fields":[0,2,1,0]}' >&2
+  echo '@nix {"action":"start","id":2,"level":3,"type":105,"text":"building","fields":["'"$drv"'","",1,1]}' >&2
+  echo '@nix {"action":"result","id":2,"type":104,"fields":["buildPhase"]}' >&2
+  while [ -e "$FAKE_ROOT/compile-hold" ]; do
+    echo '@nix {"action":"result","id":2,"type":101,"fields":["   Compiling hinteros-system"]}' >&2
+    sleep 0.2
+  done
+  echo '@nix {"action":"stop","id":2}' >&2
+  echo '@nix {"action":"result","id":3,"type":105,"fields":[2,2,0,0]}' >&2
   n=$(cat "$FAKE_ROOT/counter")
   n=$((n+1)); echo "$n" > "$FAKE_ROOT/counter"
   out="$FAKE_ROOT/store/gen$n"

@@ -82,6 +82,8 @@ impl Runner {
             stage: Stage::Measuring,
             percent: Some(percent),
             detail: None,
+            activity_at: None,
+            subject: None,
         });
     }
 

@@ -897,7 +897,9 @@ trust.
   that is not in front could type into the admin console (Ctrl+Alt+F2) or another session. The
   service freezes `user-<uid>.slice` (systemd `FreezeUnit`) of every profile account (members
   of `hinteros` and the guest; never the admin account, the greeter, root or a system user)
-  whose logind user state is `online` or `lingering` (sessions, none active), and thaws it
+  whose logind user state is `online` or `lingering` (sessions, none active) once it has been
+  `active` since it logged in (or was online when the service started), unless a session is
+  `opening` or `user@<uid>.service` is `activating` (a login waits for both), and thaws it
   (`ThawUnit`) when it is `active` again, `closing` (systemd cannot stop a frozen unit) or
   gone. Every logind signal checks at once (seat0's `ActiveSession` on a VT switch), plus a
   check every 2 s (a restart re-applies it). `PrepareForShutdown` and stopping the service thaw

@@ -153,8 +153,10 @@ pub struct FakeState {
     pub next_job: u32,
     /// logind's `State` per uid (absent: `NoSuchUser`).
     pub user_states: HashMap<u32, String>,
-    /// `FreezerState` per loaded slice (absent: not loaded).
+    /// `FreezerState` per loaded unit (absent: not loaded).
     pub slices: HashMap<String, String>,
+    /// `ActiveState` per unit (absent: `active`).
+    pub active_states: HashMap<String, String>,
     /// `FreezeUnit` / `ThawUnit` calls: (method, unit).
     pub freezer_calls: Vec<(String, String)>,
 }
@@ -249,6 +251,15 @@ impl Unit {
     fn freezer_state(&self) -> String {
         let s = self.0.lock().unwrap();
         s.slices.get(&self.1).cloned().unwrap_or_default()
+    }
+
+    #[zbus(property)]
+    fn active_state(&self) -> String {
+        let s = self.0.lock().unwrap();
+        s.active_states
+            .get(&self.1)
+            .cloned()
+            .unwrap_or_else(|| "active".into())
     }
 }
 
@@ -454,11 +465,12 @@ pub async fn serve_fakes(address: &str, state: Shared) -> zbus::Connection {
             )
             .await
             .unwrap();
-        let slice = format!("user-{uid}.slice");
-        server
-            .at(unit_path(&slice), Unit(state.clone(), slice))
-            .await
-            .unwrap();
+        for unit in [format!("user-{uid}.slice"), format!("user@{uid}.service")] {
+            server
+                .at(unit_path(&unit), Unit(state.clone(), unit))
+                .await
+                .unwrap();
+        }
     }
     server
         .at(

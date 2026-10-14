@@ -8,9 +8,11 @@
 //! never the admin account, the greeter, root or a system user) whose logind user state is
 //! `online` or `lingering` (it has sessions, none of them active: a text console, the picker,
 //! another session is in front) are frozen with systemd's cgroup freezer: `FreezeUnit` on
-//! `user-<uid>.slice` (its sessions and its user manager). They are thawed when one of its
-//! sessions is active again, while it is `closing` (systemd refuses to stop a frozen unit, so an
-//! ending session must run), and when it has no session.
+//! `user-<uid>.slice` (its sessions and its user manager), once it has been in front since it
+//! logged in and while none of its sessions is opening and its user manager is not starting
+//! (a login waits for both: frozen there, it would hang; see [`track`]). They are thawed when
+//! one of its sessions is active again, while it is `closing` (systemd refuses to stop a frozen
+//! unit, so an ending session must run), and when it has no session.
 //!
 //! Every logind signal (seat0's `ActiveSession`, sessions and users coming and going) checks
 //! at once, and a tick every [`TICK`] repairs whatever changed in between (also after a restart
@@ -19,8 +21,9 @@
 //! helper's `end-others` thaws the accounts it ends ([`crate::pam`]). Suspend is systemd's own
 //! business: it freezes and thaws `user.slice`, which leaves a slice frozen here frozen.
 
-use std::sync::Arc;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -44,6 +47,26 @@ const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 /// Whether an account in this logind user state (`None`: logind does not know it) is frozen.
 pub fn wants_frozen(user_state: Option<&str>) -> bool {
     matches!(user_state, Some("online" | "lingering"))
+}
+
+/// Remember which accounts have been in front since they logged in: only those are frozen. An
+/// account that is `online` but was never `active` is still logging in (its user manager and
+/// session start before the session is put in front; frozen there, the login would hang). On
+/// the first check (a restart of the service) an `online` account counts as seen.
+pub fn track(seen: &mut HashSet<u32>, uid: u32, user_state: Option<&str>, first: bool) {
+    match user_state {
+        Some("active") => {
+            seen.insert(uid);
+        }
+        Some("online" | "lingering") => {
+            if first {
+                seen.insert(uid);
+            }
+        }
+        _ => {
+            seen.remove(&uid);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +100,10 @@ struct Inner {
     paths: Paths,
     /// Shutting down: thaw everything, freeze nothing.
     stopping: AtomicBool,
+    /// The accounts that have been in front since they logged in ([`track`]).
+    seen: Mutex<HashSet<u32>>,
+    /// The first check is done.
+    checked: AtomicBool,
 }
 
 impl Freezer {
@@ -86,6 +113,8 @@ impl Freezer {
             users,
             paths,
             stopping: AtomicBool::new(false),
+            seen: Mutex::default(),
+            checked: AtomicBool::new(false),
         });
         info!("freezing the profiles whose session is not the active one");
         let task = tokio::spawn(inner.clone().run());
@@ -190,15 +219,22 @@ impl Inner {
             .and_then(|(s, _)| s.settings.admin.map(|a| a.user));
         let stopping = self.stopping.load(Ordering::SeqCst);
         for (name, uid) in crate::pam::accounts(&self.users, admin.as_deref()) {
-            let user_state = match user_state(&conn, uid).await {
-                Ok(s) => s,
+            let (user, user_state) = match user_state(&conn, uid).await {
+                Ok(Some((path, state))) => (Some(path), Some(state)),
+                Ok(None) => (None, None),
                 Err(e) => {
                     debug!(user = %name, "freezer: cannot ask logind: {e}");
                     continue;
                 }
             };
             let slice = slice(uid);
-            let freezer_state = match freezer_state(&conn, &slice).await {
+            let first = !self.checked.load(Ordering::SeqCst);
+            let seen = {
+                let mut seen = self.seen.lock().unwrap();
+                track(&mut seen, uid, user_state.as_deref(), first);
+                seen.contains(&uid)
+            };
+            let freezer_state = match unit_property(&conn, &slice, "FreezerState").await {
                 Ok(Some(s)) => s,
                 // Not loaded: nothing of it runs.
                 Ok(None) => continue,
@@ -207,7 +243,10 @@ impl Inner {
                     continue;
                 }
             };
-            let want = !stopping && wants_frozen(user_state.as_deref());
+            let mut want = !stopping && seen && wants_frozen(user_state.as_deref());
+            if want && let Some(user) = &user {
+                want = !logging_in(&conn, uid, user).await;
+            }
             let Some(action) = act(want, &freezer_state) else {
                 continue;
             };
@@ -226,6 +265,7 @@ impl Inner {
                 Err(_) => warn!(user = %name, "{method} {slice}: no answer"),
             }
         }
+        self.checked.store(true, Ordering::SeqCst);
     }
 }
 
@@ -253,8 +293,11 @@ pub async fn thaw(conn: &zbus::Connection, uid: u32) {
     }
 }
 
-/// logind's `State` of the user (`None`: logind does not know it, e.g. `NoSuchUser`).
-async fn user_state(conn: &zbus::Connection, uid: u32) -> zbus::Result<Option<String>> {
+/// logind's user object and `State` (`None`: logind does not know it, e.g. `NoSuchUser`).
+async fn user_state(
+    conn: &zbus::Connection,
+    uid: u32,
+) -> zbus::Result<Option<(OwnedObjectPath, String)>> {
     let path = match conn
         .call_method(
             Some(LOGIND),
@@ -269,13 +312,57 @@ async fn user_state(conn: &zbus::Connection, uid: u32) -> zbus::Result<Option<St
         Err(zbus::Error::MethodError(..)) => return Ok(None),
         Err(e) => return Err(e),
     };
-    property(conn, LOGIND, &path, "org.freedesktop.login1.User", "State")
-        .await
-        .map(Some)
+    let state = property(conn, LOGIND, &path, "org.freedesktop.login1.User", "State").await?;
+    Ok(Some((path, state)))
 }
 
-/// systemd's `FreezerState` of a loaded unit (`None`: not loaded).
-async fn freezer_state(conn: &zbus::Connection, unit: &str) -> zbus::Result<Option<String>> {
+/// Whether the account is still logging in: a session `opening`, or its user manager
+/// (`user@<uid>.service`) starting. A login waits for both; frozen, it would never finish.
+async fn logging_in(conn: &zbus::Connection, uid: u32, user: &OwnedObjectPath) -> bool {
+    let manager = unit_property(conn, &format!("user@{uid}.service"), "ActiveState").await;
+    if manager.is_ok_and(|m| m.as_deref() == Some("activating")) {
+        return true;
+    }
+    let sessions: Vec<(String, OwnedObjectPath)> = match conn
+        .call_method(
+            Some(LOGIND),
+            user.as_str(),
+            Some(PROPERTIES),
+            "Get",
+            &("org.freedesktop.login1.User", "Sessions"),
+        )
+        .await
+        .and_then(|r| r.body().deserialize::<OwnedValue>())
+        .and_then(|v| Vec::try_from(v).map_err(Into::into))
+    {
+        Ok(s) => s,
+        Err(e) => {
+            debug!(uid, "freezer: no sessions: {e}");
+            return false;
+        }
+    };
+    for (_, path) in sessions {
+        let state = property(
+            conn,
+            LOGIND,
+            &path,
+            "org.freedesktop.login1.Session",
+            "State",
+        )
+        .await;
+        if state.as_deref() == Ok("opening") {
+            return true;
+        }
+    }
+    false
+}
+
+/// A property of a loaded systemd unit (`None`: not loaded).
+async fn unit_property(
+    conn: &zbus::Connection,
+    unit: &str,
+    name: &str,
+) -> zbus::Result<Option<String>> {
     let path = match conn
         .call_method(
             Some(SYSTEMD),
@@ -290,15 +377,9 @@ async fn freezer_state(conn: &zbus::Connection, unit: &str) -> zbus::Result<Opti
         Err(zbus::Error::MethodError(..)) => return Ok(None),
         Err(e) => return Err(e),
     };
-    property(
-        conn,
-        SYSTEMD,
-        &path,
-        "org.freedesktop.systemd1.Unit",
-        "FreezerState",
-    )
-    .await
-    .map(Some)
+    property(conn, SYSTEMD, &path, "org.freedesktop.systemd1.Unit", name)
+        .await
+        .map(Some)
 }
 
 async fn property(
@@ -333,6 +414,26 @@ mod tests {
         for s in [Some("active"), Some("closing"), Some("offline"), None] {
             assert!(!wants_frozen(s), "{s:?}");
         }
+    }
+
+    #[test]
+    fn only_an_account_that_was_in_front_is_frozen() {
+        let mut seen = HashSet::new();
+        // Logging in: online before it is ever active.
+        track(&mut seen, 7, Some("online"), false);
+        assert!(!seen.contains(&7));
+        track(&mut seen, 7, Some("active"), false);
+        track(&mut seen, 7, Some("online"), false);
+        assert!(seen.contains(&7));
+        // Ended: forgotten, the next login starts over.
+        track(&mut seen, 7, Some("closing"), false);
+        assert!(!seen.contains(&7));
+        track(&mut seen, 7, None, false);
+        track(&mut seen, 7, Some("online"), false);
+        assert!(!seen.contains(&7));
+        // A restart of the service: an online account was in front before.
+        track(&mut seen, 8, Some("online"), true);
+        assert!(seen.contains(&8));
     }
 
     #[test]

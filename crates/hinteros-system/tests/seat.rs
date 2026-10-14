@@ -112,10 +112,34 @@ async fn inactive_profiles_are_frozen_and_thawed() {
         return;
     };
     let (p1, p2, guest) = (me(), 20002, 20000);
-    // p1 in front, p2 with a session on another VT, the guest not logged in.
+    // p1 in front; p2 logging in (online, never active yet, its user manager starting): a login
+    // waits for both, so p2 is not frozen.
     set_user(&sys, p1, Some("active"), Some("running"));
     set_user(&sys, p2, Some("online"), Some("running"));
     set_user(&sys, guest, None, None);
+    sys.fakes
+        .lock()
+        .unwrap()
+        .slices
+        .insert(format!("user@{p2}.service"), "running".into());
+    sys.fakes
+        .lock()
+        .unwrap()
+        .active_states
+        .insert(format!("user@{p2}.service"), "activating".into());
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    assert_eq!(slice_state(&sys, p2), "running");
+    // In front once, then another VT: frozen. (Its user manager still starting: not yet.)
+    set_user(&sys, p2, Some("active"), None);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    set_user(&sys, p2, Some("online"), None);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert_eq!(slice_state(&sys, p2), "running");
+    sys.fakes
+        .lock()
+        .unwrap()
+        .active_states
+        .insert(format!("user@{p2}.service"), "active".into());
     eventually("p2 frozen", || slice_state(&sys, p2) == "frozen").await;
     assert_eq!(slice_state(&sys, p1), "running");
 
@@ -131,6 +155,9 @@ async fn inactive_profiles_are_frozen_and_thawed() {
     })
     .await;
 
+    // p2 logs in again and is in front, then not.
+    set_user(&sys, p2, Some("active"), None);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     // Frozen by user.slice during suspend: made ours, so the resume leaves it frozen.
     set_user(&sys, p2, Some("online"), Some("frozen-by-parent"));
     eventually("p2 frozen by us", || slice_state(&sys, p2) == "frozen").await;

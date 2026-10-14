@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 16);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 17);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -1495,6 +1495,10 @@ pub struct GreeterResultParams {
     /// The PIN backoff: wait this long.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locked_seconds: Option<u32>,
+    /// 0.17: the admin profile's PIN is refused until the box restarts (10 wrong tries this
+    /// boot).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reboot_required: bool,
 }
 
 pub struct GreeterResult;

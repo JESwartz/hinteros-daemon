@@ -50,6 +50,9 @@ pub enum Command {
         /// it, or without a usable framebuffer, the splash is console text
         #[arg(long)]
         font: Option<PathBuf>,
+        /// journald's native socket (the audit entry when the admin PIN locks)
+        #[arg(long, default_value = crate::pam::JOURNAL_SOCKET)]
+        journal_socket: PathBuf,
     },
     /// The framebuffer splash's painter (started by `pin splash`, not by hand)
     #[command(hide = true)]

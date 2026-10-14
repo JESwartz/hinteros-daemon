@@ -5,7 +5,8 @@
 //! - `unlocked`: 0 when the user may enter without a PIN (an unlocked profile, a profile without
 //!   a PIN yet, the guest, a valid one-time token, a spare while no admin profile exists).
 //! - `verify`: the PIN from stdin, with the shared backoff. Wrong: `hinteros:wrong`; locked:
-//!   `hinteros:locked:<seconds>`.
+//!   `hinteros:locked:<seconds>`. The admin profile's PIN after its wrong tries this boot
+//!   ([`pins::ADMIN_TRIES`]): `hinteros:reboot` (audited when this try starts it).
 //! - `end-others`: ends every other `hinteros` account's processes before a session opens.
 //! - `splash`: paints "Loading <name>…" on the session's VT (`PAM_TTY`) during the handover, on
 //!   the framebuffer in the launcher's typeface (`--font`) or as console text (see
@@ -38,7 +39,12 @@ pub struct Ctx {
     pub paths: Paths,
     pub users: Users,
     pub bus: Option<String>,
+    /// The audit entry when the admin PIN locks.
+    pub journal_socket: PathBuf,
 }
+
+/// journald's native socket.
+pub const JOURNAL_SOCKET: &str = "/run/systemd/journal/socket";
 
 impl Ctx {
     fn state(&self) -> Option<State> {
@@ -89,7 +95,7 @@ pub fn verify(ctx: &Ctx, user: &str, pin: &str, now: i64) -> (bool, Option<Strin
     else {
         return (false, None);
     };
-    // The admin profile's PIN has no backoff (DECISIONS J4).
+    // The admin profile's PIN has no backoff (DECISIONS J4), but ten tries a boot.
     let backoff = !file.admin(&state).is_some_and(|(a, _)| a.id == account.id);
     match Pins::new(ctx.paths.pins_dir()).verify_with(&account.id, pin, now, backoff) {
         Ok(Verify::Ok) => (true, None),
@@ -100,6 +106,16 @@ pub fn verify(ctx: &Ctx, user: &str, pin: &str, now: i64) -> (bool, Option<Strin
         }
         Ok(Verify::Wrong { .. }) => (false, Some("hinteros:wrong".into())),
         Ok(Verify::Locked { seconds }) => (false, Some(format!("hinteros:locked:{seconds}"))),
+        Ok(Verify::RestartRequired { started }) => {
+            if started {
+                crate::audit::Audit::new(ctx.journal_socket.clone()).admin_pin_lockout(
+                    &account.id,
+                    "greeter",
+                    None,
+                );
+            }
+            (false, Some("hinteros:reboot".into()))
+        }
         Ok(Verify::NoPin) => (false, None),
         Err(e) => {
             warn!("pin check: {e}");
@@ -441,6 +457,7 @@ mod tests {
             ),
             users,
             bus: None,
+            journal_socket: root.join("journal.sock"),
         }
     }
 
@@ -518,8 +535,7 @@ mod tests {
         );
         assert_eq!(verify(&c, "hinteros-p2", "2468", 12), (true, None));
         assert_eq!(verify(&c, "hinteros-p3", "2468", 12), (false, None));
-        // The admin profile (p1): no backoff, however many wrong tries; a stale wait from
-        // before is ignored.
+        // The admin profile (p1): no backoff wait; a stale wait from before is ignored.
         pins.set("p1", "1357").unwrap();
         for _ in 0..8 {
             let _ = pins.verify("p1", "0000", 12);
@@ -532,6 +548,21 @@ mod tests {
         }
         assert_eq!(verify(&c, "hinteros", "1357", 12), (true, None));
         assert_eq!(verify(&c, "admin", "2468", 12), (false, None));
+        // Ten wrong tries this boot: refused until a restart, even the right PIN.
+        for _ in 0..pins::ADMIN_TRIES - 1 {
+            assert_eq!(
+                verify(&c, "hinteros", "0000", 12),
+                (false, Some("hinteros:wrong".into()))
+            );
+        }
+        for pin in ["0000", "1357"] {
+            assert_eq!(
+                verify(&c, "hinteros", pin, 12),
+                (false, Some("hinteros:reboot".into()))
+            );
+        }
+        // Other profiles keep their own backoff.
+        assert_eq!(verify(&c, "hinteros-p2", "2468", 12), (true, None));
 
         // end-others: the other members and the guest, never the admin account or system users.
         let o: Vec<String> = others(&c, "hinteros-p2")

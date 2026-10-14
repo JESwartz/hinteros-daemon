@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.8",
+  "version": "0.9",
   "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -36,16 +36,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.8", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.8", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "0.9", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "0.9", "server": { "name": "hinteros-system", "version": "0.1.0" } }
         },
         {
           "name": "mismatch",
           "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 0.1, server 0.8",
-            "data": { "client_api_version": "0.1", "server_api_version": "0.8" }
+            "message": "API version mismatch: client 0.1, server 0.9",
+            "data": { "client_api_version": "0.1", "server_api_version": "0.9" }
           }
         }
       ]
@@ -319,6 +319,7 @@
       "examples": [
         { "name": "previous", "params": { "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
         { "name": "wrong admin PIN", "params": { "admin_pin": "1111" }, "error": { "code": 3016, "message": "that PIN didn't match", "data": { "pin": "admin" } } },
+        { "name": "admin PIN refused until a reboot", "params": { "admin_pin": "2468" }, "error": { "code": 3016, "message": "too many wrong PINs: restart the box", "data": { "pin": "admin", "reboot_required": true } } },
         { "name": "unknown generation", "params": { "generation": 7 }, "error": { "code": 3010, "message": "generation 7 is not on disk" } }
       ]
     },
@@ -1308,7 +1309,7 @@
     },
     "profiles.switch": {
       "summary": "Choose the next profile (0.4): writes the switch hint the greeter reads. A locked target needs its PIN here, before the caller's session closes anything.",
-      "description": "id is a profile id or guest. A locked profile (with a PIN) other than the caller's own needs pin = the target's PIN: wrong or missing is pin_required {pin: target, retry_after_ms?} and nothing is written; right, the hint carries a one-time token for the target (single use, bound to its user, valid 60 s), so the greeter enters it without any UI. The same caller may call again without pin while its token is live to extend hint and token by 60 s (a switch waiting for apps to close). The admin profile's PIN has no backoff. For the caller's own id it issues a one-time resume token (session.restart). Unlocked profiles and the guest need no PIN. The session daemon then ends the session (session.switch_profile).",
+      "description": "id is a profile id or guest. A locked profile (with a PIN) other than the caller's own needs pin = the target's PIN: wrong or missing is pin_required {pin: target, retry_after_ms?} and nothing is written; right, the hint carries a one-time token for the target (single use, bound to its user, valid 60 s), so the greeter enters it without any UI. The same caller may call again without pin while its token is live to extend hint and token by 60 s (a switch waiting for apps to close). The admin profile's PIN has no backoff wait, but 10 wrong tries a boot (then reboot_required). For the caller's own id it issues a one-time resume token (session.restart). Unlocked profiles and the guest need no PIN. The session daemon then ends the session (session.switch_profile).",
       "since": "0.4",
       "params": {
         "type": "object",
@@ -2509,12 +2510,12 @@
     "pin_required": {
       "code": 3016,
       "since": "0.4",
-      "summary": "A PIN is missing or wrong: the caller's own (self), the admin profile's (admin) or the profile being entered (target). retry_after_ms while the backoff lock is on (3 free failures, then 1 s doubling to 5 min, per profile).",
+      "summary": "A PIN is missing or wrong: the caller's own (self), the admin profile's (admin) or the profile being entered (target). retry_after_ms while the backoff lock is on (3 free failures, then 1 s doubling to 5 min, per profile). The admin profile's PIN has no wait but 10 wrong tries a boot (counted from every path, the greeter's included): after them every check of it, also with the right PIN, is refused with reboot_required: true until the box restarts (since 0.9; a new PIN, the admin password's profiles.reset_pin or root's reset-pin clears it).",
       "data": {
         "type": "object",
         "required": ["pin"],
         "additionalProperties": false,
-        "properties": { "pin": { "enum": ["self", "admin", "target"] }, "retry_after_ms": { "type": "integer", "minimum": 0 } }
+        "properties": { "pin": { "enum": ["self", "admin", "target"] }, "retry_after_ms": { "type": "integer", "minimum": 0 }, "reboot_required": { "type": "boolean" } }
       }
     },
     "terms_required": {

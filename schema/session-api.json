@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.16",
+  "version": "0.17",
   "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). Responses to system.*, auth.*, store.list and session.restart may arrive out of order relative to other calls on the same connection (match them by id): a relayed call can wait minutes for an admin password. See hinteros-docs/design/api.md for the protocol rules.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -37,16 +37,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.16", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
-          "result": { "api_version": "0.16", "server": { "name": "hinteros-session", "version": "0.1.0" } }
+          "params": { "api_version": "0.17", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
+          "result": { "api_version": "0.17", "server": { "name": "hinteros-session", "version": "0.1.0" } }
         },
         {
           "name": "major mismatch",
           "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 1.0, server 0.16",
-            "data": { "client_api_version": "1.0", "server_api_version": "0.16" }
+            "message": "API version mismatch: client 1.0, server 0.17",
+            "data": { "client_api_version": "1.0", "server_api_version": "0.17" }
           }
         }
       ]
@@ -2268,7 +2268,7 @@
     },
     "system.profiles.switch": {
       "summary": "Relayed to the system service's profiles.switch. Choose the next profile (0.4): writes the switch hint the greeter reads. A locked target needs its PIN here, before the caller's session closes anything.",
-      "description": "id is a profile id or guest. A locked profile (with a PIN) other than the caller's own needs pin = the target's PIN: wrong or missing is pin_required {pin: target, retry_after_ms?} and nothing is written; right, the hint carries a one-time token for the target (single use, bound to its user, valid 60 s), so the greeter enters it without any UI. The same caller may call again without pin while its token is live to extend hint and token by 60 s (a switch waiting for apps to close). The admin profile's PIN has no backoff. For the caller's own id it issues a one-time resume token (session.restart). Unlocked profiles and the guest need no PIN. The session daemon then ends the session (session.switch_profile).",
+      "description": "id is a profile id or guest. A locked profile (with a PIN) other than the caller's own needs pin = the target's PIN: wrong or missing is pin_required {pin: target, retry_after_ms?} and nothing is written; right, the hint carries a one-time token for the target (single use, bound to its user, valid 60 s), so the greeter enters it without any UI. The same caller may call again without pin while its token is live to extend hint and token by 60 s (a switch waiting for apps to close). The admin profile's PIN has no backoff wait, but 10 wrong tries a boot (then reboot_required). For the caller's own id it issues a one-time resume token (session.restart). Unlocked profiles and the guest need no PIN. The session daemon then ends the session (session.switch_profile).",
       "since": "0.12",
       "params": {
         "type": "object",
@@ -4982,7 +4982,7 @@
       ]
     },
     "greeter_result": {
-      "summary": "Greeter mode: the login ended: ok (the session starts, the greeter goes away) or not (wrong PIN; locked_seconds during the backoff: 'Too many tries. Try again in N seconds').",
+      "summary": "Greeter mode: the login ended: ok (the session starts, the greeter goes away) or not (wrong PIN; locked_seconds during the backoff: 'Too many tries. Try again in N seconds'). 0.17: reboot_required: true when the admin profile's PIN is refused until the box restarts (10 wrong tries this boot).",
       "since": "0.12",
       "params": {
         "type": "object",
@@ -4997,6 +4997,9 @@
           "locked_seconds": {
             "type": "integer",
             "minimum": 0
+          },
+          "reboot_required": {
+            "type": "boolean"
           }
         }
       },
@@ -5012,6 +5015,13 @@
           "params": {
             "ok": false,
             "locked_seconds": 30
+          }
+        },
+        {
+          "name": "admin PIN refused until a reboot",
+          "params": {
+            "ok": false,
+            "reboot_required": true
           }
         }
       ]
@@ -5307,12 +5317,12 @@
     "pin_required": {
       "code": 3016,
       "since": "0.12",
-      "summary": "A PIN is missing or wrong: the caller's own (self), the admin profile's (admin) or the profile being entered (target). retry_after_ms while the backoff lock is on (3 free failures, then 1 s doubling to 5 min, per profile).",
+      "summary": "A PIN is missing or wrong: the caller's own (self), the admin profile's (admin) or the profile being entered (target). retry_after_ms while the backoff lock is on (3 free failures, then 1 s doubling to 5 min, per profile). The admin profile's PIN has no wait but 10 wrong tries a boot (counted from every path, the greeter's included): after them every check of it, also with the right PIN, is refused with reboot_required: true until the box restarts (since 0.17; a new PIN, the admin password's profiles.reset_pin or root's reset-pin clears it).",
       "data": {
         "type": "object",
         "required": ["pin"],
         "additionalProperties": false,
-        "properties": { "pin": { "enum": ["self", "admin", "target"] }, "retry_after_ms": { "type": "integer", "minimum": 0 } }
+        "properties": { "pin": { "enum": ["self", "admin", "target"] }, "retry_after_ms": { "type": "integer", "minimum": 0 }, "reboot_required": { "type": "boolean" } }
       }
     },
     "terms_required": {

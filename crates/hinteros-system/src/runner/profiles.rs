@@ -63,6 +63,7 @@ impl Runner {
                 paths: paths.clone(),
                 users: paths.users.clone(),
                 bus: self.spec.bus.clone(),
+                journal_socket: pam::JOURNAL_SOCKET.into(),
             };
             pam::end_uid(&ctx, &j.user, uid, &paths.proc_dir);
         }
@@ -149,6 +150,7 @@ impl Runner {
             paths: paths.clone(),
             users: paths.users.clone(),
             bus: self.spec.bus.clone(),
+            journal_socket: pam::JOURNAL_SOCKET.into(),
         };
         for attempt in 0..3 {
             if pam::processes_of(&paths.proc_dir, j.uid).is_empty() {

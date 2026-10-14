@@ -170,6 +170,26 @@ impl Audit {
         );
     }
 
+    /// The admin profile's PIN is refused until the box restarts: its last wrong try this boot,
+    /// from `method` (a system.sock method, or `greeter` for the PAM helper) by `uid` (when
+    /// known). Never a PIN.
+    pub fn admin_pin_lockout(&self, id: &str, method: &str, uid: Option<u32>) {
+        self.send(
+            &format!(
+                "{method}{}: {} wrong admin PINs; the admin PIN is refused until the box restarts",
+                uid.map(|u| format!(" by uid {u}")).unwrap_or_default(),
+                crate::pins::ADMIN_TRIES
+            ),
+            &[
+                ("UID", uid.map(|u| u.to_string()).unwrap_or_default()),
+                ("METHOD", method.to_owned()),
+                ("PROFILE", id.to_owned()),
+                ("PIN_CHECK", "admin".into()),
+                ("PIN_OUTCOME", "lockout_started".into()),
+            ],
+        );
+    }
+
     /// `hinteros-system reset-pin` (root, from a terminal): which profile's PIN was removed.
     pub fn pin_reset_by_root(&self, id: &str, had_pin: bool, sudo_user: Option<&str>) {
         self.send(

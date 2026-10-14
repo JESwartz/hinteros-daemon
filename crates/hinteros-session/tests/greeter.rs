@@ -15,7 +15,7 @@ use common::*;
 type Log = Arc<Mutex<Vec<Value>>>;
 
 /// A fake greetd: `hinteros` enters without a PIN, `hinteros-p3` needs 1357 (a wrong one gives
-/// the helper's lock message, then an auth error).
+/// the helper's lock message, then an auth error; 9999 the admin PIN's reboot message).
 fn fake_greetd(path: &Path) -> Log {
     let listener = UnixListener::bind(path).unwrap();
     let log: Log = Arc::default();
@@ -44,6 +44,9 @@ fn fake_greetd(path: &Path) -> Log {
                         }
                         "post_auth_message_response" => match req["response"].as_str() {
                             Some("1357") => json!({"type": "success"}),
+                            Some("9999") => {
+                                json!({"type": "auth_message", "auth_message_type": "info", "auth_message": "hinteros:reboot"})
+                            }
                             Some(_) => {
                                 json!({"type": "auth_message", "auth_message_type": "info", "auth_message": "hinteros:locked:30"})
                             }
@@ -167,6 +170,18 @@ async fn picker_logs_in_through_greetd() {
     assert_eq!(
         event_named(&mut c, "greeter_result").await,
         json!({"ok": false, "locked_seconds": 30})
+    );
+    // The admin PIN refused until the box restarts.
+    call(&mut c, "greeter.login", json!({"id": "p3"}))
+        .await
+        .unwrap();
+    event_named(&mut c, "greeter_prompt").await;
+    call(&mut c, "greeter.pin", json!({"pin": "9999"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        event_named(&mut c, "greeter_result").await,
+        json!({"ok": false, "reboot_required": true})
     );
     call(&mut c, "greeter.login", json!({"id": "p3"}))
         .await

@@ -64,6 +64,7 @@ fn main() -> ExitCode {
             dirs,
             bus,
             font,
+            journal_socket,
         }) => {
             let paths = dirs.paths();
             hinteros_system::pam::main(
@@ -72,6 +73,7 @@ fn main() -> ExitCode {
                     users: paths.users.clone(),
                     paths,
                     bus,
+                    journal_socket,
                 },
                 font.as_deref(),
             )

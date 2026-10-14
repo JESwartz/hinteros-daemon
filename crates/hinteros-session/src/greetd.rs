@@ -80,6 +80,12 @@ impl Greetd {
     }
 }
 
+/// `hinteros:reboot` from the PAM helper: the admin profile's PIN is refused until the box
+/// restarts.
+pub fn reboot_required(message: &str) -> bool {
+    message.lines().any(|l| l.trim() == "hinteros:reboot")
+}
+
 /// `hinteros:locked:<seconds>` from the PAM helper's info message.
 pub fn locked_seconds(message: &str) -> Option<u32> {
     message
@@ -121,5 +127,9 @@ mod tests {
         assert_eq!(locked_seconds("hinteros:locked:30"), Some(30));
         assert_eq!(locked_seconds("x\nhinteros:locked:4\n"), Some(4));
         assert_eq!(locked_seconds("hinteros:wrong"), None);
+        assert!(reboot_required("hinteros:reboot"));
+        assert!(reboot_required("x\nhinteros:reboot\n"));
+        assert!(!reboot_required("hinteros:wrong"));
+        assert_eq!(locked_seconds("hinteros:reboot"), None);
     }
 }

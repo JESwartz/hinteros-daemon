@@ -862,6 +862,117 @@ async fn reset_pin_from_the_terminal() {
     .unwrap();
 }
 
+/// The admin PIN has no wait but ten wrong tries a boot (owner): the API and the PAM helper
+/// share the count; the tenth refuses every later check, the right PIN's too, with
+/// `reboot_required` (audited once); other profiles keep their backoff; `reset-pin` ends it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_admin_pin_locks_until_a_reboot() {
+    let Some(sys) = System::start(root_with(Some(PROFILES)), &[]).await else {
+        return;
+    };
+    let root = &sys.root;
+    settled(&sys).await;
+    let mut c = sys.client().await;
+    let pins = hinteros_system::pins::Pins::new(root.p("var/lib/hinteros/pins"));
+    let wrong = || json!({"admin_pin": "1111"});
+    for _ in 0..8 {
+        let e = call(&mut c, "rollback", wrong()).await.unwrap_err();
+        assert_eq!(e["data"], json!({"pin": "admin"}), "{e}");
+    }
+    // The ninth from the greeter (the PAM helper), the tenth from the API.
+    let pam_verify = |pin: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_hinteros-system"))
+            .args(["pin", "verify", "--state-dir"])
+            .arg(root.p("var/lib/hinteros"))
+            .arg("--run-dir")
+            .arg(root.p("run"))
+            .arg("--config-dir")
+            .arg(root.p("etc/hinteros"))
+            .arg("--passwd-file")
+            .arg(root.p("passwd"))
+            .arg("--group-file")
+            .arg(root.p("group"))
+            .arg("--journal-socket")
+            .arg(root.p("no-journal.sock"))
+            .env_clear()
+            .env("PAM_USER", "hinteros")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(format!("{pin}\0").as_bytes()).unwrap();
+        drop(stdin);
+        String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
+    };
+    assert_eq!(pam_verify("0000"), "hinteros:wrong\n");
+    assert_eq!(pins.admin_tries("p1"), 9);
+    let e = call(&mut c, "rollback", wrong()).await.unwrap_err();
+    assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{e}");
+    assert_eq!(e["data"], json!({"pin": "admin", "reboot_required": true}));
+    // Now even the right PIN, on every path and for every admin check.
+    let e = call(&mut c, "rollback", json!({"admin_pin": ADMIN_PIN}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["data"], json!({"pin": "admin", "reboot_required": true}));
+    let e = call(
+        &mut c,
+        "profiles.set_locked",
+        json!({"locked": true, "pin": ADMIN_PIN}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["data"], json!({"pin": "self", "reboot_required": true}));
+    assert_eq!(pam_verify(ADMIN_PIN), "hinteros:reboot\n");
+    // Audited once, when it started; never a PIN.
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    let started = loop {
+        let n = sys
+            .audit()
+            .iter()
+            .filter(|e| {
+                e.get("HINTEROS_PIN_OUTCOME").map(String::as_str) == Some("lockout_started")
+            })
+            .count();
+        if n > 0 || std::time::Instant::now() > deadline {
+            break n;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(started, 1);
+    for entry in &sys.audit() {
+        assert!(
+            !entry.values().any(|v| shows_pin(v, ADMIN_PIN)),
+            "{entry:?}"
+        );
+    }
+    // reset-pin (root) removes the PIN and the count: in without a PIN, then a new one.
+    let paths = hinteros_system::pam::paths(
+        root.p("var/lib/hinteros"),
+        root.p("run"),
+        root.p("etc/hinteros"),
+        hinteros_system::users::Users {
+            passwd: Some(root.p("passwd")),
+            group: Some(root.p("group")),
+        },
+    );
+    let audit = hinteros_system::audit::Audit::new(root.p("journal.sock"));
+    hinteros_system::resetpin::reset(&paths, "p1", &audit, None, 0).unwrap();
+    assert_eq!(pins.admin_tries("p1"), 0);
+    call(&mut c, "profiles.set_pin", json!({"pin": "8642"}))
+        .await
+        .unwrap();
+    call(
+        &mut c,
+        "profiles.set_locked",
+        json!({"locked": true, "pin": "8642"}),
+    )
+    .await
+    .unwrap();
+}
+
 /// Rollback, channel and base switches, hardware re-detect and installing a system update
 /// (update.apply) need the admin profile's PIN
 /// (system API 0.5): missing or wrong is `pin_required {pin: admin}` before anything else

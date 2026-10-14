@@ -799,7 +799,7 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.8 (0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.9 (0.9: the admin PIN is refused until a reboot after 10 wrong tries, `pin_required {reboot_required}`, see "Profiles, PINs, greeter" below; 0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
 box-wide actions, `guest.end`, rollback re-adds box features; see "Profiles and per-profile apps" below)
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
@@ -1265,8 +1265,14 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
 
 - `profiles.json` (`profiles.rs`), PINs (`pins.rs`: argon2id PHC strings in `pins/<id>`, backoff
   in `pins/<id>.state` under `flock`, 3 free failures then 1 s doubling to 5 min, the lock counted
-  from when the hash check ended; **none for the admin profile's PIN**: wrong is only wrong, and a
-  stale wait file of the admin is ignored and cleared at service start), the public view `/run/hinteros/profiles-public.json` (0644) and
+  from when the hash check ended; **no wait for the admin profile's PIN**, and a stale wait file of
+  the admin is ignored and cleared at service start; instead **10 wrong admin-PIN tries a boot**
+  (owner): `pins/<id>.tries` = `{boot_id, failures}` (the kernel's
+  `/proc/sys/kernel/random/boot_id`, 0600, same `flock`), counted from every path (system.sock
+  and the PAM helper) before the hash check, so tries at the same time never pass the limit; after
+  the tenth, every check of the admin PIN, the right one too, is refused until the boot id changes
+  (a reboot; a service restart keeps it). A right PIN before that, a new PIN and `reset-pin` reset
+  the count; the try that starts the lock is audited (`HINTEROS_PIN_OUTCOME=lockout_started`)), the public view `/run/hinteros/profiles-public.json` (0644) and
   the switch hint with one-time tokens `/run/hinteros/switch.json` (0600) (`public.rs`),
   `runtime.json` → `/run/hinteros/gamescope-modes` and `audio-output`, `usage.json`
   (`hinteros-system usage`, started over D-Bus when `profiles.list` sees data older than an hour).
@@ -1274,7 +1280,8 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   set_pin/set_locked/reset_pin/remove/switch/switch_cancel/unlock`, `guest.set`, `starter_set.get/set`,
   `display.save_mode`, `audio.save_output`; event `profiles_changed`. Which PIN each checks:
   own changes `self`, anything on another profile or the box `admin`; a profile without a PIN yet
-  passes. `pin_required` (3016) names it, with `retry_after_ms` during the lock; the audit has
+  passes. `pin_required` (3016) names it, with `retry_after_ms` during the lock and (0.9)
+  `reboot_required: true` while the admin PIN is refused until a reboot; the audit has
   `HINTEROS_PIN_CHECK`/`_PIN_OUTCOME` and every PIN field is `***` in `HINTEROS_PARAMS`.
   `profiles.create`/`remove`/`guest.set`/`starter_set.set` are jobs (`profiles_create`,
   `profiles_remove`, `guest_set`, `starter_set`); a create writes metadata, PIN hash and the
@@ -1301,7 +1308,8 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   `subscribe`, `settings.get`, `jobs.get`, `profiles.create` (a create from it grants the new
   account a token).
 - `hinteros-system pin unlocked|verify|end-others|splash` (`pam.rs`): the PAM helper (`PAM_USER`;
-  the PIN on stdin; prints only `hinteros:wrong` / `hinteros:locked:<s>`). `splash`
+  the PIN on stdin; prints only `hinteros:wrong` / `hinteros:locked:<s>` / `hinteros:reboot`, which
+  the session daemon passes on as `greeter_result {reboot_required: true}`, session API 0.17). `splash`
   (`splash.rs`) paints the session's VT (`PAM_TTY`, only `/dev/ttyN`/`ttyN`, opened without
   following links and checked to be a VT) during greetd's handover: console escape sequences only
   (palette background/foreground = the launcher's `#0E1118`/`#F4F6FB`, clear, cursor hidden) and
@@ -1580,6 +1588,32 @@ standard_offset_seconds}]}`; `system.time_zone.set {zone, admin_pin?}` → the n
 `time_zone_changed` (a `TimeZoneInfo`): subscribe to it. The clock shows UTC plus
 `offset_seconds` and gets the zone again at `offset_valid_until` and on `time_zone_changed`.
 
+## Admin PIN limit (system API 0.9, session API 0.17)
+
+The admin profile's PIN has no wait (DECISIONS J4), so without a limit any process on the box
+could try every 4-digit PIN through system.sock in hours. The owner's rule: "After 10 failed
+attempts require that the box needs to be restarted before it can be attempted again."
+
+- Every check of the admin profile's PIN counts: `admin_pin` of the box-wide actions, `pin`
+  where an admin method asks for it (`pin: admin`), the admin profile's own changes (`pin: self`),
+  a switch to it (`pin: target`) and the greeter (PAM helper). The count is per boot
+  (`pins/<id>.tries`, see "Profiles, PINs, greeter" above), so restarting `hinteros-system` does
+  not reset it; a reboot does.
+- The tenth wrong try and every check after it, also with the right PIN: `pin_required {pin,
+  reboot_required: true}` (message "too many wrong PINs: restart the box"); the PAM helper prints
+  `hinteros:reboot` and the greeter gets `greeter_result {ok: false, reboot_required: true}`.
+  The try that starts it is audited (`HINTEROS_PIN_OUTCOME=lockout_started`, the profile, the
+  method or `greeter`, the uid).
+- Recovery without a reboot: `sudo hinteros-system reset-pin <admin>` (root) or
+  `profiles.reset_pin` on the admin profile (polkit `profiles.recover`: the admin account's
+  password); both set or remove the PIN, which resets the count. A missing PIN is not a try.
+
+### What the launcher must do (session API 0.17)
+
+Hello with `0.17`. On `pin_required` with `reboot_required: true`, and on `greeter_result` with
+`reboot_required: true`, show that the box must restart (no retry countdown) and take no more
+PIN input on that pad.
+
 ## Development
 
 ```sh
@@ -1593,7 +1627,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.16","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.17","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

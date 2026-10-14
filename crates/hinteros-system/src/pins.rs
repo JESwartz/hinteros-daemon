@@ -3,6 +3,13 @@
 //! (`{failures, locked_until}`), shared by the service and the PAM helper under an `flock` on
 //! the state file. The first 3 failures are free, then 1 s, 2 s, 4 s … up to 5 min; a success
 //! resets it. A PIN never reaches a log or a file in plaintext.
+//!
+//! The admin profile's PIN has no wait (DECISIONS J4) but a limit per boot (owner: "After 10
+//! failed attempts require that the box needs to be restarted before it can be attempted
+//! again"): `pins/<id>.tries` (`{boot_id, failures}`, the kernel's boot id) counts wrong tries
+//! from every path; after [`ADMIN_TRIES`] every check is refused, also the right PIN, until the
+//! boot id changes. A service restart keeps the count; a right PIN before the limit, a new PIN
+//! ([`Pins::set_hash`]) and `reset-pin` ([`Pins::clear`]) reset it.
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -21,6 +28,10 @@ use crate::fsutil;
 pub const FREE_FAILURES: u32 = 3;
 /// Longest wait.
 pub const MAX_LOCK_S: i64 = 300;
+/// Wrong admin-PIN tries a boot.
+pub const ADMIN_TRIES: u32 = 10;
+/// The kernel's id of this boot (a new one at every boot).
+pub const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 
 /// `^[0-9]{4,8}$`.
 pub fn is_pin(s: &str) -> bool {
@@ -82,6 +93,13 @@ impl Backoff {
     }
 }
 
+/// The admin PIN's wrong tries in one boot (`pins/<id>.tries`). Another boot id: none yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminTries {
+    pub boot_id: String,
+    pub failures: u32,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verify {
     Ok,
@@ -93,6 +111,11 @@ pub enum Verify {
     Locked {
         seconds: i64,
     },
+    /// The admin PIN: refused until the box restarts ([`ADMIN_TRIES`] wrong tries this boot).
+    /// `started`: this try was wrong and was the last one.
+    RestartRequired {
+        started: bool,
+    },
     /// No PIN is set.
     NoPin,
 }
@@ -101,11 +124,30 @@ pub enum Verify {
 #[derive(Debug, Clone)]
 pub struct Pins {
     dir: PathBuf,
+    boot_id: PathBuf,
 }
 
 impl Pins {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self {
+            dir: dir.into(),
+            boot_id: BOOT_ID.into(),
+        }
+    }
+
+    /// Tests: read the boot id from `path` instead of [`BOOT_ID`].
+    pub fn with_boot_id_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.boot_id = path.into();
+        self
+    }
+
+    /// This boot's id. Unreadable: a fixed one, so the count never starts over.
+    fn boot_id(&self) -> String {
+        fs::read_to_string(&self.boot_id)
+            .map(|s| s.trim().to_owned())
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".into())
     }
 
     fn hash_path(&self, id: &str) -> PathBuf {
@@ -114,6 +156,10 @@ impl Pins {
 
     fn state_path(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{id}.state"))
+    }
+
+    fn tries_path(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("{id}.tries"))
     }
 
     fn ensure_dir(&self) -> std::io::Result<()> {
@@ -127,12 +173,12 @@ impl Pins {
         self.hash_path(id).is_file()
     }
 
-    /// Store a hash (from [`hash`]) and reset the backoff.
+    /// Store a hash (from [`hash`]) and reset the backoff and the admin tries.
     pub fn set_hash(&self, id: &str, phc: &str) -> std::io::Result<()> {
         self.ensure_dir()?;
         fsutil::write_atomic(&self.hash_path(id), phc.as_bytes(), 0o600)?;
         self.with_state(id, |_| Backoff::default())?;
-        Ok(())
+        self.reset_tries(id)
     }
 
     pub fn set(&self, id: &str, pin: &str) -> std::io::Result<()> {
@@ -152,12 +198,35 @@ impl Pins {
             };
             Backoff::default()
         })?;
+        self.reset_tries(id)?;
         removed
     }
 
     pub fn remove(&self, id: &str) {
         let _ = fs::remove_file(self.hash_path(id));
         let _ = fs::remove_file(self.state_path(id));
+        let _ = fs::remove_file(self.tries_path(id));
+    }
+
+    /// The admin tries of `id` this boot (read under the lock).
+    pub fn admin_tries(&self, id: &str) -> u32 {
+        let boot = self.boot_id();
+        let mut out = 0;
+        let _ = self.with_json(&self.tries_path(id), |t: AdminTries| {
+            if t.boot_id == boot {
+                out = t.failures;
+            }
+            t
+        });
+        out
+    }
+
+    /// Forget `id`'s admin tries (a new PIN, `reset-pin`).
+    fn reset_tries(&self, id: &str) -> std::io::Result<()> {
+        if !self.tries_path(id).exists() {
+            return Ok(());
+        }
+        self.with_json(&self.tries_path(id), |_| AdminTries::default())
     }
 
     /// The backoff of `id` (read under the lock).
@@ -172,6 +241,14 @@ impl Pins {
 
     /// Read-modify-write the backoff under an exclusive `flock`.
     fn with_state(&self, id: &str, f: impl FnOnce(Backoff) -> Backoff) -> std::io::Result<()> {
+        self.with_json(&self.state_path(id), f)
+    }
+
+    /// Read-modify-write a JSON state file (0600) under an exclusive `flock` on it.
+    fn with_json<T>(&self, path: &Path, f: impl FnOnce(T) -> T) -> std::io::Result<()>
+    where
+        T: Serialize + serde::de::DeserializeOwned + Default + PartialEq + Clone,
+    {
         self.ensure_dir()?;
         let mut file = fs::OpenOptions::new()
             .read(true)
@@ -179,12 +256,12 @@ impl Pins {
             .create(true)
             .truncate(false)
             .mode(0o600)
-            .open(self.state_path(id))?;
+            .open(path)?;
         flock(&file, FlockOperation::LockExclusive)?;
         let mut text = String::new();
         file.read_to_string(&mut text)?;
-        let before: Backoff = serde_json::from_str(&text).unwrap_or_default();
-        let after = f(before);
+        let before: T = serde_json::from_str(&text).unwrap_or_default();
+        let after = f(before.clone());
         if after != before || text.is_empty() {
             let bytes = serde_json::to_vec(&after)?;
             file.set_len(0)?;
@@ -209,8 +286,10 @@ impl Pins {
         self.verify_with(id, pin, now, true)
     }
 
-    /// [`Pins::verify`]; with `backoff` false (the admin profile, DECISIONS J4) a wrong PIN is
-    /// only wrong: no count, no wait, and a stale backoff file never refuses.
+    /// [`Pins::verify`]; with `backoff` false (the admin profile, DECISIONS J4) there is no wait
+    /// (a stale backoff file never refuses) but the limit of [`ADMIN_TRIES`] wrong tries a boot.
+    /// Each try is counted under the lock before the (slow) hash check, so tries that run at the
+    /// same time never get past the limit; a right PIN then takes its count back to 0.
     pub fn verify_with(
         &self,
         id: &str,
@@ -225,12 +304,34 @@ impl Pins {
             Err(e) => return Err(e),
         };
         if !backoff {
-            let ok = is_pin(&pin) && matches(phc.trim(), &pin);
             if self.backoff(id) != Backoff::default() {
                 self.reset_backoff(id)?;
             }
-            return Ok(if ok {
-                Verify::Ok
+            let boot = self.boot_id();
+            let mut taken = None;
+            self.with_json(&self.tries_path(id), |t: AdminTries| {
+                let failures = if t.boot_id == boot { t.failures } else { 0 };
+                if failures >= ADMIN_TRIES {
+                    return t;
+                }
+                taken = Some(failures + 1);
+                AdminTries {
+                    boot_id: boot.clone(),
+                    failures: failures + 1,
+                }
+            })?;
+            let Some(taken) = taken else {
+                return Ok(Verify::RestartRequired { started: false });
+            };
+            if is_pin(&pin) && matches(phc.trim(), &pin) {
+                self.with_json(&self.tries_path(id), |t: AdminTries| AdminTries {
+                    failures: 0,
+                    ..t
+                })?;
+                return Ok(Verify::Ok);
+            }
+            return Ok(if taken >= ADMIN_TRIES {
+                Verify::RestartRequired { started: true }
             } else {
                 Verify::Wrong { locked_for: 0 }
             });
@@ -350,17 +451,27 @@ mod tests {
         assert!(!pins.is_set("p1"));
     }
 
+    /// Pins on `dir` whose boot id is in `<dir>/../boot_id`.
+    fn booted(dir: &Path, boot: &str) -> Pins {
+        let file = dir.parent().unwrap().join("boot_id");
+        fs::write(&file, format!("{boot}\n")).unwrap();
+        Pins::new(dir).with_boot_id_file(file)
+    }
+
     #[test]
-    fn no_backoff_for_the_admin_pin() {
+    fn the_admin_pin_has_no_wait_but_ten_tries_a_boot() {
+        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
-        let pins = Pins::new(d.path().join("pins"));
+        let dir = d.path().join("pins");
+        let pins = booted(&dir, "boot-a");
         pins.set("p1", "2468").unwrap();
         // A stale lock from before the upgrade (or from the backoff path) never refuses.
         for _ in 0..6 {
             let _ = pins.verify("p1", "0000", 100);
         }
         assert!(pins.backoff("p1").remaining(100) > 0);
-        for _ in 0..10 {
+        // No wait: wrong is only wrong; a right PIN before the limit resets the count.
+        for _ in 0..9 {
             assert_eq!(
                 pins.verify_with("p1", "0000", 100, false).unwrap(),
                 Verify::Wrong { locked_for: 0 }
@@ -371,17 +482,118 @@ mod tests {
             Backoff::default(),
             "the stale lock is gone"
         );
+        assert_eq!(pins.admin_tries("p1"), 9);
         assert_eq!(
             pins.verify_with("p1", "2468", 100, false).unwrap(),
             Verify::Ok
         );
-        assert_eq!(pins.backoff("p1"), Backoff::default());
+        assert_eq!(pins.admin_tries("p1"), 0);
+        // Ten wrong tries: the tenth starts the lock; then even the right PIN is refused.
+        for _ in 0..9 {
+            assert_eq!(
+                pins.verify_with("p1", "0000", 100, false).unwrap(),
+                Verify::Wrong { locked_for: 0 }
+            );
+        }
+        assert_eq!(
+            pins.verify_with("p1", "0000", 100, false).unwrap(),
+            Verify::RestartRequired { started: true }
+        );
+        for pin in ["2468", "0000", "x"] {
+            assert_eq!(
+                pins.verify_with("p1", pin, 100, false).unwrap(),
+                Verify::RestartRequired { started: false }
+            );
+        }
+        let mode = fs::metadata(dir.join("p1.tries"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        // Another process (a restarted service, the PAM helper) in the same boot: still locked.
+        assert_eq!(
+            booted(&dir, "boot-a")
+                .verify_with("p1", "2468", 100, false)
+                .unwrap(),
+            Verify::RestartRequired { started: false }
+        );
+        // The backoff path of other profiles is not touched.
+        assert_eq!(pins.admin_tries("p2"), 0);
+        // A new boot: ten tries again.
+        let next = booted(&dir, "boot-b");
+        assert_eq!(next.admin_tries("p1"), 0);
+        assert_eq!(
+            next.verify_with("p1", "0000", 100, false).unwrap(),
+            Verify::Wrong { locked_for: 0 }
+        );
+        assert_eq!(
+            next.verify_with("p1", "2468", 100, false).unwrap(),
+            Verify::Ok
+        );
         assert_eq!(
             pins.verify_with("p9", "2468", 100, false).unwrap(),
             Verify::NoPin
         );
         pins.reset_backoff("p9").unwrap();
-        assert!(!d.path().join("pins/p9.state").exists());
+        assert!(!dir.join("p9.state").exists());
+    }
+
+    #[test]
+    fn a_new_pin_or_reset_pin_ends_the_admin_lock() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("pins");
+        let pins = booted(&dir, "boot-a");
+        pins.set("p1", "2468").unwrap();
+        for _ in 0..ADMIN_TRIES {
+            let _ = pins.verify_with("p1", "0000", 0, false);
+        }
+        assert_eq!(pins.admin_tries("p1"), ADMIN_TRIES);
+        // reset-pin (root): no PIN, no count.
+        assert!(pins.clear("p1").unwrap());
+        assert_eq!(pins.admin_tries("p1"), 0);
+        pins.set("p1", "2468").unwrap();
+        for _ in 0..ADMIN_TRIES {
+            let _ = pins.verify_with("p1", "0000", 0, false);
+        }
+        // A new PIN (profiles.reset_pin with the admin password).
+        pins.set("p1", "1357").unwrap();
+        assert_eq!(
+            pins.verify_with("p1", "1357", 0, false).unwrap(),
+            Verify::Ok
+        );
+        pins.remove("p1");
+        assert!(!dir.join("p1.tries").exists());
+    }
+
+    #[test]
+    fn admin_tries_at_the_same_time_never_pass_the_limit() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("pins");
+        booted(&dir, "boot-a").set("p1", "2468").unwrap();
+        let file = d.path().join("boot_id");
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let (dir, file) = (dir.clone(), file.clone());
+                std::thread::spawn(move || {
+                    Pins::new(dir)
+                        .with_boot_id_file(file)
+                        .verify_with("p1", "0000", 0, false)
+                        .unwrap()
+                })
+            })
+            .collect();
+        let outcomes: Vec<Verify> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let checked = outcomes
+            .iter()
+            .filter(|o| !matches!(o, Verify::RestartRequired { started: false }))
+            .count();
+        assert_eq!(checked, ADMIN_TRIES as usize, "{outcomes:?}");
+        let started = outcomes
+            .iter()
+            .filter(|o| **o == Verify::RestartRequired { started: true })
+            .count();
+        assert_eq!(started, 1, "{outcomes:?}");
     }
 
     #[test]

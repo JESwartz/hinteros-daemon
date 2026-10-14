@@ -21,7 +21,7 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
-use crate::greetd::{AuthMessageType, Greetd, Request, Response, locked_seconds};
+use crate::greetd::{AuthMessageType, Greetd, Request, Response, locked_seconds, reboot_required};
 use crate::{Audience, Broadcast};
 
 pub const METHODS: &[&str] = &[
@@ -132,13 +132,18 @@ pub enum Outcome {
     Prompt,
     /// The session starts.
     Started,
-    /// Refused (wrong PIN, a lock, an account that may not enter).
-    Failed { locked_seconds: Option<u32> },
+    /// Refused (wrong PIN, a lock, an account that may not enter). `reboot`: the admin
+    /// profile's PIN is refused until the box restarts.
+    Failed {
+        locked_seconds: Option<u32>,
+        reboot: bool,
+    },
 }
 
 /// Drive a conversation from `resp` until it needs the PIN or ends; starts `cmd` on success.
 pub fn advance(conn: &mut Greetd, mut resp: Response, cmd: &[String]) -> std::io::Result<Outcome> {
     let mut locked = None;
+    let mut reboot = false;
     loop {
         resp = match resp {
             Response::AuthMessage {
@@ -146,6 +151,7 @@ pub fn advance(conn: &mut Greetd, mut resp: Response, cmd: &[String]) -> std::io
                 auth_message,
             } => {
                 locked = locked.or(locked_seconds(&auth_message));
+                reboot |= reboot_required(&auth_message);
                 conn.request(&Request::PostAuthMessageResponse { response: None })?
             }
             Response::AuthMessage { .. } => return Ok(Outcome::Prompt),
@@ -160,6 +166,7 @@ pub fn advance(conn: &mut Greetd, mut resp: Response, cmd: &[String]) -> std::io
                         let _ = conn.request(&Request::CancelSession);
                         return Ok(Outcome::Failed {
                             locked_seconds: locked,
+                            reboot,
                         });
                     }
                 }
@@ -169,6 +176,7 @@ pub fn advance(conn: &mut Greetd, mut resp: Response, cmd: &[String]) -> std::io
                 let _ = conn.request(&Request::CancelSession);
                 return Ok(Outcome::Failed {
                     locked_seconds: locked,
+                    reboot,
                 });
             }
         };
@@ -313,16 +321,21 @@ impl Greeter {
                     GreeterResultParams {
                         ok: true,
                         locked_seconds: None,
+                        reboot_required: false,
                     },
                 );
             }
-            Outcome::Failed { locked_seconds } => {
+            Outcome::Failed {
+                locked_seconds,
+                reboot,
+            } => {
                 *self.inner.conn.lock().unwrap() = None;
                 self.send(
                     EventName::GreeterResult,
                     GreeterResultParams {
                         ok: false,
                         locked_seconds,
+                        reboot_required: reboot,
                     },
                 );
             }
@@ -391,6 +404,7 @@ impl Greeter {
                     let Some(c) = conn.as_mut() else {
                         return Ok(Outcome::Failed {
                             locked_seconds: None,
+                            reboot: false,
                         });
                     };
                     let resp = c.request(&Request::PostAuthMessageResponse {

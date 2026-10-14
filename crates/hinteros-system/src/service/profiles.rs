@@ -58,6 +58,15 @@ fn pin_required(which: Which, retry_after_ms: Option<i64>, message: &str) -> Err
     ErrorObject::with_data(ErrorCode::PinRequired, message, data)
 }
 
+/// The admin PIN after [`pins::ADMIN_TRIES`] wrong tries this boot: refused until a restart.
+fn reboot_required(which: Which) -> ErrorObject {
+    ErrorObject::with_data(
+        ErrorCode::PinRequired,
+        "too many wrong PINs: restart the box",
+        json!({ "pin": which.name(), "reboot_required": true }),
+    )
+}
+
 fn bad_pin(field: &str) -> ErrorObject {
     ErrorObject::invalid_field(field, "bad_format", "a PIN is 4 to 8 digits")
 }
@@ -267,6 +276,7 @@ impl Service {
         let id2 = id.to_owned();
         let now = job::now();
         // The admin profile's PIN has no backoff (DECISIONS J4): a wait there blocked the box.
+        // It has ten tries a boot instead (refused until a restart, [`pins::ADMIN_TRIES`]).
         let backoff = !self.is_admin_profile(id);
         let outcome =
             tokio::task::spawn_blocking(move || pins.verify_with(&id2, &pin, now, backoff))
@@ -287,6 +297,12 @@ impl Service {
                 Err(pin_required(which, Some(seconds * 1000), "too many tries")),
                 "locked",
             ),
+            Verify::RestartRequired { started } => {
+                if started {
+                    self.audit.admin_pin_lockout(id, method, Some(uid));
+                }
+                (Err(reboot_required(which)), "reboot_required")
+            }
         };
         self.audit.pin_check(uid, method, which.name(), label);
         result
@@ -295,7 +311,8 @@ impl Service {
     /// The admin PIN of a box-wide action (rollback, channel and base switches, hardware
     /// re-detect; profiles.md open question 1, owner answer in apps.md; and installing a system
     /// update, from every profile, the guest's included). Like every admin
-    /// action: `pin_required {pin: admin}` when it is missing or wrong (no backoff, J4), and
+    /// action: `pin_required {pin: admin}` when it is missing or wrong (no backoff, J4; ten
+    /// wrong tries a boot, then `reboot_required`), and
     /// when there is no admin profile (first-boot mode); an admin profile without a PIN yet
     /// (migrated p1) passes. Exempt: a schema-1 box (no profiles or PINs before the
     /// migration, I2) and root (the box's administrator, e.g. a terminal or a bootstrap tool;

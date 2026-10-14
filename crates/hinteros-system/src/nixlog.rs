@@ -6,7 +6,7 @@
 //! `[activity type, expected]`. A build activity (105) starts with
 //! `fields: [drv path, machine, round, rounds]` and text `building '<drv path>'`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use hinteros_api::system::{Building, ProgressDetail, Stage};
 use serde_json::Value;
@@ -44,6 +44,8 @@ pub struct Progress {
     activities: HashMap<u64, u64>,
     /// Per-activity byte progress of copies and transfers: id → (done, expected).
     bytes: HashMap<u64, (u64, u64)>,
+    /// File transfers that bring a store path (their bytes count).
+    payload: HashSet<u64>,
     /// Running build activities.
     builds: HashMap<u64, Build>,
     seq: u64,
@@ -129,8 +131,21 @@ impl Progress {
         match v["action"].as_str() {
             Some("start") => {
                 let ty = v["type"].as_u64().unwrap_or(0);
+                let parent = v["parent"]
+                    .as_u64()
+                    .and_then(|p| self.activities.get(&p).copied());
+                // A store path coming in; a file transfer counts only as part of one (not the
+                // narinfo lookups nix makes while it plans).
+                let payload = match ty {
+                    ACT_COPY_PATH | ACT_SUBSTITUTE => true,
+                    ACT_FILE_TRANSFER => matches!(parent, Some(ACT_COPY_PATH | ACT_SUBSTITUTE)),
+                    _ => false,
+                };
                 if self.activities.len() < 100_000 {
                     self.activities.insert(id, ty);
+                    if ty == ACT_FILE_TRANSFER && payload {
+                        self.payload.insert(id);
+                    }
                 }
                 let mut changed = false;
                 if ty == ACT_BUILD && self.builds.len() < 10_000 {
@@ -154,9 +169,7 @@ impl Progress {
                 }
                 let stage = match ty {
                     ACT_BUILDS | ACT_BUILD => Some(Stage::Building),
-                    ACT_COPY_PATHS | ACT_COPY_PATH | ACT_SUBSTITUTE | ACT_FILE_TRANSFER => {
-                        Some(Stage::Downloading)
-                    }
+                    _ if payload => Some(Stage::Downloading),
                     _ => None,
                 };
                 // Building wins over downloading once it starts.
@@ -170,7 +183,16 @@ impl Progress {
                 changed
             }
             Some("stop") => {
-                self.activities.remove(&id);
+                let ty = self.activities.remove(&id);
+                self.payload.remove(&id);
+                if ty == Some(ACT_BUILDS) {
+                    // Nix is done building: what it built is the total (its last progress
+                    // can still count a finished goal twice, e.g. [2, 3, 0, 0] for 2 builds).
+                    self.builds_total = self.builds_done;
+                    self.planned_builds = self.builds_done;
+                    self.builds_running = 0;
+                    return true;
+                }
                 // A finished download's bytes stay counted (the totals stay honest).
                 self.builds.remove(&id).is_some()
             }
@@ -196,6 +218,9 @@ impl Progress {
                     (RES_PROGRESS, Some(ACT_COPY_PATHS)) if fields.len() >= 2 => {
                         self.paths_done = fields[0];
                         self.paths_total = fields[1];
+                        if fields[1] > 0 && self.stage.is_none_or(|s| s != Stage::Building) {
+                            self.stage = Some(Stage::Downloading);
+                        }
                         true
                     }
                     (RES_PROGRESS, Some(ACT_BUILDS)) if fields.len() >= 2 => {
@@ -205,7 +230,8 @@ impl Progress {
                         true
                     }
                     (RES_PROGRESS, Some(ACT_COPY_PATH | ACT_FILE_TRANSFER))
-                        if fields.len() >= 2 =>
+                        if fields.len() >= 2
+                            && (act == Some(ACT_COPY_PATH) || self.payload.contains(&id)) =>
                     {
                         if self.bytes.len() < 100_000 || self.bytes.contains_key(&id) {
                             self.bytes.insert(id, (fields[0], fields[1]));
@@ -634,7 +660,7 @@ mod tests {
             [
                 None,
                 None,
-                Some(0),
+                None,
                 Some(0),
                 Some(0),
                 Some(25),
@@ -653,5 +679,54 @@ mod tests {
         p.line(r#"@nix {"action":"start","id":2,"type":104,"text":"","fields":[]}"#);
         p.line(r#"@nix {"action":"result","id":2,"type":105,"fields":[0,2,1,0]}"#);
         assert_eq!(p.percent(), Some(99));
+    }
+
+    /// A real `nix-build --log-format internal-json -v` of a small stdenv derivation (two
+    /// builds): nix's expected count goes 1, 2, 3, 4 and back down, and its last progress
+    /// still says [2, 3] before the builds activity stops.
+    #[test]
+    fn real_build_log() {
+        let log = include_str!("../tests/fixtures/nix-build-internal-json.log");
+        let mut p = Progress::default();
+        let mut percents = Vec::new();
+        let mut names = Vec::new();
+        let mut phases = Vec::new();
+        for l in log.lines() {
+            p.line(l);
+            percents.extend(p.percent());
+            if let Some(b) = p.detail().building {
+                if names.last() != Some(&(b.name.clone(), b.version.clone())) {
+                    names.push((b.name.clone(), b.version.clone()));
+                }
+                if let Some(ph) = b.phase
+                    && phases.last() != Some(&ph)
+                {
+                    phases.push(ph);
+                }
+            }
+        }
+        let d = p.detail();
+        assert_eq!((d.builds_done, d.builds_total), (Some(2), Some(2)));
+        assert_eq!(d.builds_running, None);
+        assert!(d.building.is_none(), "nothing builds at the end");
+        assert_eq!(p.stage, Some(Stage::Building));
+        assert_eq!(
+            names.last(),
+            Some(&("hos-progress-probe".to_string(), Some("1.2.3".to_string())))
+        );
+        assert_eq!(
+            names[0].0, "x.c",
+            "the source file derivation first: {names:?}"
+        );
+        for ph in ["patch", "configure", "build", "install", "fixup"] {
+            assert!(phases.iter().any(|p| p == ph), "{ph} in {phases:?}");
+        }
+        assert!(
+            percents.windows(2).all(|w| w[0] <= w[1]),
+            "never decreases: {percents:?}"
+        );
+        assert_eq!(percents.last(), Some(&99), "its final value: {percents:?}");
+        assert_eq!(p.percent(), Some(99));
+        assert!(percents.contains(&50), "1 of 2 built: {percents:?}");
     }
 }

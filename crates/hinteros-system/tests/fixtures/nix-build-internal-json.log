@@ -1,0 +1,349 @@
+@nix {"action":"msg","level":4,"msg":"evaluating file '«nix-internal»/derivation-internal.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '«https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.zst»/flake.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/flake.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '«flakes-internal»/call-flake.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/minfeatures.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/top-level/impure.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/top-level/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/trivial.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/lists.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/top-level/impure-overlays.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/systems/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/attrsets.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/systems/architectures.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/systems/inspect.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/systems/parse.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/strings.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/meta-types.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/fixed-points.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/modules.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/top-level/config.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/options.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/types.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/debug.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/stdenv/generic/problems.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/stdenv/booter.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/stdenv/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/systems/platforms.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/stdenv/linux/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/stdenv/linux/stage0.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/customisation.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/bash/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/bash/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/bash/2.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/stage0-posix/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/stage0-posix/kaem/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/utils.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/top-level/stage.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/top-level/variants.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/top-level/aliases.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/asserts.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/top-level/all-packages.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/top-level/by-name-overlay.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/top-level/splice.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/build-support/trivial-builders/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/stdenv/adapters.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/stdenv/generic/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/build-support/bintools-wrapper/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/binutils/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/coreutils/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnugrep/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/stdenv/generic/make-derivation.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/stdenv/generic/check-meta.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/binutils/common.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gcc/glibc.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/tools/misc/binutils/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/build-support/cc-wrapper/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/tools/misc/patchelf/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/all.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/versions.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/meta.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/common/libgcc.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/common/builder.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/common/checksum.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/common/meta.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/glibc/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/glibc/common.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/kernel-headers/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/gmp/6.x.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/isl/0.20.0.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/isl/generic.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/li/libmpc/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/mp/mpfr/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/co/coreutils/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/acl/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/attr/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/systems/doubles.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/gn/gnugrep/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/glibc/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/musl/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/mu/musl/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/shells/bash/5.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/shells/bash/bash-5.3-patches.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/bzip2/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/tools/compression/bzip2/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/diffutils/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/di/diffutils/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/findutils/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/fi/findutils/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gawk/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/tools/text/gawk/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnumake/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/gn/gnumake/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnupatch/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/gn/gnupatch/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnused/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/tools/text/gnused/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnutar/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/gn/gnutar/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gzip/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/tools/compression/gzip/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/patchelf/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/xz/static.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/xz/xz/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/bash/common.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gcc/wrapper.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/binutils/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnumake/musl.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnused/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnugrep/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gawk/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/diffutils/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/findutils/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnutar/latest.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gzip/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/coreutils/musl.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gcc/latest.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnused/common.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/coreutils/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnumake/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/tinycc/musl.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnused/mes.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnutar/mes.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/stage0-posix/mescc-tools-extra/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/coreutils/common.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/tinycc/mes.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/tinycc/common.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnupatch/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/stage0-posix/mescc-tools/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/stage0-posix/platforms.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/stage0-posix/bootstrap-sources.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/stage0-posix/mescc-tools-boot.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/stage0-posix/hex0.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '<nix/fetchurl.nix>'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/tinycc/bootstrappable.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/mes/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/build-support/fetchurl/boot.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/build-support/fetchurl/mirrors.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/mes/nyacc.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/mes/libc.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/ln-boot/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnumake/common.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnutar/common.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/musl/tcc.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/musl/common.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnutar/musl.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gawk/mes.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gawk/common.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/xz/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/musl/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gcc/4.6.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gcc/10.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/bzip2/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gcc/4.6.cxx.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/build-support/lib/cmake.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/zlib/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/gettext/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/build-support/lib/meson.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/gn/gnu-config/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/python/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/bison/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/zlib/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/versions.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gnum4/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/linux-headers/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/bi/bison/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/lib/filesystem.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/gn/gnum4/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/interpreters/perl/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/interpreters/perl/interpreter.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/libxcrypt/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/ex/expand-response-params/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/common/extra-target-flags.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/common/dependencies.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/common/configure-flags.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/common/platform-flags.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/tools/misc/texinfo/packages.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/tools/misc/texinfo/common.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/wh/which/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/tools/misc/autoconf/2.69.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/patches/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/build-support/nuke-references/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/build-support/replace-vars/replace-vars-with.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/common/pre-configure.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/compilers/gcc/common/strip-attributes.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/interpreters/python/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/interpreters/python/cpython/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/interpreters/python/passthrufun.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/interpreters/python/setup-hook.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/build-support/replace-vars/replace-vars.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/libidn2/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/libunistring/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/au/autoreconfHook/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/tools/misc/autoconf/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/tools/misc/automake/automake-1.18.x.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/tools/misc/libtool/libtool2.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/fi/file/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/ve/versionCheckHook/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/build-support/pkg-config-wrapper/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/pk/pkg-config-unwrapped/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/pc/pcre2/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/development/libraries/glibc/locales.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/ed/ed/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/by-name/lz/lzip/package.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/glibc/headers.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/heirloom/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/heirloom-devtools/default.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gcc/gmp.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gcc/mpc.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/gcc/mpfr.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/os-specific/linux/minimal-bootstrap/musl/headers.nix'"}
+@nix {"action":"msg","level":4,"msg":"evaluating file '/nix/store/rfcpg2ryywgma7wlswjzna99g9gq8laq-source/pkgs/stdenv/generic/common-path.nix'"}
+@nix {"action":"start","id":10249376811188224,"level":6,"parent":0,"text":"querying info about missing paths","type":0}
+@nix {"action":"start","fields":["/nix/store/m8qac29qrliqc9f4v4gyzqqr2bgi8gx9-hos-progress-probe-1.2.3","https://cache.nixos.org"],"id":10249376811188225,"level":4,"parent":0,"text":"querying info about '/nix/store/m8qac29qrliqc9f4v4gyzqqr2bgi8gx9-hos-progress-probe-1.2.3' on 'https://cache.nixos.org'","type":109}
+@nix {"action":"start","fields":["https://cache.nixos.org/m8qac29qrliqc9f4v4gyzqqr2bgi8gx9.narinfo"],"id":10249376811188226,"level":4,"parent":10249376811188225,"text":"downloading 'https://cache.nixos.org/m8qac29qrliqc9f4v4gyzqqr2bgi8gx9.narinfo'","type":101}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[3,3,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[3,3,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[3,3,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"result","fields":[3,3,0,0],"id":10249376811188226,"type":105}
+@nix {"action":"stop","id":10249376811188225}
+@nix {"action":"stop","id":10249376811188226}
+@nix {"action":"stop","id":10249376811188224}
+@nix {"action":"msg","level":3,"msg":"these 2 derivations will be built:"}
+@nix {"action":"msg","level":3,"msg":"  /nix/store/a1fipgca4si5qgnx1jlmixhlap0f9vni-x.c.drv"}
+@nix {"action":"msg","level":3,"msg":"  /nix/store/kqd4s3sbcvdyg48xxv92hzrxvp6svk41-hos-progress-probe-1.2.3.drv"}
+@nix {"action":"start","id":10249376811188227,"level":0,"parent":0,"text":"","type":102}
+@nix {"action":"start","id":10249376811188228,"level":0,"parent":0,"text":"","type":104}
+@nix {"action":"start","id":10249376811188229,"level":0,"parent":0,"text":"","type":103}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"start","id":10249376811188230,"level":6,"parent":0,"text":"querying info about missing paths","type":0}
+@nix {"action":"stop","id":10249376811188230}
+@nix {"action":"result","fields":[0,1,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,1,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,1,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,1,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,2,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,3,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,4,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,3,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,2,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,2,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,2,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,3,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,4,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,3,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[0,2,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"start","fields":["/nix/store/a1fipgca4si5qgnx1jlmixhlap0f9vni-x.c.drv","",1,1],"id":10249376811188231,"level":3,"parent":0,"text":"building '/nix/store/a1fipgca4si5qgnx1jlmixhlap0f9vni-x.c.drv'","type":105}
+@nix {"action":"result","fields":[0,2,1,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":["structuredAttrs is enabled"],"id":10249376811188231,"type":101}
+@nix {"action":"result","fields":[1,3,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"stop","id":10249376811188231}
+@nix {"action":"start","fields":["/nix/store/kqd4s3sbcvdyg48xxv92hzrxvp6svk41-hos-progress-probe-1.2.3.drv","",1,1],"id":10249376811188232,"level":3,"parent":0,"text":"building '/nix/store/kqd4s3sbcvdyg48xxv92hzrxvp6svk41-hos-progress-probe-1.2.3.drv'","type":105}
+@nix {"action":"result","fields":[1,2,1,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":["Running phase: patchPhase"],"id":10249376811188232,"type":101}
+@nix {"action":"result","fields":["patchPhase"],"id":10249376811188232,"type":104}
+@nix {"action":"result","fields":["Running phase: updateAutotoolsGnuConfigScriptsPhase"],"id":10249376811188232,"type":101}
+@nix {"action":"result","fields":["updateAutotoolsGnuConfigScriptsPhase"],"id":10249376811188232,"type":104}
+@nix {"action":"result","fields":["Running phase: configurePhase"],"id":10249376811188232,"type":101}
+@nix {"action":"result","fields":["configurePhase"],"id":10249376811188232,"type":104}
+@nix {"action":"result","fields":["no configure script, doing nothing"],"id":10249376811188232,"type":101}
+@nix {"action":"result","fields":["Running phase: buildPhase"],"id":10249376811188232,"type":101}
+@nix {"action":"result","fields":["buildPhase"],"id":10249376811188232,"type":104}
+@nix {"action":"result","fields":["Running phase: installPhase"],"id":10249376811188232,"type":101}
+@nix {"action":"result","fields":["installPhase"],"id":10249376811188232,"type":104}
+@nix {"action":"result","fields":["Running phase: fixupPhase"],"id":10249376811188232,"type":101}
+@nix {"action":"result","fields":["fixupPhase"],"id":10249376811188232,"type":104}
+@nix {"action":"result","fields":["shrinking RPATHs of ELF executables and libraries in /nix/store/m8qac29qrliqc9f4v4gyzqqr2bgi8gx9-hos-progress-probe-1.2.3"],"id":10249376811188232,"type":101}
+@nix {"action":"result","fields":["shrinking /nix/store/m8qac29qrliqc9f4v4gyzqqr2bgi8gx9-hos-progress-probe-1.2.3/bin/probe"],"id":10249376811188232,"type":101}
+@nix {"action":"result","fields":["checking for references to /build/ in /nix/store/m8qac29qrliqc9f4v4gyzqqr2bgi8gx9-hos-progress-probe-1.2.3..."],"id":10249376811188232,"type":101}
+@nix {"action":"result","fields":["patching script interpreter paths in /nix/store/m8qac29qrliqc9f4v4gyzqqr2bgi8gx9-hos-progress-probe-1.2.3"],"id":10249376811188232,"type":101}
+@nix {"action":"result","fields":["stripping (with command strip and flags -S -p) in /nix/store/m8qac29qrliqc9f4v4gyzqqr2bgi8gx9-hos-progress-probe-1.2.3/bin"],"id":10249376811188232,"type":101}
+@nix {"action":"result","fields":[2,3,0,0],"id":10249376811188228,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":10249376811188229,"type":105}
+@nix {"action":"result","fields":[101,0],"id":10249376811188227,"type":106}
+@nix {"action":"result","fields":[100,0],"id":10249376811188227,"type":106}
+@nix {"action":"stop","id":10249376811188232}
+@nix {"action":"stop","id":10249376811188229}
+@nix {"action":"stop","id":10249376811188228}
+@nix {"action":"stop","id":10249376811188227}

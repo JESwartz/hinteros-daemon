@@ -91,6 +91,7 @@ async fn version_mismatch_is_rejected_and_closes() {
         ApiVersion::new(0, 12),
         ApiVersion::new(0, 13),
         ApiVersion::new(0, 14),
+        ApiVersion::new(0, 15),
     ] {
         let mut c = d.connect().await;
         let e = rpc_error(

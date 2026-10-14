@@ -1218,7 +1218,9 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   via `nix-store --add-root --indirect --realise`). The service publishes
   `/run/hinteros/apps/<user>` → the profile's Nix profile at start and after every job.
   `/run/hinteros/apps` is 0750 root:hinteros, not the 0755 of the M7 design (D4): every
-  session account is in `hinteros`, and other users cannot list who has which apps. An env
+  session account is in `hinteros`, and other users cannot list who has which apps. Whoever
+  publishes (a job runs as root:root: the migration is the first to publish on a schema-1 box)
+  sets that mode and the group of `/run/hinteros` (the service's runtime directory). An env
   is built by `config.hinteros.appEnv.build ids` of `/etc/hinteros` (`nix eval --impure --json
   --expr` over a list of id lists, all of a job's envs in one evaluation, then `nix build
   <drv>^out … --keep-going`) and set with `nix-env -p <profile> --set` (skipped when it is

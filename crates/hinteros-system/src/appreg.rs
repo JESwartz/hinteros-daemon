@@ -263,6 +263,11 @@ pub const APPS_RUN_DIR_MODE: u32 = 0o750;
 /// note (DECISIONS D4): every account that runs a session is in `hinteros`, so nobody who needs
 /// it loses it, and other users cannot list who has which apps. The service's `UMask=0007`
 /// would make a 0755 request 0750 anyway; asking for 0750 says it on purpose.
+///
+/// A job publishes too (the v1 -> v2 migration is the first to, on a schema-1 box), and a job
+/// runs as root:root with another umask: the group is taken from the run directory (the
+/// service's `RuntimeDirectory`, root:hinteros) and the mode set, on every call, so the sessions
+/// can read the directory whoever made it.
 pub fn publish(paths: &Paths, state: &State) {
     let dir = paths.apps_run_dir();
     if let Err(e) = std::fs::DirBuilder::new()
@@ -272,6 +277,9 @@ pub fn publish(paths: &Paths, state: &State) {
     {
         warn!("cannot create {}: {e}", dir.display());
         return;
+    }
+    if let Err(e) = fix_run_dir(&dir) {
+        warn!("cannot set the owner of {}: {e}", dir.display());
     }
     let accounts = state.accounts();
     for a in &accounts {
@@ -299,6 +307,22 @@ pub fn publish(paths: &Paths, state: &State) {
             let _ = std::fs::remove_file(e.path());
         }
     }
+}
+
+/// `dir`: mode [`APPS_RUN_DIR_MODE`] and its parent's group (changed only when different).
+fn fix_run_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let meta = std::fs::metadata(dir)?;
+    if let Some(parent) = dir.parent() {
+        let gid = std::fs::metadata(parent)?.gid();
+        if meta.gid() != gid {
+            std::os::unix::fs::chown(dir, None, Some(gid))?;
+        }
+    }
+    if meta.permissions().mode() & 0o7777 != APPS_RUN_DIR_MODE {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(APPS_RUN_DIR_MODE))?;
+    }
+    Ok(())
 }
 
 /// `starter.json`: the starter set's ids.
@@ -459,6 +483,19 @@ mod tests {
                 .mode()
                 & 0o777,
             APPS_RUN_DIR_MODE
+        );
+        // Made by someone else with another mode (a job: root:root, umask 0022): set back, with
+        // the run dir's group.
+        std::fs::set_permissions(p.apps_run_dir(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        publish(&p, &state);
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(p.apps_run_dir()).unwrap();
+        assert_eq!(m.permissions().mode() & 0o777, APPS_RUN_DIR_MODE);
+        assert_eq!(
+            m.gid(),
+            std::fs::metadata(p.apps_run_dir().parent().unwrap())
+                .unwrap()
+                .gid()
         );
         let c = current(
             &Owner::Profile {

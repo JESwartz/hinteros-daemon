@@ -36,7 +36,7 @@
 //! xbox_label_swap = "auto"     # "auto" | "on" | "off": swap ui_action/ui_context on Xbox (xpad) pads
 //! dev_gamepad = false          # development only: read pads via evdev, no InputPlumber
 //! direction_debounce_ms = 40   # a direction re-pressed this soon after its release is stick chatter
-//! keyboard_home = true         # Ctrl+Super+D on any keyboard is Home (read-only, never grabbed)
+//! keyboard_home = true         # the system's keyboard_home (Ctrl+Super+D) is Home
 //!
 //! [icons]
 //! fetch = true                 # download web app icons (https only)
@@ -680,8 +680,8 @@ pub struct InputConfig {
     /// A direction pressed again within this long after its release is stick chatter and
     /// ignored (InputPlumber has no hysteresis at its stick threshold); 0: off.
     pub direction_debounce_ms: u64,
-    /// Ctrl + Super + D on a keyboard is Home, like a short Guide press (see
-    /// `input::keyboard`). Keyboards are read, never grabbed: the focused app gets the keys too.
+    /// Ctrl + Super + D on a keyboard is Home, like a short Guide press. The daemon never reads
+    /// keyboards: the system service sends `keyboard_home` for the chord ([`crate::system`]).
     pub keyboard_home: bool,
 }
 

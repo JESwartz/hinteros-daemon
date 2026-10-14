@@ -96,6 +96,9 @@ fn main() -> ExitCode {
             paths.localtime = localtime;
             hinteros_system::timezone::apply_main(&paths)
         }
+        Some(Command::KeyboardHome { socket, input_dir }) => {
+            hinteros_system::keyboard::main(&input_dir, &socket)
+        }
         Some(Command::CheckState { .. }) => unreachable!("handled above"),
         None => {
             let result = tokio::runtime::Builder::new_current_thread()

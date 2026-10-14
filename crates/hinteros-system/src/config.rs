@@ -74,6 +74,16 @@ pub enum Command {
     /// Apply the time zone `time_zone.set` asked for (`hinteros-time-zone-apply.service`):
     /// the zone in `<run-dir>/time-zone.request` into `<config-dir>/state.json` and the
     /// localtime link
+    /// Read every keyboard for Ctrl + Super + D and report each press on the service's keyboard
+    /// socket (`hinteros-keyboard.service`: the only reader of keyboards; read-only, never grabbed)
+    KeyboardHome {
+        /// The system service's keyboard socket
+        #[arg(long, default_value = "/run/hinteros/keyboard.sock")]
+        socket: PathBuf,
+        /// Where the evdev devices are
+        #[arg(long, default_value = "/dev/input")]
+        input_dir: PathBuf,
+    },
     TimeZoneApply {
         #[command(flatten)]
         dirs: HelperDirs,
@@ -189,6 +199,18 @@ pub struct ServeArgs {
     /// The group that may connect to the greeter socket
     #[arg(long, default_value = "hinteros-greeter")]
     pub greeter_group: String,
+    /// The keyboard socket: `hinteros-system keyboard-home` reports Ctrl + Super + D here, and the
+    /// service sends `keyboard_home` to the seat0 owner [none: no keyboard socket]
+    #[arg(long, default_value = "/run/hinteros/keyboard.sock")]
+    pub keyboard_socket: Option<PathBuf>,
+    /// The group that may connect to the keyboard socket (the keyboard reader's; without it no
+    /// socket)
+    #[arg(long, default_value = "hinteros-keyboard")]
+    pub keyboard_group: String,
+    /// Freeze the processes of every profile account whose session is not the active one (a
+    /// text console, the picker, another session), thaw them when it is again (`freeze`)
+    #[arg(long)]
+    pub freeze_inactive: bool,
 
     /// Root of the per-profile app Nix profiles (`apps/<user>`, `starter`)
     #[arg(long, default_value = "/nix/var/nix/profiles/hinteros")]

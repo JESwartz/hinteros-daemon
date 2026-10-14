@@ -9,7 +9,8 @@
 //! - An app has focus: gamescope shows that app as soon as it has a window (the launcher until
 //!   then), InputPlumber is in `Pass` mode, so input goes to the app (through Steam Input).
 //! - Home (Guide, Ctrl+Super+D on a keyboard, or SIGUSR1): `home_pressed`, then the launcher
-//!   gets focus. Apps keep running. The keyboard chord and SIGUSR1 act at once (no long press).
+//!   gets focus. Apps keep running. The keyboard chord (the system service's `keyboard_home`,
+//!   [`crate::system`]) and SIGUSR1 act at once (no long press).
 //!   Guide held for [`GUIDE_LONG_PRESS`] while Steam or a Steam game is in front goes to Steam
 //!   instead (one Guide tap on the virtual pad: its in-game or Big Picture menu), no Home.
 //! - If the focused app's windows go away for longer than the debounce (it closed its window,
@@ -88,7 +89,7 @@ pub enum Msg {
         params: Option<Value>,
         reply: Reply,
     },
-    /// Home at once: SIGUSR1, or Ctrl+Super+D on a keyboard ([`crate::input::keyboard`]). Guide
+    /// Home at once: SIGUSR1, or Ctrl+Super+D on a keyboard (the system's `keyboard_home`). Guide
     /// goes through `Input` (long press and the on-screen keyboard chord).
     Home,
     Input(RawInput),
@@ -123,13 +124,6 @@ pub enum Msg {
         focus: FieldFocus,
         clicked: bool,
     },
-}
-
-/// The keyboard chord is a Home press like SIGUSR1.
-impl From<crate::input::keyboard::KeyboardHome> for Msg {
-    fn from(_: crate::input::keyboard::KeyboardHome) -> Self {
-        Msg::Home
-    }
 }
 
 /// The methods the shell answers (the connection handles the rest).
@@ -4565,26 +4559,11 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_chord_is_home_at_once() {
-        use crate::input::devpad::PadEvent;
-        use crate::input::devpad::tests::Scripted;
-        use crate::input::keyboard::run_keyboard;
-        use evdev::KeyCode;
-        use std::collections::VecDeque;
-
-        let key = |k: KeyCode, pressed| PadEvent::Key { code: k.0, pressed };
-        // Steam in front: a Guide press would wait for its release; the chord does not.
+    fn keyboard_home_is_home_at_once() {
+        // Ctrl+Super+D (the system's keyboard_home, see system.rs) is Msg::Home, like SIGUSR1.
+        // Steam in front: a Guide press would wait for its release; this does not.
         let mut t = steam_game_in_front(|_| {});
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut source = Scripted(VecDeque::from([vec![
-            key(KeyCode::KEY_RIGHTCTRL, true),
-            key(KeyCode::KEY_LEFTMETA, true),
-            key(KeyCode::KEY_D, true),
-        ]]));
-        run_keyboard("keyboard:test", &mut source, &tx);
-        let home = rx.try_recv().unwrap();
-        assert!(rx.try_recv().is_err());
-        t.shell.handle(Msg::from(home), t.now);
+        t.shell.handle(Msg::Home, t.now);
         assert_eq!(t.shell.focused(), None);
         assert!(home_pressed(&t.events()));
         assert_eq!(

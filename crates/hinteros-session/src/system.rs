@@ -3,7 +3,9 @@
 //! The session daemon keeps one connection to `/run/hinteros/system.sock`, handshakes with the
 //! system API version, subscribes to the job events and forwards them to its own clients. The
 //! session API's `system.*` methods (`relay: true` in the schema) are passed through with the
-//! same params; results and errors come back unchanged (one 3xxx code space). The service
+//! same params; results and errors come back unchanged (one 3xxx code space). The system's
+//! `keyboard_home` (Ctrl + Super + D, which only the system reads: see `hinteros-system
+//! keyboard-home`) is not forwarded: it is Home for the shell, like SIGUSR1. The service
 //! authorizes this daemon like any other process of the user: the relay is a convenience, not a
 //! trust step. While the service is down or speaks another version, relayed methods fail with
 //! `system_unavailable {reason}` and the rest of the session API keeps working.
@@ -22,6 +24,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use crate::shell::Msg;
 use crate::{Audience, Broadcast};
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
@@ -75,10 +78,15 @@ impl Relay {
         Self { tx: None }
     }
 
-    /// Start the connection task.
-    pub fn spawn(socket: PathBuf, events: broadcast::Sender<Broadcast>) -> Self {
+    /// Start the connection task. `home`: where the system's `keyboard_home` goes (`None`:
+    /// ignored, `[input] keyboard_home = false`).
+    pub fn spawn(
+        socket: PathBuf,
+        events: broadcast::Sender<Broadcast>,
+        home: Option<mpsc::UnboundedSender<Msg>>,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(run(socket, rx, events));
+        tokio::spawn(run(socket, rx, events, home));
         Self { tx: Some(tx) }
     }
 
@@ -116,6 +124,7 @@ async fn run(
     socket: PathBuf,
     mut calls: mpsc::UnboundedReceiver<Call>,
     events: broadcast::Sender<Broadcast>,
+    home: Option<mpsc::UnboundedSender<Msg>>,
 ) {
     let mut backoff = BACKOFF_MIN;
     let mut logged_down = false;
@@ -125,7 +134,7 @@ async fn run(
                 info!(socket = %socket.display(), "connected to the system service");
                 logged_down = false;
                 backoff = BACKOFF_MIN;
-                serve(conn, &mut calls, &events).await;
+                serve(conn, &mut calls, &events, home.as_ref()).await;
                 if calls.is_closed() {
                     return;
                 }
@@ -235,6 +244,7 @@ async fn serve(
     mut conn: Conn,
     calls: &mut mpsc::UnboundedReceiver<Call>,
     events: &broadcast::Sender<Broadcast>,
+    home: Option<&mpsc::UnboundedSender<Msg>>,
 ) {
     let mut pending: HashMap<i64, Reply> = HashMap::new();
     let mut next_id: i64 = 3;
@@ -266,7 +276,13 @@ async fn serve(
                         }
                     }
                     Ok(ServerMessage::Notification { method, params }) => {
-                        if method == <system::ProfilesChanged as hinteros_api::Event>::NAME {
+                        if method == <system::KeyboardHome as hinteros_api::Event>::NAME {
+                            // Only ever sent to the seat0 owner's connections, by root.
+                            if let Some(home) = home {
+                                info!("Ctrl+Super+D: Home pressed");
+                                let _ = home.send(Msg::Home);
+                            }
+                        } else if method == <system::ProfilesChanged as hinteros_api::Event>::NAME {
                             // The session re-queries and sends its own (see profile.rs).
                             let _ = events.send((EventName::ProfilesChanged, params, Audience::Internal));
                         } else if let Some(name) = session_event(&method) {
@@ -313,15 +329,19 @@ mod tests {
 
     #[test]
     fn maps_events_and_errors() {
-        // profiles_changed is not forwarded as it is: the session re-queries (profile.rs).
-        for e in system::EventName::ALL
-            .iter()
-            .filter(|e| **e != system::EventName::ProfilesChanged)
-        {
+        // profiles_changed is not forwarded as it is: the session re-queries (profile.rs);
+        // keyboard_home is Home for the shell.
+        for e in system::EventName::ALL.iter().filter(|e| {
+            !matches!(
+                e,
+                system::EventName::ProfilesChanged | system::EventName::KeyboardHome
+            )
+        }) {
             let s = session_event(e.wire_name()).unwrap();
             assert_eq!(s.wire_name(), e.wire_name());
         }
         assert_eq!(session_event("home_pressed"), None);
+        assert_eq!(session_event("keyboard_home"), None);
         let denied = ErrorObject::with_data(
             ErrorCode::PermissionDenied,
             "no",

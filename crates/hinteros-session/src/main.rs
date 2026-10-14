@@ -22,7 +22,7 @@ use hinteros_session::focus::gamescope::{GamescopeFocus, WatchOptions, spawn_wat
 use hinteros_session::focus::{FocusControl, NoFocus};
 use hinteros_session::icons::{self, Icons};
 use hinteros_session::input::{
-    InputControl, InterceptMode, NoInput, devpad, inputplumber, keyboard, pointer,
+    InputControl, InterceptMode, NoInput, devpad, inputplumber, pointer,
 };
 use hinteros_session::keys::ime::GamescopeIme;
 use hinteros_session::keys::uinput::UinputKeyboard;
@@ -85,7 +85,7 @@ fn main() -> ExitCode {
             config.system.enable = false;
             config.auth.enable = false;
             config.osk.enable = false;
-            // No apps to go Home from; the picker does not read keyboards.
+            // No apps to go Home from.
             config.input.keyboard_home = false;
             config.launcher.command = None;
         }
@@ -183,13 +183,6 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
             forward(rx, shell_tx.clone(), Msg::Input);
             devpad::spawn(tx);
         }
-    }
-
-    // Ctrl+Super+D: Home at once, the same as SIGUSR1 (not through the Guide long-press timer).
-    if config.input.keyboard_home {
-        let (tx, rx) = mpsc::unbounded_channel();
-        forward(rx, shell_tx.clone(), Msg::from);
-        keyboard::spawn(tx);
     }
 
     let input: Box<dyn InputControl> = if config.inputplumber.enable {
@@ -353,7 +346,10 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
 
     let relay = if config.system.enable {
         info!(socket = %config.system.socket.display(), "relaying system.* to the system service");
-        hinteros_session::system::Relay::spawn(config.system.socket.clone(), events.clone())
+        // Ctrl+Super+D (the system's keyboard_home): Home at once, the same as SIGUSR1 (not
+        // through the Guide long-press timer).
+        let home = config.input.keyboard_home.then(|| shell_tx.clone());
+        hinteros_session::system::Relay::spawn(config.system.socket.clone(), events.clone(), home)
     } else {
         info!("system relay off");
         hinteros_session::system::Relay::disabled()

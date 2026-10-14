@@ -43,12 +43,11 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   the on-screen keyboard is up (both ALL, see below). Guide sends `home_pressed` and brings the
   launcher back (on release, since Guide also starts the on-screen keyboard chord), except for
   a long press with Steam in front (below). Ctrl + Super (Windows key) + D on any keyboard is
-  Home too (`input/keyboard.rs`), at once like SIGUSR1: the daemon reads every keyboard through evdev,
-  read-only and never grabbed (the focused app gets the keys too), skips its own virtual
-  keyboard, and fires once per D press while a Ctrl and a Super are held on that keyboard.
-  It needs read access to the keyboard (logind uaccess on the active seat, which the system
-  adds for keyboards, else group `input`); a keyboard it cannot open is skipped.
-  `[input] keyboard_home = false` turns it off; the greeter never reads keyboards.
+  Home too, at once like SIGUSR1. The daemon never reads keyboards (no profile account may: a
+  game could log the admin password): `hinteros-system keyboard-home` does, in its own unit, and
+  the system service sends `keyboard_home` to the daemon of the active seat0 session over the
+  system relay (`system.rs`; see "Keyboard Home" under "System service").
+  `[input] keyboard_home = false` ignores it; the greeter has no relay.
   Re-applies everything when InputPlumber restarts or a pad appears. Without
   InputPlumber it logs and carries on. `--dev-gamepad` reads
   pads directly instead, for desktop previews only (see "Desktop preview").
@@ -328,7 +327,7 @@ repeat_interval_ms = 100
 xbox_label_swap = "auto"       # "auto" | "on" | "off": Xbox (xpad) pads give Y as ui_action, X as ui_context
 dev_gamepad = false            # development only, see "Desktop preview"
 direction_debounce_ms = 40     # a direction re-pressed this soon after its release is stick chatter (0: off)
-keyboard_home = true           # Ctrl+Super+D on a keyboard is Home (read-only, never grabbed)
+keyboard_home = true           # the system's keyboard_home (Ctrl+Super+D) is Home
 
 [icons]
 fetch = true                   # download web app icons (https only)
@@ -799,7 +798,7 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.8 (0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.9 (0.9: `keyboard_home`, see "Keyboard Home" below; 0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
 box-wide actions, `guest.end`, rollback re-adds box features; see "Profiles and per-profile apps" below)
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
@@ -879,6 +878,33 @@ trust.
   `/etc/hinteros`'s `flake.nix`, `flake.lock` and `state.json` from the generation's snapshot
   (`$out/hinteros/`, as `hinteros-config-sync` does at boot).
 - **`hardware.redetect`**: `nixos-facter -o staging/facter.json`, then the apply flow.
+- **Keyboard Home** (0.9, `keyboard.rs`): Ctrl + Super + D on a keyboard is Home. No profile
+  account may read keyboards (a game would log the admin password typed into the launcher's
+  prompt or on the admin console), so `hinteros-system keyboard-home` is the only reader, in its
+  own unit (system repo: `hinteros-keyboard`, a dynamic user in groups `input` and
+  `hinteros-keyboard`, devices read-only, no network, no capabilities). It opens every
+  `/dev/input/event*` keyboard read-only and never grabs it (the focused app gets the keys too),
+  skips the session daemon's virtual keyboard (and anything named "hinteros"), keeps only the
+  state of Ctrl, Super and D, and fires once per D press while a Ctrl and a Super are held on
+  that keyboard (hotplug every 2 s). Each press is one `home` line on `keyboard.sock`
+  (`--keyboard-socket`, root:`--keyboard-group` 0660; anything else closes the connection; a
+  press while the service is down is dropped). The service sends `keyboard_home` (params `{}`)
+  only to the connections of the uid owning seat0's active session at that moment, never to the
+  greeter socket; the session daemon goes Home. Nobody owns seat0 on a text console without a
+  session: no event.
+- **Inactive profiles frozen** (`--freeze-inactive`, `freeze.rs`): logind moves device ACLs at
+  every switch but cannot revoke an fd opened before (`/dev/uinput`), so a game of a profile
+  that is not in front could type into the admin console (Ctrl+Alt+F2) or another session. The
+  service freezes `user-<uid>.slice` (systemd `FreezeUnit`) of every profile account (members
+  of `hinteros` and the guest; never the admin account, the greeter, root or a system user)
+  whose logind user state is `online` or `lingering` (sessions, none active), and thaws it
+  (`ThawUnit`) when it is `active` again, `closing` (systemd cannot stop a frozen unit) or
+  gone. Every logind signal checks at once (seat0's `ActiveSession` on a VT switch), plus a
+  check every 2 s (a restart re-applies it). `PrepareForShutdown` and stopping the service thaw
+  everything. `pin end-others` thaws the accounts it ends, before and after `TerminateUser`.
+  A slice frozen by `user.slice` during suspend is frozen by us too, so the resume leaves it
+  frozen. A frozen profile's sleep inhibitor (`delay`) holds a suspend from a text console up to
+  logind's `InhibitDelayMaxSec`.
 
 ### Command line
 
@@ -902,8 +928,13 @@ All paths default to the box's; tests point them at a temporary root.
 | `--auth-timeout-s` | 300 (how long an interactive polkit check waits for the admin password) |
 | `--zoneinfo-dir` | `/etc/zoneinfo` (the system's tzdata: TZif files and `zone1970.tab`) |
 | `--localtime` | `/etc/localtime` (the link `time_zone.set` replaces) |
+| `--keyboard-socket`, `--keyboard-group` | `/run/hinteros/keyboard.sock`, `hinteros-keyboard` (no socket without the group) |
+| `--freeze-inactive` | off (the system repo sets it): freeze profiles whose session is not the active one |
 
 `hinteros-system job [--run-dir DIR] <id>` runs one job (the job unit's `ExecStart`).
+
+`hinteros-system keyboard-home [--socket PATH] [--input-dir DIR]` reads the keyboards for
+Ctrl + Super + D (see "Keyboard Home"; the `hinteros-keyboard` unit's `ExecStart`).
 
 `hinteros-system check-state FILE...` parses each file with the same `State::parse` the service
 uses, without starting the service (no root, sockets or D-Bus). It prints `ok <file>` or
@@ -935,6 +966,11 @@ For `daemon.nix` (and the VM tests) in the system repo:
   **`restartIfChanged = false; stopIfChanged = false`** (`X-RestartIfChanged=false`) so the
   switch it performs never restarts the running instance. `StateDirectory=hinteros` (0700)
   for `/var/lib/hinteros` on either unit.
+- **Keyboards** (0.9): no profile account may read a keyboard (no uaccess rule for keyboards, no
+  group `input`). `hinteros-keyboard.service`: `ExecStart=hinteros-system keyboard-home`,
+  `DynamicUser`, `SupplementaryGroups=input hinteros-keyboard`, `DeviceAllow=char-input r`,
+  no network, no capabilities. Group `hinteros-keyboard`, and `hinteros-system.service` in it
+  (it chgrps `keyboard.sock` without `CAP_CHOWN`). `hinteros-system --freeze-inactive`.
 - **polkit** `share/polkit-1/actions/org.hinteros.system.policy` with the actions
   `org.hinteros.system.{settings,rebuild,update.check,update.apply,rollback,channel,jobs.cancel,apps}`
   (defaults `no/no/no`) and `org.hinteros.system.ssh` (defaults `auth_admin` for

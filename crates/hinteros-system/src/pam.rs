@@ -108,22 +108,31 @@ pub fn verify(ctx: &Ctx, user: &str, pin: &str, now: i64) -> (bool, Option<Strin
     }
 }
 
-/// The accounts whose processes `end-others` stops when `entering` opens a session: every
-/// member of `hinteros` and the guest, never `entering`, the admin account, root or a system
-/// user (uid < 1000).
-pub fn others(ctx: &Ctx, entering: &str) -> Vec<(String, u32)> {
-    let admin = ctx.state().and_then(|s| s.settings.admin.map(|a| a.user));
-    let mut names = ctx.users.group_members("hinteros");
+/// The profile accounts: every member of `hinteros` and the guest, never the admin account
+/// (`admin`), root or a system user (uid < 1000, e.g. the greeter). `end-others` ends them; the
+/// service freezes them while their session is not the active one ([`crate::freeze`]).
+pub fn accounts(users: &Users, admin: Option<&str>) -> Vec<(String, u32)> {
+    let mut names = users.group_members("hinteros");
     names.push(state::GUEST_USER.into());
     names.sort();
     names.dedup();
     names
         .into_iter()
-        .filter(|n| n != entering && Some(n) != admin.as_ref())
+        .filter(|n| Some(n.as_str()) != admin)
         .filter_map(|n| {
-            let u = ctx.users.by_name(&n)?;
+            let u = users.by_name(&n)?;
             (u.uid >= 1000).then_some((n, u.uid))
         })
+        .collect()
+}
+
+/// The accounts whose processes `end-others` stops when `entering` opens a session: every
+/// profile account ([`accounts`]) but `entering`.
+pub fn others(ctx: &Ctx, entering: &str) -> Vec<(String, u32)> {
+    let admin = ctx.state().and_then(|s| s.settings.admin.map(|a| a.user));
+    accounts(&ctx.users, admin.as_deref())
+        .into_iter()
+        .filter(|(n, _)| n != entering)
         .collect()
 }
 
@@ -147,6 +156,11 @@ pub fn processes_of(proc_dir: &Path, uid: u32) -> Vec<i32> {
 }
 
 async fn end_user(conn: &zbus::Connection, name: &str, uid: u32) {
+    // A frozen account (its session was not the active one, `crate::freeze`) cannot be stopped:
+    // systemd refuses to stop a frozen unit and frozen processes do not handle SIGTERM. Thaw it
+    // first; once logind calls it `closing`, the service no longer freezes it, and the second
+    // thaw covers a freeze in between.
+    crate::freeze::thaw(conn, uid).await;
     if let Err(e) = conn
         .call_method(
             Some("org.freedesktop.login1"),
@@ -159,6 +173,7 @@ async fn end_user(conn: &zbus::Connection, name: &str, uid: u32) {
     {
         info!(user = name, "TerminateUser: {e}");
     }
+    crate::freeze::thaw(conn, uid).await;
     // A bounded wait for the user manager to stop.
     let unit = format!("user@{uid}.service");
     let deadline = Instant::now() + Duration::from_secs(3);

@@ -72,13 +72,14 @@ fn fake_system(path: &Path, installed: Arc<Mutex<Vec<String>>>) -> tokio::task::
                                     let (w, installed) = (w.clone(), installed.clone());
                                     tokio::spawn(async move {
                                         let job = "00000000000000aa";
-                                        let ev = jsonrpc::notification("job_started", json!({"job_id": job, "kind": "apps_install", "uid": 1000}));
+                                        let ev = jsonrpc::notification("job_started", json!({"job_id": job, "kind": "apps_install", "uid": 1000, "subject": {}, "started_at": 1791300000}));
                                         write_message(&mut *w.lock().await, &ev).await.unwrap();
                                         tokio::time::sleep(Duration::from_millis(400)).await;
                                         installed.lock().unwrap().extend(ids);
                                         let ev = jsonrpc::notification("job_finished", json!({
                                             "job_id": job, "kind": "apps_install", "ok": true,
-                                            "result": {"generation": 2, "rev": null}, "session_restart_required": false
+                                            "result": {"generation": 2, "rev": null}, "session_restart_required": false,
+                                            "subject": {}, "started_at": 1791300000, "finished_at": 1791300001
                                         }));
                                         write_message(&mut *w.lock().await, &ev).await.unwrap();
                                     });

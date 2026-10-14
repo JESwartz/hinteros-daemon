@@ -19,7 +19,12 @@
 //! - A Steam game: `[game, 769, launcher]` (Steam's pre-launch and error windows show until the
 //!   game has one), PASS. It runs while Steam's reaper for it is alive, whatever its windows
 //!   do; launching it again then only focuses it. A Steam window over the launcher right after
-//!   our own Steam request gets focus (`STEAM_ANSWER_WINDOW`).
+//!   our own Steam request gets focus (`STEAM_ANSWER_WINDOW`). A game whose window carries
+//!   another app id (the one its Steam API reports, e.g. 480) has that id as an alias:
+//!   `[game, alias, 769, launcher]`, written as soon as that window appears; it ends once its
+//!   reaper and all its windows are gone. With Big Picture open, Steam writes focus orders of
+//!   its own; one that hides the focused game gets ours again (rate-limited, never while
+//!   Steam shows its menu after our Guide tap; see `Shell::check_order`).
 //! - `apps.close`: SIGTERM now, SIGKILL after the close timeout, then stop tracking.
 //! - An app with the keyboard input profile: InputPlumber intercepts the pad while it has focus
 //!   (`GamepadOnly` with the right-stick pointer profile, else `All`) and `ui_*` events become
@@ -141,6 +146,47 @@ pub const STEAM_ANSWER_WINDOW: Duration = Duration::from_secs(10);
 /// How many gamescope app ids above the launcher's are our command apps' (see
 /// `Shell::own_app_id`): far more apps than ever run at once.
 const OWN_APP_IDS: u32 = 4096;
+
+/// Steam (with Big Picture open) writes its own focus orders, and may put its own window in
+/// front of a Steam game we show. We write ours again at most this often...
+const REASSERT_GAP: Duration = Duration::from_millis(500);
+/// ...and at most [`REASSERT_MAX`] times in this long; after that Steam keeps its order (until
+/// the focus changes, or Steam shows the game by itself).
+const REASSERT_WINDOW: Duration = Duration::from_secs(30);
+const REASSERT_MAX: usize = 6;
+
+/// State for writing our focus order again when Steam changed it (see `Shell::check_order`).
+#[derive(Debug, Default)]
+struct OrderGuard {
+    /// When we wrote our order again (within [`REASSERT_WINDOW`]).
+    times: std::collections::VecDeque<Instant>,
+    /// Look again at this time (a write held back by [`REASSERT_GAP`]).
+    at: Option<Instant>,
+    /// Gave up: Steam kept changing it.
+    gave_up: bool,
+    /// We sent Steam a Guide tap (its menu): Steam's order goes; the order at that time, so
+    /// that Steam showing the game again (another order) ends it.
+    steam_menu: Option<Vec<u32>>,
+}
+
+/// The app that a focus order shows: the first one with a window (the launcher always has
+/// one).
+fn shown_by(order: &[u32], focusable: &[u32], launcher: u32) -> Option<u32> {
+    order
+        .iter()
+        .copied()
+        .find(|id| *id == launcher || focusable.contains(id))
+}
+
+/// What to tell gamescope (see [`FocusControl`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FocusPlan {
+    Launcher,
+    App(u32),
+    SteamGame(u32),
+    /// Steam (or a Steam game) with these games' windows in front of Steam's.
+    SteamClient(Vec<u32>),
+}
 
 /// A Guide press older than this no longer starts a chord (its release may have been lost).
 const GUIDE_HOLD_MAX: Duration = Duration::from_secs(10);
@@ -271,10 +317,18 @@ struct Closing {
 struct Running {
     info: RunningApp,
     started: Instant,
-    /// gamescope listed it in GAMESCOPE_FOCUSABLE_APPS (it has an Xwayland window).
+    /// gamescope listed it (or one of its `aliases`) in GAMESCOPE_FOCUSABLE_APPS (it has an
+    /// Xwayland window).
     seen_focusable: bool,
-    /// gamescope reported it as GAMESCOPE_FOCUSED_APP.
+    /// gamescope reported it (or one of its `aliases`) as GAMESCOPE_FOCUSED_APP.
     seen_focused: bool,
+    /// A Steam game: Steam's reaper for it was alive at some point (so once it is gone, the
+    /// game has ended).
+    reaper_seen: bool,
+    /// A Steam game: other app ids its windows carry (the one its Steam API reports, e.g.
+    /// 480 for a shortcut with Spacewar's steam_appid.txt; gamescope: "appid clash"), in the
+    /// order they were found.
+    aliases: Vec<u32>,
     /// Tracked by its windows: since when they are gone (exit after the debounce).
     gone_since: Option<Instant>,
     closing: Option<Closing>,
@@ -331,6 +385,8 @@ pub struct Shell {
     focus_lost_at: Option<Instant>,
     /// Writing the focus to gamescope failed (it is restarting?): try again at this time.
     focus_retry_at: Option<Instant>,
+    /// Writing our focus order again after Steam changed it (see [`Shell::check_order`]).
+    order: OrderGuard,
     /// The last few focus orders we wrote; gamescope state can lag behind our writes.
     written: std::collections::VecDeque<Vec<u32>>,
     next_command: u64,
@@ -421,6 +477,7 @@ impl Shell {
             gamescope: None,
             focus_lost_at: None,
             focus_retry_at: None,
+            order: OrderGuard::default(),
             written: std::collections::VecDeque::new(),
             next_command: 1,
             steam_windows: Vec::new(),
@@ -892,6 +949,8 @@ impl Shell {
                 started: now,
                 seen_focusable: false,
                 seen_focused: false,
+                reaper_seen: false,
+                aliases: Vec::new(),
                 gone_since: None,
                 closing: None,
                 keymap: input.keymap,
@@ -990,7 +1049,22 @@ impl Shell {
         if !self.apps.contains_key(STEAM_CLIENT_APP_ID) {
             return Vec::new();
         }
-        let mut games = self.steam_reaper_games();
+        let mut games = Vec::new();
+        for id in self.steam_reaper_games() {
+            games.push(id);
+            // The windows of a game we track carry its id or one of its aliases.
+            if let Some(app) = self
+                .apps
+                .values()
+                .find(|a| a.info.source == AppSource::Steam && a.info.gamescope_app_id == id)
+            {
+                for alias in &app.aliases {
+                    if !games.contains(alias) {
+                        games.push(*alias);
+                    }
+                }
+            }
+        }
         if !games.is_empty() {
             for id in self.unclaimed_windows() {
                 if !games.contains(&id) {
@@ -1045,22 +1119,99 @@ impl Shell {
                 *id != 0
                     && *id != launcher
                     && *id != STEAM_CLIENT_GAMESCOPE_APP_ID
-                    && !self.apps.values().any(|a| a.info.gamescope_app_id == *id)
+                    && !self.own_app_id(*id)
+                    && !self
+                        .apps
+                        .values()
+                        .any(|a| a.info.gamescope_app_id == *id || a.aliases.contains(id))
             })
             .collect()
     }
 
     /// A Steam game we track whose window carries another app id than its reaper's: those
-    /// windows, while its reaper is alive (they go in front of Steam's when it is focused).
+    /// ids (they go in front of Steam's window). Its aliases once known; until then, while its
+    /// reaper is alive, the windows that are nobody else's.
     fn steam_game_windows(&mut self, gs_id: u32) -> Vec<u32> {
-        let seen = self
+        let Some(app) = self
             .apps
             .values()
-            .any(|a| a.info.gamescope_app_id == gs_id && a.seen_focusable);
-        if seen || self.procs.steam_reapers(gs_id).is_empty() {
+            .find(|a| a.info.source == AppSource::Steam && a.info.gamescope_app_id == gs_id)
+        else {
+            return Vec::new();
+        };
+        if !app.aliases.is_empty() {
+            return app.aliases.clone();
+        }
+        if self.procs.steam_reapers(gs_id).is_empty() {
             return Vec::new();
         }
         self.unclaimed_windows()
+    }
+
+    /// Follow the Steam games we track (on each gamescope state): note that Steam's reaper for
+    /// each is alive, and claim the windows that are nobody else's for the game while it is
+    /// the only Steam game running (its aliases).
+    fn observe_steam_games(&mut self) {
+        if self.gamescope.is_none()
+            || !self
+                .apps
+                .values()
+                .any(|a| a.info.source == AppSource::Steam && a.closing.is_none())
+        {
+            return;
+        }
+        let live = self.steam_reaper_games();
+        for app in self.apps.values_mut() {
+            if app.info.source == AppSource::Steam
+                && !app.reaper_seen
+                && live.contains(&app.info.gamescope_app_id)
+            {
+                info!(app = %app.info.id, "Steam's reaper for it runs");
+                app.reaper_seen = true;
+            }
+        }
+        // Its reaper came and went, and it has no window (under its id or an alias): it ended.
+        let state = self.gamescope.as_ref().expect("checked above");
+        let ended: Vec<String> = self
+            .apps
+            .values()
+            .filter(|a| {
+                a.info.source == AppSource::Steam
+                    && a.closing.is_none()
+                    && a.reaper_seen
+                    && !live.contains(&a.info.gamescope_app_id)
+                    && !std::iter::once(a.info.gamescope_app_id)
+                        .chain(a.aliases.iter().copied())
+                        .any(|id| {
+                            state.focusable_apps.contains(&id) || state.focused_app == Some(id)
+                        })
+            })
+            .map(|a| a.info.id.clone())
+            .collect();
+        for id in ended {
+            info!(app = %id, "its Steam reaper and its windows are gone");
+            self.exited(&id, ExitReason::Exited, None);
+        }
+        let [only] = live[..] else { return };
+        let unclaimed = self.unclaimed_windows();
+        if unclaimed.is_empty() {
+            return;
+        }
+        let Some(app) = self.apps.values_mut().find(|a| {
+            a.info.source == AppSource::Steam
+                && a.closing.is_none()
+                && a.info.gamescope_app_id == only
+        }) else {
+            return;
+        };
+        for alias in unclaimed {
+            info!(
+                app = %app.info.id,
+                alias,
+                "its window has another app id (its Steam API's): that id is the game's too"
+            );
+            app.aliases.push(alias);
+        }
     }
 
     fn steam_game_still_running(&mut self, id: &str, reason: ExitReason) -> bool {
@@ -1082,9 +1233,10 @@ impl Shell {
         if app.info.source != AppSource::Steam {
             return false;
         }
+        // Once its reaper has come and gone, the game has ended (Steam windows are not its).
         let (gs_id, launching) = (
             app.info.gamescope_app_id,
-            !app.seen_focusable && !app.seen_focused,
+            !app.seen_focusable && !app.seen_focused && !app.reaper_seen,
         );
         if !self.procs.steam_reapers(gs_id).is_empty() {
             debug!(
@@ -1101,6 +1253,7 @@ impl Shell {
             );
             return true;
         }
+        info!(app = id, ?reason, "no window and no Steam reaper: ended");
         false
     }
 
@@ -1277,6 +1430,8 @@ impl Shell {
             self.set_osk(false, false);
         }
         self.focused = target;
+        // Asked for anew: Steam's earlier orders (and its menu) no longer count.
+        self.order = OrderGuard::default();
         self.apply_focus();
         if self.steam_shown() {
             // The user now sees Steam's windows.
@@ -1298,15 +1453,13 @@ impl Shell {
     }
 
     /// (Re)apply the current focus to gamescope and InputPlumber.
-    fn apply_focus(&mut self) {
+    /// What gamescope should show now, and the focus order that is.
+    fn focus_plan(&mut self) -> (FocusPlan, Vec<u32>) {
         let target = self
             .focused
             .as_ref()
             .and_then(|id| self.apps.get(id))
             .map(|r| (r.info.gamescope_app_id, r.info.source == AppSource::Steam));
-        if self.written.len() == 4 {
-            self.written.pop_front();
-        }
         let launcher = self.cfg.launcher_app_id;
         // Steam with games it started itself: their windows in front of Steam's. A Steam game
         // whose window has another id than its own: the game, then that window.
@@ -1322,17 +1475,32 @@ impl Shell {
             }
             _ => Vec::new(),
         };
-        self.written.push_back(match target {
-            _ if !client_games.is_empty() => baselayer_for_steam_client(&client_games, launcher),
-            Some((id, true)) => baselayer_for_steam_game(id, launcher),
-            _ => baselayer_for(target.map(|(id, _)| id), launcher),
-        });
-        let result = match target {
-            _ if !client_games.is_empty() => self.focus.focus_steam_client(&client_games),
+        match target {
+            _ if !client_games.is_empty() => {
+                let order = baselayer_for_steam_client(&client_games, launcher);
+                (FocusPlan::SteamClient(client_games), order)
+            }
             // Steam's own windows (shader pre-caching, launch errors) until the game has one.
-            Some((id, true)) => self.focus.focus_steam_game(id),
-            Some((id, false)) => self.focus.focus_app(id),
-            None => self.focus.focus_launcher(),
+            Some((id, true)) => (
+                FocusPlan::SteamGame(id),
+                baselayer_for_steam_game(id, launcher),
+            ),
+            Some((id, false)) => (FocusPlan::App(id), baselayer_for(Some(id), launcher)),
+            None => (FocusPlan::Launcher, baselayer_for(None, launcher)),
+        }
+    }
+
+    fn apply_focus(&mut self) {
+        let (plan, order) = self.focus_plan();
+        if self.written.len() == 4 {
+            self.written.pop_front();
+        }
+        self.written.push_back(order);
+        let result = match plan {
+            FocusPlan::SteamClient(games) => self.focus.focus_steam_client(&games),
+            FocusPlan::SteamGame(id) => self.focus.focus_steam_game(id),
+            FocusPlan::App(id) => self.focus.focus_app(id),
+            FocusPlan::Launcher => self.focus.focus_launcher(),
         };
         match result {
             Ok(()) => self.focus_retry_at = None,
@@ -1841,6 +2009,14 @@ impl Shell {
         self.guide = None;
         self.guide_others.clear();
         self.guide_tap_at = Some(now);
+        // Steam shows its menu by putting its window first: leave its order alone.
+        self.order.steam_menu = Some(
+            self.gamescope
+                .as_ref()
+                .map(|g| g.baselayer_apps.clone())
+                .unwrap_or_default(),
+        );
+        self.order.at = None;
     }
 
     /// A button pressed while Guide is held that is not the chord button: no long press for
@@ -2145,10 +2321,13 @@ impl Shell {
                     warn!(
                         found = ?state.baselayer_apps,
                         expected = ?self.written.back(),
+                        focusable = ?state.focusable_apps,
+                        focused = ?state.focused_app,
                         "someone else changed GAMESCOPECTRL_BASELAYER_APPID (Steam?)"
                     );
                 }
                 self.gamescope = Some(state);
+                self.observe_steam_games();
                 self.observe(now);
                 self.adopt_steam_client_games(now);
                 if self.steam_shown() {
@@ -2156,6 +2335,7 @@ impl Shell {
                         .extend(self.steam_windows.iter().map(|w| w.window));
                     self.update_attention();
                 }
+                self.check_order(now);
             }
             GamescopeEvent::SteamWindows(windows) => self.steam_windows(windows, now),
         }
@@ -2167,14 +2347,17 @@ impl Shell {
         let focused = self.focused.clone();
         for (id, app) in &mut self.apps {
             let gs = app.info.gamescope_app_id;
-            let listed = state.focusable_apps.contains(&gs);
-            let is_focused = state.focused_app == Some(gs);
+            let ids = || std::iter::once(gs).chain(app.aliases.iter().copied());
+            let listed = ids().any(|id| state.focusable_apps.contains(&id));
+            let is_focused = state.focused_app.is_some_and(|f| ids().any(|id| id == f));
             app.seen_focusable |= listed;
             app.seen_focused |= is_focused;
             if tracked_by_windows(app.info.source) {
                 // Gone when the Xwayland windows it had are gone. (A native Wayland game is
-                // never listed; the focus-loss rule below covers it.)
-                let gone = app.seen_focusable && !listed && !is_focused;
+                // never listed; the focus-loss rule below covers it.) A Steam game whose
+                // reaper ran: look whether that is still so (see `tick`), window or not.
+                let had = app.seen_focusable || app.reaper_seen;
+                let gone = had && !listed && !is_focused;
                 app.gone_since = match (gone, app.gone_since) {
                     (true, None) => Some(now),
                     (true, since) => since,
@@ -2190,6 +2373,85 @@ impl Shell {
                 };
             }
         }
+    }
+
+    /// Keep gamescope's focus order right while Steam or a Steam game has focus (on each
+    /// gamescope state, and at `order.at`):
+    /// - Our order changed (a game's window appeared under an alias): write it.
+    /// - Steam wrote its own order (it does while Big Picture is open, and may put its own
+    ///   window in front of the game) and that shows another app than ours would: write ours
+    ///   again, at most every [`REASSERT_GAP`] and [`REASSERT_MAX`] times per
+    ///   [`REASSERT_WINDOW`], then leave it to Steam. Not while Steam shows its menu (our
+    ///   Guide tap), and only for a Steam game: Steam with focus orders its windows itself.
+    fn check_order(&mut self, now: Instant) {
+        let Some(app) = self.focused_app() else {
+            return;
+        };
+        let steam_game = app.info.source == AppSource::Steam;
+        if !steam_game && app.info.source != AppSource::SteamClient {
+            return;
+        }
+        let (_, ours) = self.focus_plan();
+        if self.written.back() != Some(&ours) {
+            info!(order = ?ours, app = ?self.focused, "focus order changes");
+            self.order.gave_up = false;
+            self.apply_focus();
+            return;
+        }
+        let Some(state) = &self.gamescope else { return };
+        let found = &state.baselayer_apps;
+        if !steam_game || found.is_empty() || self.written.contains(found) {
+            return;
+        }
+        let launcher = self.cfg.launcher_app_id;
+        let theirs = shown_by(found, &state.focusable_apps, launcher);
+        let wanted = shown_by(&ours, &state.focusable_apps, launcher);
+        if theirs == wanted {
+            // Steam shows what we would.
+            if self.order.steam_menu.as_ref() != Some(found) {
+                self.order.steam_menu = None;
+            }
+            self.order.gave_up = false;
+            return;
+        }
+        if self.order.steam_menu.is_some() || self.order.gave_up {
+            debug!(
+                ?found,
+                ?theirs,
+                "Steam's focus order stays (its menu, or gave up)"
+            );
+            return;
+        }
+        self.order
+            .times
+            .retain(|t| now.duration_since(*t) < REASSERT_WINDOW);
+        if let Some(last) = self.order.times.back()
+            && now < *last + REASSERT_GAP
+        {
+            self.order.at = Some(*last + REASSERT_GAP);
+            return;
+        }
+        if self.order.times.len() >= REASSERT_MAX {
+            warn!(
+                ?found,
+                ours = ?ours,
+                "Steam keeps changing the focus order; it stays as Steam wrote it"
+            );
+            self.order.gave_up = true;
+            self.order.at = None;
+            return;
+        }
+        info!(
+            ?found,
+            ours = ?ours,
+            focusable = ?state.focusable_apps,
+            ?theirs,
+            ?wanted,
+            "Steam's focus order hides the game: writing ours again"
+        );
+        self.order.times.push_back(now);
+        self.order.at = None;
+        self.apply_focus();
     }
 
     /// Whether a window-tracked app that never showed a window has run out of time.
@@ -2223,6 +2485,7 @@ impl Shell {
             .chain(self.repeat.deadline())
             .chain(self.focus_lost_at)
             .chain(self.focus_retry_at)
+            .chain(self.order.at)
             .chain(self.osk_auto_hide_at)
             .chain(self.guide.as_ref().and_then(|hold| hold.steam_at))
             .min()
@@ -2240,6 +2503,10 @@ impl Shell {
         if self.focus_retry_at.is_some_and(|at| now >= at) {
             self.focus_retry_at = None;
             self.apply_focus();
+        }
+        if self.order.at.is_some_and(|at| now >= at) {
+            self.order.at = None;
+            self.check_order(now);
         }
         if self.osk_auto_hide_at.is_some_and(|at| now >= at) {
             self.osk_auto_hide_at = None;
@@ -2721,6 +2988,17 @@ mod tests {
                 focused_app: focused,
                 focusable_apps: focusable.to_vec(),
                 baselayer_apps: vec![],
+            };
+            self.shell
+                .handle(Msg::Gamescope(GamescopeEvent::State(state)), self.now);
+        }
+
+        /// A gamescope state with the focus order someone wrote (Steam, or us).
+        fn gamescope_order(&mut self, focused: Option<u32>, focusable: &[u32], order: &[u32]) {
+            let state = GamescopeState {
+                focused_app: focused,
+                focusable_apps: focusable.to_vec(),
+                baselayer_apps: order.to_vec(),
             };
             self.shell
                 .handle(Msg::Gamescope(GamescopeEvent::State(state)), self.now);
@@ -3572,6 +3850,244 @@ mod tests {
             .steam_reapers
             .insert(shortcut, vec![602]);
         assert_eq!(t.shell.steam_client_games(), vec![570, shortcut]);
+    }
+
+    /// Zombie Force: a non-Steam shortcut whose Steam API says it is Spacewar (its
+    /// steam_appid.txt), so its window ends up under 480, not under the shortcut's id.
+    const ZOMBIE: u32 = 2_396_848_268;
+    const ZOMBIE_APP: &str = "steam-2396848268";
+    /// The first id Steam writes in its focus orders (no window of its own).
+    const STEAM_FIRST: u32 = 413_091;
+
+    /// Zombie Force launched from Home (Steam runs in the background); with `big_picture`,
+    /// Steam's Big Picture is open behind the launcher. Log and events cleared.
+    fn zombie_force(big_picture: bool) -> T {
+        let mut t = T::new();
+        t.procs.lock().unwrap().steam_running = true;
+        if big_picture {
+            t.launch(json!({"id": "steam"}));
+            t.gamescope(Some(769), &[769, L]);
+            steam_windows(&mut t, &[(10, "Steam Big Picture Mode")]);
+            t.input("ui_guide", 1.0);
+            t.input("ui_guide", 0.0);
+            assert_eq!(t.shell.focused(), None);
+            t.gamescope(Some(L), &[769, L]);
+        }
+        let app = t.launch(json!({"url": format!("steam://rungameid/{ZOMBIE}")}));
+        assert_eq!(app.id, ZOMBIE_APP);
+        assert_eq!(t.shell.focused(), Some(ZOMBIE_APP));
+        t.events();
+        t.log.take();
+        t
+    }
+
+    /// The focus orders written (Mode and other calls left out).
+    fn focus_calls(log: Vec<Call>) -> Vec<Call> {
+        log.into_iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Call::FocusLauncher
+                        | Call::FocusApp(_)
+                        | Call::FocusSteamGame(_)
+                        | Call::FocusSteamClient(_)
+                )
+            })
+            .collect()
+    }
+
+    /// Steam starts the game: its reaper, then its window, under the shortcut's id for a
+    /// moment with `own_first` (gamescope: "appid clash was 2396848268 now 480"), then under
+    /// 480. `others`: the other focusable apps (the first one focused); `order`: the focus
+    /// order gamescope reports meanwhile (Steam's, with Big Picture open; empty: ours).
+    fn zombie_force_window(t: &mut T, others: &[u32], own_first: bool, order: &[u32]) {
+        let with = |ids: &[u32]| -> Vec<u32> { others.iter().chain(ids).copied().collect() };
+        t.procs
+            .lock()
+            .unwrap()
+            .steam_reapers
+            .insert(ZOMBIE, vec![500]);
+        t.gamescope_order(Some(others[0]), &with(&[]), order);
+        if own_first {
+            t.gamescope_order(Some(others[0]), &with(&[ZOMBIE]), order);
+        }
+        t.gamescope_order(Some(others[0]), &with(&[480]), order);
+    }
+
+    #[test]
+    fn a_game_under_another_app_id_shows_as_soon_as_its_window_does() {
+        // Cold start: Steam runs without Big Picture and leaves the focus order alone.
+        for own_first in [false, true] {
+            let mut t = zombie_force(false);
+            // Steam's own window while it launches it (an interstitial).
+            t.gamescope(Some(769), &[769, L]);
+            zombie_force_window(&mut t, &[769, L], own_first, &[]);
+            // Its window goes in front of Steam's as soon as it is there.
+            assert_eq!(
+                focus_calls(t.log.take()),
+                [Call::FocusSteamClient(vec![ZOMBIE, 480])],
+                "own_first: {own_first}"
+            );
+            // Written once.
+            t.gamescope(Some(480), &[769, 480, L]);
+            t.advance(Duration::from_secs(10));
+            assert!(focus_calls(t.log.take()).is_empty());
+            assert_eq!(t.shell.focused(), Some(ZOMBIE_APP));
+            assert!(t.events().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_game_under_another_app_id_gets_the_screen_while_big_picture_is_open() {
+        for own_first in [false, true] {
+            let mut t = zombie_force(true);
+            // Big Picture writes its own focus orders while it starts the game.
+            t.gamescope_order(Some(769), &[769, L], &[STEAM_FIRST, ZOMBIE, 769]);
+            let steams = [STEAM_FIRST, 769, 480];
+            zombie_force_window(&mut t, &[769, L], own_first, &steams);
+            // Steam's window would be in front of the game: ours again, game first (and its
+            // window under its own id, while it has one).
+            let mut expected = vec![Call::FocusSteamClient(vec![ZOMBIE, 480])];
+            if own_first {
+                expected.insert(0, Call::FocusSteamGame(ZOMBIE));
+            }
+            assert_eq!(
+                focus_calls(t.log.take()),
+                expected,
+                "own_first: {own_first}"
+            );
+            let ours = [ZOMBIE, 480, 769, L];
+            t.gamescope_order(Some(480), &[769, 480, L], &ours);
+            // Steam writes an order with the game first: left alone.
+            t.advance(Duration::from_secs(1));
+            t.gamescope_order(Some(480), &[769, 480, L], &[STEAM_FIRST, 480, 769]);
+            t.advance(Duration::from_secs(1));
+            assert!(focus_calls(t.log.take()).is_empty());
+            // Steam's window first again: ours again.
+            t.gamescope_order(Some(769), &[769, 480, L], &steams);
+            t.advance(Duration::from_secs(1));
+            assert_eq!(
+                focus_calls(t.log.take()),
+                [Call::FocusSteamClient(vec![ZOMBIE, 480])]
+            );
+            assert_eq!(t.shell.focused(), Some(ZOMBIE_APP));
+        }
+    }
+
+    #[test]
+    fn steam_rewriting_the_focus_order_is_not_fought_forever() {
+        let mut t = zombie_force(true);
+        let steams = [STEAM_FIRST, 769, 480];
+        zombie_force_window(&mut t, &[769, L], false, &steams);
+        t.log.take();
+        // Steam puts its window first again ten times a second, for a minute.
+        let mut writes = 0;
+        for _ in 0..600 {
+            t.gamescope_order(Some(769), &[769, 480, L], &steams);
+            t.advance(MS(100));
+            writes += focus_calls(t.log.take()).len();
+        }
+        assert!((1..=20).contains(&writes), "{writes} writes");
+        // A quick pair of Steam orders gets one answer, not two.
+        let mut t = zombie_force(true);
+        zombie_force_window(&mut t, &[769, L], false, &steams);
+        t.log.take();
+        t.advance(Duration::from_secs(1));
+        t.gamescope_order(Some(769), &[769, 480, L], &steams);
+        t.gamescope_order(Some(769), &[769, 480, L], &[STEAM_FIRST, 769]);
+        assert_eq!(focus_calls(t.log.take()).len(), 1);
+    }
+
+    #[test]
+    fn steams_menu_over_a_game_under_another_app_id_is_left_alone() {
+        let mut t = zombie_force(true);
+        let steams = [STEAM_FIRST, 769, 480];
+        zombie_force_window(&mut t, &[769, L], false, &steams);
+        t.gamescope_order(Some(480), &[769, 480, L], &[ZOMBIE, 480, 769, L]);
+        t.advance(Duration::from_secs(1));
+        t.log.take();
+        // Guide held: Steam's menu, which Steam shows by putting its window first.
+        t.input("ui_guide", 1.0);
+        t.advance(GUIDE_LONG_PRESS);
+        t.input("ui_guide", 0.0);
+        assert_eq!(t.log.take(), [Call::GuideTap(InterceptMode::Pass)]);
+        t.gamescope_order(Some(769), &[769, 480, L], &steams);
+        t.advance(Duration::from_secs(5));
+        assert!(focus_calls(t.log.take()).is_empty());
+        assert_eq!(t.shell.focused(), Some(ZOMBIE_APP));
+        // Back in the game (Steam puts it first); later Steam's window first by itself: ours.
+        t.gamescope_order(Some(480), &[769, 480, L], &[STEAM_FIRST, 480, 769]);
+        t.advance(Duration::from_secs(1));
+        t.gamescope_order(Some(769), &[769, 480, L], &steams);
+        t.advance(Duration::from_secs(1));
+        assert_eq!(
+            focus_calls(t.log.take()),
+            [Call::FocusSteamClient(vec![ZOMBIE, 480])]
+        );
+        // Home: the launcher; Steam's orders are its own business then.
+        t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
+        assert_eq!(focus_calls(t.log.take()), [Call::FocusLauncher]);
+        t.gamescope_order(Some(769), &[769, 480, L], &steams);
+        t.advance(Duration::from_secs(5));
+        assert!(focus_calls(t.log.take()).is_empty());
+    }
+
+    #[test]
+    fn a_game_under_another_app_id_that_ends_by_itself_is_exited() {
+        let exited = || {
+            ev(
+                EventName::AppExited,
+                json!({"id": ZOMBIE_APP, "reason": "exited"}),
+            )
+        };
+        for big_picture in [false, true] {
+            for own_first in [false, true] {
+                let case = format!("big_picture: {big_picture}, own_first: {own_first}");
+                let mut t = zombie_force(big_picture);
+                let steams: &[u32] = if big_picture {
+                    &[STEAM_FIRST, 769, 480]
+                } else {
+                    &[]
+                };
+                zombie_force_window(&mut t, &[769, L], own_first, steams);
+                t.advance(Duration::from_secs(10));
+                assert_eq!(t.shell.focused(), Some(ZOMBIE_APP), "{case}");
+                assert!(t.events().is_empty(), "{case}");
+                // It ends by itself: its reaper and its window go.
+                t.procs.lock().unwrap().steam_reapers.remove(&ZOMBIE);
+                let order: &[u32] = if big_picture {
+                    &[STEAM_FIRST, 769]
+                } else {
+                    &[]
+                };
+                t.gamescope_order(Some(769), &[769, L], order);
+                t.advance(Duration::from_secs(3));
+                assert!(t.events().contains(&exited()), "{case}");
+                assert_eq!(t.shell.focused(), None, "{case}");
+            }
+        }
+        // The window goes first, the reaper a while later (it saves, cleans up).
+        let mut t = zombie_force(false);
+        zombie_force_window(&mut t, &[769, L], false, &[]);
+        t.gamescope(Some(769), &[769, L]);
+        t.advance(Duration::from_secs(10));
+        assert!(t.events().is_empty(), "the reaper is alive: still running");
+        t.procs.lock().unwrap().steam_reapers.remove(&ZOMBIE);
+        t.advance(Duration::from_secs(3));
+        assert!(t.events().contains(&exited()));
+        // It never shows a window, but its reaper came and went: ended, no launch timeout.
+        let mut t = zombie_force(true);
+        t.procs
+            .lock()
+            .unwrap()
+            .steam_reapers
+            .insert(ZOMBIE, vec![500]);
+        t.gamescope(Some(769), &[769, L]);
+        t.advance(Duration::from_secs(5));
+        t.procs.lock().unwrap().steam_reapers.remove(&ZOMBIE);
+        t.advance(Duration::from_secs(3));
+        assert!(t.events().contains(&exited()));
     }
 
     #[test]

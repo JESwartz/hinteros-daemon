@@ -14,13 +14,14 @@ use hinteros_api::server::{self, Connection, Step, method_not_found};
 use hinteros_api::system::{
     self, AppsAcceptTerms, AppsAcceptTermsParams, AppsGenerations, AppsInstall, AppsInstallParams,
     AppsList, AppsRemove, AppsRemoveParams, AppsRollback, AppsRollbackParams, BaseSet,
-    BaseSetParams, ChannelSet, ChannelSetParams, EventName, GenerationsList, GenerationsListResult,
-    HardwareRedetect, HardwareRedetectParams, JobIdParams, JobKind, JobRef, JobsCancel, JobsGet,
-    JobsGetResult, JobsList, JobsListResult, Rebuild, Rollback, RollbackParams, Settings,
-    SettingsGet, SettingsGetResult, SettingsSet, SettingsSetParams, SshInfo, SshSet, SshSetParams,
-    SshSettings, Subscribe, SubscriptionParams, SubscriptionResult, SystemInfo, SystemInfoResult,
-    Unsubscribe, UpdateApply, UpdateApplyParams, UpdateCheck, UpdateCheckReply, UpdateCheckResult,
-    is_job_id, is_rev,
+    BaseSetParams, ChannelCheck, ChannelCheckParams, ChannelCheckResult, ChannelSet,
+    ChannelSetParams, EventName, GenerationsList, GenerationsListResult, HardwareRedetect,
+    HardwareRedetectParams, JobIdParams, JobKind, JobRef, JobsCancel, JobsGet, JobsGetResult,
+    JobsList, JobsListResult, Rebuild, Rollback, RollbackParams, Settings, SettingsGet,
+    SettingsGetResult, SettingsSet, SettingsSetParams, SshInfo, SshSet, SshSetParams, SshSettings,
+    Subscribe, SubscriptionParams, SubscriptionResult, SystemInfo, SystemInfoResult, Unsubscribe,
+    UpdateApply, UpdateApplyParams, UpdateCheck, UpdateCheckReply, UpdateCheckResult, is_job_id,
+    is_rev,
 };
 use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde::de::DeserializeOwned;
@@ -581,6 +582,7 @@ pub(crate) enum Request {
     Rollback(RollbackParams),
     UpdateCheck,
     UpdateApply(UpdateApplyParams),
+    ChannelCheck(ChannelCheckParams),
     ChannelSet(ChannelSetParams),
     BaseSet(BaseSetParams),
     AppsInstall(AppsInstallParams),
@@ -643,9 +645,17 @@ impl Request {
                 }
                 Self::UpdateApply(p)
             }
+            ChannelCheck::NAME => Self::ChannelCheck(decode::<ChannelCheck>(params)?),
             ChannelSet::NAME => {
                 let p: ChannelSetParams = decode::<ChannelSet>(params)?;
                 check_admin_pin(p.admin_pin.as_deref())?;
+                if p.rev.as_deref().is_some_and(|r| !is_rev(r)) {
+                    return Err(ErrorObject::invalid_field(
+                        "rev",
+                        "bad_format",
+                        "rev must be 40 hex digits",
+                    ));
+                }
                 Self::ChannelSet(p)
             }
             BaseSet::NAME => {
@@ -1065,12 +1075,23 @@ impl Service {
             current_rev,
             allowed_signers: flake::allowed_signers(&self.policy_dir()),
             catalog: None,
+            others: Vec::new(),
         })
     }
 
     /// The last update check, if it is for the channel and revision the box is on.
     fn last_check(&self, channel: system::Channel, rev: Option<&str>) -> Option<UpdateCheckResult> {
         let r: UpdateCheckResult = job::read_json(&self.paths.last_check())?;
+        (r.channel == channel && r.current_rev.as_deref() == rev).then_some(r)
+    }
+
+    /// The last `channel.check` result, if it is for `channel` and the revision the box is on.
+    fn last_channel_check(
+        &self,
+        channel: system::Channel,
+        rev: Option<&str>,
+    ) -> Option<ChannelCheckResult> {
+        let r: ChannelCheckResult = job::read_json(&self.paths.channel_check())?;
         (r.channel == channel && r.current_rev.as_deref() == rev).then_some(r)
     }
 
@@ -1260,6 +1281,13 @@ impl Service {
                     .map_err(internal);
                 }
                 let mut source = self.update_source(&table, channel, lock.rev.clone())?;
+                // The other channels' tips are verified and recorded too, before any switch.
+                source.others = table
+                    .branches
+                    .values()
+                    .filter(|b| **b != source.branch)
+                    .cloned()
+                    .collect();
                 let index = self.args.catalog_index();
                 source.catalog = Some(job::CatalogCheck {
                     index: std::fs::canonicalize(&index).unwrap_or(index),
@@ -1336,6 +1364,28 @@ impl Service {
                     .about(subject);
                 job_ref(Some(self.start(spec).await?))
             }
+            Request::ChannelCheck(p) => {
+                let table = self
+                    .channel_table()
+                    .ok_or_else(|| internal("this system has no update channel table"))?;
+                let lock = flake::read_lock(&self.paths.config_dir.join("flake.lock"))
+                    .map_err(internal)?;
+                let from = flake::current_channel(&lock, Some(&table));
+                if from == Some(p.channel) {
+                    return job_ref(None);
+                }
+                let source = self.update_source(&table, p.channel, lock.rev.clone())?;
+                let subject = system::JobSubject {
+                    channel: Some(p.channel),
+                    from_channel: from,
+                    from_rev: lock.rev.clone(),
+                    ..Default::default()
+                };
+                let spec = self
+                    .spec(JobKind::ChannelCheck, uid, Action::ChannelCheck(source))
+                    .about(subject);
+                job_ref(Some(self.start(spec).await?))
+            }
             Request::ChannelSet(p) => {
                 self.check_box_admin(uid, ChannelSet::NAME, p.admin_pin.as_deref())
                     .await?;
@@ -1345,9 +1395,21 @@ impl Service {
                 let lock = flake::read_lock(&self.paths.config_dir.join("flake.lock"))
                     .map_err(internal)?;
                 let from = flake::current_channel(&lock, Some(&table));
-                let ack = p.acknowledge_downgrade.unwrap_or(false);
-                let Some(to) = state::channel_change(from, p.channel, ack)? else {
+                let to = p.channel;
+                if from == Some(to) {
                     return job_ref(None);
+                }
+                // Only the revision channel.check verified, and the owner confirmed, for this
+                // channel and the locked revision.
+                let verified = self
+                    .last_channel_check(to, lock.rev.as_deref())
+                    .filter(|c| p.rev.as_deref() == Some(c.target.rev.as_str()));
+                let Some(verified) = verified else {
+                    return Err(ErrorObject::with_data(
+                        ErrorCode::StateConflict,
+                        "rev is not the last verified channel check",
+                        json!({ "reason": "channel_rev" }),
+                    ));
                 };
                 let from_branch = lock
                     .branch
@@ -1355,18 +1417,19 @@ impl Service {
                     .ok_or_else(|| internal("/etc/hinteros/flake.lock does not follow a branch"))?;
                 self.preflight()?;
                 let source = self.update_source(&table, to, lock.rev.clone())?;
+                let rev = verified.target.rev.clone();
                 let update = ApplyUpdate {
                     input_url: table.input_url(&source.branch, None),
                     retarget_from: Some(table.input_url(&from_branch, None)),
                     source,
-                    rev: None,
-                    not_fast_forward: if ack {
-                        NotFastForward::Allow
-                    } else {
-                        NotFastForward::NeedsAcknowledgement
-                    },
+                    rev: Some(rev.clone()),
+                    // The owner confirmed this revision; the job still refuses one older than
+                    // the newest verified tip of the target branch.
+                    not_fast_forward: NotFastForward::Allow,
                 };
                 let subject = system::JobSubject {
+                    rev: Some(rev),
+                    version: verified.target.version,
                     channel: Some(to),
                     from_channel: from,
                     from_rev: lock.rev.clone(),

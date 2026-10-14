@@ -433,6 +433,15 @@ impl Paths {
     pub fn last_check(&self) -> PathBuf {
         self.state_dir.join("update-check.json")
     }
+    /// The last `channel.check` result (root only), which `channel.set` must match.
+    pub fn channel_check(&self) -> PathBuf {
+        self.state_dir.join("channel-check.json")
+    }
+    /// The newest verified tip seen on each channel branch (root only). Only update jobs write
+    /// it, and only forward: rollbacks and channel switches never lower it.
+    pub fn channel_tips(&self) -> PathBuf {
+        self.state_dir.join("channel-tips.json")
+    }
     /// Which vendor terms were accepted, when and by whom (written by apps.install jobs).
     pub fn terms_accepted(&self) -> PathBuf {
         self.state_dir.join("terms-accepted.json")

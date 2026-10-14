@@ -112,6 +112,8 @@ pub enum JobKind {
     CleanupProfiles,
     /// 0.6: the automatic clean-up setting changed (a rebuild).
     CleanupSet,
+    /// 0.9: the tip of another channel verified before `channel.set`.
+    ChannelCheck,
 }
 
 impl JobKind {
@@ -138,6 +140,7 @@ impl JobKind {
         JobKind::CleanupSystem,
         JobKind::CleanupProfiles,
         JobKind::CleanupSet,
+        JobKind::ChannelCheck,
     ];
 }
 
@@ -576,12 +579,47 @@ impl Method for UpdateApply {
     type Result = JobRef;
 }
 
+/// 0.9: `channel.check`: verify the tip of another channel before `channel.set`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelCheckParams {
+    pub channel: Channel,
+}
+
+pub struct ChannelCheck;
+impl Method for ChannelCheck {
+    const NAME: &'static str = "channel.check";
+    type Params = ChannelCheckParams;
+    type Result = JobRef;
+}
+
+/// 0.9: the result of a `channel_check` job: the verified tip of the target channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelCheckResult {
+    /// The target channel.
+    pub channel: Channel,
+    /// The locked revision when the check ran.
+    #[serde(deserialize_with = "nullable")]
+    pub current_rev: Option<String>,
+    /// The target's verified tip (`commits` and `security` count the commits the installed
+    /// revision does not have).
+    pub target: AvailableUpdate,
+    /// The target does not descend from the installed revision (the switch may go back to an
+    /// older version).
+    pub older: bool,
+    /// When the check ran (Unix time, seconds).
+    pub checked_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelSetParams {
     pub channel: Channel,
+    /// 0.9: the target revision the owner confirmed: the last `channel.check` result's
+    /// `target.rev` for this channel (needed unless `channel` is the current one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acknowledge_downgrade: Option<bool>,
+    pub rev: Option<String>,
     /// 0.5: the admin profile's PIN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_pin: Option<String>,
@@ -1522,6 +1560,8 @@ pub enum JobResult {
     Measured(MeasuredResult),
     /// 0.6: `cleanup_system`, `cleanup_profiles`.
     Cleaned(CleanedResult),
+    /// 0.9: `channel_check`.
+    ChannelCheck(ChannelCheckResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1798,6 +1838,7 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<Rollback>(),
         MethodInfo::of::<UpdateCheck>(),
         MethodInfo::of::<UpdateApply>(),
+        MethodInfo::of::<ChannelCheck>(),
         MethodInfo::of::<ChannelSet>(),
         MethodInfo::of::<BaseSet>(),
         MethodInfo::of::<AppsInstall>(),
@@ -1858,6 +1899,7 @@ pub const MUTATING: &[&str] = &[
     Rollback::NAME,
     UpdateCheck::NAME,
     UpdateApply::NAME,
+    ChannelCheck::NAME,
     ChannelSet::NAME,
     BaseSet::NAME,
     AppsInstall::NAME,
@@ -1909,7 +1951,8 @@ pub fn polkit_action(method: &str) -> Option<&'static str> {
         SettingsSet::NAME => "org.hinteros.system.settings",
         SshSet::NAME => "org.hinteros.system.ssh",
         Rebuild::NAME | HardwareRedetect::NAME => "org.hinteros.system.rebuild",
-        UpdateCheck::NAME => "org.hinteros.system.update.check",
+        // 0.9: a check like update.check (no PIN), so the policy file needs no change.
+        UpdateCheck::NAME | ChannelCheck::NAME => "org.hinteros.system.update.check",
         UpdateApply::NAME => "org.hinteros.system.update.apply",
         Rollback::NAME => "org.hinteros.system.rollback",
         ChannelSet::NAME | BaseSet::NAME => "org.hinteros.system.channel",

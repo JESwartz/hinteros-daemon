@@ -18,8 +18,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hinteros_api::system::{
-    AppliedResult, CatalogApp, JobResult, JobState, JobSubject, RemovedApp, Stage,
-    UpdateCheckResult, is_job_id,
+    AppliedResult, CatalogApp, ChannelCheckResult, JobResult, JobState, JobSubject, RemovedApp,
+    Stage, UpdateCheckResult, is_job_id,
 };
 use hinteros_api::{ErrorCode, ErrorObject};
 use rustix::fs::{FlockOperation, flock};
@@ -32,7 +32,7 @@ use crate::fsutil;
 use crate::generations;
 use crate::job::{self, Action, Apply, JobSpec, NotFastForward, ProgressLine, Snapshot, Status};
 use crate::nixlog;
-use crate::update::{Git, GitError, Rejection};
+use crate::update::{Git, GitError, SeenTips};
 
 mod apps;
 mod profiles;
@@ -98,6 +98,7 @@ fn run(dir: &Path) -> anyhow::Result<()> {
             }
         }),
         Action::UpdateCheck(_) => r.update_check(),
+        Action::ChannelCheck(_) => r.channel_check(),
         Action::Apps(j) => r.apps_job(&j),
         Action::MigrateApps(m) => r.migrate(&m),
         Action::ProfileCreate(j) => r.profile_create(&j),
@@ -566,7 +567,7 @@ impl Runner {
         }
     }
 
-    fn git_error(&self, source: &job::UpdateSource, e: GitError, nff: NotFastForward) -> Failure {
+    fn git_error(&self, source: &job::UpdateSource, e: GitError) -> Failure {
         match e {
             GitError::Unreachable(msg) => {
                 warn!("update server unreachable: {msg}");
@@ -574,14 +575,6 @@ impl Runner {
                     ErrorCode::UpdateUnreachable,
                     "cannot reach the update server",
                     json!({ "host": source.host }),
-                ))
-            }
-            GitError::Rejected(Rejection::NotFastForward)
-                if nff == NotFastForward::NeedsAcknowledgement =>
-            {
-                Failure::Error(ErrorObject::new(
-                    ErrorCode::NeedsAcknowledgement,
-                    "the target revision does not descend from the installed one",
                 ))
             }
             GitError::Rejected(r) => Failure::Error(r.error()),
@@ -597,20 +590,36 @@ impl Runner {
         };
         self.set_stage(Stage::Preparing);
         let git = self.git(&source);
+        let tips_path = self.spec.paths.channel_tips();
+        let mut tips = SeenTips::load(&tips_path);
         let mut stages = Vec::new();
         let checked = git.check(
             &source.repo,
             &source.branch,
             source.current_rev.as_deref(),
             true,
+            tips.get(&source.branch),
             &source.allowed_signers,
             &mut |s| stages.push(s),
         );
         for s in stages {
             self.set_stage(s);
         }
-        let mut available =
-            checked.map_err(|e| self.git_error(&source, e, NotFastForward::Reject))?;
+        // Record the verified tips: this channel's, and (unless the server is unreachable) the
+        // other channels', so a later switch is checked against them.
+        let mut changed = false;
+        if let Ok(Some(a)) = &checked {
+            changed |= record_tip(&git, &mut tips, &source.branch, &a.rev);
+        }
+        if !matches!(checked, Err(GitError::Unreachable(_))) {
+            for branch in &source.others {
+                changed |= record_other(&git, &source, &mut tips, branch);
+            }
+        }
+        if changed && let Err(e) = tips.save(&tips_path) {
+            warn!("cannot store the verified channel tips: {e}");
+        }
+        let mut available = checked.map_err(|e| self.git_error(&source, e))?;
         if let (Some(a), Some(cat)) = (available.as_mut(), &source.catalog) {
             self.set_stage(Stage::Evaluating);
             if let Some((new, removed)) = self.catalog_diff(cat, &a.rev)? {
@@ -631,6 +640,64 @@ impl Runner {
             }
         }
         Ok((Some(JobResult::UpdateCheck(result)), false))
+    }
+
+    /// `channel.check`: fetch and verify the target channel's tip. It may be older than the
+    /// locked revision (`older`), never older than the newest tip recorded for its branch.
+    fn channel_check(&mut self) -> Outcome {
+        let Action::ChannelCheck(source) = self.spec.action.clone() else {
+            unreachable!()
+        };
+        self.set_stage(Stage::Preparing);
+        let git = self.git(&source);
+        let tips_path = self.spec.paths.channel_tips();
+        let mut tips = SeenTips::load(&tips_path);
+        self.set_stage(Stage::Fetching);
+        let tip = git
+            .init()
+            .and_then(|()| git.fetch_tip(&source.repo, &source.branch))
+            .map_err(|e| self.git_error(&source, e))?;
+        self.check_cancel()?;
+        self.set_stage(Stage::Verifying);
+        let current = source.current_rev.as_deref();
+        let target = git
+            .describe(
+                &tip,
+                current,
+                false,
+                tips.get(&source.branch),
+                &source.allowed_signers,
+            )
+            .map_err(|e| self.git_error(&source, e))?;
+        let older = match current {
+            Some(c) => !git
+                .is_ancestor(c, &tip)
+                .map_err(|e| self.git_error(&source, e))?,
+            None => false,
+        };
+        if record_tip(&git, &mut tips, &source.branch, &tip)
+            && let Err(e) = tips.save(&tips_path)
+        {
+            warn!("cannot store the verified channel tips: {e}");
+        }
+        self.set_subject(|s| {
+            s.rev = Some(tip.clone());
+            s.version = target.version.clone();
+        });
+        let result = ChannelCheckResult {
+            channel: source.channel,
+            current_rev: source.current_rev.clone(),
+            target,
+            older,
+            checked_at: job::now(),
+        };
+        let bytes = serde_json::to_vec(&result)
+            .map_err(|e| self.fail(format!("encoding the check result: {e}")))?;
+        let _ = fs::create_dir_all(&self.spec.paths.state_dir);
+        // channel.set accepts only this revision: without the file the switch cannot go on.
+        fsutil::write_atomic(&self.spec.paths.channel_check(), &bytes, 0o600)
+            .map_err(|e| self.fail(format!("storing the check result: {e}")))?;
+        Ok((Some(JobResult::ChannelCheck(result)), false))
     }
 
     /// The apps the update at `rev` adds and removes: `lib.catalogIds` of the target revision
@@ -697,24 +764,34 @@ impl Runner {
             let fetched = git
                 .init()
                 .and_then(|()| git.fetch(&u.source.repo, &u.source.branch));
-            fetched.map_err(|e| self.git_error(&u.source, e, u.not_fast_forward))?;
+            fetched.map_err(|e| self.git_error(&u.source, e))?;
             self.check_cancel()?;
             self.set_stage(Stage::Verifying);
             let rev = match &u.rev {
                 Some(r) => r.clone(),
                 None => git
                     .ls_remote(&u.source.repo, &u.source.branch)
-                    .map_err(|e| self.git_error(&u.source, e, u.not_fast_forward))?,
+                    .map_err(|e| self.git_error(&u.source, e))?,
             };
             let require_ff = u.not_fast_forward != NotFastForward::Allow;
+            // Never older than the newest tip this box verified on the target branch (also on
+            // a switch, which may go back from the locked revision).
+            let tips_path = paths.channel_tips();
+            let mut tips = SeenTips::load(&tips_path);
             let described = git
                 .describe(
                     &rev,
                     u.source.current_rev.as_deref(),
                     require_ff,
+                    tips.get(&u.source.branch),
                     &u.source.allowed_signers,
                 )
-                .map_err(|e| self.git_error(&u.source, e, u.not_fast_forward))?;
+                .map_err(|e| self.git_error(&u.source, e))?;
+            if record_tip(&git, &mut tips, &u.source.branch, &rev)
+                && let Err(e) = tips.save(&tips_path)
+            {
+                warn!("cannot store the verified channel tips: {e}");
+            }
             // The verified target names the job (a channel switch learns it only now).
             self.set_subject(|s| {
                 s.rev = Some(rev.clone());
@@ -961,6 +1038,35 @@ impl Runner {
 
 /// What `hinteros-config-sync` does at boot, for a rollback from Settings: make the managed
 /// files of `config_dir` equal the generation's snapshot (other files, e.g. facter.json, stay).
+/// Record a verified `rev` as `branch`'s newest tip if it descends from the recorded one;
+/// returns whether the record changed.
+fn record_tip(git: &Git, tips: &mut SeenTips, branch: &str, rev: &str) -> bool {
+    tips.record(git, branch, rev).unwrap_or_else(|e| {
+        warn!("cannot record the tip of {branch}: {e}");
+        false
+    })
+}
+
+/// `update.check`: fetch and verify another channel's tip and record it. Failures are logged
+/// only (the check is about the followed channel). Returns whether the record changed.
+fn record_other(git: &Git, source: &job::UpdateSource, tips: &mut SeenTips, branch: &str) -> bool {
+    let tip = match git
+        .fetch_tip(&source.repo, branch)
+        .and_then(|tip| git.verify(&tip, &source.allowed_signers).map(|_| tip))
+    {
+        Ok(tip) => tip,
+        Err(e) => {
+            warn!("channel branch {branch} not recorded: {e}");
+            return false;
+        }
+    };
+    let changed = record_tip(git, tips, branch, &tip);
+    if !changed && tips.get(branch) != Some(tip.as_str()) {
+        warn!("channel branch {branch} not recorded: {tip} is older than the recorded tip");
+    }
+    changed
+}
+
 pub fn sync_config(
     snapshot: &Path,
     config_dir: &Path,

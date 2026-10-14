@@ -894,36 +894,62 @@ async fn updates_are_verified() {
     // Nothing of that changed the box.
     assert!(root.read("etc/hinteros/flake.lock").contains(&c3));
 
-    // Channel switch to beta: a signed descendant of the installed revision.
+    // The newest verified stable tip is recorded (c3, not the rewound one).
+    assert_eq!(tips(root)["stable"], c3.as_str());
+
+    // Channel switch to beta: verify first, then switch to the verified revision.
     up.checkout(&c3);
     let b1 = up.commit("Beta 0.3", Some("release"));
     up.push(&b1, "beta");
-    let r = call(&mut c, "channel.set", json!({"channel": "beta"}))
+    // Nothing checked: no switch.
+    for params in [
+        json!({"channel": "beta"}),
+        json!({"channel": "beta", "rev": b1}),
+    ] {
+        let e = call(&mut c, "channel.set", params).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::StateConflict.code());
+        assert_eq!(e["data"], json!({"reason": "channel_rev"}));
+    }
+    let checked = channel_check(&mut c, "beta").await;
+    assert_eq!(checked["ok"], true, "{checked}");
+    let result = &checked["result"];
+    assert_eq!(result["channel"], "beta");
+    assert_eq!(result["current_rev"], c3.as_str());
+    assert_eq!(result["older"], false);
+    assert_eq!(result["target"]["rev"], b1.as_str());
+    assert_eq!(result["target"]["version"], "0.2.1");
+    assert_eq!(result["target"]["summary"], "Beta 0.3");
+    assert_eq!(result["target"]["signer"], "release@hinteros");
+    assert_eq!(
+        checked["subject"],
+        json!({
+            "channel": "beta", "from_channel": "stable", "from_rev": c3,
+            "rev": b1, "version": "0.2.1"
+        })
+    );
+    assert_eq!(tips(root)["beta"], b1.as_str());
+    // Only the checked revision.
+    let e = call(&mut c, "channel.set", json!({"channel": "beta", "rev": c3}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["data"], json!({"reason": "channel_rev"}));
+    let r = call(&mut c, "channel.set", json!({"channel": "beta", "rev": b1}))
         .await
         .unwrap();
     let id = r["job_id"].as_str().unwrap().to_owned();
     let events = until_finished(&mut c, &id).await;
-    let before = json!({
-        "channel": "beta", "from_channel": "stable",
+    // The target is known from the start: the confirmed revision.
+    let subject = json!({
+        "channel": "beta", "from_channel": "stable", "rev": b1, "version": "0.2.1",
         "from_rev": c3, "from_version": "0.1.0-test"
     });
-    assert_eq!(events[0].1["subject"], before);
-    // The target is known once verified: one job_progress carries the new subject.
-    let mut after = before.clone();
-    after["rev"] = json!(b1);
-    after["version"] = json!("0.2.1");
-    let updates: Vec<&Value> = events
-        .iter()
-        .filter(|(n, p)| n == "job_progress" && p.get("subject").is_some())
-        .map(|(_, p)| &p["subject"])
-        .collect();
-    assert_eq!(updates, [&after]);
+    assert_eq!(events[0].1["subject"], subject);
     let done = finished(&events).clone();
-    assert_eq!(done["subject"], after);
+    assert_eq!(done["subject"], subject);
     let job = call(&mut c, "jobs.get", json!({"job_id": id}))
         .await
         .unwrap();
-    assert_eq!(job["job"]["subject"], after);
+    assert_eq!(job["job"]["subject"], subject);
     assert_eq!(done["ok"], true, "{done} {}", sys.job_log(&id));
     let flake = root.read("etc/hinteros/flake.nix");
     assert!(
@@ -931,25 +957,55 @@ async fn updates_are_verified() {
         "{flake}"
     );
     assert!(!flake.contains("ref=stable"));
+    let lock = root.read("etc/hinteros/flake.lock");
+    assert!(lock.contains(&b1), "{lock}");
     let info = call(&mut c, "system.info", json!({})).await.unwrap();
     assert_eq!(info["channel"], "beta");
     assert_eq!(info["rev"], b1.as_str());
-    assert_eq!(
-        call(&mut c, "channel.set", json!({"channel": "beta"}))
-            .await
-            .unwrap()["job_id"],
-        Value::Null
-    );
+    for method in ["channel.check", "channel.set"] {
+        assert_eq!(
+            call(&mut c, method, json!({"channel": "beta"}))
+                .await
+                .unwrap()["job_id"],
+            Value::Null
+        );
+    }
 
-    // Back to stable is a downgrade: refused without acknowledgement.
-    let e = call(&mut c, "channel.set", json!({"channel": "stable"}))
-        .await
-        .unwrap_err();
-    assert_eq!(code(&e), ErrorCode::NeedsAcknowledgement.code());
+    // Back to stable: the server now serves the rewound tip, an older signed commit than the
+    // stable tip this box verified (c3). Refused, whatever the owner would confirm.
+    let failure = channel_check(&mut c, "stable").await;
+    assert_eq!(
+        code(&failure["error"]),
+        ErrorCode::UpdateVerificationFailed.code()
+    );
+    assert_eq!(
+        failure["error"]["data"],
+        json!({"reason": "older_than_seen"})
+    );
+    let e = call(
+        &mut c,
+        "channel.set",
+        json!({"channel": "stable", "rev": old}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["data"], json!({"reason": "channel_rev"}));
+    assert_eq!(tips(root)["stable"], c3.as_str());
+
+    // A stable release after c3 (a hotfix: not on beta) is older than the installed beta, and
+    // is shown and confirmed as such.
+    up.checkout(&c3);
+    let s2 = up.commit("Release 0.2.2", Some("release"));
+    up.push(&s2, "stable");
+    let checked = channel_check(&mut c, "stable").await;
+    assert_eq!(checked["ok"], true, "{checked}");
+    assert_eq!(checked["result"]["target"]["rev"], s2.as_str());
+    assert_eq!(checked["result"]["older"], true);
+    assert_eq!(checked["result"]["current_rev"], b1.as_str());
     let r = call(
         &mut c,
         "channel.set",
-        json!({"channel": "stable", "acknowledge_downgrade": true}),
+        json!({"channel": "stable", "rev": s2}),
     )
     .await
     .unwrap();
@@ -958,9 +1014,68 @@ async fn updates_are_verified() {
     assert_eq!(done["ok"], true, "{done} {}", sys.job_log(&id));
     assert_eq!(
         call(&mut c, "system.info", json!({})).await.unwrap()["rev"],
-        old.as_str()
+        s2.as_str()
     );
     assert!(root.read("etc/hinteros/flake.nix").contains("ref=stable"));
+    assert_eq!(tips(root)["stable"], s2.as_str());
+
+    // update.check verifies and records the other channel too (beta moved on to b2), so a
+    // later switch refuses a beta older than b2 (b1, served again).
+    up.checkout(&b1);
+    let b2 = up.commit("Beta 0.4", Some("release"));
+    up.push(&b2, "beta");
+    let r = call(&mut c, "update.check", json!({})).await.unwrap();
+    let id = r["job_id"].as_str().expect("a new check job").to_owned();
+    let done = finished(&until_finished(&mut c, &id).await).clone();
+    assert_eq!(done["ok"], true, "{done} {}", sys.job_log(&id));
+    assert_eq!(done["result"]["available"], Value::Null, "stable is at s2");
+    assert_eq!(tips(root)["beta"], b2.as_str());
+    up.push(&b1, "beta");
+    let failure = channel_check(&mut c, "beta").await;
+    assert_eq!(
+        failure["error"]["data"],
+        json!({"reason": "older_than_seen"})
+    );
+    // A signed beta tip that is not on the recorded line is never recorded.
+    up.checkout(&c3);
+    let fork = up.commit("Other beta", Some("release"));
+    up.push(&fork, "beta");
+    let failure = channel_check(&mut c, "beta").await;
+    assert_eq!(
+        failure["error"]["data"],
+        json!({"reason": "older_than_seen"})
+    );
+    assert_eq!(tips(root)["beta"], b2.as_str());
+    // The real beta is fine again.
+    up.push(&b2, "beta");
+    let checked = channel_check(&mut c, "beta").await;
+    assert_eq!(checked["ok"], true, "{checked}");
+    assert_eq!(checked["result"]["target"]["rev"], b2.as_str());
+    assert_eq!(checked["result"]["older"], true, "b2 is not on s2");
+
+    // Within the channel the record holds too: after a rollback to c3 a signed tip that
+    // descends from c3 but not from s2 (the newest stable this box verified) is refused.
+    root.set_lock("stable", &c3);
+    up.checkout(&c3);
+    let side = up.commit("Side line", Some("release"));
+    up.push(&side, "stable");
+    let failure = check_fails(&mut c).await;
+    assert_eq!(failure["data"], json!({"reason": "older_than_seen"}));
+    assert_eq!(tips(root)["stable"], s2.as_str());
+}
+
+/// The newest verified tips the box recorded (`channel-tips.json`).
+fn tips(root: &Root) -> Value {
+    serde_json::from_str(&root.read("var/lib/hinteros/channel-tips.json")).unwrap()
+}
+
+/// Run a channel check; returns its `job_finished`.
+async fn channel_check(c: &mut Client, channel: &str) -> Value {
+    let r = call(c, "channel.check", json!({"channel": channel}))
+        .await
+        .unwrap();
+    let id = r["job_id"].as_str().expect("a new check job").to_owned();
+    finished(&until_finished(c, &id).await).clone()
 }
 
 /// Run an update check that must fail; returns `job_finished.error`.

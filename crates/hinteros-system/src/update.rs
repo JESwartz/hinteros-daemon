@@ -1,4 +1,5 @@
-//! Update verification: the git side of `update.check`, `update.apply` and `channel.set`.
+//! Update verification: the git side of `update.check`, `update.apply`, `channel.check` and
+//! `channel.set`.
 //!
 //! Policy (threat-model.md, B4): the channel tip must carry an SSH signature by a principal in
 //! the allowed signers file shipped in the *running* generation (`git verify-commit` with
@@ -8,12 +9,21 @@
 //! security update (the tip's signature covers its whole history); the newest
 //! `Security-Summary:` trailer is the notice's one-line summary. The tip's `release/version`
 //! file names the release (falling back to the short revision).
+//!
+//! [`SeenTips`] keeps the newest verified tip of each channel branch (`channel-tips.json` in the
+//! state dir, root only). A tip must also descend from (or equal) that record, also on a channel
+//! switch, where it may be older than the locked revision: so a server that serves an older
+//! signed release again (one with a known hole) is refused. Update checks verify every channel
+//! branch of the table, so the record exists before a switch. Rollbacks and switches never
+//! lower it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use hinteros_api::system::{AvailableUpdate, Severity, is_rev};
 use hinteros_api::{ErrorCode, ErrorObject};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// Most commits read for trailers in one check.
@@ -25,6 +35,8 @@ pub enum Rejection {
     Unsigned,
     UnknownSigner,
     NotFastForward,
+    /// The tip does not descend from the newest verified tip this box saw on the branch.
+    OlderThanSeen,
 }
 
 impl Rejection {
@@ -33,6 +45,7 @@ impl Rejection {
             Self::Unsigned => "unsigned",
             Self::UnknownSigner => "unknown_signer",
             Self::NotFastForward => "not_fast_forward",
+            Self::OlderThanSeen => "older_than_seen",
         }
     }
 
@@ -41,6 +54,9 @@ impl Rejection {
             Self::Unsigned => "the channel tip is not signed",
             Self::UnknownSigner => "the channel tip is not signed by an allowed signer",
             Self::NotFastForward => "the channel tip does not descend from the installed revision",
+            Self::OlderThanSeen => {
+                "the channel tip is older than a verified tip this box already saw"
+            }
         };
         ErrorObject::with_data(
             ErrorCode::UpdateVerificationFailed,
@@ -270,6 +286,67 @@ impl std::fmt::Display for Rejection {
     }
 }
 
+/// The newest verified tip of each channel branch (`<state-dir>/channel-tips.json`, root only):
+/// `{"<branch>": "<rev>"}`. Only verified revisions go in, and only forward (a revision that
+/// descends from the recorded one), so nothing the update server serves later can lower it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SeenTips(BTreeMap<String, String>);
+
+impl SeenTips {
+    /// Read the record; a missing file is an empty record. An unreadable one is too (logged):
+    /// only jobs write it, atomically, so that is damage, and the locked revision's
+    /// fast-forward rule still holds within a channel.
+    pub fn load(path: &Path) -> Self {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(e) => {
+                tracing::warn!("cannot read {}: {e}", path.display());
+                return Self::default();
+            }
+        };
+        match serde_json::from_slice::<SeenTips>(&bytes) {
+            Ok(mut s) => {
+                s.0.retain(|b, r| crate::flake::is_branch(b) && is_rev(r));
+                s
+            }
+            Err(e) => {
+                tracing::warn!("{} is not valid: {e}", path.display());
+                Self::default()
+            }
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let bytes = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        crate::fsutil::write_atomic(path, &bytes, 0o600)
+    }
+
+    /// The newest verified tip seen on `branch`.
+    pub fn get(&self, branch: &str) -> Option<&str> {
+        self.0.get(branch).map(String::as_str)
+    }
+
+    /// Record `rev` (already verified) as `branch`'s newest tip if it descends from the
+    /// recorded one. Returns whether the record changed.
+    pub fn record(&mut self, git: &Git, branch: &str, rev: &str) -> Result<bool, GitError> {
+        if !is_rev(rev) {
+            return Ok(false);
+        }
+        if let Some(seen) = self.get(branch)
+            && (seen == rev || !git.is_ancestor(seen, rev)?)
+        {
+            return Ok(false);
+        }
+        self.0.insert(branch.to_owned(), rev.to_owned());
+        Ok(true)
+    }
+}
+
 /// git, run as root against our own bare repo, with every configuration file ignored and only
 /// the channel's transport allowed.
 pub struct Git {
@@ -371,6 +448,21 @@ impl Git {
         Ok(())
     }
 
+    /// Fetch `branch` and return the commit it points to (what was fetched, so no race with a
+    /// separate `ls-remote`).
+    pub fn fetch_tip(&self, repo: &str, branch: &str) -> Result<String, GitError> {
+        self.fetch(repo, branch)?;
+        let refname = format!("refs/hinteros/{branch}^{{commit}}");
+        let rev = self.ok(&["rev-parse", "--verify", "--quiet", &refname])?;
+        let rev = rev.trim();
+        if !is_rev(rev) {
+            return Err(GitError::Failed(format!(
+                "the server has no branch {branch}"
+            )));
+        }
+        Ok(rev.to_owned())
+    }
+
     pub fn has_commit(&self, rev: &str) -> bool {
         is_rev(rev)
             && self
@@ -465,14 +557,16 @@ impl Git {
     }
 
     /// Fetch, verify and describe the tip of `branch`. `current`: the locked revision;
-    /// `require_ff`: refuse a tip that does not descend from it. `expect`: the tip must be this
-    /// revision (or descend from it, for a re-check before apply) — `None` takes the branch tip.
+    /// `require_ff`: refuse a tip that does not descend from it. `seen`: the newest verified tip
+    /// recorded for `branch` ([`SeenTips`]); the tip must descend from it too.
+    #[allow(clippy::too_many_arguments)]
     pub fn check(
         &self,
         repo: &str,
         branch: &str,
         current: Option<&str>,
         require_ff: bool,
+        seen: Option<&str>,
         allowed_signers: &Path,
         progress: &mut dyn FnMut(hinteros_api::system::Stage),
     ) -> Result<Option<AvailableUpdate>, GitError> {
@@ -485,16 +579,18 @@ impl Git {
         }
         self.fetch(repo, branch)?;
         progress(Stage::Verifying);
-        self.describe(&tip, current, require_ff, allowed_signers)
+        self.describe(&tip, current, require_ff, seen, allowed_signers)
             .map(Some)
     }
 
-    /// Verify an already fetched revision and describe it as an update from `current`.
+    /// Verify an already fetched revision and describe it as an update from `current`. `seen`:
+    /// the newest verified tip recorded for its branch; `rev` must descend from (or equal) it.
     pub fn describe(
         &self,
         rev: &str,
         current: Option<&str>,
         require_ff: bool,
+        seen: Option<&str>,
         allowed_signers: &Path,
     ) -> Result<AvailableUpdate, GitError> {
         if !self.has_commit(rev) {
@@ -509,6 +605,11 @@ impl Git {
             if !ff {
                 return Err(GitError::Rejected(Rejection::NotFastForward));
             }
+        }
+        if let Some(seen) = seen
+            && !self.is_ancestor(seen, rev)?
+        {
+            return Err(GitError::Rejected(Rejection::OlderThanSeen));
         }
         let tip = self.commit(rev)?;
         let commits = self.new_commits(current, rev)?;
@@ -711,5 +812,93 @@ mod tests {
             signer_from_output("Good \"git\" signature for  with x"),
             None
         );
+    }
+
+    /// A work repo with commits `a <- b <- c` and `a <- d`; the [`Git`] runs against its
+    /// `.git`. `None` without git on PATH.
+    fn history(dir: &Path) -> Option<(Git, [String; 4])> {
+        let run = |args: &[&str]| -> Option<String> {
+            let out = Command::new("git")
+                .current_dir(dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=T", "-c", "user.email=t@x"])
+                .args(args)
+                .output()
+                .ok()?;
+            assert!(out.status.success(), "git {args:?}");
+            Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        };
+        run(&["init", "--quiet"])?;
+        let commit = |m: &str| -> Option<String> {
+            run(&["commit", "--quiet", "--allow-empty", "-m", m])?;
+            run(&["rev-parse", "HEAD"])
+        };
+        let a = commit("a")?;
+        let b = commit("b")?;
+        let c = commit("c")?;
+        run(&["checkout", "--quiet", "--detach", &a])?;
+        let d = commit("d")?;
+        let git = Git {
+            git: "git".into(),
+            ssh_keygen: "ssh-keygen".into(),
+            git_dir: dir.join(".git"),
+            scheme: "file",
+        };
+        Some((git, [a, b, c, d]))
+    }
+
+    #[test]
+    fn seen_tips_only_move_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some((git, [a, b, c, d])) = history(dir.path()) else {
+            return;
+        };
+        let path = dir.path().join("state/channel-tips.json");
+        let mut tips = SeenTips::load(&path);
+        assert_eq!(tips, SeenTips::default(), "no file: no record");
+        assert!(tips.record(&git, "stable", &b).unwrap(), "first record");
+        assert!(!tips.record(&git, "stable", &b).unwrap(), "the same");
+        assert!(!tips.record(&git, "stable", &a).unwrap(), "older");
+        assert!(!tips.record(&git, "stable", &d).unwrap(), "not on the line");
+        assert!(!tips.record(&git, "stable", "HEAD").unwrap(), "not a rev");
+        assert_eq!(tips.get("stable"), Some(b.as_str()));
+        assert!(tips.record(&git, "stable", &c).unwrap(), "descendant");
+        assert!(tips.record(&git, "beta", &d).unwrap(), "per branch");
+        tips.save(&path).unwrap();
+        let mode = std::os::unix::fs::PermissionsExt::mode(
+            &std::fs::metadata(&path).unwrap().permissions(),
+        );
+        assert_eq!(mode & 0o777, 0o600);
+        let back = SeenTips::load(&path);
+        assert_eq!(back, tips);
+        assert_eq!(back.get("stable"), Some(c.as_str()));
+        assert_eq!(back.get("beta"), Some(d.as_str()));
+        assert_eq!(back.get("main"), None);
+    }
+
+    #[test]
+    fn seen_tips_drop_what_is_not_a_branch_and_rev() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("channel-tips.json");
+        let rev = "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5";
+        std::fs::write(
+            &path,
+            format!(r#"{{"stable":"{rev}","beta":"HEAD","../x":"{rev}"}}"#),
+        )
+        .unwrap();
+        let tips = SeenTips::load(&path);
+        assert_eq!(tips.get("stable"), Some(rev));
+        assert_eq!(tips.get("beta"), None);
+        assert_eq!(tips.get("../x"), None);
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(SeenTips::load(&path), SeenTips::default());
+    }
+
+    #[test]
+    fn older_than_seen_reason() {
+        let e = Rejection::OlderThanSeen.error();
+        assert_eq!(e.kind(), Some(ErrorCode::UpdateVerificationFailed));
+        assert_eq!(e.data.unwrap(), json!({"reason": "older_than_seen"}));
     }
 }

@@ -1525,11 +1525,19 @@ link), `service/timezone.rs` (the methods).
   (`pin_required {pin: admin}` when missing or wrong), except in first-boot mode (no admin
   profile yet, the rule of `profiles.setup_admin`). The zone must be a regular TZif file (not a link) under the
   zoneinfo dir (`UTC` always): a bad name is `invalid_params {field: zone, reason: bad_format}`,
-  an unknown zone `invalid_params {field: zone, reason: unknown}`. No job and no rebuild: under
-  the `state.json` lock (`<run-dir>/state.lock`) it writes `settings.timeZone` (atomically,
-  canonical form; only when it changes) and points `--localtime` at `<zoneinfo-dir>/<zone>` (a
-  new link renamed over the old one). The result is the new `TimeZoneInfo`; then
-  `time_zone_changed` with the same, only when the zone changed. Works while a job runs.
+  an unknown zone `invalid_params {field: zone, reason: unknown}`. No job and no rebuild, and
+  the service never writes `/etc`: it writes the zone to `<run-dir>/time-zone.request` (one
+  line, 0600, atomically), starts `hinteros-time-zone-apply.service` through systemd's D-Bus
+  API (`StartUnit`, mode `replace`) and waits up to 30 s for its `JobRemoved` with result `done`
+  (else `internal_error` "The time zone did not change."; one request at a time). The unit runs
+  `hinteros-system time-zone-apply [--config-dir --state-dir --run-dir --zoneinfo-dir
+  --localtime]`: it reads the request, checks the name and the TZif file again, and under the
+  `state.json` lock (`<run-dir>/state.lock`) writes `settings.timeZone` (atomically, canonical
+  form; only when it changes), points `--localtime` at `<zoneinfo-dir>/<zone>` (a new link
+  renamed over the old one) and removes the request; on any failure it logs, exits 1 and leaves
+  `state.json` as it was. The service then reads the zone back: the result is the new
+  `TimeZoneInfo`, then `time_zone_changed` with the same, only when the zone changed. Works
+  while a job runs.
 - Jobs: a job that replaces `/etc/hinteros` takes the same lock and first copies the live
   `settings.timeZone` into its staged `state.json`, so a zone set while it ran (or after its
   state was computed) is kept. A rollback restores the generation's `state.json` (its zone) and
@@ -1546,8 +1554,10 @@ link), `service/timezone.rs` (the methods).
   The sync must not undo that at the next boot: compare `state.json` without `settings.timeZone`
   and keep the live zone when it restores (a rollback, which changes the generation, restores
   the snapshot's zone, as the daemon's own rollback does).
-- The service's sandbox must let it write `/etc/localtime` (replace the link in `/etc`) and
-  `/run/hinteros/state.lock`; it reads `/etc/zoneinfo`. No new polkit action.
+- `hinteros-time-zone-apply.service`: oneshot, root, `ExecStart=hinteros-system
+  time-zone-apply`, `ProtectSystem=strict`, `ReadWritePaths=/etc /run/hinteros`, no network.
+  The service only needs `/run/hinteros` writable (no `/etc`) and may start this unit (it is
+  root; systemd's manager API). No new polkit action.
 
 ### What the launcher must do (session API 0.16)
 

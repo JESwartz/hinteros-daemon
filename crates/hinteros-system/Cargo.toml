@@ -12,6 +12,7 @@ anyhow.workspace = true
 argon2 = { version = "0.5", features = ["std"] }
 base64.workspace = true
 clap.workspace = true
+futures-util.workspace = true
 hinteros-api.workspace = true
 nix = { workspace = true, features = ["user"] }
 rustix.workspace = true

@@ -1,6 +1,10 @@
 //! The box's time zone (system API 0.8, time-zone.md): zone names, offsets from the system's
 //! tzdata, the zone list and the `/etc/localtime` link.
 //!
+//! The service never writes `/etc` itself: `time_zone.set` leaves the zone in
+//! `<run-dir>/time-zone.request` and starts `hinteros-time-zone-apply.service`, which runs
+//! `hinteros-system time-zone-apply` ([`apply_main`]).
+//!
 //! Offsets come from the TZif files of the zoneinfo directory (`/etc/zoneinfo`, the same files
 //! `/etc/localtime` points into), never from a database built into the daemon, so the daemon
 //! and the C library always agree.
@@ -266,6 +270,88 @@ pub fn set_localtime(localtime: &Path, zoneinfo: &Path, zone: &str) -> io::Resul
     fs::File::open(dir).and_then(|d| d.sync_all())
 }
 
+/// The request `time_zone.set` leaves for the helper: one line, the zone name.
+pub const REQUEST_FILE: &str = "time-zone.request";
+
+/// The helper's unit (oneshot, root; the system repo defines it).
+pub const APPLY_UNIT: &str = "hinteros-time-zone-apply.service";
+
+/// Longest request file read.
+const MAX_REQUEST_BYTES: u64 = 256;
+
+/// `<run-dir>/time-zone.request`.
+pub fn request_path(paths: &Paths) -> PathBuf {
+    paths.run_dir.join(REQUEST_FILE)
+}
+
+/// Leave a request for the helper (atomically, 0600).
+pub fn write_request(paths: &Paths, zone: &str) -> io::Result<()> {
+    crate::fsutil::write_atomic(&request_path(paths), format!("{zone}\n").as_bytes(), 0o600)
+}
+
+/// Read the request: one line, a zone name of the right shape.
+fn read_request(paths: &Paths) -> anyhow::Result<String> {
+    let path = request_path(paths);
+    let mut text = String::new();
+    fs::File::open(&path)
+        .and_then(|f| f.take(MAX_REQUEST_BYTES).read_to_string(&mut text))
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+    let zone = text.strip_suffix('\n').unwrap_or(&text);
+    if !is_zone_name(zone) {
+        anyhow::bail!("{} does not hold a time zone name", path.display());
+    }
+    Ok(zone.to_owned())
+}
+
+/// Under the `state.json` lock: write `settings.timeZone` (when it changes) and point the
+/// localtime link at `zone` (a TZif file of the zoneinfo dir, checked again here). On a failure
+/// `state.json` is left (or put back) as it was. Returns the zone that applied before.
+pub fn apply_zone(paths: &Paths, zone: &str) -> anyhow::Result<String> {
+    load(&paths.zoneinfo_dir, zone)?;
+    let _lock = crate::state::lock(&paths.state_lock())?;
+    let path = paths.state_json();
+    let old = fs::read(&path)?;
+    let mut st = State::parse(&old)?;
+    let before = effective(&paths.zoneinfo_dir, &st, crate::job::now()).zone;
+    let changed = st.time_zone() != zone;
+    if changed {
+        st.settings.time_zone = Some(zone.to_owned());
+        crate::fsutil::write_atomic(&path, &st.to_canonical_json(), 0o644)?;
+    }
+    if let Err(e) = set_localtime(&paths.localtime, &paths.zoneinfo_dir, zone) {
+        if changed && let Err(e2) = crate::fsutil::write_atomic(&path, &old, 0o644) {
+            warn!("cannot put state.json back: {e2}");
+        }
+        return Err(anyhow::anyhow!(
+            "replacing {}: {e}",
+            paths.localtime.display()
+        ));
+    }
+    Ok(before)
+}
+
+/// The request applied: zone checked, `state.json`, the link, the request file removed.
+pub fn apply_request(paths: &Paths) -> anyhow::Result<(String, String)> {
+    let zone = read_request(paths)?;
+    let before = apply_zone(paths, &zone)?;
+    let _ = fs::remove_file(request_path(paths));
+    Ok((before, zone))
+}
+
+/// `hinteros-system time-zone-apply` (`hinteros-time-zone-apply.service`).
+pub fn apply_main(paths: &Paths) -> std::process::ExitCode {
+    match apply_request(paths) {
+        Ok((before, zone)) => {
+            tracing::info!(from = %before, to = %zone, "time zone applied");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            tracing::error!("time zone not applied: {e:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 /// Point `/etc/localtime` at the zone `state.json` names now (UTC when tzdata lacks it):
 /// after a rollback restored another `state.json` (the switch ran before the restore). Returns
 /// the zone applied.
@@ -292,6 +378,8 @@ pub fn carry_live_zone(live: &Path, staged: &Path) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
     use super::*;
 
     fn fixtures() -> PathBuf {
@@ -477,6 +565,93 @@ mod tests {
         let left: Vec<_> = fs::read_dir(d.path()).unwrap().collect();
         assert_eq!(left.len(), 1, "no temporary link left");
         assert!(set_localtime(&lt, &fixtures(), "../x").is_err());
+    }
+
+    fn helper_paths(d: &Path) -> Paths {
+        let mut p = crate::pam::paths(
+            d.join("var"),
+            d.join("run"),
+            d.join("etc"),
+            Default::default(),
+        );
+        p.zoneinfo_dir = fixtures();
+        p.localtime = d.join("localtime");
+        fs::create_dir_all(d.join("etc")).unwrap();
+        fs::create_dir_all(d.join("run")).unwrap();
+        fs::write(
+            d.join("etc/state.json"),
+            r#"{"schemaVersion":1,"settings":{"ssh":{"enable":true}}}"#,
+        )
+        .unwrap();
+        p
+    }
+
+    #[test]
+    fn helper_applies_a_request() {
+        let d = tempfile::tempdir().unwrap();
+        let p = helper_paths(d.path());
+        write_request(&p, "Europe/London").unwrap();
+        assert_eq!(
+            fs::metadata(request_path(&p)).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let (before, zone) = apply_request(&p).unwrap();
+        assert_eq!((before.as_str(), zone.as_str()), ("UTC", "Europe/London"));
+        let (s, _) = State::load(&p.state_json()).unwrap();
+        assert_eq!(s.time_zone(), "Europe/London");
+        assert!(s.settings.ssh.enable, "the rest stays");
+        assert_eq!(
+            fs::read_link(&p.localtime).unwrap(),
+            fixtures().join("Europe/London")
+        );
+        assert!(!request_path(&p).exists(), "request removed");
+
+        // The same zone again: state.json is not rewritten, the link is made again.
+        let bytes = fs::read(p.state_json()).unwrap();
+        let ino = fs::metadata(p.state_json()).unwrap().ino();
+        fs::remove_file(&p.localtime).unwrap();
+        write_request(&p, "Europe/London").unwrap();
+        assert_eq!(apply_request(&p).unwrap().0, "Europe/London");
+        assert_eq!(fs::read(p.state_json()).unwrap(), bytes);
+        assert_eq!(
+            fs::metadata(p.state_json()).unwrap().ino(),
+            ino,
+            "not rewritten"
+        );
+        assert_eq!(
+            fs::read_link(&p.localtime).unwrap(),
+            fixtures().join("Europe/London")
+        );
+    }
+
+    #[test]
+    fn helper_refuses_bad_requests_and_changes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let mut p = helper_paths(d.path());
+        let bytes = fs::read(p.state_json()).unwrap();
+        // No request.
+        assert!(apply_request(&p).is_err());
+        // Bad names, unknown zones, two lines.
+        for bad in [
+            "../../etc/shadow",
+            "/etc/passwd",
+            "posixrules",
+            "Mars/Olympus_Mons",
+            "Europe/Paris",
+            "UTC\nAsia/Tokyo",
+            "",
+        ] {
+            fs::write(request_path(&p), format!("{bad}\n")).unwrap();
+            assert!(apply_request(&p).is_err(), "{bad:?}");
+            assert_eq!(fs::read(p.state_json()).unwrap(), bytes, "{bad:?}");
+            assert!(!p.localtime.exists(), "{bad:?}");
+        }
+        // The link cannot be made (its directory is missing): state.json is put back.
+        p.localtime = d.path().join("missing/localtime");
+        write_request(&p, "Asia/Tokyo").unwrap();
+        assert!(apply_request(&p).is_err());
+        assert_eq!(fs::read(p.state_json()).unwrap(), bytes);
+        assert!(request_path(&p).exists(), "kept for a look");
     }
 
     #[test]

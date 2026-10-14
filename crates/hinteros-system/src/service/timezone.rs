@@ -1,6 +1,11 @@
 //! Time zone (system API 0.8, time-zone.md): `time_zone.get`, `time_zone.list` and
 //! `time_zone.set`, which changes `state.json` and `/etc/localtime` at once, without a job.
 //!
+//! The service has no write access to `/etc`: `time_zone.set` leaves the zone in
+//! `<run-dir>/time-zone.request`, starts `hinteros-time-zone-apply.service` (a oneshot running
+//! `hinteros-system time-zone-apply`, see [`crate::timezone::apply_main`]) and waits for its
+//! systemd job to end.
+//!
 //! The admin PIN guards `time_zone.set` like every box-wide setting, except in first-boot mode
 //! (no admin profile yet, the rule of `profiles.setup_admin`): the first-boot wizard sets the
 //! zone before there is an admin.
@@ -8,16 +13,21 @@
 use hinteros_api::system::{
     self, EventName, TimeZoneInfo, TimeZoneListResult, TimeZoneSetParams, is_zone_name,
 };
-use hinteros_api::{ErrorObject, Method};
+use std::time::Duration;
+
+use futures_util::StreamExt;
+use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde_json::Value;
-use tracing::info;
+use tracing::{info, warn};
+use zbus::zvariant::OwnedObjectPath;
 
 use super::{Service, internal};
-use crate::config::Paths;
 use crate::job;
 use crate::peer::Peer;
-use crate::state::{self, State};
-use crate::timezone::{self, ZoneError};
+use crate::timezone::{self, APPLY_UNIT, ZoneError};
+
+/// How long `time_zone.set` waits for the helper unit.
+const APPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Formats only (before the rate limit and polkit).
 pub fn validate(p: &TimeZoneSetParams) -> Result<(), ErrorObject> {
@@ -41,19 +51,9 @@ fn zone_error(e: ZoneError) -> ErrorObject {
     }
 }
 
-/// Under the `state.json` lock: write `settings.timeZone` (when it changes) and point the
-/// localtime link at the zone. Returns the zone that applied before.
-fn write_zone(paths: &Paths, zone: &str) -> std::io::Result<String> {
-    let _lock = state::lock(&paths.state_lock())?;
-    let path = paths.state_json();
-    let (mut st, _) = State::load(&path).map_err(std::io::Error::other)?;
-    let before = timezone::effective(&paths.zoneinfo_dir, &st, job::now()).zone;
-    if st.time_zone() != zone {
-        st.settings.time_zone = Some(zone.to_owned());
-        crate::fsutil::write_atomic(&path, &st.to_canonical_json(), 0o644)?;
-    }
-    timezone::set_localtime(&paths.localtime, &paths.zoneinfo_dir, zone)?;
-    Ok(before)
+fn not_applied(detail: impl std::fmt::Display) -> ErrorObject {
+    warn!("time zone not applied: {detail}");
+    ErrorObject::new(ErrorCode::InternalError, "The time zone did not change.")
 }
 
 impl Service {
@@ -104,19 +104,72 @@ impl Service {
             self.check_box_admin(peer.uid, system::TimeZoneSet::NAME, p.admin_pin.as_deref())
                 .await?;
         }
-        // The zone must be one the system's tzdata has (UTC always).
-        let new =
-            timezone::info(&self.paths.zoneinfo_dir, &p.zone, job::now()).map_err(zone_error)?;
-        let paths = self.paths.clone();
-        let zone = p.zone.clone();
-        let before = tokio::task::spawn_blocking(move || write_zone(&paths, &zone))
-            .await
-            .map_err(internal)?
-            .map_err(|e| internal(format!("cannot set the time zone: {e}")))?;
+        // The zone must be one the system's tzdata has (UTC always); the helper checks again.
+        timezone::info(&self.paths.zoneinfo_dir, &p.zone, job::now()).map_err(zone_error)?;
+        let before = self.time_zone_get()?.zone;
+        {
+            // One request at a time.
+            let _one = self.tz_apply.lock().await;
+            timezone::write_request(&self.paths, &p.zone).map_err(not_applied)?;
+            self.run_apply_unit().await.map_err(not_applied)?;
+        }
+        let new = self.time_zone_get()?;
+        if new.zone != p.zone {
+            return Err(not_applied(format!(
+                "the helper ended, but {} applies, not {}",
+                new.zone, p.zone
+            )));
+        }
         if before != new.zone {
             info!(uid = peer.uid, from = %before, to = %new.zone, first_boot, "time zone set");
         }
         self.time_zone_announce(&new);
         serde_json::to_value(new).map_err(internal)
+    }
+
+    /// Start the helper unit and wait for its job to end (`JobRemoved`, result `done`).
+    async fn run_apply_unit(&self) -> Result<(), String> {
+        let conn = self.bus.get().await.map_err(|e| format!("no bus: {e}"))?;
+        let manager: zbus::Proxy<'_> = zbus::proxy::Builder::new(&conn)
+            .destination("org.freedesktop.systemd1")
+            .and_then(|b| b.path("/org/freedesktop/systemd1"))
+            .and_then(|b| b.interface("org.freedesktop.systemd1.Manager"))
+            .map_err(|e| e.to_string())?
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await
+            .map_err(|e| format!("systemd: {e}"))?;
+        // systemd sends job signals only to subscribed clients.
+        if let Err(e) = manager.call_method("Subscribe", &()).await {
+            warn!("systemd Subscribe: {e}");
+        }
+        let mut removed = manager
+            .receive_signal("JobRemoved")
+            .await
+            .map_err(|e| format!("systemd JobRemoved: {e}"))?;
+        let job: OwnedObjectPath = manager
+            .call("StartUnit", &(APPLY_UNIT, "replace"))
+            .await
+            .map_err(|e| format!("starting {APPLY_UNIT}: {e}"))?;
+        let wait = async {
+            while let Some(msg) = removed.next().await {
+                let Ok((_, path, _, result)) = msg
+                    .body()
+                    .deserialize::<(u32, OwnedObjectPath, String, String)>()
+                else {
+                    continue;
+                };
+                if path == job {
+                    return Some(result);
+                }
+            }
+            None
+        };
+        match tokio::time::timeout(APPLY_TIMEOUT, wait).await {
+            Err(_) => Err(format!("{APPLY_UNIT} did not end within {APPLY_TIMEOUT:?}")),
+            Ok(None) => Err("the systemd signal stream ended".into()),
+            Ok(Some(r)) if r == "done" => Ok(()),
+            Ok(Some(r)) => Err(format!("{APPLY_UNIT} ended with {r}")),
+        }
     }
 }

@@ -71,6 +71,19 @@ pub enum Command {
         #[command(flatten)]
         dirs: HelperDirs,
     },
+    /// Apply the time zone `time_zone.set` asked for (`hinteros-time-zone-apply.service`):
+    /// the zone in `<run-dir>/time-zone.request` into `<config-dir>/state.json` and the
+    /// localtime link
+    TimeZoneApply {
+        #[command(flatten)]
+        dirs: HelperDirs,
+        /// The system's tzdata
+        #[arg(long, default_value = "/etc/zoneinfo")]
+        zoneinfo_dir: PathBuf,
+        /// The link to point at `<zoneinfo-dir>/<zone>`
+        #[arg(long, default_value = "/etc/localtime")]
+        localtime: PathBuf,
+    },
 }
 
 /// Paths of the helper subcommands (defaults: the box's).

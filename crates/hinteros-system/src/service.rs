@@ -76,6 +76,8 @@ pub struct Service {
     env_tried: Mutex<BTreeSet<String>>,
     /// The time zone last announced (`time_zone_changed` only when it differs).
     last_zone: Mutex<Option<String>>,
+    /// One `time_zone.set` at a time (one request file).
+    tz_apply: tokio::sync::Mutex<()>,
 }
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
@@ -106,6 +108,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         users: args.users(),
         env_tried: Mutex::new(BTreeSet::new()),
         last_zone: Mutex::new(zone),
+        tz_apply: tokio::sync::Mutex::new(()),
         paths,
         args,
     });

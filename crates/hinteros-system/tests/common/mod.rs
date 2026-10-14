@@ -143,6 +143,12 @@ pub struct FakeState {
     pub children: Vec<Child>,
     /// How to run a job: (binary, run dir, extra env).
     pub job_cmd: Option<JobCmd>,
+    /// How `hinteros-time-zone-apply.service` runs: the binary and its arguments.
+    pub tz_cmd: Option<(PathBuf, Vec<String>)>,
+    /// The time zone unit's job result instead of running it (e.g. "failed").
+    pub tz_result: Option<String>,
+    /// Jobs started so far (their ids).
+    pub next_job: u32,
 }
 
 /// How the fake systemd runs a job: binary, run dir, extra environment.
@@ -254,7 +260,17 @@ struct Systemd(Shared);
 
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
 impl Systemd {
-    fn start_unit(&self, name: String, _mode: String) -> zbus::fdo::Result<OwnedObjectPath> {
+    fn subscribe(&self) {}
+
+    async fn start_unit(
+        &self,
+        name: String,
+        _mode: String,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        if name == "hinteros-time-zone-apply.service" {
+            return Ok(self.start_time_zone_unit(name, conn.clone()));
+        }
         let mut s = self.0.lock().unwrap();
         let id = name
             .strip_prefix("hinteros-job@")
@@ -278,6 +294,51 @@ impl Systemd {
         s.children.push(child);
         s.units.push(name);
         Ok(OwnedObjectPath::try_from("/org/freedesktop/systemd1/job/1").unwrap())
+    }
+}
+
+impl Systemd {
+    /// Run `hinteros-system time-zone-apply` like the oneshot unit, then send `JobRemoved`
+    /// (after the reply, as systemd does).
+    fn start_time_zone_unit(&self, name: String, conn: zbus::Connection) -> OwnedObjectPath {
+        let (cmd, result, n) = {
+            let mut s = self.0.lock().unwrap();
+            s.units.push(name.clone());
+            s.next_job += 1;
+            (s.tz_cmd.clone(), s.tz_result.clone(), 1000 + s.next_job)
+        };
+        let path = OwnedObjectPath::try_from(format!("/org/freedesktop/systemd1/job/{n}")).unwrap();
+        let job = path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let result = match result {
+                Some(r) => r,
+                None => {
+                    let (bin, args) = cmd.expect("time zone command configured");
+                    let ok = tokio::task::spawn_blocking(move || {
+                        Command::new(bin)
+                            .args(args)
+                            .env("RUST_LOG", "debug")
+                            .stdin(Stdio::null())
+                            .status()
+                            .is_ok_and(|s| s.success())
+                    })
+                    .await
+                    .unwrap();
+                    if ok { "done" } else { "failed" }.to_owned()
+                }
+            };
+            let _ = conn
+                .emit_signal(
+                    None::<&str>,
+                    "/org/freedesktop/systemd1",
+                    "org.freedesktop.systemd1.Manager",
+                    "JobRemoved",
+                    &(n, job, name, result),
+                )
+                .await;
+        });
+        path
     }
 }
 
@@ -703,6 +764,25 @@ impl System {
                 ("FAKE_ROOT".into(), root.path().display().to_string()),
             ],
         ));
+        {
+            let r = |p: &str| root.p(p).display().to_string();
+            fakes.lock().unwrap().tz_cmd = Some((
+                PathBuf::from(env!("CARGO_BIN_EXE_hinteros-system")),
+                vec![
+                    "time-zone-apply".into(),
+                    "--config-dir".into(),
+                    r("etc/hinteros"),
+                    "--state-dir".into(),
+                    r("var/lib/hinteros"),
+                    "--run-dir".into(),
+                    r("run"),
+                    "--zoneinfo-dir".into(),
+                    zoneinfo_fixtures().display().to_string(),
+                    "--localtime".into(),
+                    r("etc/localtime"),
+                ],
+            ));
+        }
         let conn = serve_fakes(&bus.address, fakes.clone()).await;
         let sock = UnixDatagram::bind(root.p("journal.sock")).unwrap();
         sock.set_read_timeout(Some(Duration::from_millis(50)))

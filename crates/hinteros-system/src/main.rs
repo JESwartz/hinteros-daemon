@@ -86,6 +86,16 @@ fn main() -> ExitCode {
             journal_socket,
         }) => hinteros_system::resetpin::main(&dirs.paths(), profile.as_deref(), &journal_socket),
         Some(Command::Usage { dirs }) => hinteros_system::usage::main(&dirs.paths()),
+        Some(Command::TimeZoneApply {
+            dirs,
+            zoneinfo_dir,
+            localtime,
+        }) => {
+            let mut paths = dirs.paths();
+            paths.zoneinfo_dir = zoneinfo_dir;
+            paths.localtime = localtime;
+            hinteros_system::timezone::apply_main(&paths)
+        }
         Some(Command::CheckState { .. }) => unreachable!("handled above"),
         None => {
             let result = tokio::runtime::Builder::new_current_thread()

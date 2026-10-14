@@ -1,7 +1,8 @@
 //! Time zone (system API 0.8, time-zone.md) against the real binary and a fake root: the zone
 //! and list from tzdata fixtures, `time_zone.set` (state.json, the localtime link, the event),
 //! its errors, the admin PIN and first-boot mode, a job that runs across a change, and a
-//! rollback that restores another zone.
+//! rollback that restores another zone. The helper unit (`hinteros-time-zone-apply.service`) is
+//! the real `time-zone-apply` subcommand, run by the fake systemd.
 
 use hinteros_api::ErrorCode;
 use hinteros_api::client::Client;
@@ -260,6 +261,33 @@ async fn admin_pin_except_in_first_boot() {
         localtime(&sys.root),
         zoneinfo_fixtures().join("Europe/London")
     );
+    // Through the helper unit, and the request it read is gone.
+    assert!(
+        sys.fakes
+            .lock()
+            .unwrap()
+            .units
+            .contains(&"hinteros-time-zone-apply.service".to_string())
+    );
+    assert!(!sys.root.p("run/time-zone.request").exists());
+    // The unit fails: an error, nothing changed.
+    sys.fakes.lock().unwrap().tz_result = Some("failed".into());
+    let e = call(
+        &mut c,
+        "time_zone.set",
+        json!({"zone": "Asia/Tokyo", "admin_pin": ADMIN_PIN}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(code(&e), ErrorCode::InternalError.code(), "{e}");
+    assert_eq!(e["message"], "The time zone did not change.");
+    assert_eq!(
+        sys.root.etc_state()["settings"]["timeZone"],
+        "Europe/London"
+    );
+    let r = call(&mut c, "time_zone.get", json!({})).await.unwrap();
+    assert_eq!(r["zone"], "Europe/London");
+    sys.fakes.lock().unwrap().tz_result = None;
     // The PIN never reaches the audit log.
     let audit = format!("{:?}", sys.audit());
     assert!(!audit.contains(&format!("\"{ADMIN_PIN}\"")), "{audit}");

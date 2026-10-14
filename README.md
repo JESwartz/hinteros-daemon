@@ -791,7 +791,7 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.7 (0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.8 (0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
 box-wide actions, `guest.end`, rollback re-adds box features; see "Profiles and per-profile apps" below)
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
@@ -890,6 +890,8 @@ All paths default to the box's; tests point them at a temporary root.
 | `--min-memory-bytes`, `--min-disk-bytes`, `--store-dir` | 2 GiB, 4 GiB, `/nix/store` |
 | `--catalog-index` | `<current-system>/sw/share/hinteros/catalog.json` (resolved per request) |
 | `--auth-timeout-s` | 300 (how long an interactive polkit check waits for the admin password) |
+| `--zoneinfo-dir` | `/etc/zoneinfo` (the system's tzdata: TZif files and `zone1970.tab`) |
+| `--localtime` | `/etc/localtime` (the link `time_zone.set` replaces) |
 
 `hinteros-system job [--run-dir DIR] <id>` runs one job (the job unit's `ExecStart`).
 
@@ -1502,6 +1504,60 @@ when opening the page later, call `system.jobs.list` (the running job is first) 
 started_at, finished_at}`; new `Job` fields `subject`, `started_at`, `percent`, `detail`,
 `last_activity_at`.
 
+## Time zone (system API 0.8, session API 0.16)
+
+Design: `hinteros-docs/design/time-zone.md`. Code: `timezone.rs` (zones, offsets, list, the
+link), `service/timezone.rs` (the methods).
+
+- `state.json` `settings.timeZone`: an IANA name, absent means `UTC`, schemas 1 and 2. `State::parse`
+  (and so `check-state`) checks its shape only (the system repo's rule: `/`-separated parts
+  `[A-Z][A-Za-z0-9_+-]*`, at most 64 bytes); a well-formed zone tzdata does not have reads as UTC.
+- Offsets come from the system's tzdata (`--zoneinfo-dir`, `/etc/zoneinfo`; parsed with `tz-rs`),
+  the files `/etc/localtime` points into, never from a database in the daemon.
+  `offset_seconds` is the offset now; `standard_offset_seconds` the lower of the zone's two
+  offsets while it observes DST (so tzdata's negative DST, Europe/Dublin, gives its winter
+  offset, like the map's bands), otherwise the offset now; `offset_valid_until` the next change
+  of the offset (the explicit transitions, then the TZif footer's rule), or null.
+- `time_zone.get` (read-only): the zone that applies, with its offsets. `time_zone.list`
+  (read-only): `zone1970.tab`'s zones plus `UTC`, sorted by name, each with its offsets (a zone
+  without a usable file is left out).
+- `time_zone.set {zone, admin_pin?}` (polkit `org.hinteros.system.settings`): the admin PIN
+  (`pin_required {pin: admin}` when missing or wrong), except in first-boot mode (no admin
+  profile yet, the rule of `profiles.setup_admin`). The zone must be a regular TZif file (not a link) under the
+  zoneinfo dir (`UTC` always): a bad name is `invalid_params {field: zone, reason: bad_format}`,
+  an unknown zone `invalid_params {field: zone, reason: unknown}`. No job and no rebuild: under
+  the `state.json` lock (`<run-dir>/state.lock`) it writes `settings.timeZone` (atomically,
+  canonical form; only when it changes) and points `--localtime` at `<zoneinfo-dir>/<zone>` (a
+  new link renamed over the old one). The result is the new `TimeZoneInfo`; then
+  `time_zone_changed` with the same, only when the zone changed. Works while a job runs.
+- Jobs: a job that replaces `/etc/hinteros` takes the same lock and first copies the live
+  `settings.timeZone` into its staged `state.json`, so a zone set while it ran (or after its
+  state was computed) is kept. A rollback restores the generation's `state.json` (its zone) and
+  then points `/etc/localtime` at that zone (the switch ran before the restore); the service
+  sends `time_zone_changed` after any job when the zone that applies changed.
+
+### What the system repo must do (0.8)
+
+- `state.nix`: accept `settings.timeZone` (a string; the shape above). `time.timeZone = null`;
+  an activation script points `/etc/localtime` at `/etc/zoneinfo/<zone>` from the live
+  `/etc/hinteros/state.json` (read at run time; UTC when tzdata lacks it).
+- `hinteros-config-sync`: `time_zone.set` changes `/etc/hinteros/state.json` in place without a
+  new generation, so the running generation's snapshot differs in `settings.timeZone` only.
+  The sync must not undo that at the next boot: compare `state.json` without `settings.timeZone`
+  and keep the live zone when it restores (a rollback, which changes the generation, restores
+  the snapshot's zone, as the daemon's own rollback does).
+- The service's sandbox must let it write `/etc/localtime` (replace the link in `/etc`) and
+  `/run/hinteros/state.lock`; it reads `/etc/zoneinfo`. No new polkit action.
+
+### What the launcher must do (session API 0.16)
+
+Hello with `0.16`. `system.time_zone.get` → `{zone, offset_seconds, standard_offset_seconds,
+offset_valid_until}`; `system.time_zone.list` → `{zones: [{zone, offset_seconds,
+standard_offset_seconds}]}`; `system.time_zone.set {zone, admin_pin?}` → the new `TimeZoneInfo`
+(no PIN in the first-boot wizard; in Settings ask for the admin PIN on `pin_required`). Event
+`time_zone_changed` (a `TimeZoneInfo`): subscribe to it. The clock shows UTC plus
+`offset_seconds` and gets the zone again at `offset_valid_until` and on `time_zone_changed`.
+
 ## Development
 
 ```sh
@@ -1515,7 +1571,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.15","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.16","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

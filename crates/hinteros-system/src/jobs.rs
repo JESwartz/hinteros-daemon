@@ -502,6 +502,8 @@ mod tests {
             catalog_index: None,
             users: Default::default(),
             proc_dir: "/proc".into(),
+            zoneinfo_dir: d.join("zoneinfo"),
+            localtime: d.join("localtime"),
         }
     }
 

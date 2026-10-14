@@ -812,10 +812,21 @@ impl Runner {
             return Err(e);
         }
 
-        // Finish: /etc/hinteros now describes the running system.
+        // Finish: /etc/hinteros now describes the running system. The time zone is set in
+        // place, without a job (time_zone.set): the live one wins over the staged copy's.
         self.set_stage(Stage::Finishing);
-        fsutil::replace_dir(&staging, &paths.config_dir, &self.spec.id)
-            .map_err(|e| self.fail(format!("replacing {}: {e}", paths.config_dir.display())))?;
+        {
+            let _lock = crate::state::lock(&paths.state_lock())
+                .map_err(|e| self.fail(format!("locking state.json: {e}")))?;
+            match crate::timezone::carry_live_zone(&paths.state_json(), &staging.join("state.json"))
+            {
+                Ok(true) => info!("kept the time zone set while the job ran"),
+                Ok(false) => {}
+                Err(e) => warn!("cannot carry the live time zone into the new config: {e}"),
+            }
+            fsutil::replace_dir(&staging, &paths.config_dir, &self.spec.id)
+                .map_err(|e| self.fail(format!("replacing {}: {e}", paths.config_dir.display())))?;
+        }
         let _ = fsutil::remove(&staging);
         if let Some(d) = &a.delete_data {
             delete_data(d);
@@ -917,13 +928,23 @@ impl Runner {
             return Err(e);
         }
         self.set_stage(Stage::Finishing);
-        sync_config(
-            &target.join("hinteros"),
-            &paths.config_dir,
-            &paths.staging(),
-            &self.spec.id,
-        )
-        .map_err(|e| self.fail(format!("restoring the config snapshot: {e}")))?;
+        {
+            let _lock = crate::state::lock(&paths.state_lock())
+                .map_err(|e| self.fail(format!("locking state.json: {e}")))?;
+            sync_config(
+                &target.join("hinteros"),
+                &paths.config_dir,
+                &paths.staging(),
+                &self.spec.id,
+            )
+            .map_err(|e| self.fail(format!("restoring the config snapshot: {e}")))?;
+            // The switch set /etc/localtime from the state.json before the restore: follow the
+            // restored one (its time zone, or UTC).
+            match crate::timezone::apply_state(&paths) {
+                Ok(zone) => info!(zone, "time zone of the restored state applied"),
+                Err(e) => warn!("cannot apply the restored time zone: {e}"),
+            }
+        }
         let after = self.snapshot();
         let restart = session_restart_required(old_toplevel.as_deref(), &target);
         Ok((
@@ -1162,6 +1183,8 @@ mod tests {
             catalog_index: None,
             users: Default::default(),
             proc_dir: "/proc".into(),
+            zoneinfo_dir: d.join("zoneinfo"),
+            localtime: d.join("localtime"),
         };
         let tools = crate::config::Tools {
             nix: "nix".into(),

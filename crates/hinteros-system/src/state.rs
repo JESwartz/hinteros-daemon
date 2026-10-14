@@ -86,6 +86,10 @@ pub struct StateSettings {
     /// The automatic clean-up (`cleanup.set`; storage.md). Absent: [`CleanupState::default`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<CleanupState>,
+    /// The box's time zone, an IANA name (`time_zone.set`; time-zone.md). Absent: `UTC`. Set
+    /// in place by the service, without a rebuild: the system reads it at activation time.
+    #[serde(default, rename = "timeZone", skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
 }
 
 /// `settings.cleanup` (storage.md): every field optional, these defaults (the policy before the
@@ -254,6 +258,14 @@ impl State {
         if let Some(c) = &self.settings.cleanup {
             c.validate()?;
         }
+        if let Some(z) = &self.settings.time_zone
+            && !hinteros_api::system::is_zone_name(z)
+        {
+            return Err(format!(
+                "settings.timeZone {:?} is not a time zone name",
+                printable(z)
+            ));
+        }
         match self.schema_version {
             1 => self.validate_1(),
             2 => self.validate_2(),
@@ -366,6 +378,15 @@ impl State {
         self.settings.cleanup.unwrap_or_default()
     }
 
+    /// The time zone `state.json` names (`UTC` when absent). The system's tzdata may not have
+    /// it; then `UTC` applies (time-zone.md).
+    pub fn time_zone(&self) -> &str {
+        self.settings
+            .time_zone
+            .as_deref()
+            .unwrap_or(hinteros_api::system::DEFAULT_TIME_ZONE)
+    }
+
     /// Whether the guest account exists (schema 2, `settings.guest.enable`, default true).
     pub fn guest_enabled(&self) -> bool {
         self.is_schema2() && self.settings.guest.as_ref().is_none_or(|g| g.enable)
@@ -398,6 +419,22 @@ impl State {
         out.push(b'\n');
         out
     }
+}
+
+/// Hold the `state.json` lock (blocking): the service holds it while it reads, changes and
+/// writes `state.json` in place, a job while it carries the live time zone into its staged
+/// config and replaces `/etc/hinteros` with it (or restores a snapshot). Released on drop.
+pub fn lock(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+    Ok(file)
 }
 
 /// `[a-z0-9][a-z0-9-]{0,31}` (catalog.md).
@@ -674,6 +711,43 @@ mod tests {
             let text = format!(r#"{base},"settings":{{"cleanup":{bad}}}}}"#);
             assert!(State::parse(text.as_bytes()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn time_zone_setting() {
+        // Absent: UTC, and nothing is written.
+        let s = State::parse(br#"{"schemaVersion":1}"#).unwrap();
+        assert_eq!(s.time_zone(), "UTC");
+        assert!(
+            !String::from_utf8(s.to_canonical_json())
+                .unwrap()
+                .contains("timeZone")
+        );
+        let base = r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[{"id":"p1","user":"hinteros"}]"#;
+        let s = State::parse(
+            format!(r#"{base},"settings":{{"timeZone":"America/Chicago"}}}}"#).as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(s.time_zone(), "America/Chicago");
+        let text = String::from_utf8(s.to_canonical_json()).unwrap();
+        assert!(text.contains(r#""timeZone": "America/Chicago""#), "{text}");
+        // A well-formed name tzdata may not have is kept (UTC applies at run time).
+        State::parse(br#"{"schemaVersion":1,"settings":{"timeZone":"Mars/Olympus_Mons"}}"#)
+            .unwrap();
+        for bad in [
+            r#""../../etc/shadow""#,
+            r#""/etc/localtime""#,
+            r#""""#,
+            "3",
+            "null x",
+        ] {
+            let text = format!(r#"{{"schemaVersion":1,"settings":{{"timeZone":{bad}}}}}"#);
+            assert!(State::parse(text.as_bytes()).is_err(), "{bad}");
+        }
+        assert!(
+            State::parse(br#"{"schemaVersion":1,"settings":{"time_zone":"UTC"}}"#).is_err(),
+            "camelCase only"
+        );
     }
 
     #[test]

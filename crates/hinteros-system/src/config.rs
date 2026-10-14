@@ -232,6 +232,13 @@ pub struct ServeArgs {
     /// [default: <current-system>/sw/share/hinteros/catalog.json]
     #[arg(long)]
     pub catalog_index: Option<PathBuf>,
+    /// The system's tzdata: TZif files and `zone1970.tab` (`time_zone.*`). `/etc/localtime`
+    /// points into it
+    #[arg(long, default_value = "/etc/zoneinfo")]
+    pub zoneinfo_dir: PathBuf,
+    /// The link `time_zone.set` points at `<zoneinfo-dir>/<zone>`
+    #[arg(long, default_value = "/etc/localtime")]
+    pub localtime: PathBuf,
 }
 
 impl ServeArgs {
@@ -253,6 +260,8 @@ impl ServeArgs {
             catalog_index: self.catalog_index.clone(),
             users: self.users(),
             proc_dir: self.test_proc_dir.clone().unwrap_or_else(default_proc),
+            zoneinfo_dir: self.zoneinfo_dir.clone(),
+            localtime: self.localtime.clone(),
         }
     }
 
@@ -309,10 +318,24 @@ pub struct Paths {
     /// Where processes are looked up (and killed, for a removed profile).
     #[serde(default = "default_proc")]
     pub proc_dir: PathBuf,
+    /// The system's tzdata (TZif files and `zone1970.tab`).
+    #[serde(default = "default_zoneinfo")]
+    pub zoneinfo_dir: PathBuf,
+    /// The link to the box's time zone file.
+    #[serde(default = "default_localtime")]
+    pub localtime: PathBuf,
 }
 
 fn default_proc() -> PathBuf {
     "/proc".into()
+}
+
+pub fn default_zoneinfo() -> PathBuf {
+    "/etc/zoneinfo".into()
+}
+
+pub fn default_localtime() -> PathBuf {
+    "/etc/localtime".into()
 }
 
 fn default_apps_profiles() -> PathBuf {
@@ -400,6 +423,11 @@ impl Paths {
     }
     pub fn state_json(&self) -> PathBuf {
         self.config_dir.join("state.json")
+    }
+    /// The lock between the service writing `state.json` in place (`time_zone.set`) and a job
+    /// replacing `/etc/hinteros` ([`crate::state::lock`]).
+    pub fn state_lock(&self) -> PathBuf {
+        self.run_dir.join("state.lock")
     }
 }
 

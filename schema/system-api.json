@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.7",
+  "version": "0.8",
   "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -36,16 +36,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.7", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.7", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "0.8", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "0.8", "server": { "name": "hinteros-system", "version": "0.1.0" } }
         },
         {
           "name": "mismatch",
           "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 0.1, server 0.7",
-            "data": { "client_api_version": "0.1", "server_api_version": "0.7" }
+            "message": "API version mismatch: client 0.1, server 0.8",
+            "data": { "client_api_version": "0.1", "server_api_version": "0.8" }
           }
         }
       ]
@@ -1943,6 +1943,75 @@
         }
       ]
     },
+    "time_zone.get": {
+      "summary": "0.8: the box's time zone (state.json settings.timeZone; UTC when absent) and its offsets now. Read-only.",
+      "description": "Offsets come from the system's tzdata (/etc/zoneinfo), the same files /etc/localtime points into. offset_seconds: seconds east of UTC now (DST included). standard_offset_seconds: the zone's standard offset now: the lower of its two offsets while it observes DST (so tzdata's negative DST, e.g. Europe/Dublin, gives its winter offset, as the map's bands do), otherwise offset_seconds. offset_valid_until: Unix time of the next change of offset_seconds (the next DST change), null when the zone has none. The launcher's clock shows UTC plus offset_seconds and gets the zone again at offset_valid_until and on time_zone_changed. A zone in state.json that tzdata does not have (or a bad one) reads as UTC.",
+      "since": "0.8",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
+      "errors": [],
+      "examples": [
+        { "name": "Chicago in October", "params": {}, "result": {"zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600, "offset_valid_until": 1793516400} },
+        { "name": "never set", "params": {}, "result": {"zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0, "offset_valid_until": null} }
+      ]
+    },
+    "time_zone.list": {
+      "summary": "0.8: every zone the picker offers: tzdata's zone1970.tab zones plus UTC, sorted by name, each with its offsets now. Read-only.",
+      "description": "Offsets as in time_zone.get. A zone1970.tab entry whose file is missing or unreadable is left out (and logged).",
+      "since": "0.8",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": {
+        "type": "object",
+        "required": ["zones"],
+        "additionalProperties": false,
+        "properties": { "zones": { "type": "array", "items": { "$ref": "#/$defs/TimeZoneEntry" } } }
+      },
+      "errors": [],
+      "examples": [
+        {
+          "name": "some zones",
+          "params": {},
+          "result": {
+            "zones": [
+              { "zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600 },
+              { "zone": "Asia/Kolkata", "offset_seconds": 19800, "standard_offset_seconds": 19800 },
+              { "zone": "Europe/Dublin", "offset_seconds": 3600, "standard_offset_seconds": 0 },
+              { "zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0 }
+            ]
+          }
+        }
+      ]
+    },
+    "time_zone.set": {
+      "summary": "0.8: set the box's time zone at once (no job, no rebuild). Admin PIN, except in first-boot mode. Action org.hinteros.system.settings.",
+      "description": "zone: an IANA name that the system's tzdata has (a TZif file under /etc/zoneinfo; UTC always). A badly formed name is invalid_params {field: zone, reason: bad_format}; a well-formed name tzdata does not have is invalid_params {field: zone, reason: unknown}. The admin PIN is needed (pin_required {pin: admin} when it is missing or wrong) except in first-boot mode (no admin profile yet, the rule of profiles.setup_admin). Writes settings.timeZone to state.json (atomically; a running job's own state.json keeps the new zone) and points /etc/localtime at /etc/zoneinfo/<zone> (a new link renamed over the old one). Processes started later see the new zone. Then time_zone_changed. The result is the new zone and its offsets; setting the current zone again changes nothing and sends no event.",
+      "since": "0.8",
+      "params": {
+        "type": "object",
+        "required": ["zone"],
+        "additionalProperties": false,
+        "properties": {
+          "zone": { "$ref": "#/$defs/ZoneName" },
+          "admin_pin": { "$ref": "#/$defs/Pin" }
+        }
+      },
+      "result": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "pin_required"],
+      "examples": [
+        { "name": "Chicago", "params": { "zone": "America/Chicago", "admin_pin": "2468" }, "result": {"zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600, "offset_valid_until": 1793516400} },
+        { "name": "first boot (no PIN)", "params": { "zone": "UTC" }, "result": {"zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0, "offset_valid_until": null} },
+        {
+          "name": "unknown zone",
+          "params": { "zone": "Mars/Olympus_Mons", "admin_pin": "2468" },
+          "error": { "code": -32602, "message": "unknown time zone", "data": { "field": "zone", "reason": "unknown" } }
+        },
+        {
+          "name": "no PIN",
+          "params": { "zone": "Europe/London" },
+          "error": { "code": 3016, "message": "a PIN is needed", "data": { "pin": "admin" } }
+        }
+      ]
+    },
     "jobs.get": {
       "summary": "One job: running or among the last 10 finished. Read-only.",
       "since": "0.2",
@@ -2072,6 +2141,12 @@
     }
   },
   "events": {
+    "time_zone_changed": {
+      "summary": "The box's time zone changed (time_zone.set, or a rollback restored another zone): the new zone and its offsets, as time_zone.get.",
+      "since": "0.8",
+      "params": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
+      "examples": [{ "name": "Chicago", "params": {"zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600, "offset_valid_until": 1793516400} }]
+    },
     "profiles_changed": {
       "summary": "0.4: profiles changed (a profile job finished, a rename, a PIN, lock or appearance change): re-query profiles.list.",
       "since": "0.4",
@@ -2469,7 +2544,7 @@
         "version": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
     },
-    "EventName": { "enum": ["job_started", "job_progress", "job_finished", "profiles_changed"] },
+    "EventName": { "enum": ["job_started", "job_progress", "job_finished", "profiles_changed", "time_zone_changed"] },
     "SubscriptionParams": {
       "type": "object",
       "required": ["events"],
@@ -2645,6 +2720,35 @@
       "properties": { "keep": { "$ref": "#/$defs/Keep" }, "admin_pin": { "$ref": "#/$defs/Pin" } }
     },
     "CleanupFrequency": { "enum": ["daily", "weekly", "monthly"] },
+    "ZoneName": {
+      "description": "An IANA time zone name (UTC, America/Chicago): '/'-separated parts that each start with an ASCII capital letter, followed by ASCII letters, digits, '_', '+' and '-' (the system repo's rule; it keeps out '..', absolute paths and tzdata's other files).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Z][A-Za-z0-9_+-]*(/[A-Z][A-Za-z0-9_+-]*)*$"
+    },
+    "OffsetSeconds": { "description": "Seconds east of UTC.", "type": "integer", "minimum": -86400, "maximum": 86400 },
+    "TimeZoneInfo": {
+      "type": "object",
+      "required": ["zone", "offset_seconds", "standard_offset_seconds", "offset_valid_until"],
+      "additionalProperties": false,
+      "properties": {
+        "zone": { "$ref": "#/$defs/ZoneName" },
+        "offset_seconds": { "$ref": "#/$defs/OffsetSeconds" },
+        "standard_offset_seconds": { "$ref": "#/$defs/OffsetSeconds" },
+        "offset_valid_until": { "description": "Unix time of the next offset change; null when there is none.", "oneOf": [{ "type": "integer" }, { "type": "null" }] }
+      }
+    },
+    "TimeZoneEntry": {
+      "type": "object",
+      "required": ["zone", "offset_seconds", "standard_offset_seconds"],
+      "additionalProperties": false,
+      "properties": {
+        "zone": { "$ref": "#/$defs/ZoneName" },
+        "offset_seconds": { "$ref": "#/$defs/OffsetSeconds" },
+        "standard_offset_seconds": { "$ref": "#/$defs/OffsetSeconds" }
+      }
+    },
     "CleanupSettings": {
       "type": "object",
       "required": ["enable", "frequency", "keep_system", "keep_profiles"],

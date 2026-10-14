@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 15);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 16);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -47,6 +47,7 @@ pub enum EventName {
     ProfilesChanged,
     GreeterPrompt,
     GreeterResult,
+    TimeZoneChanged,
 }
 
 impl EventName {
@@ -77,6 +78,7 @@ impl EventName {
         EventName::ProfilesChanged,
         EventName::GreeterPrompt,
         EventName::GreeterResult,
+        EventName::TimeZoneChanged,
     ];
 
     /// The event's wire name (its JSON-RPC notification method).
@@ -108,6 +110,7 @@ impl EventName {
             EventName::ProfilesChanged => ProfilesChanged::NAME,
             EventName::GreeterPrompt => GreeterPrompt::NAME,
             EventName::GreeterResult => GreeterResult::NAME,
+            EventName::TimeZoneChanged => TimeZoneChanged::NAME,
         }
     }
 }
@@ -867,6 +870,9 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<RelayStorageCleanupProfiles>(),
         MethodInfo::of::<RelayCleanupGet>(),
         MethodInfo::of::<RelayCleanupSet>(),
+        MethodInfo::of::<RelayTimeZoneGet>(),
+        MethodInfo::of::<RelayTimeZoneList>(),
+        MethodInfo::of::<RelayTimeZoneSet>(),
         MethodInfo::of::<RelayJobsGet>(),
         MethodInfo::of::<RelayJobsList>(),
         MethodInfo::of::<RelayJobsCancel>(),
@@ -942,6 +948,7 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<ProfilesChanged>(),
         EventInfo::of::<GreeterPrompt>(),
         EventInfo::of::<GreeterResult>(),
+        EventInfo::of::<TimeZoneChanged>(),
     ],
     errors: ErrorCode::ALL,
 };
@@ -1020,6 +1027,9 @@ relay! {
     RelayStorageCleanupProfiles = "system.storage.cleanup_profiles" => crate::system::StorageCleanupProfiles;
     RelayCleanupGet = "system.cleanup.get" => crate::system::CleanupGet;
     RelayCleanupSet = "system.cleanup.set" => crate::system::CleanupSet;
+    RelayTimeZoneGet = "system.time_zone.get" => crate::system::TimeZoneGet;
+    RelayTimeZoneList = "system.time_zone.list" => crate::system::TimeZoneList;
+    RelayTimeZoneSet = "system.time_zone.set" => crate::system::TimeZoneSet;
     RelayJobsGet = "system.jobs.get" => crate::system::JobsGet;
     RelayJobsList = "system.jobs.list" => crate::system::JobsList;
     RelayJobsCancel = "system.jobs.cancel" => crate::system::JobsCancel;
@@ -1046,6 +1056,13 @@ pub struct JobFinished;
 impl Event for JobFinished {
     const NAME: &'static str = "job_finished";
     type Params = crate::system::JobFinishedParams;
+}
+
+/// 0.16: relayed from the system service's `time_zone_changed`.
+pub struct TimeZoneChanged;
+impl Event for TimeZoneChanged {
+    const NAME: &'static str = "time_zone_changed";
+    type Params = crate::system::TimeZoneInfo;
 }
 
 // ---------------------------------------------------------------------------------------------

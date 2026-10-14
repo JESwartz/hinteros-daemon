@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, ErrorObject, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 7);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 8);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/system-api.json");
@@ -229,6 +229,8 @@ pub enum EventName {
     JobFinished,
     /// 0.4: profiles changed (a job, a rename, a PIN, lock or appearance change): re-query.
     ProfilesChanged,
+    /// 0.8: the box's time zone changed (`time_zone.set`, or a rollback restored another).
+    TimeZoneChanged,
 }
 
 impl EventName {
@@ -237,6 +239,7 @@ impl EventName {
         EventName::JobProgress,
         EventName::JobFinished,
         EventName::ProfilesChanged,
+        EventName::TimeZoneChanged,
     ];
 
     pub const fn wire_name(self) -> &'static str {
@@ -245,6 +248,7 @@ impl EventName {
             EventName::JobProgress => JobProgress::NAME,
             EventName::JobFinished => JobFinished::NAME,
             EventName::ProfilesChanged => ProfilesChanged::NAME,
+            EventName::TimeZoneChanged => TimeZoneChanged::NAME,
         }
     }
 }
@@ -1380,6 +1384,102 @@ pub struct CleanedResult {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Time zone (0.8, time-zone.md)
+
+/// The zone that applies when `state.json` names none.
+pub const DEFAULT_TIME_ZONE: &str = "UTC";
+
+/// Longest zone name accepted (the longest IANA name is 32 bytes).
+pub const MAX_ZONE_NAME_BYTES: usize = 64;
+
+/// The shape of an IANA zone name (`UTC`, `America/Chicago`), the system repo's rule
+/// (`nixos/lib/time-zone.nix`): `/`-separated parts that each start with an ASCII capital letter
+/// followed by ASCII letters, digits, `_`, `+` and `-`; at most [`MAX_ZONE_NAME_BYTES`]. This
+/// keeps out `..`, absolute paths and tzdata's other files (`posix/`, `right/`, `zone1970.tab`,
+/// `posixrules`). Whether the zone exists is a separate question (the system's tzdata).
+pub fn is_zone_name(s: &str) -> bool {
+    s.len() <= MAX_ZONE_NAME_BYTES
+        && s.split('/').all(|part| {
+            let b = part.as_bytes();
+            !b.is_empty()
+                && b[0].is_ascii_uppercase()
+                && b[1..]
+                    .iter()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'+' | b'-'))
+        })
+}
+
+/// The box's time zone and its offsets now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimeZoneInfo {
+    /// An IANA name (`UTC` when `state.json` names none).
+    pub zone: String,
+    /// Seconds east of UTC now (DST included).
+    pub offset_seconds: i32,
+    /// The zone's standard offset now (without DST): the band the map shows.
+    pub standard_offset_seconds: i32,
+    /// Unix time of the next offset change; null when there is none.
+    #[serde(deserialize_with = "nullable")]
+    pub offset_valid_until: Option<i64>,
+}
+
+/// A zone in `time_zone.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimeZoneEntry {
+    pub zone: String,
+    pub offset_seconds: i32,
+    pub standard_offset_seconds: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeZoneListResult {
+    /// tzdata's `zone1970.tab` zones and `UTC`, sorted by name.
+    pub zones: Vec<TimeZoneEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimeZoneSetParams {
+    pub zone: String,
+    /// Needed except in first-boot mode (no admin profile yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
+}
+
+/// `time_zone.get`: the box's time zone (read-only).
+pub struct TimeZoneGet;
+impl Method for TimeZoneGet {
+    const NAME: &'static str = "time_zone.get";
+    type Params = NoParams;
+    type Result = TimeZoneInfo;
+}
+
+/// `time_zone.list`: every zone the picker offers (read-only).
+pub struct TimeZoneList;
+impl Method for TimeZoneList {
+    const NAME: &'static str = "time_zone.list";
+    type Params = NoParams;
+    type Result = TimeZoneListResult;
+}
+
+/// `time_zone.set`: at once, no job (admin PIN except in first-boot mode).
+pub struct TimeZoneSet;
+impl Method for TimeZoneSet {
+    const NAME: &'static str = "time_zone.set";
+    type Params = TimeZoneSetParams;
+    type Result = TimeZoneInfo;
+}
+
+/// `time_zone_changed`: the new zone and its offsets.
+pub struct TimeZoneChanged;
+impl Event for TimeZoneChanged {
+    const NAME: &'static str = "time_zone_changed";
+    type Params = TimeZoneInfo;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Jobs
 
 /// Result of a job that changed the system.
@@ -1731,6 +1831,9 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<StorageCleanupProfiles>(),
         MethodInfo::of::<CleanupGet>(),
         MethodInfo::of::<CleanupSet>(),
+        MethodInfo::of::<TimeZoneGet>(),
+        MethodInfo::of::<TimeZoneList>(),
+        MethodInfo::of::<TimeZoneSet>(),
         MethodInfo::of::<JobsGet>(),
         MethodInfo::of::<JobsList>(),
         MethodInfo::of::<JobsCancel>(),
@@ -1740,6 +1843,7 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<JobProgress>(),
         EventInfo::of::<JobFinished>(),
         EventInfo::of::<ProfilesChanged>(),
+        EventInfo::of::<TimeZoneChanged>(),
     ],
     errors: ErrorCode::SYSTEM,
 };
@@ -1781,6 +1885,7 @@ pub const MUTATING: &[&str] = &[
     StorageCleanupSystem::NAME,
     StorageCleanupProfiles::NAME,
     CleanupSet::NAME,
+    TimeZoneSet::NAME,
     JobsCancel::NAME,
 ];
 
@@ -1831,6 +1936,8 @@ pub fn polkit_action(method: &str) -> Option<&'static str> {
             "org.hinteros.system.settings"
         }
         StorageCleanupSystem::NAME | StorageCleanupProfiles::NAME => "org.hinteros.system.rebuild",
+        // 0.8: an existing action, so the policy file needs no change.
+        TimeZoneSet::NAME => "org.hinteros.system.settings",
         _ => return None,
     })
 }

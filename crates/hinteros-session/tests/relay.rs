@@ -91,6 +91,15 @@ fn fake_system(
                                     }),
                                 );
                                 write_message(&mut w, &ev).await.unwrap();
+                                let ev = jsonrpc::notification(
+                                    "time_zone_changed",
+                                    json!({
+                                        "zone": "America/Chicago", "offset_seconds": -18000,
+                                        "standard_offset_seconds": -21600,
+                                        "offset_valid_until": 1793516400
+                                    }),
+                                );
+                                write_message(&mut w, &ev).await.unwrap();
                             }
                         }
                     }
@@ -117,7 +126,7 @@ async fn relays_methods_errors_and_job_events() {
     call(
         &mut launcher,
         "subscribe",
-        json!({"events": ["job_started", "job_finished"]}),
+        json!({"events": ["job_started", "job_finished", "time_zone_changed"]}),
     )
     .await
     .unwrap();
@@ -136,6 +145,11 @@ async fn relays_methods_errors_and_job_events() {
         params["subject"]["apps"][0]["name"], "Moonlight",
         "relayed unchanged"
     );
+    // 0.16: and the time zone event.
+    let (name, params) = next_event(&mut launcher).await;
+    assert_eq!(name, "time_zone_changed");
+    assert_eq!(params["zone"], "America/Chicago");
+    assert_eq!(params["offset_valid_until"], 1793516400);
 
     // Errors come back unchanged (one 3xxx code space); params go through as given.
     let e = call(&mut c, "system.ssh.set", json!({"enabled": true}))
@@ -147,7 +161,18 @@ async fn relays_methods_errors_and_job_events() {
     while let Ok((m, p)) = seen.try_recv() {
         methods.push((m, p));
     }
-    assert!(methods.iter().any(|(m, _)| m == "subscribe"));
+    let subscribed = methods
+        .iter()
+        .find(|(m, _)| m == "subscribe")
+        .map(|(_, p)| p.clone())
+        .unwrap();
+    assert!(
+        subscribed["events"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("time_zone_changed")),
+        "{subscribed}"
+    );
     assert!(methods.contains(&("ssh.set".to_string(), json!({"enabled": true}))));
     assert!(methods.iter().any(|(m, _)| m == "system.info"));
 

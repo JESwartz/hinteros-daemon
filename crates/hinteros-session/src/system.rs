@@ -302,6 +302,7 @@ pub fn session_event(name: &str) -> Option<EventName> {
         "job_started" => Some(EventName::JobStarted),
         "job_progress" => Some(EventName::JobProgress),
         "job_finished" => Some(EventName::JobFinished),
+        "time_zone_changed" => Some(EventName::TimeZoneChanged),
         _ => None,
     }
 }

@@ -557,6 +557,61 @@ fn system_schema_rejects_what_it_should() {
     );
 }
 
+/// 0.8: the schema's ZoneName and `is_zone_name` agree; nothing path-like gets through.
+#[test]
+fn zone_names() {
+    let schema = ApiSchema::system();
+    let check = |zone: &str| {
+        schema
+            .check(
+                "/methods/time_zone.set/params",
+                &serde_json::json!({ "zone": zone }),
+            )
+            .is_ok()
+    };
+    for good in [
+        "UTC",
+        "America/Chicago",
+        "America/Argentina/ComodRivadavia",
+        "Etc/GMT+5",
+        "Etc/GMT-14",
+        "America/Port-au-Prince",
+        "Asia/Ust-Nera",
+    ] {
+        assert!(system::is_zone_name(good), "{good}");
+        assert!(check(good), "schema refuses {good}");
+    }
+    let long = "A".repeat(65);
+    for bad in [
+        "",
+        "/etc/passwd",
+        "../etc/shadow",
+        "America/../../etc",
+        "America/./Chicago",
+        "..",
+        ".",
+        "America/",
+        "/UTC",
+        "America//Chicago",
+        "America/Chi cago",
+        "America/chicago",
+        "posixrules",
+        "right/UTC",
+        "posix/Europe/London",
+        "zone1970.tab",
+        "Etc/GMT.5",
+        "America\\Chicago",
+        "Europe/Zürich",
+        "UTC\n",
+        long.as_str(),
+    ] {
+        assert!(!system::is_zone_name(bad), "{bad:?}");
+        assert!(!check(bad), "schema accepts {bad:?}");
+    }
+    use hinteros_api::system::TimeZoneSetParams;
+    assert!(serde_json::from_str::<TimeZoneSetParams>(r#"{"zone":"UTC","path":"/"}"#).is_err());
+}
+
 #[test]
 fn system_rust_params_are_closed() {
     use hinteros_api::system::{NoParams, SshSetParams, UpdateApplyParams};
@@ -651,7 +706,12 @@ fn relay_matches_the_system_api() {
             assert!(s_errors.contains(e.as_str().unwrap()), "{sm} lacks {e}");
         }
     }
-    for ev in ["job_started", "job_progress", "job_finished"] {
+    for ev in [
+        "job_started",
+        "job_progress",
+        "job_finished",
+        "time_zone_changed",
+    ] {
         assert_eq!(
             resolve(s, &s["events"][ev]["params"]),
             resolve(y, &y["events"][ev]["params"]),

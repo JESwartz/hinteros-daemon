@@ -521,6 +521,11 @@ pub const STATE: &str = r#"{
 }
 "#;
 
+/// A few TZif files of tzdata and a `zone1970.tab` naming them (and one without a file).
+pub fn zoneinfo_fixtures() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/zoneinfo")
+}
+
 pub struct Root {
     pub dir: tempfile::TempDir,
 }
@@ -772,6 +777,11 @@ impl System {
             // guest.end never looks at this machine's /tmp.
             "--guest-tmp-dir".into(),
             r("tmp"),
+            // Never this machine's /etc/localtime; tzdata from the fixtures.
+            "--zoneinfo-dir".into(),
+            zoneinfo_fixtures().display().to_string(),
+            "--localtime".into(),
+            r("etc/localtime"),
         ];
         // Generous rate limits unless the test sets its own (clap refuses a flag given twice).
         for (flag, value) in [("--rate-per-minute", "1000"), ("--rate-burst", "1000")] {

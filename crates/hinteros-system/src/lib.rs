@@ -33,6 +33,7 @@ pub mod splashdraw;
 pub mod state;
 pub mod storage;
 pub mod store;
+pub mod timezone;
 pub mod update;
 pub mod usage;
 pub mod users;

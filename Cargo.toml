@@ -34,6 +34,7 @@ url = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tz-rs = { version = "0.7", default-features = false, features = ["std"] }
 wayland-backend = "0.3"
 wayland-client = "0.31"
 wayland-scanner = "0.31"

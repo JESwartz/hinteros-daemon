@@ -368,6 +368,8 @@ mod tests {
             catalog_index: None,
             users: Users::default(),
             proc_dir: "/proc".into(),
+            zoneinfo_dir: root.join("zoneinfo"),
+            localtime: root.join("localtime"),
         }
     }
 

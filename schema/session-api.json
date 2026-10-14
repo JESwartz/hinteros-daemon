@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.15",
+  "version": "0.16",
   "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). Responses to system.*, auth.*, store.list and session.restart may arrive out of order relative to other calls on the same connection (match them by id): a relayed call can wait minutes for an admin password. See hinteros-docs/design/api.md for the protocol rules.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -37,16 +37,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.15", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
-          "result": { "api_version": "0.15", "server": { "name": "hinteros-session", "version": "0.1.0" } }
+          "params": { "api_version": "0.16", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
+          "result": { "api_version": "0.16", "server": { "name": "hinteros-session", "version": "0.1.0" } }
         },
         {
           "name": "major mismatch",
           "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 1.0, server 0.15",
-            "data": { "client_api_version": "1.0", "server_api_version": "0.15" }
+            "message": "API version mismatch: client 1.0, server 0.16",
+            "data": { "client_api_version": "1.0", "server_api_version": "0.16" }
           }
         }
       ]
@@ -2914,6 +2914,78 @@
       ],
       "relay": true
     },
+    "system.time_zone.get": {
+      "summary": "Relayed to the system service's time_zone.get. the box's time zone (state.json settings.timeZone; UTC when absent) and its offsets now. Read-only.",
+      "description": "Offsets come from the system's tzdata (/etc/zoneinfo), the same files /etc/localtime points into. offset_seconds: seconds east of UTC now (DST included). standard_offset_seconds: the zone's standard offset now: the lower of its two offsets while it observes DST (so tzdata's negative DST, e.g. Europe/Dublin, gives its winter offset, as the map's bands do), otherwise offset_seconds. offset_valid_until: Unix time of the next change of offset_seconds (the next DST change), null when the zone has none. The launcher's clock shows UTC plus offset_seconds and gets the zone again at offset_valid_until and on time_zone_changed. A zone in state.json that tzdata does not have (or a bad one) reads as UTC.",
+      "since": "0.16",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
+      "errors": ["system_unavailable"],
+      "examples": [
+        { "name": "Chicago in October", "params": {}, "result": {"zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600, "offset_valid_until": 1793516400} },
+        { "name": "never set", "params": {}, "result": {"zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0, "offset_valid_until": null} }
+      ],
+      "relay": true
+    },
+    "system.time_zone.list": {
+      "summary": "Relayed to the system service's time_zone.list. every zone the picker offers: tzdata's zone1970.tab zones plus UTC, sorted by name, each with its offsets now. Read-only.",
+      "description": "Offsets as in time_zone.get. A zone1970.tab entry whose file is missing or unreadable is left out (and logged).",
+      "since": "0.16",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": {
+        "type": "object",
+        "required": ["zones"],
+        "additionalProperties": false,
+        "properties": { "zones": { "type": "array", "items": { "$ref": "#/$defs/TimeZoneEntry" } } }
+      },
+      "errors": ["system_unavailable"],
+      "examples": [
+        {
+          "name": "some zones",
+          "params": {},
+          "result": {
+            "zones": [
+              { "zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600 },
+              { "zone": "Asia/Kolkata", "offset_seconds": 19800, "standard_offset_seconds": 19800 },
+              { "zone": "Europe/Dublin", "offset_seconds": 3600, "standard_offset_seconds": 0 },
+              { "zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0 }
+            ]
+          }
+        }
+      ],
+      "relay": true
+    },
+    "system.time_zone.set": {
+      "summary": "Relayed to the system service's time_zone.set. set the box's time zone at once (no job, no rebuild). Admin PIN, except in first-boot mode. Action org.hinteros.system.settings.",
+      "description": "zone: an IANA name that the system's tzdata has (a TZif file under /etc/zoneinfo; UTC always). A badly formed name is invalid_params {field: zone, reason: bad_format}; a well-formed name tzdata does not have is invalid_params {field: zone, reason: unknown}. The admin PIN is needed (pin_required {pin: admin} when it is missing or wrong) except in first-boot mode (no admin profile yet, the rule of profiles.setup_admin). Writes settings.timeZone to state.json (atomically; a running job's own state.json keeps the new zone) and points /etc/localtime at /etc/zoneinfo/<zone> (a new link renamed over the old one). Processes started later see the new zone. Then time_zone_changed. The result is the new zone and its offsets; setting the current zone again changes nothing and sends no event.",
+      "since": "0.16",
+      "params": {
+        "type": "object",
+        "required": ["zone"],
+        "additionalProperties": false,
+        "properties": {
+          "zone": { "$ref": "#/$defs/ZoneName" },
+          "admin_pin": { "$ref": "#/$defs/Pin" }
+        }
+      },
+      "result": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
+      "errors": ["system_unavailable", "permission_denied", "authentication_required", "rate_limited", "pin_required"],
+      "examples": [
+        { "name": "Chicago", "params": { "zone": "America/Chicago", "admin_pin": "2468" }, "result": {"zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600, "offset_valid_until": 1793516400} },
+        { "name": "first boot (no PIN)", "params": { "zone": "UTC" }, "result": {"zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0, "offset_valid_until": null} },
+        {
+          "name": "unknown zone",
+          "params": { "zone": "Mars/Olympus_Mons", "admin_pin": "2468" },
+          "error": { "code": -32602, "message": "unknown time zone", "data": { "field": "zone", "reason": "unknown" } }
+        },
+        {
+          "name": "no PIN",
+          "params": { "zone": "Europe/London" },
+          "error": { "code": 3016, "message": "a PIN is needed", "data": { "pin": "admin" } }
+        }
+      ],
+      "relay": true
+    },
     "system.jobs.get": {
       "summary": "Relayed to the system service's jobs.get. One job: running or among the last 10 finished. Read-only.",
       "since": "0.6",
@@ -4480,6 +4552,12 @@
         { "name": "hidden", "params": { "visible": false } }
       ]
     },
+    "time_zone_changed": {
+      "summary": "Relayed from the system service. The box's time zone changed (time_zone.set, or a rollback restored another zone): the new zone and its offsets, as time_zone.get.",
+      "since": "0.16",
+      "params": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
+      "examples": [{ "name": "Chicago", "params": {"zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600, "offset_valid_until": 1793516400} }]
+    },
     "job_started": {
       "summary": "Relayed from the system service. A job was started (by any caller). 0.15 (system 0.7): subject (what the job is about) and started_at.",
       "since": "0.6",
@@ -5328,7 +5406,7 @@
     },
     "EventName": {
       "type": "string",
-      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_visibility", "job_started", "job_progress", "job_finished", "network_changed", "wifi_list_changed", "bluetooth_changed", "bluetooth_confirm", "audio_changed", "authentication_requested", "authentication_finished", "store_changed", "switch_progress", "switch_blocked", "lock_state", "profiles_changed", "greeter_prompt", "greeter_result"]
+      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_visibility", "job_started", "job_progress", "job_finished", "network_changed", "wifi_list_changed", "bluetooth_changed", "bluetooth_confirm", "audio_changed", "authentication_requested", "authentication_finished", "store_changed", "switch_progress", "switch_blocked", "lock_state", "profiles_changed", "greeter_prompt", "greeter_result", "time_zone_changed"]
     },
     "AppId": {
       "description": "App identifier: an apps.list id, or for running apps started by command or Steam URL 'cmd-<n>' / 'steam-<appid>'. 'steam' is Steam itself (Big Picture and its other windows).",
@@ -5917,6 +5995,35 @@
       "properties": { "keep": { "$ref": "#/$defs/Keep" }, "admin_pin": { "$ref": "#/$defs/Pin" } }
     },
     "CleanupFrequency": { "enum": ["daily", "weekly", "monthly"] },
+    "ZoneName": {
+      "description": "An IANA time zone name (UTC, America/Chicago): '/'-separated parts that each start with an ASCII capital letter, followed by ASCII letters, digits, '_', '+' and '-' (the system repo's rule; it keeps out '..', absolute paths and tzdata's other files).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Z][A-Za-z0-9_+-]*(/[A-Z][A-Za-z0-9_+-]*)*$"
+    },
+    "OffsetSeconds": { "description": "Seconds east of UTC.", "type": "integer", "minimum": -86400, "maximum": 86400 },
+    "TimeZoneInfo": {
+      "type": "object",
+      "required": ["zone", "offset_seconds", "standard_offset_seconds", "offset_valid_until"],
+      "additionalProperties": false,
+      "properties": {
+        "zone": { "$ref": "#/$defs/ZoneName" },
+        "offset_seconds": { "$ref": "#/$defs/OffsetSeconds" },
+        "standard_offset_seconds": { "$ref": "#/$defs/OffsetSeconds" },
+        "offset_valid_until": { "description": "Unix time of the next offset change; null when there is none.", "oneOf": [{ "type": "integer" }, { "type": "null" }] }
+      }
+    },
+    "TimeZoneEntry": {
+      "type": "object",
+      "required": ["zone", "offset_seconds", "standard_offset_seconds"],
+      "additionalProperties": false,
+      "properties": {
+        "zone": { "$ref": "#/$defs/ZoneName" },
+        "offset_seconds": { "$ref": "#/$defs/OffsetSeconds" },
+        "standard_offset_seconds": { "$ref": "#/$defs/OffsetSeconds" }
+      }
+    },
     "CleanupSettings": {
       "type": "object",
       "required": ["enable", "frequency", "keep_system", "keep_profiles"],

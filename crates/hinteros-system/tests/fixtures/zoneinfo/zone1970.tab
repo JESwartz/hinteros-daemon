@@ -1,0 +1,11 @@
+# Test fixture: lines of tzdata 2026c's zone1970.tab (public domain), TZif files copied from
+# nixpkgs tzdata-2026c. Europe/Paris has no file here on purpose.
+#
+US	+415100-0873900	America/Chicago	Central (most areas)
+BR	-2332-04637	America/Sao_Paulo	Brazil (southeast: GO, DF, MG, ES, RJ, SP, PR, SC, RS)
+IN	+2232+08822	Asia/Kolkata
+JP,AU	+353916+1394441	Asia/Tokyo	Eyre Bird Observatory
+AU	-3133+15905	Australia/Lord_Howe	Lord Howe Island
+IE	+5320-00615	Europe/Dublin
+GB,GG,IM,JE	+513030-0000731	Europe/London
+FR,MC	+4852+00220	Europe/Paris

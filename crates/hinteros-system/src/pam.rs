@@ -403,6 +403,8 @@ pub fn paths(state_dir: PathBuf, run_dir: PathBuf, config_dir: PathBuf, users: U
         catalog_index: None,
         users,
         proc_dir: "/proc".into(),
+        zoneinfo_dir: crate::config::default_zoneinfo(),
+        localtime: crate::config::default_localtime(),
     }
 }
 

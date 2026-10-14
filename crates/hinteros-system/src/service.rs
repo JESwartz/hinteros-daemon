@@ -46,6 +46,7 @@ mod apps;
 mod profiles;
 mod storage;
 mod subject;
+mod timezone;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -73,6 +74,8 @@ pub struct Service {
     users: crate::users::Users,
     /// Owners `ensure_envs` already gave the starter env to (once per service run).
     env_tried: Mutex<BTreeSet<String>>,
+    /// The time zone last announced (`time_zone_changed` only when it differs).
+    last_zone: Mutex<Option<String>>,
 }
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
@@ -88,6 +91,9 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
 
     let paths = args.paths();
     let (events, _) = broadcast::channel(256);
+    let zone = State::load(&paths.state_json())
+        .ok()
+        .map(|(s, _)| crate::timezone::effective(&paths.zoneinfo_dir, &s, job::now()).zone);
     let svc = Arc::new(Service {
         tools: args.tools(),
         bus: Bus::new(args.bus.clone()),
@@ -99,6 +105,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         connections: Mutex::new(HashMap::new()),
         users: args.users(),
         env_tried: Mutex::new(BTreeSet::new()),
+        last_zone: Mutex::new(zone),
         paths,
         args,
     });
@@ -191,6 +198,7 @@ async fn monitor(svc: Arc<Service>) {
                 // The guest may need the starter env again (when the job could not give it).
                 svc.env_tried.lock().unwrap().remove("guest");
             }
+            svc.time_zone_recheck();
             if matches!(
                 f.job.kind,
                 JobKind::ProfilesCreate
@@ -515,6 +523,14 @@ async fn dispatch(
             decode::<system::CleanupGet>(params)?;
             encode::<system::CleanupGet>(svc.cleanup_get()?)
         }
+        system::TimeZoneGet::NAME => {
+            decode::<system::TimeZoneGet>(params)?;
+            encode::<system::TimeZoneGet>(svc.time_zone_get()?)
+        }
+        system::TimeZoneList::NAME => {
+            decode::<system::TimeZoneList>(params)?;
+            encode::<system::TimeZoneList>(svc.time_zone_list().await?)
+        }
         _ => Err(method_not_found(method)),
     }
 }
@@ -627,6 +643,7 @@ pub(crate) enum Request {
     AppsAcceptTerms(AppsAcceptTermsParams),
     Profiles(profiles::ProfilesRequest),
     Storage(storage::StorageRequest),
+    TimeZoneSet(system::TimeZoneSetParams),
     JobsCancel(JobIdParams),
 }
 
@@ -736,6 +753,11 @@ impl Request {
                 let p: JobIdParams = decode::<JobsCancel>(params)?;
                 check_job_id(&p.job_id)?;
                 Self::JobsCancel(p)
+            }
+            system::TimeZoneSet::NAME => {
+                let p = decode::<system::TimeZoneSet>(params)?;
+                timezone::validate(&p)?;
+                Self::TimeZoneSet(p)
             }
             system::StorageMeasure::NAME
             | system::StorageTree::NAME
@@ -1465,6 +1487,7 @@ impl Service {
                 job_ref(Some(id))
             }
             Request::Storage(r) => self.storage_request(peer, r).await,
+            Request::TimeZoneSet(p) => self.time_zone_set(peer, p).await,
             Request::AppsRollback(p) => self.apps_rollback(peer, p).await,
             Request::AppsAcceptTerms(p) => self.apps_accept_terms(peer, p),
             Request::JobsCancel(p) => {

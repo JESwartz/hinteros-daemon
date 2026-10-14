@@ -42,7 +42,14 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   goes to Steam/the game; Guide still comes to us), except for keyboard-profile apps and while
   the on-screen keyboard is up (both ALL, see below). Guide sends `home_pressed` and brings the
   launcher back (on release, since Guide also starts the on-screen keyboard chord), except for
-  a long press with Steam in front (below). Re-applies everything when InputPlumber restarts or a pad appears. Without
+  a long press with Steam in front (below). Ctrl + Super (Windows key) + D on any keyboard is
+  Home too (`input/keyboard.rs`), at once like SIGUSR1: the daemon reads every keyboard through evdev,
+  read-only and never grabbed (the focused app gets the keys too), skips its own virtual
+  keyboard, and fires once per D press while a Ctrl and a Super are held on that keyboard.
+  It needs read access to the keyboard (logind uaccess on the active seat, which the system
+  adds for keyboards, else group `input`); a keyboard it cannot open is skipped.
+  `[input] keyboard_home = false` turns it off; the greeter never reads keyboards.
+  Re-applies everything when InputPlumber restarts or a pad appears. Without
   InputPlumber it logs and carries on. `--dev-gamepad` reads
   pads directly instead, for desktop previews only (see "Desktop preview").
   Latency: every InputPlumber method and property read is a polkit check, so the signal loop
@@ -321,6 +328,7 @@ repeat_interval_ms = 100
 xbox_label_swap = "auto"       # "auto" | "on" | "off": Xbox (xpad) pads give Y as ui_action, X as ui_context
 dev_gamepad = false            # development only, see "Desktop preview"
 direction_debounce_ms = 40     # a direction re-pressed this soon after its release is stick chatter (0: off)
+keyboard_home = true           # Ctrl+Super+D on a keyboard is Home (read-only, never grabbed)
 
 [icons]
 fetch = true                   # download web app icons (https only)

@@ -36,6 +36,7 @@
 //! xbox_label_swap = "auto"     # "auto" | "on" | "off": swap ui_action/ui_context on Xbox (xpad) pads
 //! dev_gamepad = false          # development only: read pads via evdev, no InputPlumber
 //! direction_debounce_ms = 40   # a direction re-pressed this soon after its release is stick chatter
+//! keyboard_home = true         # Ctrl+Super+D on any keyboard is Home (read-only, never grabbed)
 //!
 //! [icons]
 //! fetch = true                 # download web app icons (https only)
@@ -679,6 +680,9 @@ pub struct InputConfig {
     /// A direction pressed again within this long after its release is stick chatter and
     /// ignored (InputPlumber has no hysteresis at its stick threshold); 0: off.
     pub direction_debounce_ms: u64,
+    /// Ctrl + Super + D on a keyboard is Home, like a short Guide press (see
+    /// `input::keyboard`). Keyboards are read, never grabbed: the focused app gets the keys too.
+    pub keyboard_home: bool,
 }
 
 impl Default for InputConfig {
@@ -689,6 +693,7 @@ impl Default for InputConfig {
             xbox_label_swap: Default::default(),
             dev_gamepad: false,
             direction_debounce_ms: 40,
+            keyboard_home: true,
         }
     }
 }
@@ -1690,6 +1695,7 @@ mod tests {
             ["gamescopectl", "paint_cursor_plane", "0"]
         );
         assert_eq!(c.input.direction_debounce(), Duration::from_millis(40));
+        assert!(c.input.keyboard_home);
         let c = Config::parse(
             r#"
             [osk]
@@ -1702,6 +1708,7 @@ mod tests {
             hide_command = []
             [input]
             direction_debounce_ms = 0
+            keyboard_home = false
             [[apps]]
             id = "firefox"
             name = "Firefox"
@@ -1714,6 +1721,7 @@ mod tests {
         .unwrap();
         assert_eq!(c.osk.field_summon, FieldSummon::None);
         assert!(c.osk.auto_show && !c.pointer.enable);
+        assert!(!c.input.keyboard_home);
         assert_eq!((c.pointer.speed_pps, c.pointer.idle_ms), (1500, Some(1500)));
         assert!(c.pointer.hide_command.is_empty());
         assert!(c.apps[0].address_bar);

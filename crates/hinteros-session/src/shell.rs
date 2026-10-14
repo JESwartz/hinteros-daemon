@@ -8,7 +8,8 @@
 //!   `ui_*` events become `input_nav`.
 //! - An app has focus: gamescope shows that app as soon as it has a window (the launcher until
 //!   then), InputPlumber is in `Pass` mode, so input goes to the app (through Steam Input).
-//! - Home (Guide, or SIGUSR1): `home_pressed`, then the launcher gets focus. Apps keep running.
+//! - Home (Guide, Ctrl+Super+D on a keyboard, or SIGUSR1): `home_pressed`, then the launcher
+//!   gets focus. Apps keep running. The keyboard chord and SIGUSR1 act at once (no long press).
 //!   Guide held for [`GUIDE_LONG_PRESS`] while Steam or a Steam game is in front goes to Steam
 //!   instead (one Guide tap on the virtual pad: its in-game or Big Picture menu), no Home.
 //! - If the focused app's windows go away for longer than the debounce (it closed its window,
@@ -87,7 +88,8 @@ pub enum Msg {
         params: Option<Value>,
         reply: Reply,
     },
-    /// The Home button (SIGUSR1 in M0, Guide via InputPlumber goes through `Input`).
+    /// Home at once: SIGUSR1, or Ctrl+Super+D on a keyboard ([`crate::input::keyboard`]). Guide
+    /// goes through `Input` (long press and the on-screen keyboard chord).
     Home,
     Input(RawInput),
     Gamescope(GamescopeEvent),
@@ -121,6 +123,13 @@ pub enum Msg {
         focus: FieldFocus,
         clicked: bool,
     },
+}
+
+/// The keyboard chord is a Home press like SIGUSR1.
+impl From<crate::input::keyboard::KeyboardHome> for Msg {
+    fn from(_: crate::input::keyboard::KeyboardHome) -> Self {
+        Msg::Home
+    }
 }
 
 /// The methods the shell answers (the connection handles the rest).
@@ -4553,6 +4562,42 @@ mod tests {
         // Nothing left to happen later.
         t.advance(Duration::from_secs(2));
         assert!(t.log.take().is_empty());
+    }
+
+    #[test]
+    fn keyboard_chord_is_home_at_once() {
+        use crate::input::devpad::PadEvent;
+        use crate::input::devpad::tests::Scripted;
+        use crate::input::keyboard::run_keyboard;
+        use evdev::KeyCode;
+        use std::collections::VecDeque;
+
+        let key = |k: KeyCode, pressed| PadEvent::Key { code: k.0, pressed };
+        // Steam in front: a Guide press would wait for its release; the chord does not.
+        let mut t = steam_game_in_front(|_| {});
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut source = Scripted(VecDeque::from([vec![
+            key(KeyCode::KEY_RIGHTCTRL, true),
+            key(KeyCode::KEY_LEFTMETA, true),
+            key(KeyCode::KEY_D, true),
+        ]]));
+        run_keyboard("keyboard:test", &mut source, &tx);
+        let home = rx.try_recv().unwrap();
+        assert!(rx.try_recv().is_err());
+        t.shell.handle(Msg::from(home), t.now);
+        assert_eq!(t.shell.focused(), None);
+        assert!(home_pressed(&t.events()));
+        assert_eq!(
+            t.log.take(),
+            [Call::FocusLauncher, Call::Mode(InterceptMode::All)]
+        );
+        // No Guide tap for Steam later.
+        t.advance(Duration::from_secs(2));
+        assert!(t.log.take().is_empty());
+        // The game keeps running.
+        let r = t.call("apps.running", json!({})).unwrap();
+        assert_eq!(r["apps"][0]["id"], "portal");
+        assert_eq!(r["focused"], Value::Null);
     }
 
     #[test]

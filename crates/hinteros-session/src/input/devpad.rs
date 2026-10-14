@@ -232,8 +232,9 @@ pub fn run_pad(
     }
 }
 
-/// A real `/dev/input/event*` device, opened read-only and never grabbed.
-struct Evdev(evdev::Device);
+/// A real `/dev/input/event*` device, opened read-only and never grabbed. Autorepeat is
+/// dropped. Also the keyboard reader's source ([`super::keyboard`]).
+pub(crate) struct Evdev(pub(crate) evdev::Device);
 
 impl EventSource for Evdev {
     fn next_batch(&mut self) -> io::Result<Vec<PadEvent>> {
@@ -335,7 +336,7 @@ pub fn spawn(tx: mpsc::UnboundedSender<RawInput>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::VecDeque;
 
@@ -449,7 +450,8 @@ mod tests {
         assert!(m.release_all().is_empty());
     }
 
-    struct Scripted(VecDeque<Vec<PadEvent>>);
+    /// Scripted batches, then "unplugged" (also for [`super::super::keyboard`]).
+    pub(crate) struct Scripted(pub(crate) VecDeque<Vec<PadEvent>>);
     impl EventSource for Scripted {
         fn next_batch(&mut self) -> io::Result<Vec<PadEvent>> {
             self.0

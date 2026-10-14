@@ -519,7 +519,7 @@ impl Service {
                     ));
                 }
                 self.preflight()?;
-                if let Some(e) = self.jobs.lock().unwrap().busy_error() {
+                if let Some(e) = self.job_busy() {
                     return Err(e);
                 }
                 let name = profiles::check_name(&p.name)?;

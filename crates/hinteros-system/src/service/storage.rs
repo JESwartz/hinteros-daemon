@@ -134,6 +134,7 @@ impl Service {
         match r {
             StorageRequest::Measure => {
                 // One measurement at a time: a running one is the answer.
+                self.poll_jobs();
                 {
                     let jobs = self.jobs.lock().unwrap();
                     if let Some(id) = jobs.busy() {

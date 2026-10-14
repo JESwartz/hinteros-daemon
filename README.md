@@ -836,9 +836,11 @@ trust.
   reports through `progress.ndjson` (stages; nix `internal-json` turned into paths, bytes,
   builds, the derivation building and a percent; see "Job progress" below) and `status.json`;
   the service turns them into events (at most 4/s, and a heartbeat at least every 2 s) and
-  keeps the last 10 finished jobs. Apply flow: memory (2 GiB) and disk (4 GiB on the store's
-  filesystem) preflight → copy `/etc/hinteros` to `/var/lib/hinteros/staging` → edit (state,
-  flake input, lock, facter) → `nix build …#nixosConfigurations.hinteros.config.system.build.toplevel`
+  keeps the last 10 finished jobs. A request that a running job would refuse first takes in a
+  result the job has just written, so a job that has ended is never `job_busy`. Apply flow:
+  memory (2 GiB) and disk (4 GiB on the store's filesystem) preflight → copy `/etc/hinteros`
+  to `/var/lib/hinteros/staging` → edit (state, flake input, lock,
+  facter) → `nix build …#nixosConfigurations.hinteros.config.system.build.toplevel`
   → `nix-env -p <profile> --set` + `switch-to-configuration switch` → replace `/etc/hinteros`
   with the staging copy (`renameat2(RENAME_EXCHANGE)`). A failed switch puts the profile back
   and runs the old system's `switch-to-configuration boot`. `jobs.cancel` works until the job

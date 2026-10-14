@@ -192,64 +192,7 @@ async fn monitor(svc: Arc<Service>) {
             svc.ensure_envs().await;
         }
         n += 1;
-        let (events, finished) = svc.jobs.lock().unwrap().poll();
-        for e in events {
-            let _ = svc.events.send(e);
-        }
-        if let Some(f) = finished {
-            if f.job.kind == JobKind::GuestEnd {
-                // The guest may need the starter env again (when the job could not give it).
-                svc.env_tried.lock().unwrap().remove("guest");
-            }
-            svc.time_zone_recheck();
-            if matches!(
-                f.job.kind,
-                JobKind::ProfilesCreate
-                    | JobKind::ProfilesRemove
-                    | JobKind::GuestSet
-                    | JobKind::GuestEnd
-                    | JobKind::MigrateApps
-                    | JobKind::Rollback
-            ) {
-                svc.profiles_changed();
-            }
-            let outcome = serde_json::to_value(f.job.state)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .unwrap_or_default();
-            let kind = serde_json::to_value(f.job.kind)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .unwrap_or_default();
-            let opt = |v: Option<String>| v.unwrap_or_default();
-            let after = f.status.after.clone().unwrap_or_default();
-            svc.audit.job(
-                &f.job.job_id,
-                &kind,
-                f.job.uid,
-                &outcome,
-                &[
-                    ("REV_BEFORE", opt(f.status.before.rev.clone())),
-                    ("REV_AFTER", opt(after.rev)),
-                    (
-                        "GENERATION_BEFORE",
-                        opt(f.status.before.generation.map(|g| g.to_string())),
-                    ),
-                    (
-                        "GENERATION_AFTER",
-                        opt(after.generation.map(|g| g.to_string())),
-                    ),
-                    (
-                        "ERROR",
-                        f.job
-                            .error
-                            .as_ref()
-                            .map(|e| e.message.clone())
-                            .unwrap_or_default(),
-                    ),
-                ],
-            );
-        }
+        svc.poll_jobs();
     }
 }
 
@@ -907,6 +850,77 @@ fn job_ref(id: Option<String>) -> Result<Value, ErrorObject> {
 }
 
 impl Service {
+    /// Follow the running job: broadcast its events and, once its result is in, act on its end.
+    /// The monitor calls it 4 times a second; a request that a running job would refuse calls it
+    /// first, so a job that has just written its result no longer counts as running.
+    pub(super) fn poll_jobs(&self) {
+        let (events, finished) = self.jobs.lock().unwrap().poll();
+        for e in events {
+            let _ = self.events.send(e);
+        }
+        let Some(f) = finished else {
+            return;
+        };
+        if f.job.kind == JobKind::GuestEnd {
+            // The guest may need the starter env again (when the job could not give it).
+            self.env_tried.lock().unwrap().remove("guest");
+        }
+        self.time_zone_recheck();
+        if matches!(
+            f.job.kind,
+            JobKind::ProfilesCreate
+                | JobKind::ProfilesRemove
+                | JobKind::GuestSet
+                | JobKind::GuestEnd
+                | JobKind::MigrateApps
+                | JobKind::Rollback
+        ) {
+            self.profiles_changed();
+        }
+        let outcome = serde_json::to_value(f.job.state)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let kind = serde_json::to_value(f.job.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let opt = |v: Option<String>| v.unwrap_or_default();
+        let after = f.status.after.clone().unwrap_or_default();
+        self.audit.job(
+            &f.job.job_id,
+            &kind,
+            f.job.uid,
+            &outcome,
+            &[
+                ("REV_BEFORE", opt(f.status.before.rev.clone())),
+                ("REV_AFTER", opt(after.rev)),
+                (
+                    "GENERATION_BEFORE",
+                    opt(f.status.before.generation.map(|g| g.to_string())),
+                ),
+                (
+                    "GENERATION_AFTER",
+                    opt(after.generation.map(|g| g.to_string())),
+                ),
+                (
+                    "ERROR",
+                    f.job
+                        .error
+                        .as_ref()
+                        .map(|e| e.message.clone())
+                        .unwrap_or_default(),
+                ),
+            ],
+        );
+    }
+
+    /// The running job's `job_busy` error, if a job is still running (see [`Self::poll_jobs`]).
+    pub(super) fn job_busy(&self) -> Option<ErrorObject> {
+        self.poll_jobs();
+        self.jobs.lock().unwrap().busy_error()
+    }
+
     fn load_state(&self) -> Result<(State, String), ErrorObject> {
         State::load(&self.paths.state_json()).map_err(internal)
     }
@@ -1007,6 +1021,8 @@ impl Service {
 
     /// Create the job and start its unit; returns its id.
     async fn start(&self, spec: JobSpec) -> Result<String, ErrorObject> {
+        // A job that has just ended is taken in first (see `poll_jobs`).
+        self.poll_jobs();
         {
             let mut jobs = self.jobs.lock().unwrap();
             if let Some(e) = jobs.busy_error() {
@@ -1206,7 +1222,7 @@ impl Service {
                         format!("generation {target} is not on disk or is the current one"),
                     ));
                 }
-                if let Some(e) = self.jobs.lock().unwrap().busy_error() {
+                if let Some(e) = self.job_busy() {
                     return Err(e);
                 }
                 let spec = self

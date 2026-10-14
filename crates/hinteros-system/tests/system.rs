@@ -561,6 +561,21 @@ async fn settings_ssh_rebuild_rollback() {
     );
     assert_eq!(root.read("etc/hinteros/state.json"), before);
 
+    // A job that has written its result no longer runs: the next job starts at once, without
+    // waiting for the service's next look at the job (no job_busy right after a job ended).
+    root.touch("build-fail");
+    for _ in 0..5 {
+        let r = call(&mut c, "rebuild", json!({})).await.unwrap();
+        let id = r["job_id"].as_str().unwrap().to_owned();
+        let status = root.p(&format!("run/jobs/{id}/status.json"));
+        eventually("the job's result", || status.exists()).await;
+        let r = call(&mut c, "rebuild", json!({})).await;
+        let next = r.expect("a new job right after the result");
+        let next = next["job_id"].as_str().unwrap().to_owned();
+        until_finished(&mut c, &next).await;
+    }
+    root.rm("build-fail");
+
     // A failed switch: the profile goes back to the old generation, /etc/hinteros unchanged.
     root.touch("switch-fail");
     let r = call(&mut c, "ssh.set", json!({"enabled": false}))

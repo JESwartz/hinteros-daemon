@@ -44,6 +44,7 @@ use crate::store;
 
 mod apps;
 mod profiles;
+mod storage;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -505,6 +506,14 @@ async fn dispatch(
             decode::<system::StarterSetGet>(params)?;
             encode::<system::StarterSetGet>(svc.starter_get()?)
         }
+        system::StorageGet::NAME => {
+            decode::<system::StorageGet>(params)?;
+            encode::<system::StorageGet>(svc.storage_get())
+        }
+        system::CleanupGet::NAME => {
+            decode::<system::CleanupGet>(params)?;
+            encode::<system::CleanupGet>(svc.cleanup_get()?)
+        }
         _ => Err(method_not_found(method)),
     }
 }
@@ -616,6 +625,7 @@ pub(crate) enum Request {
     AppsRollback(AppsRollbackParams),
     AppsAcceptTerms(AppsAcceptTermsParams),
     Profiles(profiles::ProfilesRequest),
+    Storage(storage::StorageRequest),
     JobsCancel(JobIdParams),
 }
 
@@ -726,6 +736,29 @@ impl Request {
                 check_job_id(&p.job_id)?;
                 Self::JobsCancel(p)
             }
+            system::StorageMeasure::NAME
+            | system::StorageTree::NAME
+            | system::StorageCleanupSystem::NAME
+            | system::StorageCleanupProfiles::NAME
+            | system::CleanupSet::NAME => {
+                use storage::StorageRequest as S;
+                let r = match method {
+                    system::StorageMeasure::NAME => {
+                        decode::<system::StorageMeasure>(params)?;
+                        S::Measure
+                    }
+                    system::StorageTree::NAME => S::Tree(decode::<system::StorageTree>(params)?),
+                    system::StorageCleanupSystem::NAME => {
+                        S::CleanupSystem(decode::<system::StorageCleanupSystem>(params)?)
+                    }
+                    system::StorageCleanupProfiles::NAME => {
+                        S::CleanupProfiles(decode::<system::StorageCleanupProfiles>(params)?)
+                    }
+                    _ => S::CleanupSet(decode::<system::CleanupSet>(params)?),
+                };
+                r.validate()?;
+                Self::Storage(r)
+            }
             m => {
                 use profiles::ProfilesRequest as P;
                 let r = match m {
@@ -787,7 +820,7 @@ impl Request {
 }
 
 /// An optional `admin_pin` of a box-wide action: 4 to 8 digits when present.
-fn check_admin_pin(pin: Option<&str>) -> Result<(), ErrorObject> {
+pub(crate) fn check_admin_pin(pin: Option<&str>) -> Result<(), ErrorObject> {
     match pin {
         Some(p) if !crate::pins::is_pin(p) => Err(ErrorObject::invalid_field(
             "admin_pin",
@@ -1371,6 +1404,7 @@ impl Service {
                 info!(job = %id, apps = ?removing, delete_data = p.delete_data, "removing apps");
                 job_ref(Some(id))
             }
+            Request::Storage(r) => self.storage_request(peer, r).await,
             Request::AppsRollback(p) => self.apps_rollback(peer, p).await,
             Request::AppsAcceptTerms(p) => self.apps_accept_terms(peer, p),
             Request::JobsCancel(p) => {

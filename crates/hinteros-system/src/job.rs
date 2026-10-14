@@ -98,6 +98,54 @@ pub enum Action {
     /// End guest session: the guest's processes ended, then its home, app env and per-guest
     /// state wiped; the guest gets the starter env again.
     GuestEnd(GuestEndJob),
+    /// Measure what uses the disk into `storage.json` (storage.md).
+    StorageMeasure(MeasureJob),
+    /// Remove old generations (system or app envs), then collect garbage.
+    Cleanup(CleanupJob),
+}
+
+/// A home to measure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeasureHome {
+    /// The profile id, or `guest`.
+    pub id: String,
+    /// From the user database (`None`: the account has none; measured as empty).
+    pub home: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeasureJob {
+    /// The Nix store (statvfs: the disk the ring shows).
+    pub store_dir: PathBuf,
+    /// The accounts in `state.json` order, then the guest (if on).
+    pub homes: Vec<MeasureHome>,
+    /// Every app-env owner.
+    pub owners: Vec<Owner>,
+}
+
+/// Which generations a clean-up removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupTarget {
+    /// System generations (then the boot menu is rewritten).
+    System,
+    /// Every app-env Nix profile with generations (profiles and the starter set).
+    Profiles,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupJob {
+    pub target: CleanupTarget,
+    /// Generations kept (1 to 10; the running, booted and current ones always).
+    pub keep: u32,
+    /// The Nix store (statvfs before and after: what was freed).
+    pub store_dir: PathBuf,
+    /// `Profiles`: the owners whose app envs are trimmed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owners: Vec<Owner>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

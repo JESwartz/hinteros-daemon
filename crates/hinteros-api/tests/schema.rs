@@ -451,8 +451,18 @@ fn game_nullables_are_required_in_rust_too() {
 
 #[test]
 fn system_enums_match() {
-    use hinteros_api::system::{Base, Channel, EventName, JobKind, JobState, Severity, Stage};
+    use hinteros_api::system::{
+        Base, Channel, CleanupFrequency, EventName, JobKind, JobState, NodeKind, Severity, Stage,
+    };
     let schema = ApiSchema::system();
+    for s in [ApiSchema::system(), ApiSchema::session()] {
+        assert_eq!(schema_enum(&s, "NodeKind"), rust_enum(NodeKind::ALL));
+        assert_eq!(
+            schema_enum(&s, "CleanupFrequency"),
+            rust_enum(CleanupFrequency::ALL)
+        );
+        assert_eq!(schema_enum(&s, "Stage"), rust_enum(Stage::ALL));
+    }
     assert_eq!(schema_enum(&schema, "EventName"), rust_enum(EventName::ALL));
     assert_eq!(schema_enum(&schema, "Channel"), rust_enum(Channel::ALL));
     assert_eq!(schema_enum(&schema, "Base"), rust_enum(Base::ALL));
@@ -564,25 +574,36 @@ fn system_rust_params_are_closed() {
     }
 }
 
-/// Inline every `#/$defs/...` reference, so schemas from two documents can be compared.
+/// Inline every `#/$defs/...` reference, so schemas from two documents can be compared. A
+/// recursive definition (a tree node) stays a reference where it refers to itself.
 fn resolve(doc: &Value, v: &Value) -> Value {
+    resolve_in(doc, v, &mut Vec::new())
+}
+
+fn resolve_in(doc: &Value, v: &Value, open: &mut Vec<String>) -> Value {
     match v {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
             for (k, val) in map {
                 if k == "$ref" {
                     let name = val.as_str().unwrap().strip_prefix("#/$defs/").unwrap();
-                    let target = resolve(doc, &doc["$defs"][name]);
+                    if open.iter().any(|n| n == name) {
+                        out.insert(k.clone(), val.clone());
+                        continue;
+                    }
+                    open.push(name.to_owned());
+                    let target = resolve_in(doc, &doc["$defs"][name], open);
+                    open.pop();
                     for (tk, tv) in target.as_object().cloned().unwrap_or_default() {
                         out.insert(tk, tv);
                     }
                 } else {
-                    out.insert(k.clone(), resolve(doc, val));
+                    out.insert(k.clone(), resolve_in(doc, val, open));
                 }
             }
             Value::Object(out)
         }
-        Value::Array(a) => Value::Array(a.iter().map(|x| resolve(doc, x)).collect()),
+        Value::Array(a) => Value::Array(a.iter().map(|x| resolve_in(doc, x, open)).collect()),
         other => other.clone(),
     }
 }

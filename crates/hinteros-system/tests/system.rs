@@ -1225,6 +1225,47 @@ mod check_state {
         assert!(stdout(&o).starts_with(&format!("invalid {}: ", f.display())));
     }
 
+    /// `settings.cleanup` (storage.md): accepted with its defaults filled in, refused out of range,
+    /// with an unknown frequency or an unknown field.
+    #[test]
+    fn cleanup_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let base: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(fixture("vm-system-a.json")).unwrap()).unwrap();
+        let with = |name: &str, cleanup: serde_json::Value| {
+            let mut v = base.clone();
+            v["settings"]["cleanup"] = cleanup;
+            let f = dir.path().join(name);
+            std::fs::write(&f, serde_json::to_vec(&v).unwrap()).unwrap();
+            f
+        };
+        let good = [
+            with(
+                "full.json",
+                serde_json::json!({"enable": false, "frequency": "monthly", "keepSystem": 1, "keepProfiles": 10}),
+            ),
+            with("empty.json", serde_json::json!({})),
+            with("some.json", serde_json::json!({"frequency": "daily"})),
+        ];
+        for f in &good {
+            let o = run(&[f]);
+            assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        }
+        for (name, bad) in [
+            ("zero.json", serde_json::json!({"keepSystem": 0})),
+            ("eleven.json", serde_json::json!({"keepProfiles": 11})),
+            ("hourly.json", serde_json::json!({"frequency": "hourly"})),
+            ("extra.json", serde_json::json!({"enable": true, "keep": 3})),
+            ("string.json", serde_json::json!({"keepSystem": "5"})),
+        ] {
+            let f = with(name, bad);
+            let o = run(&[&f]);
+            assert_eq!(o.status.code(), Some(1), "{name}: {}", stdout(&o));
+        }
+        let o = run(&[&with("keep.json", serde_json::json!({"keepSystem": 0}))]);
+        assert!(stdout(&o).contains("keepSystem"), "{}", stdout(&o));
+    }
+
     #[test]
     fn no_files_is_usage_error() {
         let o = run(&[]);

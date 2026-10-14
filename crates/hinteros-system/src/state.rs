@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use hinteros_api::system::{Base, Channel};
+use hinteros_api::system::{Base, Channel, CleanupFrequency, MAX_KEEP};
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -83,6 +83,57 @@ pub struct StateSettings {
     /// Schema 2: the guest account (`guest.set`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest: Option<GuestState>,
+    /// The automatic clean-up (`cleanup.set`; storage.md). Absent: [`CleanupState::default`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<CleanupState>,
+}
+
+/// `settings.cleanup` (storage.md): every field optional, these defaults (the policy before the
+/// setting existed: weekly, 5 system generations).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CleanupState {
+    #[serde(default = "yes")]
+    pub enable: bool,
+    #[serde(default = "default_frequency")]
+    pub frequency: CleanupFrequency,
+    #[serde(default = "default_keep")]
+    pub keep_system: u32,
+    #[serde(default = "default_keep")]
+    pub keep_profiles: u32,
+}
+
+impl Default for CleanupState {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            frequency: default_frequency(),
+            keep_system: default_keep(),
+            keep_profiles: default_keep(),
+        }
+    }
+}
+
+fn default_frequency() -> CleanupFrequency {
+    CleanupFrequency::Weekly
+}
+
+fn default_keep() -> u32 {
+    5
+}
+
+impl CleanupState {
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, n) in [
+            ("keepSystem", self.keep_system),
+            ("keepProfiles", self.keep_profiles),
+        ] {
+            if !(1..=MAX_KEEP).contains(&n) {
+                return Err(format!("settings.cleanup.{name} must be 1 to {MAX_KEEP}"));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,6 +251,9 @@ impl State {
 
     /// Invariants the service relies on (and `state.nix` checks again).
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(c) = &self.settings.cleanup {
+            c.validate()?;
+        }
         match self.schema_version {
             1 => self.validate_1(),
             2 => self.validate_2(),
@@ -305,6 +359,11 @@ impl State {
                 user: p.user.clone(),
             })
             .collect()
+    }
+
+    /// The automatic clean-up setting (defaults when absent).
+    pub fn cleanup(&self) -> CleanupState {
+        self.settings.cleanup.unwrap_or_default()
     }
 
     /// Whether the guest account exists (schema 2, `settings.guest.enable`, default true).
@@ -563,6 +622,58 @@ mod tests {
         .unwrap();
         assert!(!s.guest_enabled());
         assert_eq!(s.accounts()[1].user, "hinteros-p12");
+    }
+
+    #[test]
+    fn cleanup_setting() {
+        let base = r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[{"id":"p1","user":"hinteros"}]"#;
+        // Absent: today's policy, and nothing is written.
+        let s = State::parse(format!("{base}}}").as_bytes()).unwrap();
+        assert_eq!(s.cleanup(), CleanupState::default());
+        assert_eq!(
+            (
+                s.cleanup().enable,
+                s.cleanup().frequency,
+                s.cleanup().keep_system,
+                s.cleanup().keep_profiles
+            ),
+            (true, CleanupFrequency::Weekly, 5, 5)
+        );
+        assert!(
+            !String::from_utf8(s.to_canonical_json())
+                .unwrap()
+                .contains("cleanup")
+        );
+        // Partly given: the rest defaults; written back in full, camelCase.
+        let s = State::parse(
+            format!(r#"{base},"settings":{{"cleanup":{{"keepSystem":2,"frequency":"daily"}}}}}}"#)
+                .as_bytes(),
+        )
+        .unwrap();
+        let c = s.cleanup();
+        assert_eq!(
+            (c.enable, c.frequency, c.keep_system, c.keep_profiles),
+            (true, CleanupFrequency::Daily, 2, 5)
+        );
+        let text = String::from_utf8(s.to_canonical_json()).unwrap();
+        assert!(
+            text.contains("\"keepSystem\": 2") && text.contains("\"keepProfiles\": 5"),
+            "{text}"
+        );
+        assert_eq!(State::parse(text.as_bytes()).unwrap(), s);
+        // Schema 1 too.
+        State::parse(br#"{"schemaVersion":1,"settings":{"cleanup":{"enable":false}}}"#).unwrap();
+        for bad in [
+            r#"{"keepSystem":0}"#,
+            r#"{"keepProfiles":11}"#,
+            r#"{"frequency":"yearly"}"#,
+            r#"{"keep_system":3}"#,
+            r#"{"enable":"yes"}"#,
+            r#"{"keepSystem":-1}"#,
+        ] {
+            let text = format!(r#"{base},"settings":{{"cleanup":{bad}}}}}"#);
+            assert!(State::parse(text.as_bytes()).is_err(), "{bad}");
+        }
     }
 
     #[test]

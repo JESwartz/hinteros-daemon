@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.5",
+  "version": "0.6",
   "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -36,16 +36,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.5", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.5", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "0.6", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "0.6", "server": { "name": "hinteros-system", "version": "0.1.0" } }
         },
         {
           "name": "mismatch",
           "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 0.1, server 0.5",
-            "data": { "client_api_version": "0.1", "server_api_version": "0.5" }
+            "message": "API version mismatch: client 0.1, server 0.6",
+            "data": { "client_api_version": "0.1", "server_api_version": "0.6" }
           }
         }
       ]
@@ -1729,6 +1729,220 @@
         }
       ]
     },
+    "storage.get": {
+      "summary": "0.6: the last storage measurement (storage.md): the disk, the top level of the ring, every profile's total, the system and apps breakdown, garbage and the clean-up estimates. Read-only, open to every caller.",
+      "description": "Null until the first storage_measure job has finished. Kept in /var/lib/hinteros/storage.json (root, 0600) with its time. Never contains a file, folder or Steam game name or an app id: profile and guest nodes have no children here (storage.tree gives a home's detailed tree). estimates.system[keep-1] and estimates.profiles[keep-1] (keep 1 to 10) say how many generations storage.cleanup_system / storage.cleanup_profiles with that keep would remove now and about how many bytes it frees (garbage_bytes included; NAR sizes), from this measurement.",
+      "since": "0.6",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": {
+        "type": "object",
+        "required": ["measurement"],
+        "additionalProperties": false,
+        "properties": { "measurement": { "oneOf": [{ "$ref": "#/$defs/Measurement" }, { "type": "null" }] } }
+      },
+      "errors": [],
+      "examples": [
+        { "name": "never measured", "params": {}, "result": { "measurement": null } },
+        {
+          "name": "measured",
+          "params": {},
+          "result": {
+            "measurement": {
+              "measured_at": 1791300000,
+              "disk": { "total_bytes": 512000000000, "used_bytes": 201000000000, "free_bytes": 300000000000 },
+              "root": {
+                "kind": "disk",
+                "bytes": 512000000000,
+                "children": [
+                  {
+                    "kind": "system",
+                    "bytes": 9000000000,
+                    "children": [
+                      { "kind": "generation", "bytes": 800000000, "children": [], "generation": 43, "date": 1791200000, "current": true, "booted": true },
+                      { "kind": "generation", "bytes": 600000000, "children": [], "generation": 42, "date": 1790000000, "current": false, "booted": false },
+                      { "kind": "common", "bytes": 7600000000, "children": [] }
+                    ]
+                  },
+                  {
+                    "kind": "apps",
+                    "bytes": 3000000000,
+                    "children": [
+                      {
+                        "kind": "app_env",
+                        "bytes": 900000000,
+                        "children": [
+                          { "kind": "generation", "bytes": 100000000, "children": [], "generation": 7, "date": 1791100000, "current": true, "booted": false },
+                          { "kind": "common", "bytes": 800000000, "children": [] }
+                        ],
+                        "id": "p1"
+                      },
+                      { "kind": "app_env", "bytes": 0, "children": [], "id": "starter" },
+                      { "kind": "shared", "bytes": 2100000000, "children": [] }
+                    ]
+                  },
+                  { "kind": "profile", "bytes": 150000000000, "children": [], "id": "p1" },
+                  { "kind": "profile", "bytes": 20000000000, "children": [], "id": "p2" },
+                  { "kind": "guest", "bytes": 10000000, "children": [] },
+                  { "kind": "other", "bytes": 29990000000, "children": [] },
+                  { "kind": "free", "bytes": 300000000000, "children": [] }
+                ]
+              },
+              "garbage_bytes": 1200000000,
+              "estimates": {
+                "system": [
+                  { "keep": 1, "generations": 4, "bytes": 3100000000 },
+                  { "keep": 2, "generations": 3, "bytes": 2500000000 },
+                  { "keep": 3, "generations": 2, "bytes": 1900000000 },
+                  { "keep": 4, "generations": 1, "bytes": 1500000000 },
+                  { "keep": 5, "generations": 0, "bytes": 1200000000 },
+                  { "keep": 6, "generations": 0, "bytes": 1200000000 },
+                  { "keep": 7, "generations": 0, "bytes": 1200000000 },
+                  { "keep": 8, "generations": 0, "bytes": 1200000000 },
+                  { "keep": 9, "generations": 0, "bytes": 1200000000 },
+                  { "keep": 10, "generations": 0, "bytes": 1200000000 }
+                ],
+                "profiles": [
+                  { "keep": 1, "generations": 9, "bytes": 1500000000 },
+                  { "keep": 2, "generations": 6, "bytes": 1300000000 },
+                  { "keep": 3, "generations": 3, "bytes": 1250000000 },
+                  { "keep": 4, "generations": 0, "bytes": 1200000000 },
+                  { "keep": 5, "generations": 0, "bytes": 1200000000 },
+                  { "keep": 6, "generations": 0, "bytes": 1200000000 },
+                  { "keep": 7, "generations": 0, "bytes": 1200000000 },
+                  { "keep": 8, "generations": 0, "bytes": 1200000000 },
+                  { "keep": 9, "generations": 0, "bytes": 1200000000 },
+                  { "keep": 10, "generations": 0, "bytes": 1200000000 }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "storage.measure": {
+      "summary": "0.6: measure what uses the disk (job storage_measure). Any profile or the guest; no PIN. Action org.hinteros.system.settings.",
+      "description": "A storage_measure job that is already running is the answer (its job_id, no new job); another job running is job_busy. Stages preparing, measuring (with percent), finishing; cancellable at any time (the last measurement stays). Measures: statvfs of the store's filesystem; nix path-info --all -s (NAR sizes) and nix-store --gc --print-live (garbage = all minus live); nix-store -qR of every system and app generation; every home with a walk that never follows a symlink, never leaves the home's filesystem and never reads a file (only Steam's libraryfolders.vdf and appmanifest_*.acf, for the games' names). The result is {measured_at}; then call storage.get. Nothing a caller can read (events, results, the job's log) names a file of a home.",
+      "since": "0.6",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy"],
+      "examples": [{ "name": "started", "params": {}, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
+    },
+    "storage.tree": {
+      "summary": "0.6: one home's detailed tree from the last measurement: its folders and its Steam games. The caller's own home: open; another profile's or the guest's: the admin PIN. Action org.hinteros.system.settings.",
+      "description": "id: a profile id or guest (else invalid_params {field: id, reason: bad_format}). The caller's own account (or the guest asking for guest) needs no PIN; anything else needs admin_pin, checked like every box-wide action (pin_required {pin: admin} when missing or wrong, or without an admin profile; an admin profile without a PIN yet passes; schema-1 boxes and root are exempt). not_found: nothing measured yet, or that home was not measured (measure again). The root is kind profile (with id) or guest; its bytes equal the top level's. Children: steam (its children: steam_game, one per installed game, named from appmanifest_<appid>.acf in each Steam library folder inside the home; the game folders are not counted again among the folders), dir (recursively) and files (files directly in a folder, and folders too small or deep to show). At most 6 folder levels, folders of at least max(1 MiB, 0.5 % of the home), at most 16 per folder, at most 400 nodes; names at most 128 characters, control characters replaced by U+FFFD.",
+      "since": "0.6",
+      "params": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/StorageHomeId" },
+          "admin_pin": { "$ref": "#/$defs/Pin" }
+        }
+      },
+      "result": {
+        "type": "object",
+        "required": ["id", "measured_at", "root"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/StorageHomeId" },
+          "measured_at": { "type": "integer" },
+          "root": { "$ref": "#/$defs/StorageNode" }
+        }
+      },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "pin_required", "not_found"],
+      "examples": [
+        {
+          "name": "own home",
+          "params": { "id": "p1" },
+          "result": {
+            "id": "p1",
+            "measured_at": 1791300000,
+            "root": {
+              "kind": "profile",
+              "bytes": 150000000000,
+              "children": [
+                {
+                  "kind": "steam",
+                  "bytes": 120000000000,
+                  "children": [
+                    { "kind": "steam_game", "bytes": 100000000000, "children": [], "name": "Cyberpunk 2077", "app_id": 1091500 },
+                    { "kind": "steam_game", "bytes": 20000000000, "children": [], "name": "Hades", "app_id": 1145360 }
+                  ]
+                },
+                {
+                  "kind": "dir",
+                  "bytes": 25000000000,
+                  "children": [
+                    { "kind": "dir", "bytes": 20000000000, "children": [], "name": "Steam" },
+                    { "kind": "files", "bytes": 5000000000, "children": [] }
+                  ],
+                  "name": ".local"
+                },
+                { "kind": "files", "bytes": 5000000000, "children": [] }
+              ],
+              "id": "p1"
+            }
+          }
+        },
+        { "name": "another profile without the admin PIN", "params": { "id": "p2" }, "error": { "code": 3016, "message": "a PIN is needed", "data": { "pin": "admin" } } }
+      ]
+    },
+    "storage.cleanup_system": {
+      "summary": "0.6: clean up the system (job cleanup_system): remove the system generations older than the newest keep (never the running or the booted one), rewrite the boot menu, collect garbage. Admin PIN every time. Action org.hinteros.system.rebuild.",
+      "description": "keep: 1 to 10 (else invalid_params {field: keep, reason: out_of_range}). admin_pin as for every box-wide action. Always a job (garbage is collected even when no generation goes). Stages preparing, cleaning (removing generations with nix-env --delete-generations, then switch-to-configuration boot of the default generation so no boot entry points at a removed one; not cancellable from here), collecting (nix-store --gc), finishing. Result {freed_bytes, generations_removed}: freed_bytes is the store filesystem's free space after minus before. The estimate comes from storage.get's estimates.system. Below 2 the launcher warns that there is no older version to roll back to.",
+      "since": "0.6",
+      "params": { "$ref": "#/$defs/CleanupParams", "type": "object" },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required"],
+      "examples": [
+        { "name": "keep 3", "params": { "keep": 3, "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }
+      ]
+    },
+    "storage.cleanup_profiles": {
+      "summary": "0.6: clean up profiles (job cleanup_profiles): in every profile's app env and the starter set's, remove the generations older than the newest keep (never the current one), then collect garbage. Admin PIN every time. Action org.hinteros.system.rebuild.",
+      "description": "keep: 1 to 10. The guest's env (a single link) is not touched. Stages preparing, cleaning, collecting, finishing; result {freed_bytes, generations_removed}. Schema-1 boxes: unavailable {service: profiles, reason: schema1}. The estimate comes from storage.get's estimates.profiles. Below 2 the launcher warns that app rollback in those profiles is gone.",
+      "since": "0.6",
+      "params": { "$ref": "#/$defs/CleanupParams", "type": "object" },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required", "unavailable"],
+      "examples": [{ "name": "keep 2", "params": { "keep": 2, "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
+    },
+    "cleanup.get": {
+      "summary": "0.6: the automatic clean-up setting (state.json settings.cleanup; defaults when absent: on, weekly, keep 5 and 5). Read-only.",
+      "since": "0.6",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": { "$ref": "#/$defs/CleanupSettings", "type": "object" },
+      "errors": [],
+      "examples": [{ "name": "default", "params": {}, "result": { "enable": true, "frequency": "weekly", "keep_system": 5, "keep_profiles": 5 } }]
+    },
+    "cleanup.set": {
+      "summary": "0.6: change the automatic clean-up (job cleanup_set, a rebuild like ssh.set). Admin PIN. Action org.hinteros.system.settings.",
+      "description": "All four fields; keep_system and keep_profiles 1 to 10 (else invalid_params {field, reason: out_of_range}). Writes settings.cleanup {enable, frequency, keepSystem, keepProfiles} to state.json through the apply flow; job_id null when nothing changes (also when it was absent and the defaults are asked for). The system's nix-gc timer and the boot menu limit follow it.",
+      "since": "0.6",
+      "params": {
+        "type": "object",
+        "required": ["enable", "frequency", "keep_system", "keep_profiles"],
+        "additionalProperties": false,
+        "properties": {
+          "enable": { "type": "boolean" },
+          "frequency": { "$ref": "#/$defs/CleanupFrequency" },
+          "keep_system": { "$ref": "#/$defs/Keep" },
+          "keep_profiles": { "$ref": "#/$defs/Keep" },
+          "admin_pin": { "$ref": "#/$defs/Pin" }
+        }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "pin_required"],
+      "examples": [
+        {
+          "name": "monthly, keep 3",
+          "params": { "enable": true, "frequency": "monthly", "keep_system": 3, "keep_profiles": 3, "admin_pin": "2468" },
+          "result": { "job_id": "3f9a0c2b7e4d1a65" }
+        }
+      ]
+    },
     "jobs.get": {
       "summary": "One job: running or among the last 10 finished. Read-only.",
       "since": "0.2",
@@ -2061,7 +2275,7 @@
         "properties": { "reason": { "enum": ["unsigned", "unknown_signer", "not_fast_forward"] } }
       }
     },
-    "not_found": { "code": 3010, "since": "0.2", "summary": "Unknown generation or job; apps.install: an id that is not in the running generation's catalog; apps.remove: an id that is not installed." },
+    "not_found": { "code": 3010, "since": "0.2", "summary": "Unknown generation or job; apps.install: an id that is not in the running generation's catalog; apps.remove: an id that is not installed; storage.tree (0.6): nothing measured yet, or that home was not measured." },
     "needs_acknowledgement": { "code": 3011, "since": "0.2", "summary": "A downgrading channel or base switch without acknowledge_downgrade: true." },
     "authentication_required": {
       "code": 3012,
@@ -2163,7 +2377,7 @@
     "PolkitAction": { "type": "string", "pattern": "^org\\.hinteros\\.system\\.[a-z.]+$" },
     "Channel": { "enum": ["stable", "beta"] },
     "Base": { "enum": ["stable", "unstable"] },
-    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "migrate_apps", "profiles_create", "profiles_remove", "guest_set", "guest_end"] },
+    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "migrate_apps", "profiles_create", "profiles_remove", "guest_set", "guest_end", "storage_measure", "cleanup_system", "cleanup_profiles", "cleanup_set"] },
     "ProfileId": { "description": "A profile id.", "type": "string", "pattern": "^p[1-9][0-9]{0,2}$" },
     "ProfileName": { "description": "A display name: 1 to 32 characters, trimmed, no control or format characters.", "type": "string", "minLength": 1, "maxLength": 128 },
     "ProfileColor": { "enum": ["teal", "blue", "purple", "pink", "red", "orange", "yellow", "green"] },
@@ -2194,7 +2408,7 @@
       }
     },
     "JobState": { "enum": ["running", "succeeded", "failed", "cancelled"] },
-    "Stage": { "enum": ["preparing", "fetching", "verifying", "box", "evaluating", "downloading", "building", "activating", "apps", "finishing"] },
+    "Stage": { "enum": ["preparing", "fetching", "verifying", "box", "measuring", "evaluating", "downloading", "building", "activating", "cleaning", "collecting", "apps", "finishing"] },
     "Severity": { "enum": ["low", "medium", "high", "critical"] },
     "JobRef": {
       "description": "A started job, or null when there was nothing to do.",
@@ -2308,8 +2522,108 @@
       }
     },
     "JobResult": {
-      "description": "update_check jobs: an UpdateCheckResult; jobs that change the system: an AppliedResult.",
-      "oneOf": [{ "$ref": "#/$defs/UpdateCheckResult" }, { "$ref": "#/$defs/AppliedResult" }]
+      "description": "update_check jobs: an UpdateCheckResult; jobs that change the system: an AppliedResult; storage_measure (0.6): a MeasuredResult; cleanup_system and cleanup_profiles (0.6): a CleanedResult.",
+      "oneOf": [{ "$ref": "#/$defs/UpdateCheckResult" }, { "$ref": "#/$defs/AppliedResult" }, { "$ref": "#/$defs/MeasuredResult" }, { "$ref": "#/$defs/CleanedResult" }]
+    },
+    "Keep": { "description": "Generations to keep (the running, booted and current ones always stay).", "type": "integer", "minimum": 1, "maximum": 10 },
+    "CleanupParams": {
+      "type": "object",
+      "required": ["keep"],
+      "additionalProperties": false,
+      "properties": { "keep": { "$ref": "#/$defs/Keep" }, "admin_pin": { "$ref": "#/$defs/Pin" } }
+    },
+    "CleanupFrequency": { "enum": ["daily", "weekly", "monthly"] },
+    "CleanupSettings": {
+      "type": "object",
+      "required": ["enable", "frequency", "keep_system", "keep_profiles"],
+      "additionalProperties": false,
+      "properties": {
+        "enable": { "type": "boolean" },
+        "frequency": { "$ref": "#/$defs/CleanupFrequency" },
+        "keep_system": { "$ref": "#/$defs/Keep" },
+        "keep_profiles": { "$ref": "#/$defs/Keep" }
+      }
+    },
+    "StorageHomeId": { "description": "A profile id or guest.", "type": "string", "pattern": "^(p[1-9][0-9]{0,2}|guest)$" },
+    "NodeKind": {
+      "description": "What a storage node stands for: disk (the top-level root), system, apps, profile (id), guest, other (what none of the others explains: other store paths, garbage, filesystem overhead), free; generation (what only that generation holds), common (what two or more generations of the parent hold), app_env (one owner's app envs outside the system; id: a profile id, starter or guest), shared (app store paths in two or more owners' envs, counted once); dir (name), files (loose files and folders too small or deep to show), steam (the installed games), steam_game (name, app_id).",
+      "enum": ["disk", "system", "apps", "profile", "guest", "other", "free", "generation", "common", "app_env", "shared", "dir", "files", "steam", "steam_game"]
+    },
+    "StorageNode": {
+      "description": "A segment of the storage ring. Children always add up to bytes (the disk root: to the filesystem's size, unless the measured parts exceed it). Zero-byte nodes are left out except app_env, profile, guest and free. Order: generations newest first, other named nodes largest first, then common, shared, files, other, free. The launcher names kinds itself; name is data (a folder or a game).",
+      "type": "object",
+      "required": ["kind", "bytes", "children"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "$ref": "#/$defs/NodeKind" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "children": { "type": "array", "items": { "$ref": "#/$defs/StorageNode" } },
+        "id": { "description": "profile: its id; app_env: a profile id, starter or guest; a profile tree's root.", "type": "string", "pattern": "^(p[1-9][0-9]{0,2}|starter|guest)$" },
+        "name": { "description": "dir: the folder's name; steam_game: the game's name.", "type": "string", "maxLength": 128 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "date": { "description": "generation: created (Unix seconds).", "type": "integer" },
+        "current": { "description": "generation: the running system, or the owner's current apps.", "type": "boolean" },
+        "booted": { "description": "generation: the booted system.", "type": "boolean" },
+        "app_id": { "description": "steam_game: Steam's appid.", "type": "integer", "minimum": 0 }
+      }
+    },
+    "DiskUsage": {
+      "description": "The Nix store's filesystem, like df: used = total minus free blocks, free = available blocks.",
+      "type": "object",
+      "required": ["total_bytes", "used_bytes", "free_bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "total_bytes": { "type": "integer", "minimum": 0 },
+        "used_bytes": { "type": "integer", "minimum": 0 },
+        "free_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "CleanupEstimate": {
+      "type": "object",
+      "required": ["keep", "generations", "bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "keep": { "$ref": "#/$defs/Keep" },
+        "generations": { "description": "Generations that clean-up would remove now.", "type": "integer", "minimum": 0 },
+        "bytes": { "description": "About what it would free (garbage included).", "type": "integer", "minimum": 0 }
+      }
+    },
+    "Measurement": {
+      "type": "object",
+      "required": ["measured_at", "disk", "root", "garbage_bytes", "estimates"],
+      "additionalProperties": false,
+      "properties": {
+        "measured_at": { "description": "When it finished (Unix seconds).", "type": "integer" },
+        "disk": { "$ref": "#/$defs/DiskUsage" },
+        "root": { "$ref": "#/$defs/StorageNode" },
+        "garbage_bytes": { "description": "Store paths no GC root reaches now.", "type": "integer", "minimum": 0 },
+        "estimates": {
+          "type": "object",
+          "required": ["system", "profiles"],
+          "additionalProperties": false,
+          "properties": {
+            "system": { "description": "keep 1 to 10, in order.", "type": "array", "minItems": 10, "maxItems": 10, "items": { "$ref": "#/$defs/CleanupEstimate" } },
+            "profiles": { "description": "keep 1 to 10, in order.", "type": "array", "minItems": 10, "maxItems": 10, "items": { "$ref": "#/$defs/CleanupEstimate" } }
+          }
+        }
+      }
+    },
+    "MeasuredResult": {
+      "description": "0.6, storage_measure jobs.",
+      "type": "object",
+      "required": ["measured_at"],
+      "additionalProperties": false,
+      "properties": { "measured_at": { "type": "integer" } }
+    },
+    "CleanedResult": {
+      "description": "0.6, cleanup_system and cleanup_profiles jobs. freed_bytes: free space after minus before on the store's filesystem (never negative).",
+      "type": "object",
+      "required": ["freed_bytes", "generations_removed"],
+      "additionalProperties": false,
+      "properties": {
+        "freed_bytes": { "type": "integer", "minimum": 0 },
+        "generations_removed": { "type": "integer", "minimum": 0 }
+      }
     },
     "ProgressDetail": {
       "type": "object",

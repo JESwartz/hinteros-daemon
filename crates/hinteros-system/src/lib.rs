@@ -31,6 +31,7 @@ pub mod service;
 pub mod splash;
 pub mod splashdraw;
 pub mod state;
+pub mod storage;
 pub mod store;
 pub mod update;
 pub mod usage;

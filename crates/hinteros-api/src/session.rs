@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 13);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 14);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -860,6 +860,13 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<RelayAudioSaveOutput>(),
         MethodInfo::of::<RelayStarterSetGet>(),
         MethodInfo::of::<RelayStarterSetSet>(),
+        MethodInfo::of::<RelayStorageGet>(),
+        MethodInfo::of::<RelayStorageMeasure>(),
+        MethodInfo::of::<RelayStorageTree>(),
+        MethodInfo::of::<RelayStorageCleanupSystem>(),
+        MethodInfo::of::<RelayStorageCleanupProfiles>(),
+        MethodInfo::of::<RelayCleanupGet>(),
+        MethodInfo::of::<RelayCleanupSet>(),
         MethodInfo::of::<RelayJobsGet>(),
         MethodInfo::of::<RelayJobsList>(),
         MethodInfo::of::<RelayJobsCancel>(),
@@ -1006,6 +1013,13 @@ relay! {
     RelayAudioSaveOutput = "system.audio.save_output" => crate::system::AudioSaveOutput;
     RelayStarterSetGet = "system.starter_set.get" => crate::system::StarterSetGet;
     RelayStarterSetSet = "system.starter_set.set" => crate::system::StarterSetSet;
+    RelayStorageGet = "system.storage.get" => crate::system::StorageGet;
+    RelayStorageMeasure = "system.storage.measure" => crate::system::StorageMeasure;
+    RelayStorageTree = "system.storage.tree" => crate::system::StorageTree;
+    RelayStorageCleanupSystem = "system.storage.cleanup_system" => crate::system::StorageCleanupSystem;
+    RelayStorageCleanupProfiles = "system.storage.cleanup_profiles" => crate::system::StorageCleanupProfiles;
+    RelayCleanupGet = "system.cleanup.get" => crate::system::CleanupGet;
+    RelayCleanupSet = "system.cleanup.set" => crate::system::CleanupSet;
     RelayJobsGet = "system.jobs.get" => crate::system::JobsGet;
     RelayJobsList = "system.jobs.list" => crate::system::JobsList;
     RelayJobsCancel = "system.jobs.cancel" => crate::system::JobsCancel;

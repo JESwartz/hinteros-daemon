@@ -1,0 +1,1088 @@
+//! Storage (storage.md, system API 0.6): what uses the disk, as the ring's tree.
+//!
+//! The `storage_measure` job ([`crate::runner`]) gathers the facts: the store's filesystem
+//! (statvfs), the NAR size of every store path and which are live, the closure of every system
+//! and app-env generation, and each home with [`measure_home`] (a walk that never follows a
+//! symlink, never leaves the home's filesystem and never reads a file; only Steam's
+//! `libraryfolders.vdf` and `appmanifest_*.acf` are read, to name the games). This module turns
+//! them into [`StorageNode`] trees whose children always add up to their parent, and writes the
+//! result to `/var/lib/hinteros/storage.json` (root, 0600): the public view (top level, every
+//! profile's total, the system/apps breakdown, the clean-up estimates) and the detailed trees
+//! of the homes, which only the service hands out (the profile itself, or with the admin PIN).
+//!
+//! Nothing here logs a file or folder name.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::os::unix::fs::MetadataExt;
+use std::path::{Component, Path, PathBuf};
+
+use hinteros_api::system::{
+    CleanupEstimate, CleanupEstimates, DiskUsage, MAX_KEEP, Measurement, NodeKind, StorageNode,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::fsutil;
+
+/// Format of `storage.json`.
+pub const STORED_VERSION: u32 = 1;
+
+/// What the measure job writes and the service reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stored {
+    pub version: u32,
+    /// The public view (`storage.get`).
+    pub measurement: Measurement,
+    /// Detailed home trees by profile id or `guest` (`storage.tree`; never public).
+    pub homes: BTreeMap<String, StorageNode>,
+}
+
+impl Stored {
+    pub fn load(path: &Path) -> Option<Self> {
+        let s: Stored = crate::job::read_json(path)?;
+        (s.version == STORED_VERSION).then_some(s)
+    }
+
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec(self).map_err(std::io::Error::other)?;
+        fsutil::write_atomic(path, &bytes, 0o600)
+    }
+}
+
+/// statvfs of `dir`, like df: total, used (total minus free blocks), free (available blocks).
+pub fn disk_usage(dir: &Path) -> Option<DiskUsage> {
+    let s = rustix::fs::statvfs(dir).ok()?;
+    let frsize = s.f_frsize.max(1);
+    let total = s.f_blocks.saturating_mul(frsize);
+    let free_blocks = s.f_bfree.saturating_mul(frsize);
+    Some(DiskUsage {
+        total_bytes: total,
+        used_bytes: total.saturating_sub(free_blocks),
+        free_bytes: s.f_bavail.saturating_mul(frsize),
+    })
+}
+
+/// The device a path is on (without following a final symlink).
+pub fn device_of(path: &Path) -> Option<u64> {
+    std::fs::symlink_metadata(path).ok().map(|m| m.dev())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Homes
+
+/// Limits that keep a home's tree small (storage.md: depth-limited, size-thresholded).
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// Folder levels below the home that are shown.
+    pub max_depth: usize,
+    /// A folder must be at least this big…
+    pub min_bytes: u64,
+    /// …and at least this many thousandths of the home.
+    pub min_permille: u64,
+    /// Folders shown per folder (the rest go into `files`).
+    pub max_children: usize,
+    /// Nodes in a whole tree (the threshold rises until it fits).
+    pub max_nodes: usize,
+    /// Characters of a name.
+    pub max_name: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_depth: 6,
+            min_bytes: 1 << 20,
+            min_permille: 5,
+            max_children: 16,
+            max_nodes: 400,
+            max_name: 128,
+        }
+    }
+}
+
+/// A folder as walked: its own block and loose files in `files`, its sub-folders (those of at
+/// least the floor size, within the depth) in `dirs`; `bytes` is everything below it.
+#[derive(Debug, Clone, Default)]
+struct RawDir {
+    name: String,
+    bytes: u64,
+    files: u64,
+    dirs: Vec<RawDir>,
+}
+
+struct Walk<'a> {
+    dev: u64,
+    /// Folders not counted in the tree (the Steam games, counted on their own).
+    exclude: HashSet<(u64, u64)>,
+    /// Files with more than one link already counted.
+    seen: HashSet<(u64, u64)>,
+    limits: Limits,
+    entries: u64,
+    cancel: &'a dyn Fn() -> bool,
+    cancelled: bool,
+}
+
+impl Walk<'_> {
+    fn tick(&mut self) -> bool {
+        self.entries += 1;
+        if self.entries.is_multiple_of(4096) && (self.cancel)() {
+            self.cancelled = true;
+        }
+        self.cancelled
+    }
+
+    fn file_bytes(&mut self, meta: &std::fs::Metadata) -> u64 {
+        if meta.nlink() > 1 && !meta.is_dir() && !self.seen.insert((meta.dev(), meta.ino())) {
+            return 0;
+        }
+        meta.blocks().saturating_mul(512)
+    }
+
+    /// Walk `dir` (already checked to be a folder on our device). `keep_tree`: record
+    /// sub-folders (false below the depth limit and for the games).
+    fn dir(
+        &mut self,
+        dir: &Path,
+        meta: &std::fs::Metadata,
+        depth: usize,
+        keep_tree: bool,
+    ) -> RawDir {
+        let mut out = RawDir {
+            name: String::new(),
+            bytes: 0,
+            files: meta.blocks().saturating_mul(512),
+            dirs: Vec::new(),
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            out.bytes = out.files;
+            return out;
+        };
+        for entry in entries.flatten() {
+            if self.tick() {
+                break;
+            }
+            // DirEntry::metadata does not follow a symlink.
+            let Ok(m) = entry.metadata() else { continue };
+            if m.dev() != self.dev {
+                // A mount point: another filesystem, not counted (nor its mount directory).
+                continue;
+            }
+            if m.is_dir() {
+                if self.exclude.contains(&(m.dev(), m.ino())) {
+                    continue;
+                }
+                let mut sub = self.dir(
+                    &entry.path(),
+                    &m,
+                    depth + 1,
+                    keep_tree && depth < self.limits.max_depth,
+                );
+                if keep_tree && depth < self.limits.max_depth && sub.bytes >= self.limits.min_bytes
+                {
+                    sub.name =
+                        clean_name(&entry.file_name().to_string_lossy(), self.limits.max_name);
+                    out.dirs.push(sub);
+                } else {
+                    out.files += sub.bytes;
+                }
+            } else {
+                out.files += self.file_bytes(&m);
+            }
+        }
+        out.bytes = out.files + out.dirs.iter().map(|d| d.bytes).sum::<u64>();
+        out
+    }
+}
+
+/// A name as shown: at most `max` characters, control characters replaced.
+pub fn clean_name(s: &str, max: usize) -> String {
+    s.chars()
+        .take(max)
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect()
+}
+
+/// One installed Steam game in a home.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SteamGame {
+    pub app_id: u32,
+    pub name: String,
+    pub dir: PathBuf,
+}
+
+/// The quoted strings of a VDF/ACF text, in order (escapes `\\` and `\"` undone).
+fn vdf_tokens(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let mut s = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => match chars.next() {
+                    Some('n') => s.push('\n'),
+                    Some('t') => s.push('\t'),
+                    Some(other) => s.push(other),
+                    None => break,
+                },
+                '"' => break,
+                c => s.push(c),
+            }
+        }
+        out.push(s);
+    }
+    out
+}
+
+/// The value after the first `key` (case-insensitive), as VDF writes `"key" "value"`.
+fn vdf_value<'a>(tokens: &'a [String], key: &str) -> Option<&'a str> {
+    tokens
+        .windows(2)
+        .find(|w| w[0].eq_ignore_ascii_case(key))
+        .map(|w| w[1].as_str())
+}
+
+/// Read a small text file without following a symlink (Steam's own files only).
+fn read_small(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > 1 << 20 {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Whether `path` is `home` or below it with no symlink on the way (lexically clean, absolute).
+fn inside_without_links(home: &Path, path: &Path) -> bool {
+    if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return false;
+    }
+    let Ok(rest) = path.strip_prefix(home) else {
+        return false;
+    };
+    let mut at = home.to_path_buf();
+    for c in rest.components() {
+        at.push(c);
+        match std::fs::symlink_metadata(&at) {
+            Ok(m) if m.is_dir() => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// The Steam library folders inside `home`: Steam's own folder and every `"path"` of its
+/// `libraryfolders.vdf` that is a real folder in the home.
+pub fn steam_libraries(home: &Path) -> Vec<PathBuf> {
+    let main = home.join(".local/share/Steam");
+    let mut libs: Vec<PathBuf> = Vec::new();
+    if inside_without_links(home, &main) {
+        libs.push(main.clone());
+    }
+    for f in ["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
+        let Some(text) = read_small(&main.join(f)) else {
+            continue;
+        };
+        let tokens = vdf_tokens(&text);
+        for w in tokens.windows(2) {
+            if w[0].eq_ignore_ascii_case("path") {
+                let p = PathBuf::from(&w[1]);
+                if inside_without_links(home, &p) && !libs.contains(&p) {
+                    libs.push(p);
+                }
+            }
+        }
+    }
+    libs
+}
+
+/// The installed games of the libraries in `home`, named from their `appmanifest_*.acf`.
+pub fn steam_games(home: &Path) -> Vec<SteamGame> {
+    let mut games: Vec<SteamGame> = Vec::new();
+    for lib in steam_libraries(home) {
+        let apps = lib.join("steamapps");
+        let Ok(entries) = std::fs::read_dir(&apps) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let file = e.file_name();
+            let Some(file) = file.to_str() else { continue };
+            let Some(id) = file
+                .strip_prefix("appmanifest_")
+                .and_then(|r| r.strip_suffix(".acf"))
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Some(text) = read_small(&e.path()) else {
+                continue;
+            };
+            let tokens = vdf_tokens(&text);
+            let Some(installdir) = vdf_value(&tokens, "installdir") else {
+                continue;
+            };
+            // One plain path component.
+            let mut comps = Path::new(installdir).components();
+            if !matches!(
+                (comps.next(), comps.next()),
+                (Some(Component::Normal(_)), None)
+            ) {
+                continue;
+            }
+            let dir = apps.join("common").join(installdir);
+            match std::fs::symlink_metadata(&dir) {
+                Ok(m) if m.is_dir() => {}
+                _ => continue,
+            }
+            if games.iter().any(|g| g.app_id == id || g.dir == dir) {
+                continue;
+            }
+            let name = vdf_value(&tokens, "name")
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or(installdir);
+            games.push(SteamGame {
+                app_id: id,
+                name: clean_name(name.trim(), 128),
+                dir,
+            });
+        }
+    }
+    games
+}
+
+/// One home, measured.
+#[derive(Debug, Clone)]
+pub struct Home {
+    /// The detailed tree (`kind` profile or guest).
+    pub tree: StorageNode,
+    pub dev: u64,
+}
+
+/// Measure `home` into a detailed tree of `kind` (profile or guest). `None`: not a folder, or
+/// cancelled (`cancel` is asked every few thousand entries).
+pub fn measure_home(
+    home: &Path,
+    kind: NodeKind,
+    limits: Limits,
+    cancel: &dyn Fn() -> bool,
+) -> Option<Home> {
+    let meta = std::fs::symlink_metadata(home).ok()?;
+    if !meta.is_dir() {
+        return None;
+    }
+    let dev = meta.dev();
+    let games = steam_games(home);
+    let mut walk = Walk {
+        dev,
+        exclude: HashSet::new(),
+        seen: HashSet::new(),
+        limits,
+        entries: 0,
+        cancel,
+        cancelled: false,
+    };
+    let mut game_nodes = Vec::new();
+    for g in &games {
+        let Ok(m) = std::fs::symlink_metadata(&g.dir) else {
+            continue;
+        };
+        if m.dev() != dev || !walk.exclude.insert((m.dev(), m.ino())) {
+            continue;
+        }
+        let raw = walk.dir(&g.dir, &m, limits.max_depth, false);
+        let mut n = StorageNode::new(NodeKind::SteamGame, raw.bytes);
+        n.name = Some(g.name.clone());
+        n.app_id = Some(g.app_id);
+        game_nodes.push(n);
+    }
+    let raw = walk.dir(home, &meta, 0, true);
+    if walk.cancelled {
+        return None;
+    }
+    Some(Home {
+        tree: home_tree(kind, raw, game_nodes, limits),
+        dev,
+    })
+}
+
+/// Build the shown tree: the threshold is max(floor, permille of the total), raised until the
+/// tree has at most `max_nodes` nodes.
+fn home_tree(
+    kind: NodeKind,
+    raw: RawDir,
+    mut games: Vec<StorageNode>,
+    limits: Limits,
+) -> StorageNode {
+    let games_bytes: u64 = games.iter().map(|g| g.bytes).sum();
+    let total = raw.bytes + games_bytes;
+    games.retain(|g| g.bytes > 0);
+    sort_named(&mut games);
+    let mut threshold = limits
+        .min_bytes
+        .max(total.saturating_mul(limits.min_permille) / 1000);
+    loop {
+        let mut root = StorageNode::new(kind, total);
+        if games_bytes > 0 {
+            let mut steam = StorageNode::new(NodeKind::Steam, games_bytes);
+            steam.children = games.clone();
+            root.children.push(steam);
+        }
+        let (dirs, files) = shown(&raw, threshold, limits.max_children);
+        root.children.extend(dirs);
+        sort_named(&mut root.children);
+        if files > 0 {
+            root.children.push(StorageNode::new(NodeKind::Files, files));
+        }
+        if count(&root) <= limits.max_nodes || threshold >= total {
+            return root;
+        }
+        threshold = threshold.saturating_mul(2);
+    }
+}
+
+/// The sub-folders of `raw` shown at `threshold` (at most `max` of them), and the bytes left
+/// for its `files` node.
+fn shown(raw: &RawDir, threshold: u64, max: usize) -> (Vec<StorageNode>, u64) {
+    let mut dirs: Vec<&RawDir> = raw.dirs.iter().filter(|d| d.bytes >= threshold).collect();
+    dirs.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
+    dirs.truncate(max);
+    let shown_bytes: u64 = dirs.iter().map(|d| d.bytes).sum();
+    let nodes = dirs
+        .into_iter()
+        .map(|d| {
+            let mut n = StorageNode::new(NodeKind::Dir, d.bytes);
+            n.name = Some(d.name.clone());
+            let (children, files) = shown(d, threshold, max);
+            n.children = children;
+            if !n.children.is_empty() && files > 0 {
+                n.children.push(StorageNode::new(NodeKind::Files, files));
+            }
+            n
+        })
+        .collect();
+    (nodes, raw.bytes - shown_bytes)
+}
+
+fn count(n: &StorageNode) -> usize {
+    1 + n.children.iter().map(count).sum::<usize>()
+}
+
+/// Largest first, then by name (stable for equal sizes).
+fn sort_named(nodes: &mut [StorageNode]) {
+    nodes.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The store
+
+/// One generation and its closure (store paths).
+#[derive(Debug, Clone, Default)]
+pub struct GenFacts {
+    /// `None`: a single link without generations (the guest's env).
+    pub generation: Option<u32>,
+    pub date: i64,
+    pub current: bool,
+    pub booted: bool,
+    pub closure: Vec<String>,
+}
+
+/// An app-env owner (a profile id, `starter`, `guest`) and its generations, newest first.
+#[derive(Debug, Clone, Default)]
+pub struct OwnerFacts {
+    pub id: String,
+    pub gens: Vec<GenFacts>,
+}
+
+/// The store: every valid path's NAR size, and which paths are live.
+#[derive(Debug, Clone, Default)]
+pub struct StoreFacts {
+    pub sizes: HashMap<String, u64>,
+    pub live: HashSet<String>,
+}
+
+/// Store paths interned to indices.
+struct Interner<'a> {
+    index: HashMap<&'a str, usize>,
+    sizes: Vec<u64>,
+}
+
+impl<'a> Interner<'a> {
+    fn new(facts: &'a StoreFacts) -> Self {
+        let mut index = HashMap::with_capacity(facts.sizes.len());
+        let mut sizes = Vec::with_capacity(facts.sizes.len());
+        for (p, s) in &facts.sizes {
+            index.insert(p.as_str(), sizes.len());
+            sizes.push(*s);
+        }
+        Self { index, sizes }
+    }
+
+    /// A closure as sorted, unique indices (paths without a known size are left out).
+    fn set(&self, closure: &[String]) -> Vec<usize> {
+        let mut v: Vec<usize> = closure
+            .iter()
+            .filter_map(|p| self.index.get(p.as_str()).copied())
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    fn bytes(&self, set: impl IntoIterator<Item = usize>) -> u64 {
+        set.into_iter().map(|i| self.sizes[i]).sum()
+    }
+}
+
+/// The store side of a measurement.
+#[derive(Debug, Clone)]
+pub struct StoreTree {
+    pub system: StorageNode,
+    pub apps: StorageNode,
+    pub garbage_bytes: u64,
+    pub estimates: CleanupEstimates,
+}
+
+/// Generations with their closures as index sets.
+type GenSets<'a> = Vec<(&'a GenFacts, Vec<usize>)>;
+
+/// `generation` + `common` children of a node holding `gens` (each a set of indices),
+/// restricted to `within` (when given).
+fn generation_children(
+    int: &Interner,
+    gens: &[(&GenFacts, Vec<usize>)],
+    within: Option<&[bool]>,
+) -> (u64, Vec<StorageNode>) {
+    let mut count: HashMap<usize, u32> = HashMap::new();
+    for (_, set) in gens {
+        for &i in set {
+            if within.is_none_or(|w| w[i]) {
+                *count.entry(i).or_insert(0) += 1;
+            }
+        }
+    }
+    let total = int.bytes(count.keys().copied());
+    let mut children = Vec::new();
+    let mut unique_sum = 0;
+    for (g, set) in gens {
+        let Some(generation) = g.generation else {
+            continue;
+        };
+        let unique = int.bytes(set.iter().copied().filter(|i| count.get(i) == Some(&1)));
+        unique_sum += unique;
+        if unique > 0 {
+            let mut n = StorageNode::new(NodeKind::Generation, unique);
+            n.generation = Some(generation);
+            n.date = Some(g.date);
+            n.current = Some(g.current);
+            n.booted = Some(g.booted);
+            children.push(n);
+        }
+    }
+    children.sort_by_key(|c| std::cmp::Reverse(c.generation));
+    if !children.is_empty() && total > unique_sum {
+        children.push(StorageNode::new(NodeKind::Common, total - unique_sum));
+    }
+    (total, children)
+}
+
+/// Which generations a clean-up with `keep` removes: all but the newest `keep` (by number), the
+/// current and the booted one.
+pub fn removed_by(gens: &[GenFacts], keep: u32) -> Vec<u32> {
+    let mut numbers: Vec<(u32, bool)> = gens
+        .iter()
+        .filter_map(|g| g.generation.map(|n| (n, g.current || g.booted)))
+        .collect();
+    numbers.sort_by_key(|n| std::cmp::Reverse(n.0));
+    numbers
+        .into_iter()
+        .enumerate()
+        .filter(|(i, (_, pinned))| *i >= keep as usize && !pinned)
+        .map(|(_, (n, _))| n)
+        .collect()
+}
+
+/// Turn the store facts into the `system` and `apps` nodes, the garbage and the estimates.
+pub fn store_tree(facts: &StoreFacts, system: &[GenFacts], owners: &[OwnerFacts]) -> StoreTree {
+    let int = Interner::new(facts);
+    let n = int.sizes.len();
+    let garbage_bytes = facts
+        .sizes
+        .iter()
+        .filter(|(p, _)| !facts.live.contains(*p))
+        .map(|(_, s)| s)
+        .sum();
+
+    // System: every system generation's closure.
+    let sys: Vec<(&GenFacts, Vec<usize>)> =
+        system.iter().map(|g| (g, int.set(&g.closure))).collect();
+    let mut in_system = vec![false; n];
+    for (_, set) in &sys {
+        for &i in set {
+            in_system[i] = true;
+        }
+    }
+    let (sys_bytes, sys_children) = generation_children(&int, &sys, None);
+    let mut system_node = StorageNode::new(NodeKind::System, sys_bytes);
+    system_node.children = sys_children;
+
+    // Apps: what the envs hold outside the system; in two or more owners' envs: shared.
+    let owner_sets: Vec<(&OwnerFacts, GenSets)> = owners
+        .iter()
+        .map(|o| (o, o.gens.iter().map(|g| (g, int.set(&g.closure))).collect()))
+        .collect();
+    let mut owners_of = vec![0u32; n];
+    for (_, gens) in &owner_sets {
+        let mut mine: HashSet<usize> = HashSet::new();
+        for (_, set) in gens {
+            mine.extend(set.iter().copied().filter(|i| !in_system[*i]));
+        }
+        for i in mine {
+            owners_of[i] += 1;
+        }
+    }
+    let shared = int.bytes((0..n).filter(|i| owners_of[*i] >= 2));
+    let exclusive: Vec<bool> = (0..n).map(|i| owners_of[i] == 1).collect();
+    let mut apps_node = StorageNode::new(NodeKind::Apps, 0);
+    let mut owner_nodes = Vec::new();
+    for (o, gens) in &owner_sets {
+        let (bytes, children) = generation_children(&int, gens, Some(&exclusive));
+        let mut node = StorageNode::new(NodeKind::AppEnv, bytes);
+        node.id = Some(o.id.clone());
+        node.children = children;
+        owner_nodes.push(node);
+    }
+    sort_named(&mut owner_nodes);
+    apps_node.bytes = owner_nodes.iter().map(|o| o.bytes).sum::<u64>() + shared;
+    apps_node.children = owner_nodes;
+    if shared > 0 {
+        apps_node
+            .children
+            .push(StorageNode::new(NodeKind::Shared, shared));
+    }
+
+    // Estimates: what each clean-up would free with keep 1..10.
+    let all_apps: Vec<bool> = {
+        let mut v = vec![false; n];
+        for (_, gens) in &owner_sets {
+            for (_, set) in gens {
+                for &i in set {
+                    v[i] = true;
+                }
+            }
+        }
+        v
+    };
+    let freed = |removed: &[&Vec<usize>], protected: &[bool]| -> u64 {
+        let mut gone: HashSet<usize> = HashSet::new();
+        for set in removed {
+            gone.extend(set.iter().copied().filter(|i| !protected[*i]));
+        }
+        garbage_bytes + int.bytes(gone)
+    };
+    let mut estimates = CleanupEstimates::default();
+    for keep in 1..=MAX_KEEP {
+        // System: kept generations and every app env protect their paths.
+        let removed = removed_by(system, keep);
+        let mut protected = all_apps.clone();
+        let mut gone_sets = Vec::new();
+        for (g, set) in &sys {
+            if g.generation.is_some_and(|x| removed.contains(&x)) {
+                gone_sets.push(set);
+            } else {
+                for &i in set {
+                    protected[i] = true;
+                }
+            }
+        }
+        estimates.system.push(CleanupEstimate {
+            keep,
+            generations: removed.len() as u32,
+            bytes: freed(&gone_sets, &protected),
+        });
+
+        // Profiles: the system, kept app generations and single links protect theirs.
+        let mut protected = in_system.clone();
+        let mut gone_sets = Vec::new();
+        let mut count = 0u32;
+        for (o, gens) in &owner_sets {
+            let removed = removed_by(&o.gens, keep);
+            count += removed.len() as u32;
+            for (g, set) in gens {
+                if g.generation.is_some_and(|x| removed.contains(&x)) {
+                    gone_sets.push(set);
+                } else {
+                    for &i in set {
+                        protected[i] = true;
+                    }
+                }
+            }
+        }
+        estimates.profiles.push(CleanupEstimate {
+            keep,
+            generations: count,
+            bytes: freed(&gone_sets, &protected),
+        });
+    }
+    StoreTree {
+        system: system_node,
+        apps: apps_node,
+        garbage_bytes,
+        estimates,
+    }
+}
+
+/// A profile's (or the guest's) node for the top level: its total, no children.
+pub fn summary(tree: &StorageNode) -> StorageNode {
+    let mut n = StorageNode::new(tree.kind, tree.bytes);
+    n.id = tree.id.clone();
+    n
+}
+
+/// The top-level tree: system, apps, the homes (in the given order), other, free. `on_disk`
+/// says which homes are on the store's filesystem (only those reduce `other`).
+pub fn top_level(disk: DiskUsage, store: &StoreTree, homes: &[(StorageNode, bool)]) -> StorageNode {
+    let mut root = StorageNode::new(NodeKind::Disk, 0);
+    root.children.push(store.system.clone());
+    root.children.push(store.apps.clone());
+    let mut known = store.system.bytes + store.apps.bytes;
+    for (h, on_disk) in homes {
+        if *on_disk {
+            known += h.bytes;
+        }
+        root.children.push(summary(h));
+    }
+    let other = disk
+        .total_bytes
+        .saturating_sub(disk.free_bytes)
+        .saturating_sub(known);
+    root.children
+        .retain(|c| c.bytes > 0 || matches!(c.kind, NodeKind::Profile | NodeKind::Guest));
+    if other > 0 {
+        root.children.push(StorageNode::new(NodeKind::Other, other));
+    }
+    root.children
+        .push(StorageNode::new(NodeKind::Free, disk.free_bytes));
+    root.bytes = root.children.iter().map(|c| c.bytes).sum();
+    root
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn sum_ok(n: &StorageNode) {
+        if !n.children.is_empty() {
+            let s: u64 = n.children.iter().map(|c| c.bytes).sum();
+            assert_eq!(s, n.bytes, "children of {:?} {:?}", n.kind, n.name);
+        }
+        for c in &n.children {
+            sum_ok(c);
+        }
+    }
+
+    /// The folder names in a tree.
+    fn dir_names(n: &StorageNode) -> Vec<String> {
+        let mut out = Vec::new();
+        if n.kind == NodeKind::Dir {
+            out.extend(n.name.clone());
+        }
+        for c in &n.children {
+            out.extend(dir_names(c));
+        }
+        out
+    }
+
+    fn write(path: &Path, bytes: usize) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![7u8; bytes]).unwrap();
+    }
+
+    const MIB: usize = 1 << 20;
+
+    fn small() -> Limits {
+        Limits {
+            min_bytes: 64 * 1024,
+            ..Limits::default()
+        }
+    }
+
+    #[test]
+    fn a_home_with_folders_and_steam_games() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        write(&home.join("Videos/a.mkv"), 2 * MIB);
+        write(&home.join("Videos/deep/1/2/3/4/5/6/7/x"), MIB);
+        write(&home.join("Documents/note"), 100);
+        write(&home.join(".cache/c"), MIB);
+        write(&home.join("loose"), 300 * 1024);
+        // Steam's own library with one game, and a second library inside the home.
+        let steam = home.join(".local/share/Steam");
+        write(&steam.join("steamapps/common/Portal Two/data"), 3 * MIB);
+        std::fs::write(
+            steam.join("steamapps/appmanifest_620.acf"),
+            "\"AppState\"\n{\n\t\"appid\"\t\t\"620\"\n\t\"name\"\t\t\"Portal 2\"\n\t\"installdir\"\t\t\"Portal Two\"\n}\n",
+        )
+        .unwrap();
+        let lib2 = home.join("Games/SteamLibrary");
+        write(&lib2.join("steamapps/common/Hades/game.bin"), 2 * MIB);
+        std::fs::write(
+            lib2.join("steamapps/appmanifest_1145360.acf"),
+            "\"AppState\" { \"appid\" \"1145360\" \"name\" \"Hades\" \"installdir\" \"Hades\" }",
+        )
+        .unwrap();
+        // A manifest whose installdir escapes, and one without a folder: ignored.
+        std::fs::write(
+            lib2.join("steamapps/appmanifest_1.acf"),
+            "\"AppState\" { \"name\" \"Evil\" \"installdir\" \"../../..\" }",
+        )
+        .unwrap();
+        std::fs::write(
+            lib2.join("steamapps/appmanifest_2.acf"),
+            "\"AppState\" { \"name\" \"Gone\" \"installdir\" \"Gone\" }",
+        )
+        .unwrap();
+        let outside = d.path().join("outside");
+        write(&outside.join("steamapps/common/X/big"), 5 * MIB);
+        std::fs::write(
+            outside.join("steamapps/appmanifest_3.acf"),
+            "\"AppState\" { \"name\" \"Outside\" \"installdir\" \"X\" }",
+        )
+        .unwrap();
+        std::fs::write(
+            steam.join("steamapps/libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"2\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
+                steam.display(),
+                lib2.display(),
+                outside.display()
+            ),
+        )
+        .unwrap();
+        // A symlink out of the home is not followed (its target is 5 MiB).
+        symlink(&outside, home.join("link")).unwrap();
+
+        let h = measure_home(&home, NodeKind::Profile, small(), &|| false).unwrap();
+        let t = &h.tree;
+        sum_ok(t);
+        assert_eq!(t.kind, NodeKind::Profile);
+        assert!(
+            t.bytes > 9 * MIB as u64 && t.bytes < 13 * MIB as u64,
+            "{}",
+            t.bytes
+        );
+        let steam_node = t
+            .children
+            .iter()
+            .find(|c| c.kind == NodeKind::Steam)
+            .unwrap();
+        let games: Vec<(&str, u32)> = steam_node
+            .children
+            .iter()
+            .map(|g| (g.name.as_deref().unwrap(), g.app_id.unwrap()))
+            .collect();
+        assert_eq!(games, [("Portal 2", 620), ("Hades", 1_145_360)]);
+        assert!(steam_node.children[0].bytes >= 3 * MIB as u64);
+        // The games are not counted again in the folders.
+        let all = dir_names(t);
+        assert!(!all.contains(&"Portal Two".to_string()), "{all:?}");
+        assert!(!all.contains(&"Hades".to_string()), "{all:?}");
+        assert!(all.contains(&"Videos".to_string()), "{all:?}");
+        assert!(all.contains(&".cache".to_string()), "{all:?}");
+        // Small folders go into files; the depth limit holds.
+        assert!(!all.contains(&"Documents".to_string()), "{all:?}");
+        assert!(!all.contains(&"7".to_string()), "{all:?}");
+        assert!(!all.contains(&"Outside".to_string()) && !all.contains(&"link".to_string()));
+        assert!(t.children.last().unwrap().kind == NodeKind::Files);
+
+        // Cancelled: nothing.
+        assert!(
+            measure_home(&d.path().join("nope"), NodeKind::Guest, small(), &|| false).is_none()
+        );
+    }
+
+    #[test]
+    fn the_tree_stays_small() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        for i in 0..40 {
+            for j in 0..12 {
+                write(&home.join(format!("d{i}/e{j}/f")), 70 * 1024);
+            }
+        }
+        let limits = Limits {
+            min_bytes: 64 * 1024,
+            max_nodes: 60,
+            ..Limits::default()
+        };
+        let h = measure_home(&home, NodeKind::Profile, limits, &|| false).unwrap();
+        sum_ok(&h.tree);
+        assert!(count(&h.tree) <= 60, "{}", count(&h.tree));
+        // At most 16 folders per folder.
+        assert!(h.tree.children.len() <= 17);
+        // Hard links are counted once.
+        let one = d.path().join("one");
+        write(&one.join("a"), MIB);
+        std::fs::hard_link(one.join("a"), one.join("b")).unwrap();
+        let h = measure_home(&one, NodeKind::Profile, limits, &|| false).unwrap();
+        assert!(h.tree.bytes < 2 * MIB as u64, "{}", h.tree.bytes);
+    }
+
+    #[test]
+    fn names_are_cleaned() {
+        assert_eq!(clean_name("a\nb\u{7f}c", 128), "a\u{FFFD}b\u{FFFD}c");
+        assert_eq!(clean_name(&"x".repeat(300), 128).chars().count(), 128);
+        let t = vdf_tokens(r#""path" "C:\\Games\\Steam" "name" "A \"quoted\" game""#);
+        assert_eq!(t, ["path", "C:\\Games\\Steam", "name", "A \"quoted\" game"]);
+    }
+
+    fn mkgen(n: u32, current: bool, booted: bool, paths: &[&str]) -> GenFacts {
+        GenFacts {
+            generation: Some(n),
+            date: i64::from(n) * 100,
+            current,
+            booted,
+            closure: paths.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn system_apps_shared_and_estimates() {
+        let mut facts = StoreFacts::default();
+        for (p, s) in [
+            ("glibc", 100),
+            ("sys1", 10),
+            ("sys2", 20),
+            ("sys3", 30),
+            ("old", 5),
+            ("mesa", 40),
+            ("steam", 1000),
+            ("yt", 50),
+            ("yt-old", 7),
+            ("garbage", 9),
+        ] {
+            facts.sizes.insert(p.into(), s);
+            if p != "garbage" {
+                facts.live.insert(p.into());
+            }
+        }
+        // Generation 1 holds "old" only (with glibc); 3 is current, 2 booted.
+        let system = vec![
+            mkgen(3, true, false, &["glibc", "sys3", "mesa"]),
+            mkgen(2, false, true, &["glibc", "sys2", "mesa"]),
+            mkgen(1, false, false, &["glibc", "sys1", "old"]),
+        ];
+        let owners = vec![
+            OwnerFacts {
+                id: "p1".into(),
+                gens: vec![
+                    mkgen(2, true, false, &["steam", "yt", "glibc"]),
+                    mkgen(1, false, false, &["yt-old", "yt", "glibc"]),
+                ],
+            },
+            OwnerFacts {
+                id: "p2".into(),
+                gens: vec![mkgen(1, true, false, &["yt", "mesa"])],
+            },
+            OwnerFacts {
+                id: "guest".into(),
+                gens: vec![GenFacts {
+                    closure: vec!["yt".into()],
+                    ..Default::default()
+                }],
+            },
+        ];
+        let t = store_tree(&facts, &system, &owners);
+        sum_ok(&t.system);
+        sum_ok(&t.apps);
+        assert_eq!(t.garbage_bytes, 9);
+        assert_eq!(t.system.bytes, 100 + 10 + 20 + 30 + 5 + 40);
+        let gens: Vec<(u32, u64)> = t
+            .system
+            .children
+            .iter()
+            .filter(|c| c.kind == NodeKind::Generation)
+            .map(|c| (c.generation.unwrap(), c.bytes))
+            .collect();
+        assert_eq!(gens, [(3, 30), (2, 20), (1, 15)]);
+        assert_eq!(t.system.children.last().unwrap().kind, NodeKind::Common);
+        assert_eq!(t.system.children.last().unwrap().bytes, 140);
+        // Apps: glibc and mesa are the system's; yt is in three envs (shared).
+        assert_eq!(t.apps.bytes, 1000 + 7 + 50);
+        let p1 = t
+            .apps
+            .children
+            .iter()
+            .find(|c| c.id.as_deref() == Some("p1"))
+            .unwrap();
+        assert_eq!(p1.bytes, 1007);
+        let p1_gens: Vec<(u32, u64)> = p1
+            .children
+            .iter()
+            .map(|c| (c.generation.unwrap(), c.bytes))
+            .collect();
+        assert_eq!(p1_gens, [(2, 1000), (1, 7)]);
+        let p2 = t
+            .apps
+            .children
+            .iter()
+            .find(|c| c.id.as_deref() == Some("p2"))
+            .unwrap();
+        assert_eq!(p2.bytes, 0);
+        let shared = t.apps.children.last().unwrap();
+        assert_eq!((shared.kind, shared.bytes), (NodeKind::Shared, 50));
+
+        // keep 1: generation 1 goes (3 current, 2 booted stay): sys1 + old + garbage.
+        let s1 = t.estimates.system[0];
+        assert_eq!((s1.keep, s1.generations, s1.bytes), (1, 1, 10 + 5 + 9));
+        // keep 3: nothing but garbage.
+        assert_eq!(t.estimates.system[2].generations, 0);
+        assert_eq!(t.estimates.system[2].bytes, 9);
+        assert_eq!(t.estimates.system.len(), 10);
+        // Profiles keep 1: p1's generation 1 goes: yt-old (yt stays: in the kept envs).
+        let p = t.estimates.profiles[0];
+        assert_eq!((p.generations, p.bytes), (1, 7 + 9));
+        assert_eq!(t.estimates.profiles[1].generations, 0);
+        assert_eq!(removed_by(&system, 1), [1]);
+        assert_eq!(removed_by(&system, 2), [1]);
+
+        // The top level: other is what is left of the used space; children add up.
+        let disk = DiskUsage {
+            total_bytes: 10_000,
+            used_bytes: 4_000,
+            free_bytes: 5_500,
+        };
+        let mut home = StorageNode::new(NodeKind::Profile, 2_000);
+        home.id = Some("p1".into());
+        home.children.push(StorageNode::new(NodeKind::Files, 2_000));
+        let empty = {
+            let mut n = StorageNode::new(NodeKind::Profile, 0);
+            n.id = Some("p2".into());
+            n
+        };
+        let top = top_level(disk, &t, &[(home, true), (empty, true)]);
+        assert_eq!(top.bytes, 10_000);
+        let kinds: Vec<NodeKind> = top.children.iter().map(|c| c.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                NodeKind::System,
+                NodeKind::Apps,
+                NodeKind::Profile,
+                NodeKind::Profile,
+                NodeKind::Other,
+                NodeKind::Free
+            ]
+        );
+        assert!(
+            top.children[2].children.is_empty(),
+            "no names at the top level"
+        );
+        assert_eq!(top.children[4].bytes, 10_000 - 5_500 - 205 - 1057 - 2_000);
+    }
+}

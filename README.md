@@ -791,7 +791,7 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.5 (0.4: profiles and per-profile apps; 0.5: the admin PIN for
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.6 (0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
 box-wide actions, `guest.end`, rollback re-adds box features; see "Profiles and per-profile apps" below)
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
@@ -825,7 +825,7 @@ trust.
   rate_limited`), `_JOB_ID`, `_PARAMS` (summary), and for jobs `_OUTCOME`, `_REV_BEFORE/AFTER`,
   `_GENERATION_BEFORE/AFTER`. Denials are capped at 20 per minute and uid, then summarised.
 - **State** (`state.rs`): `state.json` is read into a typed `State` mirroring `state.nix`
-  (`schemaVersion`, `base`, `stateVersion`, `settings.{hostname, ssh.enable, admin.user}`, `disk.layout`, `apps`,
+  (`schemaVersion`, `base`, `stateVersion`, `settings.{hostname, ssh.enable, admin.user, guest, cleanup}`, `disk.layout`, `apps`,
   `profiles`; anything else refused) and written canonically from it, never from client JSON.
   `revision` is the SHA-256 of the file. `apps` (M8) and `profiles` (M7) round-trip untouched,
   ready for `apps.install/remove` and `profiles.*` to edit the same struct.
@@ -1345,6 +1345,78 @@ wizard when `profile.current.setup_required`; "Set your PIN" when `!pin_set`; th
 for `apps.list` entries with `needs_terms`; on schema-2 boxes pass `system.apps.list`'s
 `revision` to `system.apps.install/remove`.
 
+## Storage and clean-up (system API 0.6, session API 0.14)
+
+Design: `hinteros-docs/design/storage.md`. Every method below is relayed as `system.<method>`.
+
+### Measuring (`storage.rs`, `runner/storage.rs`)
+
+- `storage.measure` (polkit `org.hinteros.system.settings`, any profile, no PIN) starts job
+  `storage_measure` (a running one is returned instead of a second). Stages `preparing`,
+  `measuring` (with `percent`), `finishing`; cancellable. It reads statvfs of `--store-dir`,
+  `nix path-info --all -s` (NAR sizes), `nix-store --gc --print-live` (garbage = all − live),
+  `nix-store -qR` of every system and app generation, and walks each home (`state.json`'s
+  accounts, then the guest): no symlink followed, no other filesystem entered, no file read
+  except Steam's `libraryfolders.vdf` and `appmanifest_*.acf` (games named one by one, each
+  library folder that is a real folder inside the home), hard links counted once.
+- Trees: children always add up to their parent (remainders are `common`, `shared`, `files`,
+  `other`); home trees are cut at 6 folder levels, max(1 MiB, 0.5 %) per folder, 16 folders per
+  folder, 400 nodes; names at most 128 characters. Top level: `system` (generation / common),
+  `apps` (`app_env` per owner outside the system, generation / common; `shared` = in two or more
+  owners' envs), one `profile` per account, `guest`, `other`, `free`.
+- The result goes to `/var/lib/hinteros/storage.json` (0600) with its time: `storage.get`
+  (read-only, open) returns the public part (top level, every profile's total, garbage and the
+  clean-up estimates for keep 1..10); `storage.tree {id, admin_pin?}` (through the mutating gate
+  for the rate limit and audit) a home's detailed tree: the caller's own account (or the guest's
+  own) without a PIN, any other with the admin PIN (same rules as `rollback`). The job's result
+  is only `{measured_at}`; the job logs counts, never a name.
+
+### Clean-up
+
+- `storage.cleanup_system {keep, admin_pin?}` (job `cleanup_system`, polkit
+  `org.hinteros.system.rebuild`, admin PIN every time): removes the system generations older
+  than the newest `keep` (1..10) with `nix-env --delete-generations <N…>`, never the running, the
+  booted or the profile's current one; then `switch-to-configuration boot` of the default
+  generation (no boot entry left pointing at a removed one; if that fails, no GC), then
+  `nix-store --gc`. Stages `preparing`, `cleaning` (no cancel from here), `collecting`,
+  `finishing`. Result `{freed_bytes, generations_removed}` (free space after − before).
+- `storage.cleanup_profiles {keep, admin_pin?}` (job `cleanup_profiles`): the same over every
+  profile's app Nix profile and the starter set's (never the current generation; the guest's
+  single link untouched), then GC. Schema 1: `unavailable {reason: schema1}`.
+- Both serialise with the system's `nix-gc.service` through Nix's own GC and profile locks.
+
+### Automatic clean-up setting
+
+`state.json` `settings.cleanup {enable, frequency: daily|weekly|monthly, keepSystem, keepProfiles
+(1..10)}`, every field optional (defaults on, weekly, 5, 5), schemas 1 and 2, checked by
+`State::parse` and so by `check-state`. `cleanup.get` (read-only) returns it with the defaults
+filled in; `cleanup.set {enable, frequency, keep_system, keep_profiles, admin_pin?}` (admin PIN,
+polkit `org.hinteros.system.settings`) writes all four fields through the apply flow (job
+`cleanup_set`, `null` when nothing changes, also for the defaults while absent).
+
+### What the system repo must do (0.6)
+
+- `state.nix`: accept `settings.cleanup` as above; `nix.gc.automatic` from `enable`, `dates` from
+  `frequency`, the system preStart `--delete-generations +keepSystem` and
+  `boot.loader.systemd-boot.configurationLimit` from `keepSystem`, the app-env preStart from
+  `keepProfiles` (absent: today's values). Suggested: skip the booted generation in the preStart.
+- `hinteros-job@.service`'s `path` needs `nix-store` (already there with `nix`). No new polkit
+  action (existing ones are reused).
+
+### What the launcher must do (session API 0.14)
+
+Hello with `0.14`. Settings → Storage: show `system.storage.get`'s measurement at once with its
+age, or start `system.storage.measure` (progress from `job_progress {stage: measuring,
+percent}`; re-read `storage.get` on `job_finished`); draw the ring from `root` (names for kinds
+are the launcher's; profile names from `profiles.list`); entering the caller's own profile calls
+`system.storage.tree {id}`, another profile or the guest asks for the admin PIN first (on
+`pin_required {pin: admin}`). Clean-ups: show `estimates.system[keep-1]` /
+`estimates.profiles[keep-1]` before the admin confirms, warn below 2, call
+`system.storage.cleanup_system` / `system.storage.cleanup_profiles {keep, admin_pin}`, show
+`result.freed_bytes`, then measure again. Automatic clean-up: `system.cleanup.get` /
+`system.cleanup.set` (admin PIN). New job kinds `storage_measure`, `cleanup_system`,
+`cleanup_profiles`, `cleanup_set`; new stages `measuring`, `cleaning`, `collecting`.
+
 ## Development
 
 ```sh
@@ -1358,7 +1430,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.13","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.14","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

@@ -416,6 +416,12 @@ eval)
   [ -e "$FAKE_ROOT/catalog-ids.json" ] || { echo "error: cannot fetch" >&2; exit 1; }
   cat "$FAKE_ROOT/catalog-ids.json"
   ;;
+path-info)
+  # Storage: `path-info --all -s`, "<path> <nar size>" lines.
+  while [ -e "$FAKE_ROOT/store-hold" ]; do sleep 0.05; done
+  cat "$FAKE_ROOT/path-sizes" 2>/dev/null
+  exit 0
+  ;;
 *) echo "fake nix: unexpected $*" >&2; exit 2 ;;
 esac
 "#;
@@ -459,16 +465,36 @@ case "$3" in
   [ -e "$dir/$base-$4-link" ] || exit 1
   ln -sfn "$base-$4-link" "$p"
   ;;
+--delete-generations)
+  cur=$(readlink "$p"); shift 3
+  for n in "$@"; do
+    [ "$cur" = "$base-$n-link" ] && { echo "error: cannot delete the current generation" >&2; exit 1; }
+    rm -f "$dir/$base-$n-link"
+  done
+  ;;
 *) exit 2 ;;
 esac
 "#;
 
-/// The fake `nix-store`: `--add-root <link> --indirect --realise <path>` makes the link.
+/// The fake `nix-store`: `--add-root <link> --indirect --realise <path>` makes the link;
+/// `--query --requisites`, `--gc --print-live` and `--gc` answer from files under the root.
 const FAKE_NIX_STORE: &str = r#"
 echo "$@" >> "$FAKE_ROOT/nix-store.log"
-[ "$1" = --add-root ] || exit 2
-ln -sfn "$5" "$2"
-echo "$2"
+case "$1" in
+--add-root) ln -sfn "$5" "$2"; echo "$2" ;;
+--query)
+  # Storage: `--query --requisites <path>`: closures/<name> if given, else the path itself.
+  p=$(readlink -f "$3"); f="$FAKE_ROOT/closures/$(basename "$p")"
+  if [ -e "$f" ]; then cat "$f"; else echo "$p"; fi
+  ;;
+--gc)
+  case "$2" in
+  --print-live) echo "finding garbage collector roots..." >&2; cat "$FAKE_ROOT/live-paths" 2>/dev/null ;;
+  *) echo "0 store paths deleted, 0.00 MiB freed" ;;
+  esac
+  ;;
+*) exit 2 ;;
+esac
 "#;
 
 pub const STATE: &str = r#"{

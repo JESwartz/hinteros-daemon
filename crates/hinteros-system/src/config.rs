@@ -366,6 +366,10 @@ impl Paths {
     pub fn usage_json(&self) -> PathBuf {
         self.state_dir.join("usage.json")
     }
+    /// The last storage measurement (root only: it holds the homes' trees).
+    pub fn storage_json(&self) -> PathBuf {
+        self.state_dir.join("storage.json")
+    }
     /// The greeter's public view.
     pub fn public_json(&self) -> PathBuf {
         self.run_dir.join("profiles-public.json")

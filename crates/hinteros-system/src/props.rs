@@ -81,12 +81,13 @@ proptest! {
         apps in prop::collection::vec("[a-z0-9][a-z0-9-]{0,31}", 0..5),
         host in prop::option::of("[a-z][a-z0-9-]{0,10}"),
         users in prop::collection::vec(("[a-z0-9-]{1,8}", "[^\\p{Cc}]{1,20}", "[a-z_][a-z0-9_-]{0,10}"), 0..3),
+        cleanup in prop::option::of((any::<bool>(), 0usize..3, 1u32..=10, 1u32..=10)),
     ) {
         let s = State {
             schema_version: 1,
             base: if stable { Base::Stable } else { Base::Unstable },
             state_version: host.clone().map(|_| "26.11".to_string()),
-            settings: StateSettings { hostname: host, ssh: SshState { enable }, admin: None, guest: None },
+            settings: StateSettings { hostname: host, ssh: SshState { enable }, admin: None, guest: None, cleanup: cleanup.map(|(enable, f, keep_system, keep_profiles)| crate::state::CleanupState { enable, frequency: hinteros_api::system::CleanupFrequency::ALL[f], keep_system, keep_profiles }) },
             disk: None,
             apps: Some(apps),
             requirements: None,

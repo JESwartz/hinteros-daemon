@@ -35,6 +35,7 @@ use crate::update::{Git, GitError, Rejection};
 
 mod apps;
 mod profiles;
+mod storage;
 
 /// Files of a config dir that belong to a generation (the snapshot; device-config.nix).
 pub const MANAGED: &[&str] = &["flake.nix", "flake.lock", "state.json"];
@@ -98,6 +99,8 @@ fn run(dir: &Path) -> anyhow::Result<()> {
         Action::ProfileCreate(j) => r.profile_create(&j),
         Action::ProfileRemove(j) => r.profile_remove(&j),
         Action::GuestEnd(j) => r.guest_end(&j),
+        Action::StorageMeasure(j) => r.storage_measure(&j),
+        Action::Cleanup(j) => r.cleanup(&j),
     };
     let staging = r.spec.paths.staging();
     let status = match outcome {
@@ -332,8 +335,19 @@ impl Runner {
     /// i.e. the unit's journal). While `cancellable`, a cancel request kills the group.
     fn exec(
         &mut self,
+        cmd: Command,
+        cancellable: bool,
+        on_line: &mut dyn FnMut(&mut Self, &str),
+    ) -> Result<String, Failure> {
+        self.exec_with(cmd, cancellable, 1 << 20, on_line)
+    }
+
+    /// [`Self::exec`], keeping up to `limit` bytes of stdout (the rest is read and dropped).
+    fn exec_with(
+        &mut self,
         mut cmd: Command,
         cancellable: bool,
+        limit: u64,
         on_line: &mut dyn FnMut(&mut Self, &str),
     ) -> Result<String, Failure> {
         let program = format!("{:?}", cmd.get_program());
@@ -349,7 +363,7 @@ impl Runner {
         let stderr = child.stderr.take().expect("piped");
         let out_thread = std::thread::spawn(move || {
             let mut buf = Vec::new();
-            let _ = stdout.by_ref().take(1 << 20).read_to_end(&mut buf);
+            let _ = stdout.by_ref().take(limit).read_to_end(&mut buf);
             let _ = std::io::copy(&mut stdout, &mut std::io::sink());
             buf
         });

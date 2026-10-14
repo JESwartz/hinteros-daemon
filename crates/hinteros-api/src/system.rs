@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, ErrorObject, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 5);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 6);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/system-api.json");
@@ -104,6 +104,14 @@ pub enum JobKind {
     GuestSet,
     /// 0.5: the guest session ended and the guest wiped now (home, app env, sign-ins).
     GuestEnd,
+    /// 0.6: measure what uses the disk (`storage.measure`).
+    StorageMeasure,
+    /// 0.6: old system generations removed, then garbage collected.
+    CleanupSystem,
+    /// 0.6: old app-env generations of every profile removed, then garbage collected.
+    CleanupProfiles,
+    /// 0.6: the automatic clean-up setting changed (a rebuild).
+    CleanupSet,
 }
 
 impl JobKind {
@@ -126,6 +134,10 @@ impl JobKind {
         JobKind::ProfilesRemove,
         JobKind::GuestSet,
         JobKind::GuestEnd,
+        JobKind::StorageMeasure,
+        JobKind::CleanupSystem,
+        JobKind::CleanupProfiles,
+        JobKind::CleanupSet,
     ];
 }
 
@@ -157,10 +169,16 @@ pub enum Stage {
     /// 0.4: the system rebuild that turns on box features an app needs (nix progress still
     /// attached).
     Box,
+    /// 0.6: measuring the disk (`storage_measure`; with `percent`).
+    Measuring,
     Evaluating,
     Downloading,
     Building,
     Activating,
+    /// 0.6: removing old generations (clean-ups; no longer cancellable).
+    Cleaning,
+    /// 0.6: collecting garbage (clean-ups).
+    Collecting,
     /// 0.4: after a system switch, every profile's app env is rebuilt against the new system.
     Apps,
     Finishing,
@@ -172,10 +190,13 @@ impl Stage {
         Stage::Fetching,
         Stage::Verifying,
         Stage::Box,
+        Stage::Measuring,
         Stage::Evaluating,
         Stage::Downloading,
         Stage::Building,
         Stage::Activating,
+        Stage::Cleaning,
+        Stage::Collecting,
         Stage::Apps,
         Stage::Finishing,
     ];
@@ -1070,6 +1091,295 @@ impl Event for ProfilesChanged {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Storage (0.6, storage.md): what uses the disk, clean-up, automatic clean-up
+
+/// Most generations a clean-up (or the automatic one) may keep.
+pub const MAX_KEEP: u32 = 10;
+
+/// What a storage tree node stands for (the launcher names it; the daemon gives no text).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeKind {
+    /// The whole filesystem (the top-level root).
+    Disk,
+    /// HinterOS system generations.
+    System,
+    /// The profiles' app envs.
+    Apps,
+    /// A profile's home (`id`).
+    Profile,
+    /// The guest's home.
+    Guest,
+    /// What none of the others explains.
+    Other,
+    /// Free space.
+    Free,
+    /// One generation (system, or of an app env): what only it holds.
+    Generation,
+    /// What two or more generations of the parent hold.
+    Common,
+    /// One owner's app envs (`id`: a profile id, `starter` or `guest`).
+    AppEnv,
+    /// App store paths in the envs of two or more owners (counted once).
+    Shared,
+    /// A folder (`name`).
+    Dir,
+    /// Files directly in the parent folder, and folders too small or deep to show.
+    Files,
+    /// The installed Steam games of a home.
+    Steam,
+    /// One Steam game (`name`, `app_id`).
+    SteamGame,
+}
+
+impl NodeKind {
+    pub const ALL: &[NodeKind] = &[
+        NodeKind::Disk,
+        NodeKind::System,
+        NodeKind::Apps,
+        NodeKind::Profile,
+        NodeKind::Guest,
+        NodeKind::Other,
+        NodeKind::Free,
+        NodeKind::Generation,
+        NodeKind::Common,
+        NodeKind::AppEnv,
+        NodeKind::Shared,
+        NodeKind::Dir,
+        NodeKind::Files,
+        NodeKind::Steam,
+        NodeKind::SteamGame,
+    ];
+}
+
+/// One segment of the storage ring. Children add up exactly to `bytes` (remainders are nodes
+/// of their own), except at the `disk` root when the measured parts exceed the filesystem.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageNode {
+    pub kind: NodeKind,
+    pub bytes: u64,
+    pub children: Vec<StorageNode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<u32>,
+}
+
+impl StorageNode {
+    pub fn new(kind: NodeKind, bytes: u64) -> Self {
+        Self {
+            kind,
+            bytes,
+            children: Vec::new(),
+            id: None,
+            name: None,
+            generation: None,
+            date: None,
+            current: None,
+            booted: None,
+            app_id: None,
+        }
+    }
+}
+
+/// The store's filesystem (statvfs), like df.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiskUsage {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub free_bytes: u64,
+}
+
+/// What one clean-up with `keep` would remove and free now (an estimate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupEstimate {
+    pub keep: u32,
+    /// Generations it would remove.
+    pub generations: u32,
+    /// Bytes it would free (garbage included).
+    pub bytes: u64,
+}
+
+/// For keep 1 to 10 (index `keep - 1`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupEstimates {
+    pub system: Vec<CleanupEstimate>,
+    pub profiles: Vec<CleanupEstimate>,
+}
+
+/// The last measurement, as every profile may see it (no names of files, folders or games).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Measurement {
+    /// When it finished (Unix seconds).
+    pub measured_at: i64,
+    pub disk: DiskUsage,
+    /// The top level (`kind: disk`); profile and guest nodes without children.
+    pub root: StorageNode,
+    /// Store paths no GC root reaches now.
+    pub garbage_bytes: u64,
+    pub estimates: CleanupEstimates,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageGetResult {
+    /// Null until the first measurement has finished.
+    #[serde(deserialize_with = "nullable")]
+    pub measurement: Option<Measurement>,
+}
+
+/// `storage.get`: the last measurement (read-only, open to everyone).
+pub struct StorageGet;
+impl Method for StorageGet {
+    const NAME: &'static str = "storage.get";
+    type Params = NoParams;
+    type Result = StorageGetResult;
+}
+
+/// `storage.measure`: start a `storage_measure` job (or get the running one's id).
+pub struct StorageMeasure;
+impl Method for StorageMeasure {
+    const NAME: &'static str = "storage.measure";
+    type Params = NoParams;
+    type Result = JobRef;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageTreeParams {
+    /// A profile id or `guest`.
+    pub id: String,
+    /// The admin PIN: needed for any tree but the caller's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageTreeResult {
+    pub id: String,
+    pub measured_at: i64,
+    /// `kind: profile` (with `id`) or `kind: guest`: the home's folders and Steam games.
+    pub root: StorageNode,
+}
+
+/// `storage.tree`: one home's detailed tree (own: open; another's: admin PIN).
+pub struct StorageTree;
+impl Method for StorageTree {
+    const NAME: &'static str = "storage.tree";
+    type Params = StorageTreeParams;
+    type Result = StorageTreeResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupParams {
+    /// Generations to keep, 1 to 10 (the running and booted ones are always kept).
+    pub keep: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
+}
+
+/// `storage.cleanup_system`: job `cleanup_system` (admin PIN every time).
+pub struct StorageCleanupSystem;
+impl Method for StorageCleanupSystem {
+    const NAME: &'static str = "storage.cleanup_system";
+    type Params = CleanupParams;
+    type Result = JobRef;
+}
+
+/// `storage.cleanup_profiles`: job `cleanup_profiles` (admin PIN every time).
+pub struct StorageCleanupProfiles;
+impl Method for StorageCleanupProfiles {
+    const NAME: &'static str = "storage.cleanup_profiles";
+    type Params = CleanupParams;
+    type Result = JobRef;
+}
+
+/// How often the automatic clean-up runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupFrequency {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl CleanupFrequency {
+    pub const ALL: &[CleanupFrequency] = &[
+        CleanupFrequency::Daily,
+        CleanupFrequency::Weekly,
+        CleanupFrequency::Monthly,
+    ];
+}
+
+/// The automatic clean-up (`state.json` `settings.cleanup`, defaults when absent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupSettings {
+    pub enable: bool,
+    pub frequency: CleanupFrequency,
+    pub keep_system: u32,
+    pub keep_profiles: u32,
+}
+
+/// `cleanup.get`: the automatic clean-up setting (read-only).
+pub struct CleanupGet;
+impl Method for CleanupGet {
+    const NAME: &'static str = "cleanup.get";
+    type Params = NoParams;
+    type Result = CleanupSettings;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupSetParams {
+    pub enable: bool,
+    pub frequency: CleanupFrequency,
+    pub keep_system: u32,
+    pub keep_profiles: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
+}
+
+/// `cleanup.set`: job `cleanup_set` (a rebuild; admin PIN).
+pub struct CleanupSet;
+impl Method for CleanupSet {
+    const NAME: &'static str = "cleanup.set";
+    type Params = CleanupSetParams;
+    type Result = JobRef;
+}
+
+/// `storage_measure` job result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeasuredResult {
+    pub measured_at: i64,
+}
+
+/// Clean-up job result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanedResult {
+    /// Free space after minus before on the store's filesystem (never negative).
+    pub freed_bytes: u64,
+    pub generations_removed: u32,
+}
+
+// ---------------------------------------------------------------------------------------------
 // Jobs
 
 /// Result of a job that changed the system.
@@ -1108,6 +1418,10 @@ pub struct AppNotUpdated {
 pub enum JobResult {
     UpdateCheck(UpdateCheckResult),
     Applied(AppliedResult),
+    /// 0.6: `storage_measure`.
+    Measured(MeasuredResult),
+    /// 0.6: `cleanup_system`, `cleanup_profiles`.
+    Cleaned(CleanedResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1282,6 +1596,13 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<AudioSaveOutput>(),
         MethodInfo::of::<StarterSetGet>(),
         MethodInfo::of::<StarterSetSet>(),
+        MethodInfo::of::<StorageGet>(),
+        MethodInfo::of::<StorageMeasure>(),
+        MethodInfo::of::<StorageTree>(),
+        MethodInfo::of::<StorageCleanupSystem>(),
+        MethodInfo::of::<StorageCleanupProfiles>(),
+        MethodInfo::of::<CleanupGet>(),
+        MethodInfo::of::<CleanupSet>(),
         MethodInfo::of::<JobsGet>(),
         MethodInfo::of::<JobsList>(),
         MethodInfo::of::<JobsCancel>(),
@@ -1327,6 +1648,11 @@ pub const MUTATING: &[&str] = &[
     DisplaySaveMode::NAME,
     AudioSaveOutput::NAME,
     StarterSetSet::NAME,
+    StorageMeasure::NAME,
+    StorageTree::NAME,
+    StorageCleanupSystem::NAME,
+    StorageCleanupProfiles::NAME,
+    CleanupSet::NAME,
     JobsCancel::NAME,
 ];
 
@@ -1372,6 +1698,11 @@ pub fn polkit_action(method: &str) -> Option<&'static str> {
         | GuestEnd::NAME => "org.hinteros.system.profiles",
         GuestSet::NAME | StarterSetSet::NAME => "org.hinteros.system.starter",
         DisplaySaveMode::NAME | AudioSaveOutput::NAME => "org.hinteros.system.settings",
+        // 0.6: existing actions, so the policy file needs no change.
+        StorageMeasure::NAME | StorageTree::NAME | CleanupSet::NAME => {
+            "org.hinteros.system.settings"
+        }
+        StorageCleanupSystem::NAME | StorageCleanupProfiles::NAME => "org.hinteros.system.rebuild",
         _ => return None,
     })
 }

@@ -284,6 +284,8 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   a command as a child subreaper named `reaper`, which is how gamescope (Steam mode) learns the
   app id of a process's windows, X11 and native Wayland alike. The daemon starts command apps
   this way; the launcher must be started this way too (see below).
+- **Sandbox** (`sandbox.rs`, `permissions.rs`): catalog apps run in bwrap below the reaper, with
+  the permissions the profile granted (`apps.set_permission`); see "App sandbox and permissions".
 
 ### Configuration
 
@@ -392,6 +394,12 @@ apply_timeout_ms = 6000        # display.set_mode: how long gamescope gets to sw
 pair_timeout_s = 45            # bluetooth.pair gives up
 confirm_timeout_s = 30         # a numeric comparison nobody answers is rejected
 
+[sandbox]                      # catalog apps in bwrap (not Steam); see "App sandbox and permissions"
+enable = false
+bwrap = "bwrap"                # a path, or a name looked up in PATH
+pulse_socket = "pulse/native"  # sound for apps, relative to XDG_RUNTIME_DIR
+pulse_record_socket = "pulse/native"  # with mic; the same as pulse_socket: mic is not listed
+
 [[apps]]                       # what apps.list returns after the built-in "steam" (a stub list if none)
 id = "jellyfin"
 name = "Jellyfin"
@@ -409,6 +417,8 @@ input = "keyboard"             # "gamepad" (default) or "keyboard"
 back_key = "escape"            # what B sends [default: escape]; e.g. "backspace", "alt+left"
 pointer = true                 # keyboard profile: right stick = mouse pointer [default: true]
 address_bar = false            # plain Firefox (not kiosk): View = Ctrl+L + on-screen keyboard, LB/RB = back/forward
+permissions = { mic = "optional" }  # sandbox permissions (catalog): "required" or "optional"
+# sandbox = false              # run without the sandbox [default: true]
 
 [apps.keymap]                  # controller action = key, on top of the defaults ("none" unmaps)
 context = "ctrl+l"             # Y
@@ -1696,6 +1706,61 @@ older than the one on the box), and on confirm call `system.channel.set {channel
 result.target.rev, admin_pin}`. `update_verification_failed {reason: older_than_seen}` (from either
 job): the server offers an older version than one the box already saw; nothing changed.
 `state_conflict {reason: channel_rev}`: check again. Job kind `channel_check`.
+
+## App sandbox and permissions (session API 0.18)
+
+Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command line),
+`permissions.rs` (the profile's choices), `apps.rs` (`ProcessSpawner`), `reaper.rs`.
+
+- **Sandbox** (`[sandbox] enable`, default off; the system turns it on): every configured
+  command app with `sandbox = true` (the default) runs as reaper -> bwrap -> app. Not Steam, not
+  Steam games, not `sandbox = false` apps, not `apps.launch {command}`. bwrap gets
+  `--unshare-all --share-net --die-with-parent --new-session`; read-only `/nix/store`, `/etc`,
+  `/sys`, `/run/current-system`, `/run/opengl-driver{,-32}`, `/run/systemd/resolve` and
+  `/run/nscd` if present, `/bin` and `/usr` if present, the profile's app env (the
+  `[apps] profile` link, resolved); a new `/proc`, a minimal `/dev` with `/dev/dri`, empty `/tmp`
+  and `/run`. Home: `~/.local/share/hinteros/sandbox/<id>` (created 0700 before the spawn) at
+  the real `$HOME` path; the app's data starts fresh there and `firefox_profile` is resolved
+  inside it (icons read the favicon there). Runtime dir: a new `$XDG_RUNTIME_DIR` with only
+  `pulse/native` and, for web and keyboard-profile apps, `hinteros/osk.sock`. Display: only
+  `/tmp/.X11-unix/X<n>`; `DISPLAY`, `HOME`, `XDG_RUNTIME_DIR` set, Wayland displays, D-Bus
+  addresses and other sockets unset. Nothing else of `/run` (`/run/hinteros`, `/run/dbus`,
+  `session.sock`, `bus`, `pipewire-0`, `gamescope-0`), `/dev/uinput` or the real home is there.
+- bwrap is looked up (`[sandbox] bwrap`, a path or a `PATH` name) before each sandboxed spawn; if
+  it is missing the launch fails (`app_launch_failed`, "no sandbox: bwrap not found"), it never
+  runs the app unsandboxed. The daemon's unit must not have `ProtectKernelTunables` (bwrap
+  cannot mount `/proc` then).
+- `--new-session` puts the app out of reach of the reaper's group signal, so the reaper also
+  sends forwarded signals to the process group of each process below it whose parent is bwrap
+  (`apps.close` stays a clean SIGTERM first).
+- **Permissions**: the catalog declares them (`permissions = { gamepad = "required"; mic =
+  "optional"; }`, in the app-env manifest entry), `gamepad` (`/dev/input`, `/run/udev`), `mic`
+  (`[sandbox] pulse_record_socket` at `pulse/native` instead of `pulse_socket`), `downloads`
+  (`~/Downloads`, created, read-write). The profile's opt-outs are in
+  `$XDG_STATE_HOME/hinteros/permissions.json` (`{"version":1,"denied":{"<id>":["mic"]}}`,
+  written atomically); no record means every permission, a required one is never denied, a
+  change applies at the next start. Only enforced permissions are listed: none while the sandbox
+  is off, and not `mic` while `pulse_record_socket` equals `pulse_socket` (both default
+  `pulse/native`). `[sandbox]` changes need a daemon restart.
+- `apps.list` and `store.list` entries carry `permissions: [{name, required, granted}]`
+  (display order gamepad, mic, downloads; empty for Steam and unsandboxed apps; for a Store app
+  that is not installed, the stored choice). `apps.set_permission {id, permission, granted}`
+  takes installed apps and catalog apps not installed yet; errors `unknown_app`,
+  `unknown_permission`, `permission_required`; emits `apps_changed` and `store_changed`.
+- Apps get no `WAYLAND_DISPLAY` / `GAMESCOPE_WAYLAND_DISPLAY` with or without the sandbox
+  (gamescope's private protocols); only Steam keeps them.
+
+### What the system repo must do (session API 0.18)
+
+`session.toml`: `[sandbox] enable = true`, `bwrap = "<bubblewrap>/bin/bwrap"`, and, once a
+play-only pulse socket exists, `pulse_socket` / `pulse_record_socket` (relative to
+`XDG_RUNTIME_DIR`). Drop `ProtectKernelTunables` from the session daemon's unit.
+
+### What the launcher must do (session API 0.18)
+
+Hello with `0.18`. Show `permissions` on the install sheet and the app page (required ones
+locked); call `apps.set_permission` for each optional permission whose switch differs from
+`granted`, then `system.apps.install`.
 
 ## Development
 

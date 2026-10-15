@@ -48,6 +48,11 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   the system service sends `keyboard_home` to the daemon of the active seat0 session over the
   system relay (`system.rs`; see "Keyboard Home" under "System service").
   `[input] keyboard_home = false` ignores it; the greeter has no relay.
+  ALL is also what keeps the pad from sandboxed apps while the launcher asks for a PIN or a
+  password: an app with the `gamepad` permission can only read the virtual pads (InputPlumber
+  grabs and hides the physical ones), and in ALL their events go only to us. A new pad starts
+  in InputPlumber's default mode (NONE: all to its virtual pad), so its mode is set first,
+  before the pad is classified.
   Re-applies everything when InputPlumber restarts or a pad appears. Without
   InputPlumber it logs and carries on. `--dev-gamepad` reads
   pads directly instead, for desktop previews only (see "Desktop preview").

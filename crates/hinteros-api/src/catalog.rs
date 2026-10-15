@@ -122,6 +122,9 @@ pub struct Icon {
     pub desktop_id: Option<String>,
     pub site_url: Option<String>,
     pub icon_url: Option<String>,
+    /// Hex SHA-256 of the `icon_url` file (optional in index version 3): the session daemon
+    /// keeps a download only if it matches.
+    pub sha256: Option<String>,
     #[serde(default)]
     pub firefox_profile: bool,
 }
@@ -475,7 +478,7 @@ mod tests {
               {"id":"jellyfin-server","kind":"service","type":"service","name":"Jellyfin server",
                "status":"available","box":[]},
               {"id":"youtube","kind":"app","type":"web","name":"YouTube","status":"available",
-               "starter":"ticked"},
+               "starter":"ticked","icon":{"iconUrl":"https://x.test/i.png","sha256":"ab12"}},
               {"id":"gone","kind":"app","name":"Gone","status":"removed","statusReason":"x"}]}"#,
             "/".into(),
         )
@@ -487,6 +490,12 @@ mod tests {
         assert_eq!(s.box_features, ["graphics32", "steam-devices"]);
         assert_eq!(s.starter.as_deref(), Some("offered"));
         assert_eq!(i.get("youtube").unwrap().kind, "web");
+        // The icon hash is optional (older indexes have none).
+        assert_eq!(
+            i.get("youtube").unwrap().icon.sha256.as_deref(),
+            Some("ab12")
+        );
+        assert_eq!(s.icon.sha256, None);
         assert_eq!(
             i.get("jellyfin-server").unwrap().entry_kind,
             EntryKind::Service

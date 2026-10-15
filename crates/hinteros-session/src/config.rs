@@ -85,6 +85,7 @@
 //! kind = "web"
 //! command = ["firefox", "--kiosk", "https://www.youtube.com/tv"]
 //! site_url = "https://www.youtube.com/tv"  # icon from the site's manifest/favicon (or icon_url)
+//! # icon_sha256 = "<64 hex digits>"  # with icon_url: keep the download only if it has this SHA-256
 //! # firefox_profile = "~/.local/share/hinteros/firefox/youtube"  # fallback: the favicon Firefox stored
 //! input = "keyboard"           # controller -> key presses (default "gamepad": the pad itself)
 //! back_key = "escape"          # what B sends [default: escape]
@@ -974,6 +975,8 @@ pub struct AppConfig {
     pub desktop_id: Option<String>,
     /// Web apps: an https URL of the icon image.
     pub icon_url: Option<String>,
+    /// Hex SHA-256 of the `icon_url` file: a download with another hash is refused.
+    pub icon_sha256: Option<String>,
     /// Web apps: an https page whose manifest, apple-touch-icon or favicon is the icon.
     pub site_url: Option<String>,
     /// Web apps: the app's Firefox profile directory (`~/` allowed). When the site refuses the icon
@@ -1355,6 +1358,13 @@ impl Config {
                         app.id
                     );
                 }
+            }
+            if let Some(hash) = &app.icon_sha256 {
+                ensure!(
+                    app.icon_url.is_some() && crate::icons::web::is_sha256_hex(hash),
+                    "app '{}': icon_sha256 must be 64 hex digits and needs icon_url",
+                    app.id
+                );
             }
             ensure!(
                 app.firefox_profile.is_none() || app.site_url.is_some(),
@@ -2023,6 +2033,8 @@ mod tests {
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nicon_url = \"http://x.test/i.png\"",
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\ndesktop_id = \"a/b\"",
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nfirefox_profile = \"/p\"",
+            "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nicon_sha256 = \"00\"\nicon_url = \"https://x.test/i.png\"",
+            "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nicon_sha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"",
         ] {
             assert!(Config::parse(bad).is_err(), "accepted: {bad}");
         }

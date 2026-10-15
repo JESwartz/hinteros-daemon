@@ -13,9 +13,13 @@
 //! From a filtered cgroup (and the cgroups below it), in the output hook: port 53 to the
 //! nameservers of `/etc/resolv.conf` is allowed; TCP to a local address is reset and every other
 //! packet to one is dropped (the sender gets `EPERM`). Local: the private, link-local, CGNAT,
-//! loopback, multicast and broadcast ranges ([`PRIVATE_V4`], [`PRIVATE_V6`]), the destinations of
-//! the box's on-link routes (a home network on public addresses, IPv6 prefixes from the ISP),
-//! and the box's own, broadcast and multicast addresses (`fib daddr type`).
+//! loopback, multicast and broadcast ranges and the other IANA special-purpose ranges that are
+//! not global ([`PRIVATE_V4`], [`PRIVATE_V6`]), the destinations of the box's on-link routes (a
+//! home network on public addresses, IPv6 prefixes from the ISP), every local IPv4 network as
+//! seen through NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) ([`embedded_v6`]), and the box's
+//! own, broadcast and multicast addresses (`fib daddr type`). Not the documentation ranges
+//! (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`): no network uses
+//! them unless it is on-link, and the VM tests use them as the internet.
 //!
 //! nftables resolves a `socket cgroupv2` path to the cgroup's id when it loads the table, so a
 //! cgroup removed and created again is not matched until the next load. Cgroups that are gone
@@ -51,25 +55,56 @@ const MAX_READ_BYTES: u64 = 1 << 20;
 const MAX_DEPTH: usize = 16;
 
 /// The IPv4 destinations that are local (RFC 1918, link-local, CGNAT, loopback, multicast,
-/// broadcast).
+/// broadcast, and the other non-global IANA special-purpose ranges: "this network", IETF
+/// protocol assignments, benchmarking, reserved).
 pub const PRIVATE_V4: &[(Ipv4Addr, u8)] = &[
+    (Ipv4Addr::new(0, 0, 0, 0), 8),
     (Ipv4Addr::new(10, 0, 0, 0), 8),
     (Ipv4Addr::new(172, 16, 0, 0), 12),
     (Ipv4Addr::new(192, 168, 0, 0), 16),
     (Ipv4Addr::new(169, 254, 0, 0), 16),
     (Ipv4Addr::new(100, 64, 0, 0), 10),
     (Ipv4Addr::new(127, 0, 0, 0), 8),
+    (Ipv4Addr::new(192, 0, 0, 0), 24),
+    (Ipv4Addr::new(198, 18, 0, 0), 15),
     (Ipv4Addr::new(224, 0, 0, 0), 4),
+    (Ipv4Addr::new(240, 0, 0, 0), 4),
     (Ipv4Addr::new(255, 255, 255, 255), 32),
 ];
 
-/// The IPv6 destinations that are local (unique local, link-local, multicast, loopback).
+/// The IPv6 destinations that are local (unique local, link-local, multicast, loopback,
+/// unspecified, IPv4-mapped, local-use NAT64, discard-only, benchmarking, site-local, SRv6).
 pub const PRIVATE_V6: &[(Ipv6Addr, u8)] = &[
     (Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7),
     (Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
     (Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
     (Ipv6Addr::LOCALHOST, 128),
+    (Ipv6Addr::UNSPECIFIED, 128),
+    (Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0, 0), 96),
+    (Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0), 48),
+    (Ipv6Addr::new(0x100, 0, 0, 0, 0, 0, 0, 0), 64),
+    (Ipv6Addr::new(0x2001, 2, 0, 0, 0, 0, 0, 0), 48),
+    (Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 0), 10),
+    (Ipv6Addr::new(0x5f00, 0, 0, 0, 0, 0, 0, 0), 16),
 ];
+
+/// The IPv6 addresses of local IPv4 networks: through the well-known NAT64 prefix
+/// (`64:ff9b::/96`, RFC 6052) and 6to4 (`2002::/16`, RFC 3056). The rest of those prefixes is the
+/// internet (an IPv6-only network reaches IPv4 sites through NAT64).
+pub fn embedded_v6(nets: &[(Ipv4Addr, u8)]) -> Vec<(Ipv6Addr, u8)> {
+    let nat64 = u128::from(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0));
+    let six_to_four = u128::from(Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0));
+    nets.iter()
+        .flat_map(|&(a, len)| {
+            let a = u128::from(u32::from(a));
+            let len = len.min(32);
+            [
+                (Ipv6Addr::from(nat64 | a), 96 + len),
+                (Ipv6Addr::from(six_to_four | (a << 80)), 16 + len),
+            ]
+        })
+        .collect()
+}
 
 /// `<run-dir>/lan-filter.json`: `{"version":1,"cgroups":{"<uid>":"user.slice/..."}}`, the
 /// cgroup paths relative to the cgroup root.
@@ -377,7 +412,12 @@ pub fn ruleset(i: &Inputs) -> String {
         .map(|a| a.to_string())
         .collect();
     let lan4: Vec<(Ipv4Addr, u8)> = PRIVATE_V4.iter().chain(&i.onlink_v4).copied().collect();
-    let lan6: Vec<(Ipv6Addr, u8)> = PRIVATE_V6.iter().chain(&i.onlink_v6).copied().collect();
+    let lan6: Vec<(Ipv6Addr, u8)> = PRIVATE_V6
+        .iter()
+        .chain(&i.onlink_v6)
+        .copied()
+        .chain(embedded_v6(&lan4))
+        .collect();
     let lan4: Vec<String> = minimal_v4(&lan4)
         .into_iter()
         .map(|(a, l)| format!("{a}/{l}"))
@@ -681,6 +721,23 @@ mod tests {
     }
 
     #[test]
+    fn nat64_and_6to4_of_local_networks() {
+        let v6 = embedded_v6(&[
+            (Ipv4Addr::new(192, 168, 1, 0), 24),
+            (Ipv4Addr::new(255, 255, 255, 255), 32),
+        ]);
+        assert_eq!(
+            v6,
+            [
+                ("64:ff9b::c0a8:100".parse().unwrap(), 120),
+                ("2002:c0a8:100::".parse().unwrap(), 40),
+                ("64:ff9b::ffff:ffff".parse().unwrap(), 128),
+                ("2002:ffff:ffff::".parse().unwrap(), 48),
+            ]
+        );
+    }
+
+    #[test]
     fn the_table() {
         // No cgroup: the table is removed.
         let none = ruleset(&Inputs::default());
@@ -714,13 +771,41 @@ mod tests {
         line("set dns4 { type ipv4_addr; elements = { 192.168.1.1 }; }");
         line("set dns6 { type ipv6_addr; elements = { fe80::1 }; }");
         line(
-            "set lan4 { type ipv4_addr; flags interval; elements = { 10.0.0.0/8, 100.64.0.0/10, \
-             127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 203.0.113.0/24, \
-             224.0.0.0/4, 255.255.255.255/32 }; }",
+            "set lan4 { type ipv4_addr; flags interval; elements = { 0.0.0.0/8, 10.0.0.0/8, \
+             100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, \
+             192.168.0.0/16, 198.18.0.0/15, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4 }; }",
         );
-        line(
-            "set lan6 { type ipv6_addr; flags interval; elements = { ::1/128, \
-             2001:db8:1:2::/64, fc00::/7, fe80::/10, ff00::/8 }; }",
+        let lan6 = r
+            .lines()
+            .find(|l| l.trim().starts_with("set lan6 "))
+            .unwrap();
+        for want in [
+            " ::/128,",
+            " ::1/128,",
+            " ::ffff:0.0.0.0/96,",
+            " 64:ff9b::a00:0/104,",
+            " 64:ff9b::c0a8:0/112,",
+            " 64:ff9b::cb00:7100/120,",
+            " 64:ff9b::7f00:0/104,",
+            " 64:ff9b:1::/48,",
+            " 100::/64,",
+            " 2001:2::/48,",
+            " 2001:db8:1:2::/64,",
+            " 2002:a00::/24,",
+            " 2002:c0a8::/32,",
+            " 2002:cb00:7100::/40,",
+            " 5f00::/16,",
+            " fc00::/7,",
+            " fe80::/10,",
+            " fec0::/10,",
+            " ff00::/8 ",
+        ] {
+            assert!(lan6.contains(want), "{want:?} not in {lan6}");
+        }
+        // NAT64 and 6to4 to the internet stay open.
+        assert!(
+            !lan6.contains(" 64:ff9b::/96") && !lan6.contains(" 2002::/16"),
+            "{lan6}"
         );
         line("type filter hook output priority filter; policy accept;");
         line(&format!(

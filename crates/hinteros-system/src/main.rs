@@ -101,6 +101,19 @@ fn main() -> ExitCode {
         Some(Command::KeyboardHome { socket, input_dir }) => {
             hinteros_system::keyboard::main(&input_dir, &socket)
         }
+        Some(Command::LanFilterApply {
+            run_dir,
+            cgroup_root,
+            resolv_conf,
+            proc_dir,
+            nft,
+        }) => hinteros_system::lanfilter::apply_main(&hinteros_system::lanfilter::ApplyPaths {
+            run_dir,
+            cgroup_root,
+            resolv_conf,
+            proc_dir,
+            nft,
+        }),
         Some(Command::CheckState { .. }) => unreachable!("handled above"),
         None => {
             let result = tokio::runtime::Builder::new_current_thread()

@@ -11,6 +11,7 @@ use std::process::Stdio;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::lan::LanFilter;
 use crate::procs::Children;
 use crate::reaper;
 use crate::sandbox::{self, Host, Spec};
@@ -128,6 +129,9 @@ pub struct ProcessSpawner {
     sandbox: Option<SandboxSettings>,
     /// `gamescope.apps_display` (possibly `"auto+<n>"`): apps run there, not on `env`'s display.
     apps_display: Option<String>,
+    /// `[sandbox] lan_filter`: sandboxed apps without `lan` start in the filtered cgroup
+    /// ([`crate::lan`]). Without it they do not start.
+    lan: Option<LanFilter>,
 }
 
 impl ProcessSpawner {
@@ -143,6 +147,7 @@ impl ProcessSpawner {
             children: Children::default(),
             sandbox: None,
             apps_display: None,
+            lan: None,
         }
     }
 
@@ -155,6 +160,12 @@ impl ProcessSpawner {
     /// Run sandboxed spawns with these settings (without, they fail).
     pub fn with_sandbox(mut self, settings: SandboxSettings) -> Self {
         self.sandbox = Some(settings);
+        self
+    }
+
+    /// Start sandboxed apps without `lan` in the filtered cgroup (without, they fail).
+    pub fn with_lan_filter(mut self, filter: LanFilter) -> Self {
+        self.lan = Some(filter);
         self
     }
 
@@ -227,6 +238,17 @@ impl Spawner for ProcessSpawner {
         if let (Some(_), Some(display)) = (app_id, &self.apps_display) {
             env = with_apps_display(env, display)?;
         }
+        // A sandboxed app without `lan`: only while the filter is on, forked in its cgroup.
+        let nolan = match sandbox {
+            Some(spec) if !spec.grants.lan => Some(
+                self.lan
+                    .as_ref()
+                    .ok_or_else(crate::lan::not_on)?
+                    .ready()?
+                    .clone(),
+            ),
+            _ => None,
+        };
         let mut cmd = match (app_id, sandbox) {
             (Some(id), Some(spec)) => {
                 let bwrap = self.sandboxed(spec, &program, argv, &env)?;
@@ -255,7 +277,12 @@ impl Spawner for ProcessSpawner {
                 cmd.env_remove(k);
             }
         }
-        let mut child = cmd.spawn()?;
+        let mut child = match &nolan {
+            Some(cgroups) => cgroups
+                .in_nolan(|| cmd.spawn())
+                .map_err(|e| io::Error::new(e.kind(), format!("no local network filter: {e}")))??,
+            None => cmd.spawn()?,
+        };
         let pid = child.id().unwrap_or_default();
         let children = self.children.clone();
         if !children.add(pid) {
@@ -269,6 +296,7 @@ impl Spawner for ProcessSpawner {
             ?argv,
             ?app_id,
             sandboxed = sandbox.is_some(),
+            lan = nolan.is_none(),
             "spawned"
         );
         let exits = self.exits.clone();
@@ -383,6 +411,41 @@ mod tests {
         // An apps' display that does not exist fails the launch.
         let mut s = s.with_apps_display(Some("auto+999".into()));
         assert!(s.spawn("b", &argv(&out), Some(1235), None).is_err());
+    }
+
+    #[tokio::test]
+    async fn apps_without_lan_start_only_with_the_filter_on() {
+        use crate::permissions::Grants;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let settings = SandboxSettings {
+            bwrap: "definitely-not-bwrap-hinteros".into(),
+            pulse_socket: "pulse/native".into(),
+            pulse_record_socket: "pulse/native".into(),
+            app_env: None,
+            osk_socket: None,
+        };
+        let spec = |lan| Spec {
+            id: "a".into(),
+            grants: Grants {
+                lan,
+                ..Grants::default()
+            },
+            kiosk: false,
+        };
+        let argv = ["sh".to_string()];
+        let err = |s: &mut ProcessSpawner, lan| {
+            s.spawn("a", &argv, Some(1), Some(&spec(lan)))
+                .unwrap_err()
+                .to_string()
+        };
+        let mut s = ProcessSpawner::new("reaper".into(), vec![], tx).with_sandbox(settings);
+        // No filter at all, or one that is not on: no start.
+        assert_eq!(err(&mut s, false), "no local network filter");
+        let (filter, _ask) = LanFilter::new(None);
+        let mut s = s.with_lan_filter(filter);
+        assert_eq!(err(&mut s, false), "no local network filter");
+        // With lan the filter does not matter (here bwrap is missing).
+        assert!(err(&mut s, true).contains("bwrap not found"));
     }
 
     #[test]

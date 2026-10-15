@@ -111,7 +111,9 @@ impl Service {
             // One request at a time.
             let _one = self.tz_apply.lock().await;
             timezone::write_request(&self.paths, &p.zone).map_err(not_applied)?;
-            self.run_apply_unit().await.map_err(not_applied)?;
+            self.run_oneshot(APPLY_UNIT, "StartUnit", APPLY_TIMEOUT)
+                .await
+                .map_err(not_applied)?;
         }
         let new = self.time_zone_get()?;
         if new.zone != p.zone {
@@ -127,8 +129,14 @@ impl Service {
         serde_json::to_value(new).map_err(internal)
     }
 
-    /// Start the helper unit and wait for its job to end (`JobRemoved`, result `done`).
-    async fn run_apply_unit(&self) -> Result<(), String> {
+    /// Start (`method`: `StartUnit`, `RestartUnit`) a oneshot helper unit and wait up to
+    /// `limit` for its job to end (`JobRemoved`, result `done`). Also `lan_filter.*`.
+    pub(super) async fn run_oneshot(
+        &self,
+        unit: &str,
+        method: &str,
+        limit: Duration,
+    ) -> Result<(), String> {
         let conn = self.bus.get().await.map_err(|e| format!("no bus: {e}"))?;
         let manager: zbus::Proxy<'_> = zbus::proxy::Builder::new(&conn)
             .destination("org.freedesktop.systemd1")
@@ -148,9 +156,9 @@ impl Service {
             .await
             .map_err(|e| format!("systemd JobRemoved: {e}"))?;
         let job: OwnedObjectPath = manager
-            .call("StartUnit", &(APPLY_UNIT, "replace"))
+            .call(method, &(unit, "replace"))
             .await
-            .map_err(|e| format!("starting {APPLY_UNIT}: {e}"))?;
+            .map_err(|e| format!("starting {unit}: {e}"))?;
         let wait = async {
             while let Some(msg) = removed.next().await {
                 let Ok((_, path, _, result)) = msg
@@ -165,11 +173,11 @@ impl Service {
             }
             None
         };
-        match tokio::time::timeout(APPLY_TIMEOUT, wait).await {
-            Err(_) => Err(format!("{APPLY_UNIT} did not end within {APPLY_TIMEOUT:?}")),
+        match tokio::time::timeout(limit, wait).await {
+            Err(_) => Err(format!("{unit} did not end within {limit:?}")),
             Ok(None) => Err("the systemd signal stream ended".into()),
             Ok(Some(r)) if r == "done" => Ok(()),
-            Ok(Some(r)) => Err(format!("{APPLY_UNIT} ended with {r}")),
+            Ok(Some(r)) => Err(format!("{unit} ended with {r}")),
         }
     }
 }

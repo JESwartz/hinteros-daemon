@@ -950,11 +950,17 @@ All paths default to the box's; tests point them at a temporary root.
 | `--localtime` | `/etc/localtime` (the link `time_zone.set` replaces) |
 | `--keyboard-socket`, `--keyboard-group` | `/run/hinteros/keyboard.sock`, `hinteros-keyboard` (no socket without the group) |
 | `--freeze-inactive` | off (the system repo sets it): freeze profiles whose session is not the active one |
+| `--lan-filter` (`HINTEROS_LAN_FILTER`) | off (the system repo sets it with `lan`): `lan_filter.*` work; without it they fail |
+| `--cgroup-root` | `/sys/fs/cgroup` (where `lan_filter.set` checks the caller's cgroup) |
 
 `hinteros-system job [--run-dir DIR] <id>` runs one job (the job unit's `ExecStart`).
 
 `hinteros-system keyboard-home [--socket PATH] [--input-dir DIR]` reads the keyboards for
 Ctrl + Super + D (see "Keyboard Home"; the `hinteros-keyboard` unit's `ExecStart`).
+
+`hinteros-system lan-filter-apply [--run-dir DIR] [--cgroup-root DIR] [--resolv-conf FILE]
+[--proc-dir DIR] [--nft PATH]` loads the local network filter (see "Local network filter"; the
+`hinteros-lan-filter` unit's `ExecStart`).
 
 `hinteros-system check-state FILE...` parses each file with the same `State::parse` the service
 uses, without starting the service (no root, sockets or D-Bus). It prints `ok <file>` or
@@ -1713,10 +1719,11 @@ result.target.rev, admin_pin}`. `update_verification_failed {reason: older_than_
 job): the server offers an older version than one the box already saw; nothing changed.
 `state_conflict {reason: channel_rev}`: check again. Job kind `channel_check`.
 
-## App sandbox and permissions (session API 0.18)
+## App sandbox and permissions (session API 0.18, system API 0.10)
 
 Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command line),
-`permissions.rs` (the profile's choices), `apps.rs` (`ProcessSpawner`), `reaper.rs`.
+`permissions.rs` (the profile's choices), `apps.rs` (`ProcessSpawner`), `reaper.rs`, `lan.rs`
+(the session side of `lan`), and in the system service `lanfilter.rs` and `service/lan.rs`.
 
 - **Sandbox** (`[sandbox] enable`, default off; the system turns it on): every configured
   command app with `sandbox = true` (the default) runs as reaper -> bwrap -> app. Not Steam, not
@@ -1747,7 +1754,21 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   written atomically); no record means every permission, a required one is never denied, a
   change applies at the next start. Only enforced permissions are listed: none while the sandbox
   is off, and not `mic` while `pulse_record_socket` equals `pulse_socket` (both default
-  `pulse/native`). `[sandbox]` changes need a daemon restart.
+  `pulse/native`), and not `lan` without `[sandbox] lan_filter`. `[sandbox]` changes need a
+  daemon restart.
+- **`lan`** (`[sandbox] lan_filter`, default off; the system turns it on): a sandboxed app without
+  it (not declared, or denied) reaches neither the home network nor this box's own services; DNS
+  to the box's nameservers and the internet work. The daemon's unit has `Delegate=yes` (and no
+  `ProtectControlGroups`): at start the daemon moves itself into the leaf `<unit cgroup>/daemon`
+  and creates `<unit cgroup>/nolan`, then calls the system API's `lan_filter.set {cgroup}` (at
+  once, then after 1 s doubling to 30 s, and at every launch while it is not on). An app without
+  `lan` is forked while the daemon is in `nolan` (in, spawn, straight back: the reaper, bwrap and
+  the app stay there; this crate has no `pre_exec`); a sandboxed app cannot leave it (`/sys` is
+  read-only inside, a cgroup namespace reaches only below its root). Fail closed: until the system
+  says the filter is on (or when the cgroups cannot be set up) such a launch fails
+  (`app_launch_failed`, "no local network filter"), it never runs with the network open. Apps
+  with `lan`, Steam, `sandbox = false` apps and `apps.launch {command}` are not filtered. At
+  shutdown, after the apps, the daemon calls `lan_filter.clear`.
 - `apps.list` and `store.list` entries carry `permissions: [{name, required, granted}]`
   (display order gamepad, mic, downloads; empty for Steam and unsandboxed apps; for a Store app
   that is not installed, the stored choice). `apps.set_permission {id, permission, granted}`
@@ -1769,7 +1790,11 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
 
 `session.toml`: `[sandbox] enable = true`, `bwrap = "<bubblewrap>/bin/bwrap"`, and, once a
 play-only pulse socket exists, `pulse_socket` / `pulse_record_socket` (relative to
-`XDG_RUNTIME_DIR`). Drop `ProtectKernelTunables` from the session daemon's unit. Under gamescope:
+`XDG_RUNTIME_DIR`). For `lan`: `[sandbox] lan_filter = true`, `Delegate=yes` and no
+`ProtectControlGroups` on the session daemon's unit, `HINTEROS_LAN_FILTER=true` for hinteros-system, and the
+oneshot `hinteros-lan-filter.service` running `hinteros-system lan-filter-apply --nft <nft>` as
+root with `CAP_NET_ADMIN` and `AF_NETLINK` (not in a private network namespace), started again
+when `/etc/resolv.conf` or the network changes. Drop `ProtectKernelTunables` from the session daemon's unit. Under gamescope:
 `--xwayland-count 3`, Xwaylands without abstract sockets, every one but `#1` sized to the output,
 and `[gamescope] apps_display = "auto+2"`.
 
@@ -1778,6 +1803,51 @@ and `[gamescope] apps_display = "auto+2"`.
 Hello with `0.18`. Show `permissions` on the install sheet and the app page (required ones
 locked); call `apps.set_permission` for each optional permission whose switch differs from
 `granted`, then `system.apps.install`.
+
+## Local network filter (system API 0.10)
+
+The system side of the `lan` permission (design: `hinteros-docs/design/sandbox.md`; the session
+side is in "App sandbox and permissions"). Code: `lanfilter.rs`, `service/lan.rs`.
+
+- `lan_filter.set {cgroup}` and `lan_filter.clear {}`: the session daemon's own calls, not
+  relayed. They only restrict the caller's own processes, so no seat or polkit check; rate
+  limited (a bucket of their own, at least 30 a minute, burst 10) and audited (no action).
+  `cgroup` must be below `/user.slice/user-<uid>.slice/user@<uid>.service/` of the caller's uid
+  (parts of `[A-Za-z0-9._@:-]`, no `.` or `..`, at most 16 below the manager, 512 bytes), a
+  directory under `--cgroup-root` owned by the caller; else `invalid_params {field: cgroup,
+  reason: bad_format | not_found | not_owned}` (checked before the rate limit). One cgroup per
+  uid; a new call replaces it.
+- The service writes `<run-dir>/lan-filter.json`
+  (`{"version":1,"cgroups":{"<uid>":"user.slice/..."}}`, 0600, atomically; an unreadable file is
+  an error, never an empty filter), drops the cgroups that are gone, then restarts
+  `hinteros-lan-filter.service` over D-Bus (`RestartUnit`) and waits for its job (30 s; a failed
+  job, e.g. a run the path unit started that the restart ended, is tried once more); a failure is
+  `internal_error` and the table stays what it was. Without
+  `--lan-filter`: `internal_error`. The service itself has no network and no `CAP_NET_ADMIN`.
+- `lan-filter-apply` (the unit) reads the state file (cgroups that are gone are left out), the
+  nameservers of `/etc/resolv.conf` (scope ids dropped) and the on-link routes of
+  `/proc/net/route` and `/proc/net/ipv6_route` (up, no gateway, not `lo`, not default), and loads
+  `table inet hinteros_lan` with `nft -f -` in one transaction (no cgroup: the table is removed).
+  Its output hook sends the sockets of each cgroup (`socket cgroupv2 level <n> "<path>"`, so the
+  cgroups below it too) to a chain that accepts port 53 (UDP, TCP) to the nameservers, then
+  refuses (TCP: reset, so `connect` gets `ECONNREFUSED`; anything else: dropped, so the sender
+  gets `EPERM`) every destination in 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 127/8,
+  224/4, 255.255.255.255, fc00::/7, fe80::/10, ff00::/8, ::1 and the on-link networks (nested
+  ones merged), and every address of type local, broadcast or multicast (`fib daddr type`: the
+  box's own public or global addresses too). Everything else passes: the internet.
+- nftables resolves a cgroup path to its id when it loads the table: a cgroup removed and created
+  again (a session daemon restart) is matched only after the next load, which the new daemon's
+  `lan_filter.set` does before any app without `lan` starts.
+- The system repo runs the unit again when `/etc/resolv.conf` changes (a path unit) and when
+  NetworkManager changes a connection (a dispatcher hook): new nameservers, new on-link networks.
+
+Why this and not cgroup BPF hooks (`connect4/6`, `sendmsg4/6` from hinteros-system): those need a
+BPF loader and `CAP_BPF`/`CAP_SYS_ADMIN` in the service, pinned programs to outlive a restart,
+and they see neither ICMP nor raw sockets. Not a network namespace per app with pasta: a
+userspace copy of every packet (video streams) on a small box, pasta forwards to the home network
+anyway (it filters ports, not destinations), and multicast, IPv6 and DNS need their own handling.
+nftables matches every protocol in the kernel, on any firewall backend (its own table), with
+`nft` doing the work in a small unit of its own.
 
 ## Development
 

@@ -5508,7 +5508,7 @@
       }
     },
     "PermissionName": {
-      "description": "0.18: a sandbox permission: gamepad (controllers), mic (a sound socket that may record), downloads (the profile's Downloads folder). More may come; show unknown names as they are.",
+      "description": "0.18: a sandbox permission: gamepad (controllers), mic (a sound socket that may record), downloads (the profile's Downloads folder), lan (the local network: other devices at home and this box's own services). More may come; show unknown names as they are.",
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]{0,31}$"
     },

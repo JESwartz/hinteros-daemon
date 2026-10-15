@@ -364,6 +364,7 @@ mod tests {
             gamepad: true,
             mic: true,
             downloads: true,
+            lan: true,
         };
         for s in [spec(Grants::default(), false), spec(all, true)] {
             let argv = build(&s);

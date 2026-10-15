@@ -1,8 +1,8 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.9",
-  "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
+  "version": "0.10",
+  "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. The lan_filter methods (0.10) are the session daemon's own (not relayed): they only restrict the caller's processes, so they need no seat or polkit check, but are rate limited and audited. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
   "transport": {
     "protocol": "jsonrpc-2.0",
     "framing": "ndjson",
@@ -36,16 +36,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.9", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.9", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "0.10", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "0.10", "server": { "name": "hinteros-system", "version": "0.1.0" } }
         },
         {
           "name": "mismatch",
           "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 0.1, server 0.9",
-            "data": { "client_api_version": "0.1", "server_api_version": "0.9" }
+            "message": "API version mismatch: client 0.1, server 0.10",
+            "data": { "client_api_version": "0.1", "server_api_version": "0.10" }
           }
         }
       ]
@@ -2034,6 +2034,38 @@
           "error": { "code": 3016, "message": "a PIN is needed", "data": { "pin": "admin" } }
         }
       ]
+    },
+    "lan_filter.set": {
+      "summary": "0.10: apps without the lan permission cannot reach the local network: the session daemon's own call, not relayed. No polkit action, no seat check (it only restricts the caller's own processes).",
+      "description": "cgroup: the caller's cgroup v2 path for those apps, as in /proc/self/cgroup: below /user.slice/user-<uid>.slice/user@<uid>.service/ of the caller's uid, parts of [A-Za-z0-9._@:-] (no . or ..), at most 512 bytes; it must exist (a directory owned by the caller) and must not be removed and created again while the filter is on (nftables keeps the cgroup it found). Else invalid_params {field: cgroup, reason: bad_format | not_found | not_owned}. One cgroup per uid: a new call replaces the caller's. The service keeps the cgroups in /run/hinteros/lan-filter.json and starts the oneshot hinteros-lan-filter.service, which loads the nftables table inet hinteros_lan (output hook, socket cgroupv2): from those cgroups, TCP to a local address is reset and other packets are dropped. Local: 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 127/8, 224/4, 255.255.255.255, fc00::/7, fe80::/10, ff00::/8, ::1, the destinations of the box's on-link routes, and the box's own, broadcast and multicast addresses. Allowed: port 53 (UDP and TCP) to the nameservers of /etc/resolv.conf. The unit runs again when /etc/resolv.conf or the network changes; cgroups that are gone are dropped. The call waits for the unit (up to 30 s); when it fails: internal_error, and the table is what it was. Without the filter on this box (--lan-filter): internal_error. Rate limited (a bucket of its own). A failed unit job is tried once more.",
+      "since": "0.10",
+      "params": {
+        "type": "object",
+        "required": ["cgroup"],
+        "additionalProperties": false,
+        "properties": {
+          "cgroup": { "type": "string", "minLength": 2, "maxLength": 512, "pattern": "^/user\\.slice/user-[0-9]+\\.slice/user@[0-9]+\\.service(/[A-Za-z0-9._@:-]+)+$" }
+        }
+      },
+      "result": { "type": "object", "required": [], "additionalProperties": false, "properties": {} },
+      "errors": ["rate_limited"],
+      "examples": [
+        { "name": "the session daemon's nolan cgroup", "params": { "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/hinteros-session.service/nolan" }, "result": {} },
+        {
+          "name": "another user's cgroup",
+          "params": { "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/hinteros-session.service/nolan" },
+          "error": { "code": -32602, "message": "not a cgroup of this user", "data": { "field": "cgroup", "reason": "not_owned" } }
+        }
+      ]
+    },
+    "lan_filter.clear": {
+      "summary": "0.10: remove the caller's lan_filter.set cgroup (its session ends): the session daemon's own call, not relayed.",
+      "description": "Nothing set: nothing changes. Otherwise like lan_filter.set: the unit loads the table again (internal_error when it fails).",
+      "since": "0.10",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": { "type": "object", "required": [], "additionalProperties": false, "properties": {} },
+      "errors": ["rate_limited"],
+      "examples": [{ "name": "session ends", "params": {}, "result": {} }]
     },
     "jobs.get": {
       "summary": "One job: running or among the last 10 finished. Read-only.",

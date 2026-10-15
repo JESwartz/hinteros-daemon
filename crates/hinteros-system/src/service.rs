@@ -44,6 +44,7 @@ use crate::state::{self, State};
 use crate::store;
 
 mod apps;
+mod lan;
 mod profiles;
 mod storage;
 mod subject;
@@ -82,6 +83,10 @@ pub struct Service {
     last_zone: Mutex<Option<String>>,
     /// One `time_zone.set` at a time (one request file).
     tz_apply: tokio::sync::Mutex<()>,
+    /// `lan_filter.*`: their own bucket (the session daemon calls at start and at each launch
+    /// while the filter is not on), one change at a time.
+    lan_rate: RateLimit,
+    lan_apply: tokio::sync::Mutex<()>,
 }
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
@@ -115,6 +120,9 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         env_tried: Mutex::new(BTreeSet::new()),
         last_zone: Mutex::new(zone),
         tz_apply: tokio::sync::Mutex::new(()),
+        // A session start, a restart and a few launches while it is not on fit in the burst.
+        lan_rate: RateLimit::new(args.rate_per_minute.max(30), args.rate_burst.max(10)),
+        lan_apply: tokio::sync::Mutex::new(()),
         paths,
         args,
     });
@@ -370,7 +378,9 @@ async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<
                             write_message(&mut w, &jsonrpc::response(&id, Err(method_not_found(&req.method)))).await?;
                             continue;
                         }
-                        if system::MUTATING.contains(&req.method.as_str()) {
+                        // The session daemon's own `lan_filter.*` wait for a unit too: tasks.
+                        let own = req.method.starts_with("lan_filter.");
+                        if own || system::MUTATING.contains(&req.method.as_str()) {
                             let Ok(permit) = in_flight.clone().try_acquire_owned() else {
                                 let err = authz::rate_limited(Duration::from_secs(1));
                                 write_message(&mut w, &jsonrpc::response(&id, Err(err))).await?;
@@ -378,7 +388,11 @@ async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<
                             };
                             let (svc, peer, tx) = (svc.clone(), peer.clone(), answers_tx.clone());
                             tokio::spawn(async move {
-                                let outcome = mutating(&svc, &peer, &req.method, req.params, greeter).await;
+                                let outcome = if own {
+                                    svc.lan_filter(&peer, &req.method, req.params).await
+                                } else {
+                                    mutating(&svc, &peer, &req.method, req.params, greeter).await
+                                };
                                 let _ = tx.send(jsonrpc::response(&id, outcome));
                                 drop(permit);
                             });

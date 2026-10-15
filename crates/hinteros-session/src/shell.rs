@@ -3849,7 +3849,9 @@ mod tests {
                 grants: Grants {
                     gamepad: true,
                     mic: false,
-                    downloads: false
+                    downloads: false,
+                    // `lan` is not enforced here.
+                    lan: true,
                 },
                 kiosk: false,
             }]
@@ -3867,6 +3869,50 @@ mod tests {
         let mut t = T::with(|c| c.permissions = perms.clone());
         t.launch(json!({"id": "jellyfin"}));
         assert!(sandboxes(&mut t).is_empty());
+    }
+
+    #[test]
+    fn only_apps_with_lan_get_the_local_network() {
+        use hinteros_api::catalog::Need;
+        let perms = crate::permissions::Permissions::new(None, vec!["gamepad", "lan"]);
+        let mut t = T::with(|c| {
+            c.sandbox = true;
+            c.permissions = perms.clone();
+            c.apps[2].permissions = BTreeMap::from([("lan".into(), Need::Optional)]);
+        });
+        let lan = |t: &mut T, id: &str| -> bool {
+            let pid = t.launch(json!({ "id": id })).pid.unwrap();
+            let grants = t
+                .log
+                .take()
+                .into_iter()
+                .find_map(|c| match c {
+                    Call::Sandbox(s) => Some(s.grants),
+                    _ => None,
+                })
+                .unwrap();
+            exit(t, id, pid, 0);
+            grants.lan
+        };
+        assert!(!lan(&mut t, "jellyfin"), "does not declare lan");
+        assert!(lan(&mut t, "youtube"), "declares it, granted by default");
+        let list = t.call("apps.list", json!({})).unwrap();
+        let youtube = list["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "youtube")
+            .unwrap();
+        assert_eq!(
+            youtube["permissions"],
+            json!([{"name": "lan", "required": false, "granted": true}])
+        );
+        t.call(
+            "apps.set_permission",
+            json!({"id": "youtube", "permission": "lan", "granted": false}),
+        )
+        .unwrap();
+        assert!(!lan(&mut t, "youtube"), "denied");
     }
 
     #[test]

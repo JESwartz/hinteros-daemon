@@ -110,9 +110,17 @@ impl Service {
             info!(uid = gone, cgroup = %path, "local network filter: cgroup gone");
         }
         filters.save(&path).map_err(not_applied)?;
-        self.run_oneshot(APPLY_UNIT, "RestartUnit", APPLY_TIMEOUT)
+        // A run the path unit or NetworkManager's hook started is ended by the restart, which can
+        // fail that job: once more, then it is a failure.
+        if let Err(e) = self
+            .run_oneshot(APPLY_UNIT, "RestartUnit", APPLY_TIMEOUT)
             .await
-            .map_err(not_applied)?;
+        {
+            info!("local network filter: {e}; once more");
+            self.run_oneshot(APPLY_UNIT, "RestartUnit", APPLY_TIMEOUT)
+                .await
+                .map_err(not_applied)?;
+        }
         match rel {
             Some(rel) => info!(uid, cgroup = %rel, replaced = had, "local network filter set"),
             None => info!(uid, "local network filter cleared"),

@@ -120,7 +120,8 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         env_tried: Mutex::new(BTreeSet::new()),
         last_zone: Mutex::new(zone),
         tz_apply: tokio::sync::Mutex::new(()),
-        lan_rate: RateLimit::new(args.rate_per_minute, args.rate_burst),
+        // A session start, a restart and a few launches while it is not on fit in the burst.
+        lan_rate: RateLimit::new(args.rate_per_minute.max(30), args.rate_burst.max(10)),
         lan_apply: tokio::sync::Mutex::new(()),
         paths,
         args,

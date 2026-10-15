@@ -1805,17 +1805,19 @@ The system side of the `lan` permission (design: `hinteros-docs/design/sandbox.m
 side is in "App sandbox and permissions"). Code: `lanfilter.rs`, `service/lan.rs`.
 
 - `lan_filter.set {cgroup}` and `lan_filter.clear {}`: the session daemon's own calls, not
-  relayed. They only restrict the caller's own processes, so no seat or polkit check; rate limited
-  (a bucket of their own, 10 a minute, burst 3) and audited (no action). `cgroup` must be below
-  `/user.slice/user-<uid>.slice/user@<uid>.service/` of the caller's uid (parts of
-  `[A-Za-z0-9._-]`, no `.` or `..`, at most 16 below the manager, 512 bytes), a directory under
-  `--cgroup-root` owned by the caller; else `invalid_params {field: cgroup, reason: bad_format |
-  not_found | not_owned}` (checked before the rate limit). One cgroup per uid; a new call
-  replaces it.
-- The service writes `<run-dir>/lan-filter.json` (`{"version":1,"cgroups":{"<uid>":"user.slice/..."}}`,
-  0600, atomically; an unreadable file is an error, never an empty filter), drops the cgroups that
-  are gone, then restarts `hinteros-lan-filter.service` over D-Bus (`RestartUnit`) and waits for
-  its job (30 s); a failure is `internal_error` and the table stays what it was. Without
+  relayed. They only restrict the caller's own processes, so no seat or polkit check; rate
+  limited (a bucket of their own, at least 30 a minute, burst 10) and audited (no action).
+  `cgroup` must be below `/user.slice/user-<uid>.slice/user@<uid>.service/` of the caller's uid
+  (parts of `[A-Za-z0-9._@:-]`, no `.` or `..`, at most 16 below the manager, 512 bytes), a
+  directory under `--cgroup-root` owned by the caller; else `invalid_params {field: cgroup,
+  reason: bad_format | not_found | not_owned}` (checked before the rate limit). One cgroup per
+  uid; a new call replaces it.
+- The service writes `<run-dir>/lan-filter.json`
+  (`{"version":1,"cgroups":{"<uid>":"user.slice/..."}}`, 0600, atomically; an unreadable file is
+  an error, never an empty filter), drops the cgroups that are gone, then restarts
+  `hinteros-lan-filter.service` over D-Bus (`RestartUnit`) and waits for its job (30 s; a failed
+  job, e.g. a run the path unit started that the restart ended, is tried once more); a failure is
+  `internal_error` and the table stays what it was. Without
   `--lan-filter`: `internal_error`. The service itself has no network and no `CAP_NET_ADMIN`.
 - `lan-filter-apply` (the unit) reads the state file (cgroups that are gone are left out), the
   nameservers of `/etc/resolv.conf` (scope ids dropped) and the on-link routes of

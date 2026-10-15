@@ -284,6 +284,8 @@ pub struct ShellConfig {
     pub permissions: crate::permissions::Permissions,
     /// The catalog index (`apps.set_permission` for apps not installed yet).
     pub catalog_index: PathBuf,
+    /// `[sandbox] enable`: catalog apps run in bwrap ([`crate::sandbox`]).
+    pub sandbox: bool,
 }
 
 impl From<&Config> for ShellConfig {
@@ -311,6 +313,7 @@ impl From<&Config> for ShellConfig {
             needs_terms: Default::default(),
             permissions: crate::permissions::Permissions::from_config(&c.sandbox),
             catalog_index: c.store.index.clone(),
+            sandbox: c.sandbox.enable,
         }
     }
 }
@@ -836,6 +839,14 @@ impl Shell {
             LaunchRequest::Id(id) => self.cfg.apps.iter().find(|a| &a.id == id),
             _ => None,
         };
+        // Catalog apps run sandboxed (not Steam games, not `sandbox = false` apps).
+        let sandbox = configured
+            .filter(|a| self.cfg.sandbox && a.sandbox && a.command.is_some())
+            .map(|a| crate::sandbox::Spec {
+                id: a.id.clone(),
+                grants: self.cfg.permissions.grants(&a.id, &a.permissions),
+                kiosk: a.kind == AppKind::Web || a.input == crate::config::InputProfile::Keyboard,
+            });
         let keymap = configured.and_then(|a| a.keymap().ok().flatten());
         let input = AppInput {
             address_bar: configured.is_some_and(|a| a.address_bar),
@@ -939,7 +950,7 @@ impl Shell {
                 let gamescope_app_id = self.allocate_app_id();
                 let pid = self
                     .spawner
-                    .spawn(&key, &argv, Some(gamescope_app_id))
+                    .spawn(&key, &argv, Some(gamescope_app_id), sandbox.as_ref())
                     .map_err(|e| failed(e, &argv[0]))?;
                 if key.starts_with("cmd-") {
                     self.next_command += 1;
@@ -963,7 +974,7 @@ impl Shell {
                 // Not under our reaper: the game runs under Steam's own reaper, which tags it
                 // with its Steam app id, and an outer reaper would override that.
                 self.spawner
-                    .spawn(&key, &argv, None)
+                    .spawn(&key, &argv, None, None)
                     .map_err(|e| failed(e, &steam_path))?;
                 self.steam_action_at = Some(now);
                 RunningApp {
@@ -984,7 +995,7 @@ impl Shell {
                     "-gamepadui"
                 };
                 self.spawner
-                    .spawn(&key, &[steam_path.clone(), arg.into()], None)
+                    .spawn(&key, &[steam_path.clone(), arg.into()], None, None)
                     .map_err(|e| failed(e, &steam_path))?;
                 // Opened from the launcher: closing it goes back there.
                 self.steam_return = None;
@@ -1073,7 +1084,7 @@ impl Shell {
                 match self.steam_binary(ErrorCode::AppNotFound) {
                     Ok(steam_path) => {
                         let argv = [steam_path, "-shutdown".into()];
-                        if let Err(e) = self.spawner.spawn("steam-close", &argv, None) {
+                        if let Err(e) = self.spawner.spawn("steam-close", &argv, None, None) {
                             warn!("cannot ask Steam to shut down: {e}");
                         }
                     }
@@ -2721,6 +2732,8 @@ mod tests {
             argv: Vec<String>,
             app_id: Option<u32>,
         },
+        /// The next spawn runs in this sandbox.
+        Sandbox(crate::sandbox::Spec),
         Signal(u32, Sig),
         Osk(bool),
         Keys(Vec<KeyOp>),
@@ -2824,9 +2837,13 @@ mod tests {
             key: &str,
             argv: &[String],
             app_id: Option<u32>,
+            sandbox: Option<&crate::sandbox::Spec>,
         ) -> std::io::Result<u32> {
             if self.fail {
                 return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "nope"));
+            }
+            if let Some(spec) = sandbox {
+                self.log.push(Call::Sandbox(spec.clone()));
             }
             self.log.push(Call::Spawn {
                 key: key.into(),
@@ -2968,6 +2985,7 @@ mod tests {
                 needs_terms: Default::default(),
                 permissions: Default::default(),
                 catalog_index: "/nonexistent/catalog.json".into(),
+                sandbox: false,
             };
             f(&mut cfg);
             let log = Log::default();
@@ -3788,6 +3806,67 @@ mod tests {
             code(set(&mut t, "nope", "mic", false)),
             ErrorCode::UnknownApp.code()
         );
+    }
+
+    #[test]
+    fn catalog_apps_launch_sandboxed_with_their_grants() {
+        use crate::permissions::Grants;
+        use hinteros_api::catalog::Need;
+        let perms = crate::permissions::Permissions::new(None, vec!["gamepad", "mic", "downloads"]);
+        let mut t = T::with(|c| {
+            c.sandbox = true;
+            c.permissions = perms.clone();
+            c.apps[0].permissions = BTreeMap::from([
+                ("gamepad".into(), Need::Required),
+                ("downloads".into(), Need::Optional),
+            ]);
+            c.apps[2].permissions = BTreeMap::from([("mic".into(), Need::Optional)]);
+            c.apps.push(AppConfig {
+                sandbox: false,
+                ..app_config("open", Some("open-app"), None)
+            });
+        });
+        t.call(
+            "apps.set_permission",
+            json!({"id": "jellyfin", "permission": "downloads", "granted": false}),
+        )
+        .unwrap();
+        let sandboxes = |t: &mut T| -> Vec<crate::sandbox::Spec> {
+            t.log
+                .take()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Call::Sandbox(s) => Some(s),
+                    _ => None,
+                })
+                .collect()
+        };
+        t.launch(json!({"id": "jellyfin"}));
+        assert_eq!(
+            sandboxes(&mut t),
+            [crate::sandbox::Spec {
+                id: "jellyfin".into(),
+                grants: Grants {
+                    gamepad: true,
+                    mic: false,
+                    downloads: false
+                },
+                kiosk: false,
+            }]
+        );
+        // A keyboard-profile app gets the text field socket.
+        t.launch(json!({"id": "youtube"}));
+        let s = sandboxes(&mut t);
+        assert!(s[0].kiosk && s[0].grants.mic && !s[0].grants.gamepad);
+        // Not sandboxed: sandbox = false, a Steam game, a plain command.
+        t.launch(json!({"id": "open"}));
+        t.launch(json!({"id": "portal"}));
+        t.launch(json!({"command": ["sh"]}));
+        assert!(sandboxes(&mut t).is_empty());
+        // Sandbox off: none.
+        let mut t = T::with(|c| c.permissions = perms.clone());
+        t.launch(json!({"id": "jellyfin"}));
+        assert!(sandboxes(&mut t).is_empty());
     }
 
     #[test]

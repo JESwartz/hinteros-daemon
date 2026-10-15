@@ -11,6 +11,10 @@
 //! command's status once every descendant is gone.
 //!
 //! The process must not be started below another reaper with an app id: the outermost one wins.
+//!
+//! A sandboxed app (reaper -> bwrap -> app, see [`crate::sandbox`]) runs in a session of its own
+//! (`bwrap --new-session`), out of reach of the group signal: forwarded signals also go to the
+//! process group of each process below us whose parent is bwrap, so that it can quit cleanly.
 
 use std::ffi::CString;
 use std::os::unix::process::CommandExt;
@@ -72,6 +76,29 @@ pub fn parse(args: &[String]) -> Result<(Option<u32>, Vec<String>), String> {
     Ok((app_id, command.to_vec()))
 }
 
+/// Processes below `root` whose parent is bwrap and that are not bwrap themselves: the apps
+/// in a bwrap sandbox (each leads its own session).
+pub fn sandboxed_apps(procs: &[crate::procs::Proc], root: u32) -> Vec<u32> {
+    let below = crate::procs::descendants_of(procs, root);
+    procs
+        .iter()
+        .filter(|p| below.contains(&p.pid) && p.comm != "bwrap")
+        .filter(|p| procs.iter().any(|q| q.pid == p.ppid && q.comm == "bwrap"))
+        .map(|p| p.pid)
+        .collect()
+}
+
+/// Send `sig` to the command's process group and to those of the sandboxed apps below us.
+fn forward(child: Pid, sig: Signal) {
+    let _ = kill_process_group(child, sig);
+    let me = getpid().as_raw_nonzero().get() as u32;
+    for pid in sandboxed_apps(&crate::procs::list(), me) {
+        if let Some(pid) = Pid::from_raw(pid as i32) {
+            let _ = kill_process_group(pid, sig);
+        }
+    }
+}
+
 /// Exit status for a child that ended with `status` (shell convention: 128 + signal).
 fn status_code(status: rustix::process::WaitStatus) -> i32 {
     status
@@ -124,7 +151,7 @@ pub fn run(args: &[String]) -> i32 {
                         SIGHUP => Signal::HUP,
                         _ => Signal::TERM,
                     };
-                    let _ = kill_process_group(child_pid, sig);
+                    forward(child_pid, sig);
                 }
             });
         }
@@ -137,7 +164,7 @@ pub fn run(args: &[String]) -> i32 {
     match rustix::process::set_parent_process_death_signal(Some(Signal::TERM)) {
         Ok(()) if rustix::process::getppid() != parent => {
             // The parent was already gone.
-            let _ = kill_process_group(child_pid, Signal::TERM);
+            forward(child_pid, Signal::TERM);
         }
         Ok(()) => {}
         Err(e) => eprintln!("reaper: cannot ask for the parent's death: {e}"),
@@ -185,6 +212,31 @@ mod tests {
         ] {
             assert!(parse(&strings(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn finds_sandboxed_apps_below_us() {
+        use crate::procs::Proc;
+        let p = |pid, ppid, comm: &str| Proc {
+            pid,
+            ppid,
+            comm: comm.into(),
+        };
+        // reaper 10 -> bwrap 11 -> bwrap 12 -> firefox 13 -> content 14; another reaper's app.
+        let procs = [
+            p(10, 1, "reaper"),
+            p(11, 10, "bwrap"),
+            p(12, 11, "bwrap"),
+            p(13, 12, "firefox"),
+            p(14, 13, "Isolated Web Co"),
+            p(20, 1, "reaper"),
+            p(21, 20, "bwrap"),
+            p(22, 21, "kodi"),
+        ];
+        assert_eq!(sandboxed_apps(&procs, 10), [13]);
+        assert_eq!(sandboxed_apps(&procs, 20), [22]);
+        // Not sandboxed: nothing extra.
+        assert!(sandboxed_apps(&[p(30, 1, "reaper"), p(31, 30, "jellyfin")], 30).is_empty());
     }
 
     #[test]

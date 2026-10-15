@@ -1108,6 +1108,31 @@ impl Config {
         self.icons.profile_share = Some(profile.join("share"));
     }
 
+    /// Sandboxed apps see their sandbox home as `$HOME`: their `firefox_profile` (`~/...`) is
+    /// in it ([`crate::sandbox::outside_path`]).
+    pub fn resolve_sandbox_paths(&mut self) {
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            self.resolve_sandbox_paths_in(Path::new(&home));
+        }
+    }
+
+    /// [`Config::resolve_sandbox_paths`] for the profile's `home`.
+    pub fn resolve_sandbox_paths_in(&mut self, home: &Path) {
+        if !self.sandbox.enable {
+            return;
+        }
+        for app in self
+            .apps
+            .iter_mut()
+            .filter(|a| a.sandbox && a.command.is_some())
+        {
+            if let Some(p) = &app.firefox_profile {
+                app.firefox_profile =
+                    Some(crate::sandbox::outside_path(&expand_home(p), home, &app.id));
+            }
+        }
+    }
+
     /// The config file: the one named on the command line, else the default location (which
     /// may not exist yet).
     pub fn config_path(cli: &Cli) -> Option<PathBuf> {
@@ -1143,6 +1168,7 @@ impl Config {
             config.icons.profile_share = Some(p.join("share"));
             config.load_profile_apps(p);
         }
+        config.resolve_sandbox_paths();
         config.validate()?;
         Ok(config)
     }
@@ -1912,5 +1938,34 @@ mod tests {
             );
         }
         assert_eq!(expand_home(Path::new("/abs/p")), Path::new("/abs/p"));
+    }
+
+    #[test]
+    fn sandboxed_firefox_profiles_are_in_the_sandbox_home() {
+        let text = "[[apps]]\nid = \"cr\"\nname = \"CR\"\ncommand = [\"x\"]\nsite_url = \"https://c/\"\n\
+                    firefox_profile = \"/home/tv/.local/share/hinteros/firefox/cr\"\n\
+                    [[apps]]\nid = \"open\"\nname = \"O\"\ncommand = [\"x\"]\nsite_url = \"https://o/\"\n\
+                    firefox_profile = \"/home/tv/ff/open\"\nsandbox = false\n";
+        let home = Path::new("/home/tv");
+        // Sandbox off: unchanged.
+        let mut c = Config::parse(text).unwrap();
+        c.resolve_sandbox_paths_in(home);
+        assert_eq!(
+            c.apps[0].firefox_profile.as_deref(),
+            Some(Path::new("/home/tv/.local/share/hinteros/firefox/cr"))
+        );
+        let mut c = Config::parse(&format!("[sandbox]\nenable = true\n{text}")).unwrap();
+        c.resolve_sandbox_paths_in(home);
+        assert_eq!(
+            c.apps[0].firefox_profile.as_deref(),
+            Some(Path::new(
+                "/home/tv/.local/share/hinteros/sandbox/cr/.local/share/hinteros/firefox/cr"
+            ))
+        );
+        assert_eq!(
+            c.apps[1].firefox_profile.as_deref(),
+            Some(Path::new("/home/tv/ff/open")),
+            "not sandboxed"
+        );
     }
 }

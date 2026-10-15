@@ -305,7 +305,7 @@ mod tests {
         );
         // Another instance reads it back; granting again removes the record.
         let p2 = Permissions::new(Some(path.clone()), enforced(&on()));
-        assert_eq!(view(&p2)[1].2, false);
+        assert!(!view(&p2)[1].2);
         assert!(p2.set("app", Some(&d), "mic", true).unwrap());
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -335,7 +335,7 @@ mod tests {
             code(p.set("app", Some(&d), "gamepad", false)),
             ErrorCode::PermissionRequired
         );
-        assert_eq!(p.set("app", Some(&d), "gamepad", true).unwrap(), false);
+        assert!(!p.set("app", Some(&d), "gamepad", true).unwrap());
         // mic not enforced: unknown.
         let same = Permissions::new(
             None,

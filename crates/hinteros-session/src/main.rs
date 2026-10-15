@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use hinteros_api::server as api_server;
 use hinteros_api::session;
-use hinteros_session::apps::{ProcessSpawner, which};
+use hinteros_session::apps::{ProcessSpawner, SandboxSettings, which};
 use hinteros_session::config::{Cli, Config};
 use hinteros_session::focus::gamescope::{GamescopeFocus, WatchOptions, spawn_watcher};
 use hinteros_session::focus::{FocusControl, NoFocus};
@@ -151,8 +151,18 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
     let (exit_tx, exit_rx) = mpsc::unbounded_channel();
     forward(exit_rx, shell_tx.clone(), Msg::ChildExit);
     let children = Children::default();
-    let spawner =
+    let mut spawner =
         ProcessSpawner::new(exe.clone(), env.clone(), exit_tx).with_children(children.clone());
+    if config.sandbox.enable {
+        info!(bwrap = %config.sandbox.bwrap.display(), "catalog apps run sandboxed");
+        spawner = spawner.with_sandbox(SandboxSettings {
+            bwrap: config.sandbox.bwrap.clone(),
+            pulse_socket: config.sandbox.pulse_socket.clone(),
+            pulse_record_socket: config.sandbox.pulse_record_socket.clone(),
+            app_env: cli.apps_profile.clone().or_else(|| config.apps_profile()),
+            osk_socket: Some(osk_socket.clone()),
+        });
+    }
 
     let osk_pid = Arc::new(AtomicU32::new(0));
     let focus: Box<dyn FocusControl> = if config.gamescope.enable {

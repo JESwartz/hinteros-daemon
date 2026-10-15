@@ -344,6 +344,57 @@ async fn launch_steam_url_with_a_fake_steam() {
     assert_eq!(log, "-silent steam://rungameid/1000001\n");
 }
 
+/// A sandboxed app without bwrap does not start (never unsandboxed); `sandbox = false` apps
+/// and plain commands still do.
+#[tokio::test]
+async fn sandboxed_launch_needs_bwrap() {
+    let d = Daemon::start_with(|dir| {
+        let config = dir.join("session.toml");
+        std::fs::write(
+            &config,
+            r#"
+            [sandbox]
+            enable = true
+            bwrap = "/nonexistent/bwrap"
+            [[apps]]
+            id = "boxed"
+            name = "Boxed"
+            command = ["sleep", "30"]
+            permissions = { gamepad = "required" }
+            [[apps]]
+            id = "open"
+            name = "Open"
+            command = ["sleep", "30"]
+            sandbox = false
+            "#,
+        )
+        .unwrap();
+        vec!["--config".into(), config.into()]
+    });
+    let mut c = d.client().await;
+    let e = call(&mut c, "apps.launch", json!({ "id": "boxed" }))
+        .await
+        .unwrap_err();
+    assert_eq!(e["code"], ErrorCode::AppLaunchFailed.code());
+    let message = e["message"].as_str().unwrap();
+    assert!(message.contains("bwrap not found"), "{message}");
+    let r = call(&mut c, "apps.running", json!({})).await.unwrap();
+    assert_eq!(r["apps"], json!([]));
+    let list = call(&mut c, "apps.list", json!({})).await.unwrap();
+    assert_eq!(
+        list["apps"][1]["permissions"],
+        json!([{ "name": "gamepad", "required": true, "granted": true }])
+    );
+    assert_eq!(list["apps"][2]["permissions"], json!([]));
+    let app = call(&mut c, "apps.launch", json!({ "id": "open" }))
+        .await
+        .unwrap();
+    assert_eq!(app["app"]["id"], "open");
+    call(&mut c, "apps.close", json!({ "id": "open" }))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn configured_apps_and_launch_errors() {
     let d = Daemon::start_with(|dir| {

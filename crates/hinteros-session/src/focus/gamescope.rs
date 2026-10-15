@@ -82,7 +82,11 @@ struct Conn {
 impl Conn {
     /// Connect to `display` and check that it really is gamescope (it sets `GAMESCOPE_PID`).
     fn open(display: &str) -> Result<Self> {
-        let display = &crate::config::resolve_display(display);
+        let display = &match display {
+            "auto" => crate::config::resolve_display(display),
+            _ => crate::config::try_resolve_display(display)
+                .with_context(|| format!("X display {display} does not exist (yet)"))?,
+        };
         let (conn, screen) =
             x11rb::connect(Some(display)).with_context(|| format!("connecting to X {display}"))?;
         let root = conn.setup().roots[screen].root;

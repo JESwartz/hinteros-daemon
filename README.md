@@ -1818,7 +1818,8 @@ and `[gamescope] apps_display = "auto+2"`.
 
 Hello with `0.18`. Show `permissions` on the install sheet and the app page (required ones
 locked); call `apps.set_permission` for each optional permission whose switch differs from
-`granted`, then `system.apps.install`.
+`granted`, then `system.apps.install`. When `full_access` is true (Steam, `sandbox = false`, or the
+sandbox is off), the install sheet warns that the app can use everything the profile can.
 
 ## Local network filter (system API 0.10)
 

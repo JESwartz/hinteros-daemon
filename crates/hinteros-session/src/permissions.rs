@@ -105,6 +105,11 @@ impl Permissions {
         Self::new(default_path(), enforced(cfg))
     }
 
+    /// Whether apps run in the sandbox on this box (`[sandbox] enable`).
+    pub fn sandboxed(&self) -> bool {
+        !self.enforced.is_empty()
+    }
+
     /// An app's permissions for `apps.list` / `store.list`: the declared ones this box
     /// enforces, in display order.
     pub fn list(&self, id: &str, declared: &BTreeMap<String, Need>) -> Vec<AppPermission> {

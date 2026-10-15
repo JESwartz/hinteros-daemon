@@ -4402,7 +4402,8 @@
                 "requires": [], "depends": [], "conflicts": [], "installer": true, "on_iso": false, "installer_default": false,
                 "data_paths": [".config/Moonlight Game Streaming Project"], "terms": null, "builds_on_device": false,
                 "free": true, "redistributable": true, "status": "available", "status_reason": null, "state": "installed",
-                "permissions": [{ "name": "gamepad", "required": true, "granted": true }, { "name": "mic", "required": false, "granted": false }]
+                "permissions": [{ "name": "gamepad", "required": true, "granted": true }, { "name": "mic", "required": false, "granted": false }],
+                "full_access": false
               },
               {
                 "id": "steam", "name": "Steam", "summary": "Play your Steam library on the TV.",
@@ -4413,7 +4414,8 @@
                 "data_paths": [".local/share/Steam", ".steam"],
                 "terms": { "title": "Steam Subscriber Agreement", "version": "2026-09-10", "url": "https://store.steampowered.com/subscriber_agreement/", "retrieved": "2026-10-06", "file": "/run/current-system/sw/share/hinteros/terms/steam-2026-09-10.txt" },
                 "builds_on_device": false, "free": false, "redistributable": true, "status": "available", "status_reason": null, "state": "available",
-                "permissions": []
+                "permissions": [],
+                "full_access": true
               }
             ],
             "more_after_update": false
@@ -5698,7 +5700,7 @@
       "required": [
         "id", "name", "summary", "description", "category", "homepage", "kind", "size_mib", "icon", "requires", "depends",
         "conflicts", "installer", "on_iso", "installer_default", "data_paths", "terms", "builds_on_device", "free",
-        "redistributable", "status", "status_reason", "state", "permissions"
+        "redistributable", "status", "status_reason", "state", "permissions", "full_access"
       ],
       "additionalProperties": false,
       "properties": {
@@ -5754,7 +5756,8 @@
         "status": { "$ref": "#/$defs/CatalogStatus" },
         "status_reason": { "oneOf": [{ "type": "string", "maxLength": 200 }, { "type": "null" }] },
         "state": { "$ref": "#/$defs/StoreState" },
-        "permissions": { "description": "0.18: what the app may use in its sandbox, in catalog order. Not installed: the stored choice for its install (default granted). Empty for Steam, apps without a sandbox and tombstones.", "type": "array", "items": { "$ref": "#/$defs/AppPermission" } }
+        "permissions": { "description": "0.18: what the app may use in its sandbox, in catalog order. Not installed: the stored choice for its install (default granted). Empty for Steam, apps without a sandbox and tombstones.", "type": "array", "items": { "$ref": "#/$defs/AppPermission" } },
+        "full_access": { "description": "0.18: runs without the app sandbox (Steam, apps with sandbox = false, or every app while the sandbox is off on this box): it can use everything the profile can. The install sheet warns. False for tombstones.", "type": "boolean" }
       }
     },
 

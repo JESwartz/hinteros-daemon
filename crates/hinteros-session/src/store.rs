@@ -350,9 +350,14 @@ pub fn merge(
             }
         };
         let mut a = app(index, e, state, icons.get(&e.id));
-        // Steam and apps that opt out of the sandbox have none.
-        if e.sandbox && e.id != hinteros_api::session::STEAM_CLIENT_APP_ID {
+        // Steam and apps that opt out of the sandbox have no permissions: they have full access.
+        if e.sandbox
+            && e.id != hinteros_api::session::STEAM_CLIENT_APP_ID
+            && permissions.sandboxed()
+        {
             a.permissions = permissions.list(&e.id, &e.permissions);
+        } else {
+            a.full_access = e.status != Status::Removed;
         }
         out.push(a);
     }
@@ -403,6 +408,7 @@ fn empty(id: &str) -> StoreApp {
         status_reason: None,
         state: StoreState::Unavailable,
         permissions: Vec::new(),
+        full_access: false,
     }
 }
 
@@ -455,6 +461,7 @@ fn app(index: &Index, e: &Entry, state: StoreState, icon: Option<PathBuf>) -> St
             .map(|r| r.chars().take(200).collect()),
         state,
         permissions: Vec::new(),
+        full_access: false,
     }
 }
 
@@ -551,6 +558,21 @@ mod tests {
         );
         assert_eq!(perms_of("steam"), json!([]), "never sandboxed");
         assert_eq!(perms_of("mystery"), json!([]));
+        let full = |id: &str| apps.iter().find(|a| a.id == id).unwrap().full_access;
+        assert!(full("steam"), "Steam has full access");
+        assert!(!full("youtube") && !full("moonlight"));
+        assert!(!full("mystery") && !full("gone"), "tombstones");
+        // With the sandbox off, every app has full access and no permissions.
+        let off = merge(
+            &index,
+            &installed,
+            &installing,
+            &removing,
+            &icons,
+            &Permissions::default(),
+        );
+        let yt = off.iter().find(|a| a.id == "youtube").unwrap();
+        assert!(yt.full_access && yt.permissions.is_empty());
         // Every app is valid against the schema.
         let schema = hinteros_api::conformance::ApiSchema::session();
         for a in &apps {

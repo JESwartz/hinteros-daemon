@@ -1653,6 +1653,10 @@ pub struct StoreApp {
     /// 0.18: what the app may use in its sandbox; for an app that is not installed, the choice
     /// stored for its install.
     pub permissions: Vec<AppPermission>,
+    /// 0.18: runs without the app sandbox (Steam, `sandbox = false`, or the sandbox is off on
+    /// this box): it can use everything the profile can.
+    #[serde(default)]
+    pub full_access: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

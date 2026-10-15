@@ -20,7 +20,7 @@
 //! [gamescope]
 //! enable = true
 //! display = ":0"               # gamescope's Xwayland [default: $DISPLAY, else :0]
-//! wayland_display = "gamescope-0"  # passed to launched apps [default: $WAYLAND_DISPLAY, else gamescope-0]
+//! wayland_display = "gamescope-0"  # passed to Steam (not to apps) [default: $WAYLAND_DISPLAY, else gamescope-0]
 //! focus_loss_debounce_ms = 1500
 //! unmap_gl_dummies = true      # unmap invisible full-screen override-redirect windows over an app
 //!
@@ -1300,8 +1300,9 @@ impl Config {
             .unwrap_or_else(|| "gamescope-0".into())
     }
 
-    /// Environment for apps the daemon starts, so they land in gamescope. Empty when gamescope
-    /// integration is off (apps inherit the daemon's environment).
+    /// Environment for processes the daemon starts, so they land in gamescope. Empty when
+    /// gamescope integration is off (they inherit the daemon's environment). Apps get it without
+    /// the Wayland displays ([`crate::apps::spawn_env`]); only Steam keeps them.
     pub fn child_env(&self) -> Vec<(String, String)> {
         if !self.gamescope.enable {
             return Vec::new();

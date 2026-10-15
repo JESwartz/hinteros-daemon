@@ -66,6 +66,19 @@ pub fn steam_binary(configured: &Path) -> Option<PathBuf> {
     which(&configured.to_string_lossy()).ok()
 }
 
+/// Variables apps never get: gamescope's Wayland display gives access to its private protocols
+/// (input method, action bindings, control). Steam keeps them.
+pub const HIDDEN_FROM_APPS: &[&str] = &["WAYLAND_DISPLAY", "GAMESCOPE_WAYLAND_DISPLAY"];
+
+/// The environment for a spawn: `env` (`"auto"` display resolved now), without
+/// [`HIDDEN_FROM_APPS`] for an app (`app`: it runs under the reaper).
+pub fn spawn_env(env: &[(String, String)], app: bool) -> Vec<(String, String)> {
+    crate::config::live_env(env)
+        .into_iter()
+        .filter(|(k, _)| !(app && HIDDEN_FROM_APPS.contains(&k.as_str())))
+        .collect()
+}
+
 /// Starts real processes with tokio and reports their exit.
 pub struct ProcessSpawner {
     /// Our own executable, which provides the `reaper` subcommand.
@@ -115,9 +128,15 @@ impl Spawner for ProcessSpawner {
                 cmd
             }
         };
-        cmd.envs(crate::config::live_env(&self.env))
+        cmd.envs(spawn_env(&self.env, app_id.is_some()))
             .stdin(Stdio::null())
             .kill_on_drop(false);
+        if app_id.is_some() {
+            // Also when the daemon itself was started with them.
+            for k in HIDDEN_FROM_APPS {
+                cmd.env_remove(k);
+            }
+        }
         let mut child = cmd.spawn()?;
         let pid = child.id().unwrap_or_default();
         let children = self.children.clone();
@@ -162,6 +181,24 @@ mod tests {
                 .kind(),
             io::ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn apps_get_no_wayland_display() {
+        let env: Vec<(String, String)> = [
+            ("DISPLAY", ":1"),
+            ("WAYLAND_DISPLAY", "gamescope-0"),
+            ("GAMESCOPE_WAYLAND_DISPLAY", "gamescope-0"),
+            ("HINTEROS_OSK_SOCKET", "/run/user/1000/hinteros/osk.sock"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let keys =
+            |app| -> Vec<String> { spawn_env(&env, app).into_iter().map(|(k, _)| k).collect() };
+        assert_eq!(keys(true), ["DISPLAY", "HINTEROS_OSK_SOCKET"]);
+        // Steam keeps them.
+        assert_eq!(keys(false).len(), 4);
     }
 
     #[test]

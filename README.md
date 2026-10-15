@@ -311,7 +311,7 @@ shutdown_grace_ms = 3000         # SIGTERM of the daemon: SIGKILL its apps after
 [gamescope]
 enable = true
 display = ":0"                 # gamescope's Xwayland [default: $DISPLAY, else :0]
-wayland_display = "gamescope-0"  # given to launched apps [default: $WAYLAND_DISPLAY, else gamescope-0]
+wayland_display = "gamescope-0"  # given to Steam (not to apps) [default: $WAYLAND_DISPLAY, else gamescope-0]
 focus_loss_debounce_ms = 1500  # how long the focused app may be without a window
 unmap_gl_dummies = true     # unmap invisible full-screen override-redirect windows (GTK3 GL dummies) over an app
 
@@ -508,8 +508,10 @@ nothing: it never takes part in the TV setup.
   (or set `launcher.command` and let the daemon start it). Steam itself must **not** run under
   a reaper with an app id: the outermost one wins, and games must get their Steam app ids.
 - The daemon reaching gamescope's Xwayland: `DISPLAY` (or `gamescope.display`), `:0` when
-  gamescope is the only X server. No Xauthority is needed. Launched apps get `DISPLAY` and
-  `WAYLAND_DISPLAY` from the config, since a user service does not inherit gamescope's.
+  gamescope is the only X server. No Xauthority is needed. Launched apps get `DISPLAY` from the
+  config, since a user service does not inherit gamescope's. Only Steam also gets
+  `WAYLAND_DISPLAY` and `GAMESCOPE_WAYLAND_DISPLAY`: apps run as X11 clients and never see
+  gamescope's private Wayland protocols (input method, action bindings, control).
 - InputPlumber: polkit, the session user in group `inputplumber`, its udev rules. The daemon
   sets `ManageAllDevices` itself on every InputPlumber (re)start.
 - A `steam` binary on the daemon's `PATH`, or `steam.path`, for the built-in `steam` app (left

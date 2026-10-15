@@ -945,7 +945,7 @@ All paths default to the box's; tests point them at a temporary root.
 | `--localtime` | `/etc/localtime` (the link `time_zone.set` replaces) |
 | `--keyboard-socket`, `--keyboard-group` | `/run/hinteros/keyboard.sock`, `hinteros-keyboard` (no socket without the group) |
 | `--freeze-inactive` | off (the system repo sets it): freeze profiles whose session is not the active one |
-| `--lan-filter` | off (the system repo sets it with `lan`): `lan_filter.*` work; without it they fail |
+| `--lan-filter` (`HINTEROS_LAN_FILTER`) | off (the system repo sets it with `lan`): `lan_filter.*` work; without it they fail |
 | `--cgroup-root` | `/sys/fs/cgroup` (where `lan_filter.set` checks the caller's cgroup) |
 
 `hinteros-system job [--run-dir DIR] <id>` runs one job (the job unit's `ExecStart`).
@@ -1786,7 +1786,7 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
 `session.toml`: `[sandbox] enable = true`, `bwrap = "<bubblewrap>/bin/bwrap"`, and, once a
 play-only pulse socket exists, `pulse_socket` / `pulse_record_socket` (relative to
 `XDG_RUNTIME_DIR`). For `lan`: `[sandbox] lan_filter = true`, `Delegate=yes` and no
-`ProtectControlGroups` on the session daemon's unit, `hinteros-system --lan-filter`, and the
+`ProtectControlGroups` on the session daemon's unit, `HINTEROS_LAN_FILTER=1` for hinteros-system, and the
 oneshot `hinteros-lan-filter.service` running `hinteros-system lan-filter-apply --nft <nft>` as
 root with `CAP_NET_ADMIN` and `AF_NETLINK` (not in a private network namespace), started again
 when `/etc/resolv.conf` or the network changes. Drop `ProtectKernelTunables` from the session daemon's unit. Under gamescope:

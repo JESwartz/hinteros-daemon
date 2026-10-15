@@ -296,8 +296,9 @@ pub struct ServeArgs {
     #[arg(long, default_value = "/etc/localtime")]
     pub localtime: PathBuf,
     /// `lan_filter.*` (system API 0.10): the box has the local network filter
-    /// (`hinteros-lan-filter.service`); without it they fail
-    #[arg(long)]
+    /// (`hinteros-lan-filter.service`); without it they fail. An environment variable too, so a
+    /// unit whose `ExecStart` is replaced keeps it
+    #[arg(long, env = "HINTEROS_LAN_FILTER")]
     pub lan_filter: bool,
     /// The cgroup v2 root: `lan_filter.set` checks the caller's cgroup there
     #[arg(long, default_value = "/sys/fs/cgroup")]

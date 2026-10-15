@@ -8,7 +8,9 @@
 //! - Files: read-only `/nix/store`, `/run/current-system`, `/run/opengl-driver{,-32}`, `/etc`,
 //!   `/sys`, `/run/systemd/resolve` and `/run/nscd` if present, `/bin` and `/usr` if present
 //!   (`/bin/sh`, `/usr/bin/env`), the profile's app env (`/run/hinteros/apps/<user>`, resolved).
-//!   A new `/proc`, a minimal `/dev` with `/dev/dri`, empty `/tmp` and `/run`.
+//!   A new `/proc`, a minimal `/dev` with the GPU render nodes (`/dev/dri/renderD*`, not the
+//!   display nodes `card*`), empty `/tmp` and `/run`.
+//! - System calls: [`seccomp`] (a denylist; user namespaces stay allowed).
 //! - Home: `~/.local/share/hinteros/sandbox/<id>` (0700), read-write at the real `$HOME` path.
 //!   The app's data starts fresh there; its Firefox kiosk profile lands inside it.
 //! - Runtime dir: a new `$XDG_RUNTIME_DIR` with only `pulse/native` (`[sandbox] pulse_socket`,
@@ -23,13 +25,15 @@
 //! - Environment: no Wayland displays, no D-Bus addresses, no other sockets.
 //!
 //! [`args`] is a pure function of [`Host`] and [`Spec`]; [`prepare`] does the file system work
-//! before the spawn (the sandbox home, `~/Downloads`). A launch fails when bwrap is missing; it
-//! never runs the app without the sandbox.
+//! before the spawn (the sandbox home, `~/Downloads`). A launch fails when bwrap or the system
+//! call filter is missing; it never runs the app without the sandbox.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::permissions::Grants;
+
+pub mod seccomp;
 
 /// Where the sandbox homes are, relative to the profile's home.
 pub const HOMES_DIR: &str = ".local/share/hinteros/sandbox";
@@ -86,6 +90,11 @@ pub struct Host {
     pub pulse_record_socket: PathBuf,
     /// The text field socket (absolute), for kiosk apps.
     pub osk_socket: Option<PathBuf>,
+    /// The GPU render nodes (`/dev/dri/renderD*`, see [`render_nodes`]).
+    pub render_nodes: Vec<PathBuf>,
+    /// The file descriptor bwrap reads the system call filter from ([`seccomp::pipe`]);
+    /// without, there is no sandbox.
+    pub seccomp_fd: Option<i32>,
 }
 
 /// One app's sandbox.
@@ -112,6 +121,7 @@ pub fn args(
     program: &Path,
     args: &[String],
 ) -> Result<Vec<String>, String> {
+    let seccomp_fd = host.seccomp_fd.ok_or("no sandbox: no system call filter")?;
     let n = display_number(&host.display)
         .ok_or_else(|| format!("display {:?} is not :<number>", host.display))?;
     if !crate::config::valid_app_id(&spec.id) {
@@ -127,6 +137,7 @@ pub fn args(
         "--die-with-parent",
         "--new-session",
     ]);
+    push(&["--seccomp", &seccomp_fd.to_string()]);
 
     // The system, read-only.
     for p in ["/nix/store", "/etc", "/sys"] {
@@ -136,7 +147,10 @@ pub fn args(
         push(&["--ro-bind-try", p, p]);
     }
     push(&["--proc", "/proc", "--dev", "/dev"]);
-    push(&["--dev-bind-try", "/dev/dri", "/dev/dri"]);
+    // The GPU: render nodes only, no display (KMS) nodes.
+    for node in &host.render_nodes {
+        push(&["--dev-bind-try", &s(node), &s(node)]);
+    }
     if spec.grants.gamepad {
         push(&["--dev-bind-try", "/dev/input", "/dev/input"]);
     }
@@ -207,6 +221,19 @@ pub fn args(
     Ok(out)
 }
 
+/// The GPU render nodes in `dir` (`/dev/dri`): `renderD*`, sorted. None when it is missing.
+pub fn render_nodes(dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+        .map(|e| e.path())
+        .collect();
+    out.sort();
+    out
+}
+
 /// Before the spawn: the app's sandbox home (0700, also when it exists) and, with
 /// `downloads`, `~/Downloads`.
 pub fn prepare(home: &Path, spec: &Spec) -> io::Result<()> {
@@ -240,6 +267,8 @@ mod tests {
             pulse_socket: "pulse/play".into(),
             pulse_record_socket: "pulse/native".into(),
             osk_socket: Some("/run/user/1000/hinteros/osk.sock".into()),
+            render_nodes: vec!["/dev/dri/renderD128".into(), "/dev/dri/renderD129".into()],
+            seccomp_fd: Some(7),
         }
     }
 
@@ -266,7 +295,8 @@ mod tests {
         let operands = |op: &str| match op {
             "--ro-bind" | "--ro-bind-try" | "--bind" | "--bind-try" | "--dev-bind"
             | "--dev-bind-try" | "--setenv" => 2,
-            "--proc" | "--dev" | "--tmpfs" | "--dir" | "--perms" | "--unsetenv" | "--chdir" => 1,
+            "--proc" | "--dev" | "--tmpfs" | "--dir" | "--perms" | "--unsetenv" | "--chdir"
+            | "--seccomp" => 1,
             _ => 0,
         };
         let mut out = Vec::new();
@@ -326,7 +356,16 @@ mod tests {
         }
         assert!(has(&argv, &["--proc", "/proc"]));
         assert!(has(&argv, &["--dev", "/dev"]));
-        assert!(has(&argv, &["--dev-bind-try", "/dev/dri", "/dev/dri"]));
+        // The GPU: each render node, never the display nodes or the whole directory.
+        for node in ["/dev/dri/renderD128", "/dev/dri/renderD129"] {
+            assert!(has(&argv, &["--dev-bind-try", node, node]), "{node}");
+        }
+        assert!(
+            !targets(&argv)
+                .iter()
+                .any(|t| t == "/dev/dri" || t.starts_with("/dev/dri/card")),
+            "{argv:?}"
+        );
         assert!(has(&argv, &["--tmpfs", "/tmp"]));
         assert!(has(&argv, &["--tmpfs", "/run"]));
         assert!(has(
@@ -356,6 +395,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn system_call_filter_or_no_sandbox() {
+        let argv = build(&spec(Grants::default(), false));
+        assert!(has(&argv, &["--seccomp", "7"]));
+        assert_eq!(argv.iter().filter(|a| *a == "--seccomp").count(), 1);
+        let mut h = host();
+        h.seccomp_fd = None;
+        let err = args(&h, &spec(Grants::default(), false), Path::new("/x"), &[]).unwrap_err();
+        assert!(err.contains("no system call filter"), "{err}");
+        // No render nodes (no GPU): nothing from /dev/dri.
+        let mut h = host();
+        h.render_nodes.clear();
+        let argv = args(&h, &spec(Grants::default(), false), Path::new("/x"), &[]).unwrap();
+        assert!(!targets(&argv).iter().any(|t| t.starts_with("/dev/dri")));
+    }
+
+    #[test]
+    fn render_nodes_only() {
+        let t = tempfile::tempdir().unwrap();
+        for f in ["card0", "card1", "renderD129", "renderD128", "by-path"] {
+            std::fs::write(t.path().join(f), "").unwrap();
+        }
+        assert_eq!(
+            render_nodes(t.path()),
+            [t.path().join("renderD128"), t.path().join("renderD129")]
+        );
+        assert!(render_nodes(&t.path().join("missing")).is_empty());
     }
 
     #[test]

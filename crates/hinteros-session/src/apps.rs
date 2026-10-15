@@ -5,6 +5,7 @@
 //! tests use a recording mock.
 
 use std::io;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -204,15 +205,15 @@ impl ProcessSpawner {
     }
 
     /// The bwrap command line for `argv` (`program` resolved) in `spec`'s sandbox, after
-    /// preparing its home. Fails when bwrap is missing: an app never runs unsandboxed by
-    /// mistake.
+    /// preparing its home, and the system call filter bwrap reads (keep it until the spawn).
+    /// Fails when bwrap or the filter is missing: an app never runs unsandboxed by mistake.
     fn sandboxed(
         &self,
         spec: &Spec,
         program: &Path,
         argv: &[String],
         env: &[(String, String)],
-    ) -> io::Result<Vec<String>> {
+    ) -> io::Result<(Vec<String>, OwnedFd)> {
         let settings = self
             .sandbox
             .as_ref()
@@ -231,6 +232,9 @@ impl ProcessSpawner {
                 .filter(|v| !v.is_empty())
                 .ok_or_else(|| io::Error::other(format!("no sandbox: {k} is not set")))
         };
+        let seccomp = sandbox::seccomp::pipe().map_err(|e| {
+            io::Error::new(e.kind(), format!("no sandbox: no system call filter ({e})"))
+        })?;
         let host = Host {
             bwrap,
             home: var("HOME")?.into(),
@@ -243,9 +247,12 @@ impl ProcessSpawner {
             pulse_socket: settings.pulse_socket.clone(),
             pulse_record_socket: settings.pulse_record_socket.clone(),
             osk_socket: settings.osk_socket.clone(),
+            render_nodes: sandbox::render_nodes(Path::new("/dev/dri")),
+            seccomp_fd: Some(seccomp.as_raw_fd()),
         };
         sandbox::prepare(&host.home, spec)?;
-        sandbox::args(&host, spec, program, &argv[1..]).map_err(io::Error::other)
+        let argv = sandbox::args(&host, spec, program, &argv[1..]).map_err(io::Error::other)?;
+        Ok((argv, seccomp))
     }
 
     /// Register the processes started here with `children` (to end them at shutdown).
@@ -284,9 +291,12 @@ impl Spawner for ProcessSpawner {
             ),
             _ => None,
         };
+        // The system call filter: bwrap reads it at start (`--seccomp`), ours goes after the spawn.
+        let mut seccomp = None;
         let mut cmd = match (app_id, sandbox) {
             (Some(id), Some(spec)) => {
-                let bwrap = self.sandboxed(spec, &program, argv, &env)?;
+                let (bwrap, filter) = self.sandboxed(spec, &program, argv, &env)?;
+                seccomp = Some(filter);
                 let mut cmd = tokio::process::Command::new(&self.reaper_exe);
                 cmd.args(reaper::args_in(id, nolan.as_deref(), &bwrap));
                 cmd
@@ -322,6 +332,7 @@ impl Spawner for ProcessSpawner {
             None => None,
         };
         let mut child = cmd.spawn()?;
+        drop(seccomp);
         // Our copy of the pipe's write end goes with it: end of file once the reaper is gone.
         drop(cmd);
         if let Some(read) = in_nolan
@@ -573,6 +584,64 @@ mod tests {
         std::fs::remove_dir_all(unit_dir.join("nolan")).unwrap();
         let e = s.spawn("a", &argv, Some(1), Some(&spec)).unwrap_err();
         assert!(e.to_string().starts_with("no local network filter"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn bwrap_gets_the_system_call_filter() {
+        use crate::permissions::Grants;
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        // A stand-in reaper: copies what it can read from bwrap's `--seccomp <fd>`.
+        let out = t.path().join("filter");
+        let reaper = t.path().join("reaper");
+        std::fs::write(
+            &reaper,
+            format!(
+                "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = --seccomp ] && fd=$2; shift; done\n\
+                 [ -n \"$fd\" ] || exit 2\neval \"cat <&$fd\" > {}\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&reaper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let settings = SandboxSettings {
+            bwrap: "sh".into(),
+            pulse_socket: "pulse/native".into(),
+            pulse_record_socket: "pulse/native".into(),
+            app_env: None,
+            osk_socket: None,
+        };
+        let env = [
+            ("HOME", "home"),
+            ("XDG_RUNTIME_DIR", "run"),
+            ("DISPLAY", ":0"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .to_vec();
+        let env: Vec<_> = env
+            .into_iter()
+            .map(|(k, v)| match k.as_str() {
+                "DISPLAY" => (k, v),
+                _ => (k, t.path().join(v).display().to_string()),
+            })
+            .collect();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut s = ProcessSpawner::new(reaper, env, tx).with_sandbox(settings);
+        let spec = Spec {
+            id: "a".into(),
+            grants: Grants {
+                lan: true,
+                ..Grants::default()
+            },
+            kiosk: false,
+        };
+        s.spawn("a", &["sh".to_string()], Some(1), Some(&spec))
+            .unwrap();
+        assert_eq!(rx.recv().await.unwrap().code, Some(0));
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            sandbox::seccomp::program().unwrap()
+        );
     }
 
     #[test]

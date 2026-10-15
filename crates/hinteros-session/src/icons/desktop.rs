@@ -68,6 +68,11 @@ impl Dirs {
     /// `applications/<id>.desktop` in the data directories (an `a-b` id may also be
     /// `applications/a/b.desktop`, per the spec).
     pub fn find_desktop_file(&self, desktop_id: &str) -> Option<PathBuf> {
+        self.find_desktop(desktop_id).map(|(_, file)| file)
+    }
+
+    /// [`Self::find_desktop_file`] and the data directory it is in.
+    fn find_desktop(&self, desktop_id: &str) -> Option<(&Path, PathBuf)> {
         let id = desktop_id.strip_suffix(".desktop").unwrap_or(desktop_id);
         if id.is_empty() || id.contains("..") || id.starts_with('/') {
             return None;
@@ -80,13 +85,21 @@ impl Dirs {
             ]
             .into_iter()
             .find(|p| p.is_file())
+            .map(|p| (d.as_path(), p))
         })
     }
 
-    /// The icon file for a `.desktop` id, if its file and its icon can be found.
+    /// The icon file for a `.desktop` id, if its file and its icon can be found. An absolute
+    /// `Icon=` counts only inside the package that has the desktop file (its `/nix/store` path)
+    /// or inside the data directory it was found in: an app's package cannot name a file
+    /// elsewhere on the box.
     pub fn resolve_desktop(&self, desktop_id: &str) -> Option<PathBuf> {
-        let file = self.find_desktop_file(desktop_id)?;
-        let name = desktop_icon_name(&fs::read_to_string(file).ok()?)?;
+        let (dir, file) = self.find_desktop(desktop_id)?;
+        let name = desktop_icon_name(&fs::read_to_string(&file).ok()?)?;
+        if Path::new(&name).is_absolute() {
+            let icon = self.lookup(&name)?;
+            return icon_inside(&icon, dir, &file).then_some(icon);
+        }
         self.lookup(&name)
     }
 
@@ -163,6 +176,29 @@ impl Dirs {
         }
         chain
     }
+}
+
+/// The Nix store, where a package's files are.
+const STORE: &str = "/nix/store";
+
+/// Whether `icon` (resolved) is inside the store path of `desktop_file` (resolved) or inside
+/// `data_dir` (resolved).
+fn icon_inside(icon: &Path, data_dir: &Path, desktop_file: &Path) -> bool {
+    let Ok(icon) = fs::canonicalize(icon) else {
+        return false;
+    };
+    let package = fs::canonicalize(desktop_file)
+        .ok()
+        .and_then(|f| store_path_of(&f));
+    package.is_some_and(|p| icon.starts_with(p))
+        || fs::canonicalize(data_dir).is_ok_and(|d| icon.starts_with(d))
+}
+
+/// `/nix/store/<hash>-<name>` of a path in the store.
+fn store_path_of(path: &Path) -> Option<PathBuf> {
+    let rest = path.strip_prefix(STORE).ok()?;
+    let top = rest.components().next()?;
+    Some(Path::new(STORE).join(top))
 }
 
 /// Quality of an icon file; larger is better.
@@ -409,6 +445,42 @@ mod tests {
         let d = dirs(r, None);
         assert_eq!(d.resolve_desktop("org.example.App"), Some(png));
         assert_eq!(d.resolve_desktop("org.example.Missing"), None);
+    }
+
+    #[test]
+    fn absolute_desktop_icon_only_inside_its_package_or_data_dir() {
+        let t = tempfile::tempdir().unwrap();
+        let r = t.path();
+        let inside = touch(r, "a/pixmaps/inside.png");
+        let outside = touch(r, "secret/outside.png");
+        // A symlink in the data directory that leads out of it.
+        std::os::unix::fs::symlink(&outside, r.join("a/pixmaps/link.png")).unwrap();
+        let write = |id: &str, icon: &Path| {
+            let f = r.join(format!("a/applications/{id}.desktop"));
+            fs::create_dir_all(f.parent().unwrap()).unwrap();
+            fs::write(&f, format!("[Desktop Entry]\nIcon={}\n", icon.display())).unwrap();
+        };
+        write("in", &inside);
+        write("out", &outside);
+        write("link", &r.join("a/pixmaps/link.png"));
+        write("dots", &r.join("a/pixmaps/../../secret/outside.png"));
+        let d = dirs(r, None);
+        assert_eq!(d.resolve_desktop("in"), Some(inside));
+        assert_eq!(d.resolve_desktop("out"), None);
+        assert_eq!(d.resolve_desktop("link"), None);
+        assert_eq!(d.resolve_desktop("dots"), None);
+        // The `icon` setting (the catalog's, not the package's) may still name any file.
+        assert_eq!(d.lookup(outside.to_str().unwrap()), Some(outside.clone()));
+    }
+
+    #[test]
+    fn store_paths() {
+        assert_eq!(
+            store_path_of(Path::new("/nix/store/abc-x/share/a.desktop")),
+            Some(PathBuf::from("/nix/store/abc-x"))
+        );
+        assert_eq!(store_path_of(Path::new("/nix/store")), None);
+        assert_eq!(store_path_of(Path::new("/home/x/a.desktop")), None);
     }
 
     #[test]

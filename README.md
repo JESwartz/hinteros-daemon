@@ -248,12 +248,17 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   on the box at runtime. Per app, first match wins: `icon` (an absolute path or an icon theme
   name), then `desktop_id` (the app's freedesktop `.desktop` file, its `Icon=`, looked up in the
   icon themes), then for web apps `icon_url` / `site_url`, then `firefox_profile`. The built-in `steam`
-  entry uses Steam's own `steam.desktop`. Desktop files and icons are searched in `$XDG_DATA_HOME`,
-  `$XDG_DATA_DIRS`, `/run/current-system/sw/share`, `/etc/profiles/per-user/$USER/share`,
-  `~/.nix-profile/share` and the Flatpak exports; themes searched are the active one (GTK's
+  entry uses Steam's own `steam.desktop`. Desktop files and icons are searched in the profile's
+  app env (`[apps] profile`, its `share`, first; the session's `PATH` and `XDG_DATA_DIRS` never
+  have it), `$XDG_DATA_HOME`, `$XDG_DATA_DIRS`, `/run/current-system/sw/share`,
+  `/etc/profiles/per-user/$USER/share`, `~/.nix-profile/share` and the Flatpak exports. An
+  absolute `Icon=` in a desktop file counts only when the file is inside the same package
+  (`/nix/store` path) as the desktop file, or inside the data directory it was found in; themes
+  searched are the active one (GTK's
   `gtk-icon-theme-name`, or `icons.theme`), what it inherits, and `hicolor`, plus `pixmaps/`.
   The best file wins: the largest PNG of at least 256 px, else an SVG, else the largest
-  smaller PNG. Web apps: the daemon fetches `icon_url`, or finds the icon of `site_url` (web app
+  smaller PNG. Web apps: the daemon fetches `icon_url` (and, with `icon_sha256`, the catalog's
+  `icon.sha256`, keeps it only if its SHA-256 matches; else it logs and retries later), or finds the icon of `site_url` (web app
   manifest icons, `apple-touch-icon`, `<link rel=icon>`, `/favicon.ico`; the largest square one
   of at least 192 px, not mask-only), over https only (also through redirects), with timeouts,
   a 1 MiB limit and an image check, in a background thread; it caches the file as
@@ -419,6 +424,7 @@ name = "YouTube"
 kind = "web"
 command = ["firefox", "--kiosk", "--new-instance", "https://www.youtube.com/tv"]
 site_url = "https://www.youtube.com/tv"     # icon from the site (or: icon_url = "https://.../icon.png")
+# icon_sha256 = "<64 hex digits>"           # with icon_url: refuse a download with another SHA-256
 # firefox_profile = "~/.local/share/hinteros/firefox/youtube"  # fallback: the favicon Firefox stored
 input = "keyboard"             # "gamepad" (default) or "keyboard"
 back_key = "escape"            # what B sends [default: escape]; e.g. "backspace", "alt+left"

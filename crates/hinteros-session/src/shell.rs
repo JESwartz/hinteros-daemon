@@ -2916,6 +2916,7 @@ mod tests {
             icon: None,
             desktop_id: None,
             icon_url: None,
+            icon_sha256: None,
             site_url: None,
             firefox_profile: None,
             command: command.map(|c| vec![c.into()]),

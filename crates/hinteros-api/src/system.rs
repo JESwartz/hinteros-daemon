@@ -1813,6 +1813,10 @@ pub struct Building {
     /// Nix's build phase without `Phase` (`unpack`, `configure`, `build`, `install`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// 0.10: how far this derivation is (0..=99), from the last standard stdenv phase it
+    /// started; absent before the first one and for builders without phases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
 }
 
 impl ProgressDetail {

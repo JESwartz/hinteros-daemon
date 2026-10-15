@@ -571,6 +571,19 @@ fn system_schema_rejects_what_it_should() {
             "/events/job_progress/params",
             r#"{"job_id":"3f9a0c2b7e4d1a65","stage":"downloading","percent":101}"#,
         ),
+        // 0.10: a build's percent stays below 100 and is a whole number.
+        (
+            "/events/job_progress/params",
+            r#"{"job_id":"3f9a0c2b7e4d1a65","kind":"rebuild","stage":"building","detail":{"building":{"name":"x","percent":100}}}"#,
+        ),
+        (
+            "/events/job_progress/params",
+            r#"{"job_id":"3f9a0c2b7e4d1a65","kind":"rebuild","stage":"building","detail":{"building":{"name":"x","percent":-1}}}"#,
+        ),
+        (
+            "/events/job_progress/params",
+            r#"{"job_id":"3f9a0c2b7e4d1a65","kind":"rebuild","stage":"building","detail":{"building":{"name":"x","percent":"20"}}}"#,
+        ),
     ];
     for (pointer, instance) in bad {
         let v: Value = serde_json::from_str(instance).unwrap();
@@ -599,6 +612,21 @@ fn system_schema_rejects_what_it_should() {
             )
             .is_err()
     );
+}
+
+/// System API 0.10 (session API 0.18): `Building.percent`, in both documents, relayed unchanged.
+#[test]
+fn building_percent() {
+    let ok = r#"{"job_id":"3f9a0c2b7e4d1a65","kind":"rebuild","stage":"building","started_at":1,"last_activity_at":1,"detail":{"building":{"name":"x","phase":"build","percent":20}}}"#;
+    let bad = r#"{"job_id":"3f9a0c2b7e4d1a65","kind":"rebuild","stage":"building","started_at":1,"last_activity_at":1,"detail":{"building":{"name":"x","percent":99.5}}}"#;
+    for schema in [ApiSchema::system(), ApiSchema::session()] {
+        let v: Value = serde_json::from_str(ok).unwrap();
+        schema.check("/events/job_progress/params", &v).unwrap();
+        let v: Value = serde_json::from_str(bad).unwrap();
+        assert!(schema.check("/events/job_progress/params", &v).is_err());
+    }
+    let p: system::JobProgressParams = serde_json::from_str(ok).unwrap();
+    assert_eq!(p.detail.unwrap().building.unwrap().percent, Some(20));
 }
 
 /// 0.8: the schema's ZoneName and `is_zone_name` agree; nothing path-like gets through.

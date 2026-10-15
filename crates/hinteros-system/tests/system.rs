@@ -666,7 +666,9 @@ async fn build_progress_heartbeat_and_reconnect() {
     root.touch("compile-hold");
     let r = call(&mut c, "rebuild", json!({})).await.unwrap();
     let id = r["job_id"].as_str().unwrap().to_owned();
-    let building = json!({"name": "hinteros-daemon", "version": "0.7.1", "phase": "build"});
+    // 0.10: the build's own percent from its phase.
+    let building =
+        json!({"name": "hinteros-daemon", "version": "0.7.1", "phase": "build", "percent": 20});
     // The compile starts.
     let first = loop {
         let (name, p) = next_event(&mut c).await;
@@ -680,7 +682,10 @@ async fn build_progress_heartbeat_and_reconnect() {
     assert_eq!(first["detail"]["builds_done"], 0);
     assert_eq!(first["detail"]["builds_total"], 2);
     assert_eq!(first["detail"]["builds_running"], 1);
-    assert_eq!(first["percent"], 50, "downloads done, no build yet");
+    assert_eq!(
+        first["percent"], 55,
+        "downloads done, no build done, one at its build phase: (1 + 0.2 / 2) / 2"
+    );
 
     // Nothing countable changes while it compiles, yet job_progress keeps coming, and the
     // activity time moves (the build prints log lines).
@@ -717,7 +722,7 @@ async fn build_progress_heartbeat_and_reconnect() {
         .clone();
     assert_eq!(job["state"], "running");
     assert_eq!(job["stage"], "building");
-    assert_eq!(job["percent"], 50);
+    assert_eq!(job["percent"], 55);
     assert_eq!(job["detail"]["building"], building);
     assert_eq!(job["detail"]["builds_total"], 2);
     assert_eq!(job["subject"], json!({}));

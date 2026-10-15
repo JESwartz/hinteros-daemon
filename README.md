@@ -1753,9 +1753,11 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   it is missing the launch fails (`app_launch_failed`, "no sandbox: bwrap not found"), it never
   runs the app unsandboxed. The daemon's unit must not have `ProtectKernelTunables` (bwrap
   cannot mount `/proc` then).
-- `--new-session` puts the app out of reach of the reaper's group signal, so the reaper also
-  sends forwarded signals to the process group of each process below it whose parent is bwrap
-  (`apps.close` stays a clean SIGTERM first).
+- `--new-session` puts the app out of reach of the reaper's group signal, so the reaper sends
+  forwarded signals to the process group of each process below it whose parent is bwrap, and
+  not to bwrap (bwrap dies on SIGTERM and takes the sandbox with it; it gets the signal only
+  before it has started the app). So `apps.close` stays a clean SIGTERM first, an app can still
+  ignore it, and the SIGKILL after `close.timeout_ms` goes to every process below the reaper.
 - **Permissions**: the catalog declares them (`permissions = { gamepad = "required"; mic =
   "optional"; }`, in the app-env manifest entry), `gamepad` (`/dev/input`, `/run/udev`), `mic`
   (`[sandbox] pulse_record_socket` at `pulse/native` instead of `pulse_socket`), `downloads`

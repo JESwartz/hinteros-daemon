@@ -13,8 +13,12 @@
 //! The process must not be started below another reaper with an app id: the outermost one wins.
 //!
 //! A sandboxed app (reaper -> bwrap -> app, see [`crate::sandbox`]) runs in a session of its own
-//! (`bwrap --new-session`), out of reach of the group signal: forwarded signals also go to the
-//! process group of each process below us whose parent is bwrap, so that it can quit cleanly.
+//! (`bwrap --new-session`), out of reach of the group signal: forwarded signals go to the process
+//! group of each process below us whose parent is bwrap, and not to bwrap. bwrap does not handle
+//! SIGTERM: it would die, and with it (`--die-with-parent`, `--unshare-pid`) the whole sandbox, so
+//! the app could not quit cleanly or refuse to quit. Only while bwrap has not started the app
+//! yet does bwrap get the signal. SIGKILL after the close timeout comes from the session daemon
+//! to every process below us.
 
 use std::ffi::CString;
 use std::os::unix::process::CommandExt;
@@ -88,11 +92,25 @@ pub fn sandboxed_apps(procs: &[crate::procs::Proc], root: u32) -> Vec<u32> {
         .collect()
 }
 
-/// Send `sig` to the command's process group and to those of the sandboxed apps below us.
+/// The process groups to forward a signal to: those of the sandboxed apps below `root`, and the
+/// command's own (`child`) unless the command is bwrap and has started its app. bwrap dies on
+/// SIGTERM and takes the sandbox with it, so it gets the signal only before the app exists.
+pub fn signal_groups(procs: &[crate::procs::Proc], root: u32, child: u32) -> Vec<u32> {
+    let apps = sandboxed_apps(procs, root);
+    let child_is_bwrap = procs.iter().any(|p| p.pid == child && p.comm == "bwrap");
+    let mut groups = Vec::new();
+    if !child_is_bwrap || apps.is_empty() {
+        groups.push(child);
+    }
+    groups.extend(apps);
+    groups
+}
+
+/// Send `sig` to the process groups of [`signal_groups`].
 fn forward(child: Pid, sig: Signal) {
-    let _ = kill_process_group(child, sig);
     let me = getpid().as_raw_nonzero().get() as u32;
-    for pid in sandboxed_apps(&crate::procs::list(), me) {
+    let child = child.as_raw_nonzero().get() as u32;
+    for pid in signal_groups(&crate::procs::list(), me, child) {
         if let Some(pid) = Pid::from_raw(pid as i32) {
             let _ = kill_process_group(pid, sig);
         }
@@ -237,6 +255,37 @@ mod tests {
         assert_eq!(sandboxed_apps(&procs, 20), [22]);
         // Not sandboxed: nothing extra.
         assert!(sandboxed_apps(&[p(30, 1, "reaper"), p(31, 30, "jellyfin")], 30).is_empty());
+    }
+
+    #[test]
+    fn signals_the_sandboxed_app_not_bwrap() {
+        use crate::procs::Proc;
+        let p = |pid, ppid, comm: &str| Proc {
+            pid,
+            ppid,
+            comm: comm.into(),
+        };
+        // reaper 10 -> bwrap 11 -> bwrap 12 (pid 1 inside) -> app 13.
+        let sandboxed = [
+            p(10, 1, "reaper"),
+            p(11, 10, "bwrap"),
+            p(12, 11, "bwrap"),
+            p(13, 12, "stubborn-app"),
+        ];
+        assert_eq!(signal_groups(&sandboxed, 10, 11), [13]);
+        // bwrap has not started the app yet (its child is still a bwrap): bwrap gets it.
+        assert_eq!(signal_groups(&sandboxed[..3], 10, 11), [11]);
+        // Not sandboxed: the command's group only.
+        let plain = [p(30, 1, "reaper"), p(31, 30, "jellyfin")];
+        assert_eq!(signal_groups(&plain, 30, 31), [31]);
+        // A command that is not bwrap but runs a bwrap of its own (Steam's FHS env): both.
+        let fhs = [
+            p(40, 1, "reaper"),
+            p(41, 40, "steam"),
+            p(42, 41, "bwrap"),
+            p(43, 42, "steam-runtime"),
+        ];
+        assert_eq!(signal_groups(&fhs, 40, 41), [41, 43]);
     }
 
     #[test]

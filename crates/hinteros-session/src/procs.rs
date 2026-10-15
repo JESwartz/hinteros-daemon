@@ -30,6 +30,12 @@ pub trait ProcessControl: Send {
     }
     /// Whether the Steam client (a process named `steam`) is running.
     fn steam_running(&mut self) -> bool;
+    /// Reapers started on X display `display` (`DISPLAY` in their environment) that are still
+    /// alive: an app display is not free while one is (an app the daemon gave up on, or one
+    /// from before a daemon restart). A reaper lives until every process below it has ended.
+    fn display_users(&mut self, _display: &str) -> Vec<u32> {
+        Vec::new()
+    }
 }
 
 /// One process, as far as we care.
@@ -62,6 +68,19 @@ pub fn is_steam_reaper_cmdline(cmdline: &[u8], app_id: u32) -> bool {
         .position(|a| *a == b"--")
         .map_or(&args[..], |i| &args[..i]);
     before.contains(&&b"SteamLaunch"[..]) && before.contains(&wanted.as_bytes())
+}
+
+/// Whether an environment block (`/proc/<pid>/environ`, NUL-separated) has `DISPLAY` set to
+/// the same X display as `display` (`:3` and `:3.0` are the same).
+pub fn environ_on_display(environ: &[u8], display: &str) -> bool {
+    let Some(want) = crate::sandbox::display_number(display) else {
+        return false;
+    };
+    environ
+        .split(|&b| b == 0)
+        .filter_map(|v| v.strip_prefix(b"DISPLAY="))
+        .filter_map(|v| std::str::from_utf8(v).ok())
+        .any(|v| crate::sandbox::display_number(v) == Some(want))
 }
 
 /// The app id in a reaper command line (`reaper SteamLaunch AppId=<id> -- ...`), if it is one.
@@ -203,6 +222,18 @@ impl ProcessControl for Procs {
     fn steam_running(&mut self) -> bool {
         list().iter().any(|p| p.comm == "steam")
     }
+
+    fn display_users(&mut self, display: &str) -> Vec<u32> {
+        list()
+            .into_iter()
+            .filter(|p| p.comm == "reaper")
+            .filter(|p| {
+                fs::read(format!("/proc/{}/environ", p.pid))
+                    .is_ok_and(|e| environ_on_display(&e, display))
+            })
+            .map(|p| p.pid)
+            .collect()
+    }
 }
 
 /// The processes the daemon started and still has (apps' reapers, the launcher, the
@@ -284,6 +315,17 @@ impl Children {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn environ_display() {
+        let env = b"HOME=/h\0DISPLAY=:3\0XDISPLAY=:4\0";
+        assert!(environ_on_display(env, ":3"));
+        assert!(environ_on_display(env, ":3.0"));
+        assert!(!environ_on_display(env, ":4"));
+        assert!(!environ_on_display(b"DISPLAY=:30", ":3"));
+        assert!(!environ_on_display(b"", ":3"));
+        assert!(!environ_on_display(env, "auto"));
+    }
 
     #[test]
     fn managed_app_is_the_outermost_reaper_above_a_process() {

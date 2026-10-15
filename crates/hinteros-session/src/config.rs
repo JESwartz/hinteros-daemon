@@ -20,7 +20,8 @@
 //! [gamescope]
 //! enable = true
 //! display = ":0"               # gamescope's Xwayland [default: $DISPLAY, else :0]
-//! apps_display = "auto+2"      # the Xwayland for apps under the reaper [default: display]
+//! apps_display = "auto+2"      # the first app display: each app under the reaper gets its own [default: display, shared]
+//! app_displays = 4             # how many, when the compositor did not say ($XDG_RUNTIME_DIR/hinteros/app-displays); the setting's default
 //! wayland_display = "gamescope-0"  # passed to Steam (not to apps) [default: $WAYLAND_DISPLAY, else gamescope-0]
 //! focus_loss_debounce_ms = 1500
 //! unmap_gl_dummies = true      # unmap invisible full-screen override-redirect windows over an app
@@ -658,10 +659,14 @@ impl Default for SteamConfig {
 pub struct GamescopeConfig {
     pub enable: bool,
     pub display: Option<String>,
-    /// The Xwayland for apps (under the reaper: catalog apps, `apps.launch {command}`), so that
-    /// they cannot read or type into the home app and the OSK on `display`. Not Steam (it and
-    /// its games keep `display`). `None`: `display`.
+    /// The first app display (under the reaper: catalog apps, `apps.launch {command}`): each
+    /// app runs on one of its own ([`crate::displays`]), so that it cannot read or type into
+    /// the home app and the OSK on `display`, nor into another app. Not Steam (it and its games
+    /// keep `display`). `None`: `display`, shared by every app.
     pub apps_display: Option<String>,
+    /// How many app displays there are when the compositor did not say, and the default of
+    /// the profile's setting (`apps.displays.set`). 1 to 8.
+    pub app_displays: u32,
     pub wayland_display: Option<String>,
     pub focus_loss_debounce_ms: u64,
     /// Unmap invisible override-redirect windows that cover an app's real window (GTK3 GL
@@ -675,6 +680,7 @@ impl Default for GamescopeConfig {
             enable: true,
             display: None,
             apps_display: None,
+            app_displays: 4,
             wayland_display: None,
             focus_loss_debounce_ms: 1500,
             unmap_gl_dummies: true,
@@ -1300,6 +1306,10 @@ impl Config {
             );
         }
         ensure!(
+            (1..=8).contains(&self.gamescope.app_displays),
+            "gamescope.app_displays must be 1 to 8"
+        );
+        ensure!(
             (0.0..1.0).contains(&self.pointer.activity_deadzone),
             "pointer.activity_deadzone must be in [0, 1)"
         );
@@ -1617,6 +1627,12 @@ mod tests {
             "no gamescope: apps inherit the env"
         );
         assert_eq!(Config::default().apps_display_setting(), None);
+        let c = Config::parse("[gamescope]\napp_displays = 6\n").unwrap();
+        assert_eq!(c.gamescope.app_displays, 6);
+        assert_eq!(Config::default().gamescope.app_displays, 4);
+        for bad in [0, 9] {
+            assert!(Config::parse(&format!("[gamescope]\napp_displays = {bad}\n")).is_err());
+        }
     }
 
     #[test]

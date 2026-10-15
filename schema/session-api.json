@@ -181,6 +181,37 @@
         { "name": "unknown app", "params": { "id": "nope", "permission": "mic", "granted": false }, "error": { "code": 2006, "message": "no app with id 'nope'" } }
       ]
     },
+    "apps.displays.get": {
+      "summary": "0.18: how many apps can run at once. Each app the daemon starts gets an X display of its own, from a fixed set.",
+      "description": "count: the setting, which the next session starts with (kept per profile in $XDG_STATE_HOME/hinteros/app-displays; default 4). active: the number this session started with (gamescope makes its Xwaylands at start only), null when apps do not get displays of their own (no gamescope; then nothing limits them). Steam and its games never use one. A display is free again once every process of its app has ended. apps.launch answers no_app_display while all are in use.",
+      "since": "0.18",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "$ref": "#/$defs/AppDisplays" },
+      "errors": [],
+      "examples": [
+        { "name": "four", "params": {}, "result": { "count": 4, "active": 4, "min": 1, "max": 8 } },
+        { "name": "changed, not applied yet", "params": {}, "result": { "count": 6, "active": 4, "min": 1, "max": 8 } },
+        { "name": "no gamescope", "params": {}, "result": { "count": 4, "active": null, "min": 1, "max": 8 } }
+      ]
+    },
+    "apps.displays.set": {
+      "summary": "0.18: set how many apps can run at once. Applies at the next session start (session.restart).",
+      "description": "Saves count for this profile and answers with apps.displays.get's result: active stays what this session started with, so count != active means a session restart is needed. invalid_params for a count outside min..max.",
+      "since": "0.18",
+      "params": {
+        "type": "object",
+        "required": ["count"],
+        "additionalProperties": false,
+        "properties": {
+          "count": { "type": "integer", "minimum": 1, "maximum": 8 }
+        }
+      },
+      "result": { "type": "object", "$ref": "#/$defs/AppDisplays" },
+      "errors": [],
+      "examples": [
+        { "name": "more", "params": { "count": 6 }, "result": { "count": 6, "active": 4, "min": 1, "max": 8 } }
+      ]
+    },
     "games.list": {
       "summary": "Installed Steam games of the session user, read from Steam's library on disk.",
       "description": "Read from the Steam directory (~/.local/share/Steam, else ~/.steam/steam; configurable): every library in steamapps/libraryfolders.vdf and its steamapps/appmanifest_<appid>.acf files. Steam tools (Proton, Steam Linux Runtime, Steamworks Common Redistributables, ...) are left out. Empty when Steam is not installed. Sorted by name. Launch a game with apps.launch {url: 'steam://rungameid/<appid>'}. games_changed says when to query again.",
@@ -281,7 +312,7 @@
     },
     "apps.launch": {
       "summary": "Start an app and give it focus. Returns once it is spawned, before it shows a window.",
-      "description": "Exactly one of: 'id' (an app from apps.list), 'command' (argv, run as the session user), or 'url' (a Steam game, handed to the running Steam client; use it for games.list entries). If the app is already running it is focused instead and the result describes the running instance. Its windows are shown as soon as they appear; until then the launcher stays visible. Progress is reported through app_started, focus_changed and app_exited. The built-in id 'steam' opens Steam's Big Picture mode (steam://open/bigpicture, or 'steam -gamepadui' when Steam is not running) and shows Steam's own windows; it runs as the app 'steam' with source 'steam_client'. A Steam game's name comes from its Steam library manifest when it is installed.",
+      "description": "Exactly one of: 'id' (an app from apps.list), 'command' (argv, run as the session user), or 'url' (a Steam game, handed to the running Steam client; use it for games.list entries). If the app is already running it is focused instead and the result describes the running instance. Its windows are shown as soon as they appear; until then the launcher stays visible. Progress is reported through app_started, focus_changed and app_exited. The built-in id 'steam' opens Steam's Big Picture mode (steam://open/bigpicture, or 'steam -gamepadui' when Steam is not running) and shows Steam's own windows; it runs as the app 'steam' with source 'steam_client'. A Steam game's name comes from its Steam library manifest when it is installed. 0.18: an app the daemon starts itself (from apps.list, or a command) gets an X display of its own (apps.displays.get); while all are in use it is not started: no_app_display names the running apps that hold one (close one with apps.close, wait for its app_exited, then launch again).",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -311,7 +342,7 @@
           "app": { "$ref": "#/$defs/RunningApp" }
         }
       },
-      "errors": ["app_not_found", "app_launch_failed", "terms_required"],
+      "errors": ["app_not_found", "app_launch_failed", "terms_required", "no_app_display"],
       "examples": [
         {
           "name": "steam game",
@@ -342,6 +373,18 @@
           "name": "unknown app",
           "params": { "id": "nope" },
           "error": { "code": 2001, "message": "no app with id 'nope'" }
+        },
+        {
+          "name": "every app display in use",
+          "params": { "id": "youtube" },
+          "error": {
+            "code": 2009,
+            "message": "every app display is in use (2)",
+            "data": { "apps": [
+              { "id": "cmd-1", "name": "Kodi", "source": "command", "gamescope_app_id": 4100000001, "pid": 4200 },
+              { "id": "jellyfin", "name": "Jellyfin", "source": "command", "gamescope_app_id": 4100000002, "pid": 4201 }
+            ] }
+          }
         },
         {
           "name": "spawn failed",
@@ -5117,6 +5160,19 @@
     "unknown_app": { "code": 2006, "since": "0.18", "summary": "apps.set_permission: the app is not installed and not in the catalog." },
     "unknown_permission": { "code": 2007, "since": "0.18", "summary": "apps.set_permission: the app does not declare this permission (or it is not enforced on this box)." },
     "permission_required": { "code": 2008, "since": "0.18", "summary": "apps.set_permission: a required permission cannot be denied." },
+    "no_app_display": {
+      "code": 2009,
+      "since": "0.18",
+      "summary": "apps.launch: every app display is in use (apps.displays.get). apps: the running apps that hold one; closing one frees it once it has exited (app_exited).",
+      "data": {
+        "type": "object",
+        "required": ["apps"],
+        "additionalProperties": false,
+        "properties": {
+          "apps": { "type": "array", "items": { "$ref": "#/$defs/RunningApp" } }
+        }
+      }
+    },
     "permission_denied": {
       "code": 3002,
       "since": "0.6",
@@ -5507,6 +5563,18 @@
           }
         },
         "permissions": { "description": "0.18: what the app may use in its sandbox, in catalog order. Empty for Steam and for apps that run without a sandbox.", "type": "array", "items": { "$ref": "#/$defs/AppPermission" } }
+      }
+    },
+    "AppDisplays": {
+      "description": "0.18: how many apps can run at once (apps.displays.get).",
+      "type": "object",
+      "required": ["count", "active", "min", "max"],
+      "additionalProperties": false,
+      "properties": {
+        "count": { "description": "The setting: what the next session starts with.", "type": "integer", "minimum": 1, "maximum": 8 },
+        "active": { "description": "What this session has; null: apps do not get displays of their own.", "oneOf": [{ "type": "integer", "minimum": 1, "maximum": 8 }, { "type": "null" }] },
+        "min": { "type": "integer", "minimum": 1 },
+        "max": { "type": "integer", "minimum": 1 }
       }
     },
     "PermissionName": {

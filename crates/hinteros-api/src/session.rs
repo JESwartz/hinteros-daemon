@@ -209,6 +209,45 @@ impl Method for AppsSetPermission {
     type Result = AppsSetPermissionResult;
 }
 
+/// 0.18: the fewest and most app displays (`apps.displays.set`).
+pub const APP_DISPLAYS_MIN: u32 = 1;
+pub const APP_DISPLAYS_MAX: u32 = 8;
+
+/// 0.18: how many apps can run at once, each on an X display of its own (`apps.displays.*`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppDisplays {
+    /// The setting: the number of app displays the next session starts with.
+    pub count: u32,
+    /// The number this session has (fixed when it started); `None` when apps do not get
+    /// displays of their own (no gamescope).
+    #[serde(deserialize_with = "nullable_u32")]
+    pub active: Option<u32>,
+    pub min: u32,
+    pub max: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsDisplaysGetParams {}
+
+pub struct AppsDisplaysGet;
+impl Method for AppsDisplaysGet {
+    const NAME: &'static str = "apps.displays.get";
+    type Params = AppsDisplaysGetParams;
+    type Result = AppDisplays;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsDisplaysSetParams {
+    pub count: u32,
+}
+
+pub struct AppsDisplaysSet;
+impl Method for AppsDisplaysSet {
+    const NAME: &'static str = "apps.displays.set";
+    type Params = AppsDisplaysSetParams;
+    type Result = AppDisplays;
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HomePressedParams {}
 
@@ -847,6 +886,8 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<Unsubscribe>(),
         MethodInfo::of::<AppsList>(),
         MethodInfo::of::<AppsSetPermission>(),
+        MethodInfo::of::<AppsDisplaysGet>(),
+        MethodInfo::of::<AppsDisplaysSet>(),
         MethodInfo::of::<AppsLaunch>(),
         MethodInfo::of::<AppsRunning>(),
         MethodInfo::of::<AppsFocus>(),
@@ -994,6 +1035,10 @@ fn nullable<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D:
 
 fn nullable_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
     Option::<u64>::deserialize(d)
+}
+
+fn nullable_u32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
+    Option::<u32>::deserialize(d)
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -19,6 +19,7 @@ use hinteros_api::session;
 use hinteros_api::{Method, system};
 use hinteros_session::apps::{ProcessSpawner, SandboxSettings, which};
 use hinteros_session::config::{Cli, Config};
+use hinteros_session::displays::DisplayPool;
 use hinteros_session::focus::gamescope::{
     GamescopeFocus, WatchOptions, spawn_dummies_watcher, spawn_watcher,
 };
@@ -169,11 +170,12 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         hinteros_session::lan::LanFilter::new(cgroups)
     });
     let apps_display = config.apps_display_setting();
+    let displays = DisplayPool::new(apps_display.clone(), config.gamescope.app_displays);
     let mut spawner = ProcessSpawner::new(exe.clone(), env.clone(), exit_tx)
         .with_children(children.clone())
-        .with_apps_display(apps_display.clone());
+        .with_app_displays(apps_display.is_some());
     if let Some(d) = &apps_display {
-        info!(display = %d, "apps run on their own Xwayland");
+        info!(first = %d, count = ?displays.active(), "each app runs on an Xwayland of its own");
     }
     if config.sandbox.enable {
         info!(bwrap = %config.sandbox.bwrap.display(), "catalog apps run sandboxed");
@@ -201,11 +203,24 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
             unmap_gl_dummies: config.gamescope.unmap_gl_dummies,
         };
         spawn_watcher(dpy.clone(), Duration::from_secs(1), opts, tx);
-        if let Some(apps) = apps_display
+        if let Some(first) = apps_display
             .clone()
             .filter(|_| config.gamescope.unmap_gl_dummies)
         {
-            spawn_dummies_watcher(apps, Duration::from_secs(1));
+            // One per app display this session may have (the number is read each time: the
+            // compositor may write it after we started).
+            for i in 0..hinteros_api::session::APP_DISPLAYS_MAX {
+                let pool = displays.clone();
+                let first = first.clone();
+                spawn_dummies_watcher(
+                    move || {
+                        (i < pool.active()?)
+                            .then(|| hinteros_session::displays::slot_setting(&first, i))
+                            .flatten()
+                    },
+                    Duration::from_secs(1),
+                );
+            }
         }
         Box::new(GamescopeFocus::new(dpy, config.launcher.app_id))
     } else {
@@ -296,7 +311,8 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         Box::new(spawner),
         Box::new(Procs),
         events.clone(),
-    );
+    )
+    .with_displays(displays);
     // gamescope's pointer is only ours to hide under gamescope.
     let shell = if config.gamescope.enable {
         shell.with_cursor(Box::new(pointer::CommandCursor {

@@ -26,6 +26,8 @@ pub enum ErrorCode {
     UnknownPermission,
     /// 0.18: `apps.set_permission`: a required permission cannot be denied.
     PermissionRequired,
+    /// 0.18: `apps.launch`: every app display is in use.
+    NoAppDisplay,
     SystemUnavailable,
     PermissionDenied,
     JobFailed,
@@ -69,6 +71,7 @@ impl ErrorCode {
         Self::UnknownApp,
         Self::UnknownPermission,
         Self::PermissionRequired,
+        Self::NoAppDisplay,
         Self::SystemUnavailable,
         Self::PermissionDenied,
         Self::JobFailed,
@@ -151,6 +154,7 @@ impl ErrorCode {
             Self::UnknownApp => 2006,
             Self::UnknownPermission => 2007,
             Self::PermissionRequired => 2008,
+            Self::NoAppDisplay => 2009,
             Self::SystemUnavailable => 3001,
             Self::PermissionDenied => 3002,
             Self::JobFailed => 3003,
@@ -194,6 +198,7 @@ impl ErrorCode {
             Self::UnknownApp => "unknown_app",
             Self::UnknownPermission => "unknown_permission",
             Self::PermissionRequired => "permission_required",
+            Self::NoAppDisplay => "no_app_display",
             Self::SystemUnavailable => "system_unavailable",
             Self::PermissionDenied => "permission_denied",
             Self::JobFailed => "job_failed",

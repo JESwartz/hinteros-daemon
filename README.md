@@ -811,7 +811,7 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.9 (0.9: `keyboard_home`, see "Keyboard Home" below; channel switches to a verified, confirmed revision, see "Channel switches" below, and the admin PIN is refused until a reboot after 10 wrong tries, `pin_required {reboot_required}`, see "Admin PIN limit" below; 0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.10 (0.10: a build's own percent, `building.percent`, see "Job progress" below; 0.9: `keyboard_home`, see "Keyboard Home" below; channel switches to a verified, confirmed revision, see "Channel switches" below, and the admin PIN is refused until a reboot after 10 wrong tries, `pin_required {reboot_required}`, see "Admin PIN limit" below; 0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
 box-wide actions, `guest.end`, rollback re-adds box features; see "Profiles and per-profile apps" below)
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
@@ -1510,6 +1510,16 @@ and its phase (`setPhase`, without `Phase`: `unpack`, `configure`, `build`, `ins
 bytes; builds), each weighted equally; it never goes back (when nix finds more work it holds,
 then covers the rest of the way) and stays below 100 until nix ends. It is rough: derivations
 differ hugely in build time, so the count is what the launcher shows prominently.
+
+`building.percent` (system API 0.10, session API 0.18) is how far that one derivation is, from
+the last standard stdenv phase it started: unpack 0, patch 5, updateAutotoolsGnuConfigScripts 8,
+configure 10, build 20, check 80, install 88, fixup 94, installCheck 98, dist 99 (`PHASES`). An
+unknown phase keeps the last value, it never goes back and stays below 100; absent before the
+first standard phase and for builders without phases (`runCommand`, trivial builders). The
+builds part of the job's `percent` is `(builds_done + the running builds' fractions) /
+builds_total`. Nix counts a build as done just before its build activity stops: the most
+advanced running build then stops counting by its fraction; a build that stops before nix counts
+it counts as 1 until nix does.
 
 ### Heartbeat (`runner.rs`, `jobs.rs`)
 

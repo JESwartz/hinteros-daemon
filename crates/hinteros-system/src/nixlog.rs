@@ -5,6 +5,9 @@
 //! 104 set phase `[phase]`, 105 progress `[done, expected, running, failed]`, 106 set expected
 //! `[activity type, expected]`. A build activity (105) starts with
 //! `fields: [drv path, machine, round, rounds]` and text `building '<drv path>'`.
+//!
+//! How far one build is comes from its stdenv phase ([`PHASES`]); the build part of the job's
+//! percent counts finished builds plus the running builds' fractions.
 
 use std::collections::{HashMap, HashSet};
 
@@ -28,6 +31,21 @@ const MAX_NAME: usize = 80;
 /// The percent stays below this until the nix run has ended.
 const MAX_RUNNING_PERCENT: u8 = 99;
 
+/// The standard stdenv phases in order (names without `Phase`), with the fraction of the build
+/// done when each starts. Compiling (`build`) gets the biggest share.
+const PHASES: &[(&str, f64)] = &[
+    ("unpack", 0.0),
+    ("patch", 0.05),
+    ("updateAutotoolsGnuConfigScripts", 0.08),
+    ("configure", 0.10),
+    ("build", 0.20),
+    ("check", 0.80),
+    ("install", 0.88),
+    ("fixup", 0.94),
+    ("installCheck", 0.98),
+    ("dist", 0.99),
+];
+
 /// A derivation being built.
 #[derive(Debug, Clone)]
 struct Build {
@@ -36,6 +54,11 @@ struct Build {
     name: String,
     version: Option<String>,
     phase: Option<String>,
+    /// How far it is, from the last standard phase it started (never goes back); `None` until
+    /// one starts (builders without phases, such as `runCommand`, never have one).
+    fraction: Option<f64>,
+    /// Nix already counts it in `builds_done` (its activity has not stopped yet).
+    counted: bool,
 }
 
 #[derive(Debug, Default)]
@@ -48,6 +71,8 @@ pub struct Progress {
     payload: HashSet<u64>,
     /// Running build activities.
     builds: HashMap<u64, Build>,
+    /// Build activities that stopped before nix counted them as done.
+    stopped_uncounted: u64,
     seq: u64,
     pub paths_done: u64,
     pub paths_total: u64,
@@ -96,6 +121,16 @@ pub fn drv_name(path: &str) -> Option<(String, Option<String>)> {
         ),
         _ => (clip(full), None),
     })
+}
+
+/// The fraction of a build done when a standard phase starts; `None` for other phases.
+fn phase_fraction(phase: &str) -> Option<f64> {
+    PHASES.iter().find(|(p, _)| *p == phase).map(|(_, f)| *f)
+}
+
+/// A build's fraction as its shown percent: floored, below 100 while it runs.
+fn percent_of(fraction: f64) -> u8 {
+    ((fraction * 100.0).floor() as u8).min(MAX_RUNNING_PERCENT)
 }
 
 /// `unpackPhase` → `unpack`; other names as they are (clipped).
@@ -162,6 +197,8 @@ impl Progress {
                                 name,
                                 version,
                                 phase: None,
+                                fraction: None,
+                                counted: false,
                             },
                         );
                         changed = true;
@@ -191,10 +228,19 @@ impl Progress {
                     self.builds_total = self.builds_done;
                     self.planned_builds = self.builds_done;
                     self.builds_running = 0;
+                    self.stopped_uncounted = 0;
                     return true;
                 }
                 // A finished download's bytes stay counted (the totals stay honest).
-                self.builds.remove(&id).is_some()
+                match self.builds.remove(&id) {
+                    Some(b) => {
+                        if !b.counted {
+                            self.stopped_uncounted += 1;
+                        }
+                        true
+                    }
+                    None => false,
+                }
             }
             Some("result") => {
                 let ty = v["type"].as_u64().unwrap_or(0);
@@ -204,6 +250,12 @@ impl Progress {
                     };
                     let phase = v["fields"][0].as_str().map(phase_name);
                     if phase.is_some() && build.phase != phase {
+                        // An unknown phase keeps the fraction of the last known one.
+                        if let Some(f) = phase.as_deref().and_then(phase_fraction)
+                            && build.fraction.is_none_or(|old| f > old)
+                        {
+                            build.fraction = Some(f);
+                        }
                         build.phase = phase;
                         return true;
                     }
@@ -224,6 +276,7 @@ impl Progress {
                         true
                     }
                     (RES_PROGRESS, Some(ACT_BUILDS)) if fields.len() >= 2 => {
+                        self.count_done(fields[0].saturating_sub(self.builds_done));
                         self.builds_done = fields[0];
                         self.builds_total = fields[1];
                         self.builds_running = fields.get(2).copied().unwrap_or(0);
@@ -288,7 +341,42 @@ impl Progress {
                 name: b.name.clone(),
                 version: b.version.clone(),
                 phase: b.phase.clone(),
+                percent: b.fraction.map(percent_of),
             })
+    }
+
+    /// The running builds' fractions summed (a build without phases counts 0; one nix already
+    /// counts as done does not count), plus 1 for each build that stopped before nix counted
+    /// it (it is done; nix's count follows).
+    fn running_fraction(&self) -> f64 {
+        self.builds
+            .values()
+            .filter(|b| !b.counted)
+            .filter_map(|b| b.fraction)
+            .sum::<f64>()
+            + self.stopped_uncounted as f64
+    }
+
+    /// Nix counted `n` more builds as done. Nix counts a build before its build activity stops;
+    /// so builds that stopped uncounted take the count first, then the most advanced running
+    /// builds (a finished build went through all its phases) stop counting by their fraction.
+    fn count_done(&mut self, n: u64) {
+        let stopped = n.min(self.stopped_uncounted);
+        self.stopped_uncounted -= stopped;
+        for _ in stopped..n {
+            let Some(b) = self
+                .builds
+                .values_mut()
+                .filter(|b| !b.counted)
+                .max_by(|a, b| {
+                    let f = |b: &Build| b.fraction.unwrap_or(0.0);
+                    f(a).total_cmp(&f(b)).then(b.seq.cmp(&a.seq))
+                })
+            else {
+                break;
+            };
+            b.counted = true;
+        }
     }
 
     pub fn detail(&self) -> ProgressDetail {
@@ -313,7 +401,8 @@ impl Progress {
     }
 
     /// The fraction done right now: the mean of the known parts (downloaded paths, else bytes;
-    /// built derivations), each weighted equally. Can go down when nix raises a total.
+    /// built derivations, the running ones by their phase), each weighted equally. Can go down
+    /// when nix raises a total.
     fn fraction(&self) -> Option<f64> {
         let d = self.detail();
         let part = |done: Option<u64>, total: Option<u64>| match (done, total) {
@@ -322,7 +411,12 @@ impl Progress {
         };
         let download =
             part(d.paths_done, d.paths_total).or_else(|| part(d.bytes_done, d.bytes_total));
-        let build = part(d.builds_done, d.builds_total);
+        let build = match (d.builds_done, d.builds_total) {
+            (Some(done), Some(total)) if total > 0 => {
+                Some(((done.min(total) as f64 + self.running_fraction()) / total as f64).min(1.0))
+            }
+            _ => None,
+        };
         match (download, build) {
             (Some(a), Some(b)) => Some((a + b) / 2.0),
             (a, b) => a.or(b),
@@ -558,7 +652,8 @@ mod tests {
             Some(Building {
                 name: "hinteros-daemon".into(),
                 version: Some("0.7.1".into()),
-                phase: None
+                phase: None,
+                percent: None
             })
         );
         assert_eq!(p.percent(), Some(50), "downloads done, no build yet");
@@ -604,9 +699,127 @@ mod tests {
         assert_eq!(p.percent(), Some(99), "below 100 while nix runs");
         assert_eq!(
             percents[percents.len() - 3],
-            66,
-            "1 of 3 built, downloads done"
+            70,
+            "1 of 3 built and one in its build phase, downloads done"
         );
+    }
+
+    fn build_start(id: u64, name: &str) -> String {
+        let drv = format!("/nix/store/{:a<32}-{name}.drv", "h");
+        format!(
+            r#"@nix {{"action":"start","id":{id},"type":105,"text":"building '{drv}'","fields":["{drv}","",1,1]}}"#
+        )
+    }
+
+    fn phase(id: u64, phase: &str) -> String {
+        format!(r#"@nix {{"action":"result","id":{id},"type":104,"fields":["{phase}"]}}"#)
+    }
+
+    fn builds(done: u64, total: u64, running: u64) -> String {
+        format!(
+            r#"@nix {{"action":"result","id":1,"type":105,"fields":[{done},{total},{running},0]}}"#
+        )
+    }
+
+    /// The item's percent and the job's percent follow the stdenv phases; neither goes back;
+    /// an unknown phase keeps the value; a builder without phases has no item percent.
+    #[test]
+    fn phases_advance_the_build() {
+        let mut p = Progress::default();
+        let item = |p: &Progress| p.detail().building.and_then(|b| b.percent);
+        p.line(r#"@nix {"action":"start","id":1,"type":104,"text":"","fields":[]}"#);
+        p.line(&build_start(10, "hinteros-daemon-0.7.1"));
+        p.line(&builds(0, 2, 1));
+        assert_eq!((item(&p), p.percent()), (None, Some(0)), "no phase yet");
+        let mut seen = Vec::new();
+        for (ph, item_percent, percent) in [
+            ("unpackPhase", 0, 0),
+            ("patchPhase", 5, 2),
+            ("updateAutotoolsGnuConfigScriptsPhase", 8, 4),
+            ("configurePhase", 10, 5),
+            ("buildPhase", 20, 10),
+            ("cargoNextestHook", 20, 10),
+            ("checkPhase", 80, 40),
+            ("configurePhase", 80, 40),
+            ("installPhase", 88, 44),
+            ("fixupPhase", 94, 47),
+            ("installCheckPhase", 98, 49),
+            ("distPhase", 99, 49),
+        ] {
+            assert!(p.line(&phase(10, ph)), "{ph} is visible");
+            seen.push((
+                p.detail().building.unwrap().phase.unwrap(),
+                item(&p).unwrap(),
+                p.percent().unwrap(),
+            ));
+            assert_eq!(
+                (item(&p), p.percent()),
+                (Some(item_percent), Some(percent)),
+                "{ph}: {seen:?}"
+            );
+        }
+        assert_eq!(
+            seen[5].0, "cargoNextestHook",
+            "the phase name still changes"
+        );
+        // Nix counts it done before its activity stops: it does not count twice.
+        p.line(&builds(1, 2, 0));
+        assert_eq!(p.percent(), Some(50));
+        p.line(r#"@nix {"action":"stop","id":10}"#);
+        assert_eq!(p.percent(), Some(50));
+
+        // A builder without phases (runCommand) has no item percent, also after an unknown one.
+        p.line(&build_start(11, "etc"));
+        p.line(&builds(1, 2, 1));
+        assert_eq!((item(&p), p.percent()), (None, Some(50)));
+        p.line(&phase(11, "customPhase"));
+        assert_eq!(item(&p), None, "an unknown first phase gives no percent");
+        assert_eq!(
+            p.detail().building.unwrap().phase.as_deref(),
+            Some("custom")
+        );
+        p.line(&builds(2, 2, 0));
+        p.line(r#"@nix {"action":"stop","id":11}"#);
+        assert_eq!(p.percent(), Some(99), "below 100 while nix runs");
+    }
+
+    /// Several builds at once: each running build counts by its phase; the one shown is the
+    /// most recent; a build that stops before nix counts it is not counted twice either.
+    #[test]
+    fn several_running_builds() {
+        let mut p = Progress::default();
+        p.line(r#"@nix {"action":"start","id":1,"type":104,"text":"","fields":[]}"#);
+        p.line(&builds(0, 4, 0));
+        p.line(&build_start(10, "a-1.0"));
+        p.line(&build_start(11, "b-1.0"));
+        p.line(&builds(0, 4, 2));
+        p.line(&phase(10, "buildPhase"));
+        p.line(&phase(11, "checkPhase"));
+        let shown = |p: &Progress| {
+            let b = p.detail().building.unwrap();
+            (b.name, b.percent)
+        };
+        assert_eq!(shown(&p), ("b".into(), Some(80)));
+        // (0 + 0.2 + 0.8) / 4
+        assert_eq!(p.percent(), Some(25));
+        p.line(&phase(11, "fixupPhase"));
+        assert_eq!(p.percent(), Some(28));
+        // b is done (nix counts it first): a still counts by its phase.
+        p.line(&builds(1, 4, 1));
+        assert_eq!(p.percent(), Some(30));
+        p.line(r#"@nix {"action":"stop","id":11}"#);
+        assert_eq!(p.percent(), Some(30));
+        assert_eq!(shown(&p), ("a".into(), Some(20)));
+        // A third build stops before nix counts it (the order may differ): it counts as done.
+        p.line(&build_start(12, "c-1.0"));
+        p.line(&builds(1, 4, 2));
+        p.line(&phase(12, "installPhase"));
+        assert_eq!(p.percent(), Some(52), "(1 + 0.2 + 0.88) / 4");
+        p.line(r#"@nix {"action":"stop","id":12}"#);
+        assert_eq!(p.percent(), Some(55), "(1 + 0.2 + 1) / 4");
+        p.line(&builds(2, 4, 1));
+        assert_eq!(p.percent(), Some(55), "(2 + 0.2) / 4: a still counts");
+        assert_eq!(shown(&p), ("a".into(), Some(20)));
     }
 
     #[test]
@@ -691,6 +904,7 @@ mod tests {
         let mut percents = Vec::new();
         let mut names = Vec::new();
         let mut phases = Vec::new();
+        let mut items = Vec::new();
         for l in log.lines() {
             p.line(l);
             percents.extend(p.percent());
@@ -702,6 +916,11 @@ mod tests {
                     && phases.last() != Some(&ph)
                 {
                     phases.push(ph);
+                }
+                if let Some(i) = b.percent
+                    && items.last() != Some(&i)
+                {
+                    items.push(i);
                 }
             }
         }
@@ -728,5 +947,6 @@ mod tests {
         assert_eq!(percents.last(), Some(&99), "its final value: {percents:?}");
         assert_eq!(p.percent(), Some(99));
         assert!(percents.contains(&50), "1 of 2 built: {percents:?}");
+        assert_eq!(items, [5, 8, 10, 20, 88, 94], "the probe's phases");
     }
 }

@@ -4639,14 +4639,14 @@
             "job_id": "3f9a0c2b7e4d1a65",
             "kind": "update_apply",
             "stage": "building",
-            "percent": 58,
+            "percent": 59,
             "detail": {
               "paths_done": 30,
               "paths_total": 30,
               "builds_done": 2,
               "builds_total": 12,
               "builds_running": 1,
-              "building": { "name": "hinteros-daemon", "version": "0.7.1", "phase": "build" }
+              "building": { "name": "hinteros-daemon", "version": "0.7.1", "phase": "build", "percent": 20 }
             },
             "started_at": 1791300000,
             "last_activity_at": 1791300412
@@ -6200,7 +6200,8 @@
       "properties": {
         "name": { "type": "string", "maxLength": 320 },
         "version": { "type": "string", "maxLength": 320 },
-        "phase": { "type": "string", "maxLength": 160 }
+        "phase": { "type": "string", "maxLength": 160 },
+        "percent": { "description": "System API 0.10, session API 0.18: how far this derivation is, from the last standard stdenv phase it started (unpack 0, patch 5, configure 10, build 20, check 80, install 88, fixup 94, installCheck 98, dist 99; other phases keep the value); never goes back; below 100. Absent before the first standard phase and for builders without phases.", "type": "integer", "minimum": 0, "maximum": 99 }
       }
     },
     "SubjectProfile": {

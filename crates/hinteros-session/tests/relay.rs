@@ -92,6 +92,19 @@ fn fake_system(
                                     }),
                                 );
                                 write_message(&mut w, &ev).await.unwrap();
+                                // System API 0.10: a build's own percent.
+                                let ev = jsonrpc::notification(
+                                    "job_progress",
+                                    json!({
+                                        "job_id": "0123456789abcdef", "kind": "apps_install",
+                                        "stage": "building", "percent": 59,
+                                        "started_at": 1791300000,
+                                        "detail": {"builds_done": 2, "builds_total": 12,
+                                            "builds_running": 1,
+                                            "building": {"name": "moonlight-qt", "phase": "build", "percent": 20}}
+                                    }),
+                                );
+                                write_message(&mut w, &ev).await.unwrap();
                                 let ev = jsonrpc::notification(
                                     "time_zone_changed",
                                     json!({
@@ -130,7 +143,7 @@ async fn relays_methods_errors_and_job_events() {
     call(
         &mut launcher,
         "subscribe",
-        json!({"events": ["job_started", "job_finished", "time_zone_changed", "home_pressed"]}),
+        json!({"events": ["job_started", "job_progress", "job_finished", "time_zone_changed", "home_pressed"]}),
     )
     .await
     .unwrap();
@@ -149,6 +162,10 @@ async fn relays_methods_errors_and_job_events() {
         params["subject"]["apps"][0]["name"], "Moonlight",
         "relayed unchanged"
     );
+    let (name, params) = next_event(&mut launcher).await;
+    assert_eq!(name, "job_progress");
+    assert_eq!(params["detail"]["building"]["percent"], 20);
+    assert_eq!(params["percent"], 59);
     // 0.16: and the time zone event.
     let (name, params) = next_event(&mut launcher).await;
     assert_eq!(name, "time_zone_changed");

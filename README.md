@@ -1742,9 +1742,10 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   `--unshare-all --share-net --die-with-parent --new-session`; read-only `/nix/store`, `/etc`,
   `/sys`, `/run/current-system`, `/run/opengl-driver{,-32}`, `/run/systemd/resolve` and
   `/run/nscd` if present, `/bin` and `/usr` if present, the profile's app env (the
-  `[apps] profile` link, resolved); a new `/proc`, a minimal `/dev` with `/dev/dri`, empty `/tmp`
-  and `/run`. Home: `~/.local/share/hinteros/sandbox/<id>` (created 0700 before the spawn) at
-  the real `$HOME` path; the app's data starts fresh there and `firefox_profile` is resolved
+  `[apps] profile` link, resolved); a new `/proc`, a minimal `/dev` with the GPU render nodes
+  (`/dev/dri/renderD*`, not the display nodes `card*`), empty `/tmp` and `/run`.
+  Home: `~/.local/share/hinteros/sandbox/<id>` (created 0700 before the spawn) at the real `$HOME`
+  path; the app's data starts fresh there and `firefox_profile` is resolved
   inside it (icons read the favicon there). Runtime dir: a new `$XDG_RUNTIME_DIR` with only
   `pulse/native` and, for web and keyboard-profile apps, `hinteros/osk.sock`. Display: only
   `/tmp/.X11-unix/X<n>`; `DISPLAY`, `HOME`, `XDG_RUNTIME_DIR` set, Wayland displays, D-Bus
@@ -1754,6 +1755,17 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   it is missing the launch fails (`app_launch_failed`, "no sandbox: bwrap not found"), it never
   runs the app unsandboxed. The daemon's unit must not have `ProtectKernelTunables` (bwrap
   cannot mount `/proc` then).
+- **System call filter** (`sandbox/seccomp.rs`): bwrap loads a seccomp BPF program (`--seccomp
+  <fd>`, a pipe the daemon fills and the reaper and bwrap inherit) before it starts the app. A
+  Flatpak-style denylist: keyrings, io_uring, `bpf`, `perf_event_open`, `userfaultfd`, NUMA
+  policy, modules, kexec, reboot, swap, clocks, `syslog`, quotas, `acct`, `open_by_handle_at`,
+  `iopl`/`ioperm`, `vhangup`, obsolete calls (`EPERM`); the new mount API (`ENOSYS`); `ioctl`
+  `TIOCSTI`/`TIOCLINUX`; `personality` other than Linux/32-bit/`UNAME26`/query; sockets other
+  than Unix, IPv4, IPv6, netlink (`EAFNOSUPPORT`). Only the x86-64 ABI (i386 kills the process,
+  x32 gets `ENOSYS`). User namespaces, `mount`, `pivot_root`, `chroot` stay allowed (Firefox,
+  Chromium and Plex's FHS bwrap sandbox themselves inside). No filter, no launch
+  (`app_launch_failed`, "no sandbox: no system call filter"); bwrap that cannot load it starts
+  nothing.
 - `--new-session` puts the app out of reach of the reaper's group signal, so the reaper sends
   forwarded signals to the process group of each process below it whose parent is bwrap, and
   not to bwrap (bwrap dies on SIGTERM and takes the sandbox with it; it gets the signal only

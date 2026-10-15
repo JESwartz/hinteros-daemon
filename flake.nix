@@ -191,12 +191,14 @@
             cargoTestExtraArgs = "--workspace";
             # Stand-ins for gamescope's Xwayland (Xvfb) and the system bus (a private
             # dbus-daemon, also for the system service's fake logind/polkit/systemd), plus git
-            # and ssh-keygen for update verification; required here, optional elsewhere.
+            # and ssh-keygen for update verification; required here, optional elsewhere. bwrap for
+            # the system call filter (its test skips where bwrap cannot run).
             nativeCheckInputs = [
               pkgs.xvfb
               pkgs.dbus
               pkgs.git
               pkgs.openssh
+              pkgs.bubblewrap
             ];
             HINTEROS_REQUIRE_TEST_TOOLS = "1";
           }

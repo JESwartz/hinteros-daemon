@@ -93,10 +93,22 @@ struct Composite {
     profile: Arc<std::sync::Mutex<String>>,
     calls: Calls,
     faults: Faults,
+    /// While true, reading `Name` and `SourceDevicePaths` (what the daemon classifies a pad by)
+    /// does not return.
+    held: Hold,
 }
 
+/// Shared by all pads of a [`Fake`] (see [`Composite::held`]).
+type Hold = Arc<tokio::sync::watch::Sender<bool>>;
+
 impl Composite {
-    fn new(mode: Arc<AtomicU32>, name: &str, targets: Vec<String>, calls: Calls) -> Self {
+    fn new(
+        mode: Arc<AtomicU32>,
+        name: &str,
+        targets: Vec<String>,
+        calls: Calls,
+        held: Hold,
+    ) -> Self {
         Self {
             mode,
             name: name.into(),
@@ -104,6 +116,15 @@ impl Composite {
             profile: Arc::new(std::sync::Mutex::new("Default".into())),
             calls,
             faults: Faults::default(),
+            held,
+        }
+    }
+
+    /// Wait while [`Self::held`], for a single `Get` (not the whole object in
+    /// `GetManagedObjects`, which the daemon reads to find the pads).
+    async fn hold(&self, header: Option<zbus::message::Header<'_>>) {
+        if header.is_some_and(|h| h.member().is_some_and(|m| m.as_str() == "Get")) {
+            let _ = self.held.subscribe().wait_for(|h| !*h).await;
         }
     }
 }
@@ -122,7 +143,8 @@ impl Composite {
         self.mode.store(value, Ordering::SeqCst);
     }
     #[zbus(property)]
-    fn name(&self) -> String {
+    async fn name(&self, #[zbus(header)] header: Option<zbus::message::Header<'_>>) -> String {
+        self.hold(header).await;
         self.name.clone()
     }
     // Named like InputPlumber's (zbus derives `DbusDevices` from `dbus_devices`).
@@ -132,7 +154,11 @@ impl Composite {
         self.targets.clone()
     }
     #[zbus(property)]
-    fn source_device_paths(&self) -> Vec<String> {
+    async fn source_device_paths(
+        &self,
+        #[zbus(header)] header: Option<zbus::message::Header<'_>>,
+    ) -> Vec<String> {
+        self.hold(header).await;
         vec!["/dev/input/event99".into()]
     }
     #[zbus(property)]
@@ -230,6 +256,8 @@ struct Fake {
     faults: Faults,
     /// Device 0's loaded profile.
     profile: Arc<std::sync::Mutex<String>>,
+    /// Every pad's classify gate ([`Composite::held`]).
+    held: Hold,
 }
 
 impl Fake {
@@ -245,9 +273,16 @@ impl Fake {
     /// ([`Self::export_manager`]), as InputPlumber looks for a moment after it starts.
     async fn start_full(address: &str, name: &str, with_manager: bool) -> Self {
         let manage_all = Arc::new(AtomicBool::new(false));
+        let held = Hold::default();
         let calls = Calls::default();
         let mode = Arc::new(AtomicU32::new(0));
-        let composite = Composite::new(mode.clone(), name, vec![TARGET.into()], calls.clone());
+        let composite = Composite::new(
+            mode.clone(),
+            name,
+            vec![TARGET.into()],
+            calls.clone(),
+            held.clone(),
+        );
         let (faults, profile) = (composite.faults.clone(), composite.profile.clone());
         let conn = zbus::connection::Builder::address(address)
             .unwrap()
@@ -269,6 +304,7 @@ impl Fake {
             calls,
             faults,
             profile,
+            held,
         };
         if with_manager {
             fake.export_manager().await;
@@ -312,7 +348,13 @@ impl Fake {
             .object_server()
             .at(
                 path,
-                Composite::new(mode.clone(), "Generic Gamepad", vec![], Calls::default()),
+                Composite::new(
+                    mode.clone(),
+                    "Generic Gamepad",
+                    vec![],
+                    Calls::default(),
+                    self.held.clone(),
+                ),
             )
             .await
             .unwrap();
@@ -332,7 +374,13 @@ impl Fake {
             .object_server()
             .at(
                 path,
-                Composite::new(mode.clone(), name, vec![target.into()], Calls::default()),
+                Composite::new(
+                    mode.clone(),
+                    name,
+                    vec![target.into()],
+                    Calls::default(),
+                    self.held.clone(),
+                ),
             )
             .await
             .unwrap();
@@ -449,6 +497,54 @@ async fn inputplumber_modes_nav_and_home() {
     ready(&fake, 1, 2).await;
     fake.press("ui_left", 1.0).await;
     assert_eq!(nav(&mut c).await, ("left".into(), "press".into()));
+}
+
+/// A pad that appears (hotplug, or InputPlumber restarted) starts in InputPlumber's default
+/// mode, NONE: all its input goes to its virtual pad, which sandboxed apps with the `gamepad`
+/// permission can read, also while the launcher asks for a PIN. The daemon sets the mode before
+/// it classifies the pad (several polkit-checked reads on real hardware). Here classifying does
+/// not end until the test lets it. (Two pads that are there when the daemon finds InputPlumber:
+/// a pad plugged in later takes the same path, but the fake cannot add one while a read is
+/// held, as zbus's object server is locked by the read.)
+#[tokio::test(flavor = "multi_thread")]
+async fn new_pad_leaves_default_mode_before_classifying() {
+    let Some(bus) = Bus::start() else { return };
+    let mut fake = Fake::start(&bus.address).await;
+    fake.add_device().await;
+    fake.held.send_replace(true);
+    let address = bus.address.clone();
+    let d = Daemon::start_with(|dir| {
+        let config = dir.join("session.toml");
+        // No timeout during the test: the held reads must not simply fail.
+        std::fs::write(&config, "[inputplumber]\ncall_timeout_ms = 60000\n").unwrap();
+        vec![
+            "--config".into(),
+            config.into(),
+            "--inputplumber".into(),
+            "--inputplumber-bus".into(),
+            address.into(),
+        ]
+    });
+    // Launcher focused: ALL, while the pads are still being classified.
+    ready(&fake, 0, 2).await;
+    ready(&fake, 1, 2).await;
+
+    // Classified: input reaches the launcher.
+    let mut c = d.client().await;
+    call(&mut c, "subscribe", json!({ "events": ["input_nav"] }))
+        .await
+        .unwrap();
+    fake.held.send_replace(false);
+    eventually("the pads classified", async || {
+        d.log()
+            .matches("ui_action/ui_context labels")
+            .nth(1)
+            .map(|_| ())
+    })
+    .await;
+    fake.press("ui_accept", 1.0).await;
+    assert_eq!(nav(&mut c).await, ("accept".into(), "press".into()));
+    assert_eq!((fake.mode(0), fake.mode(1)), (2, 2));
 }
 
 /// The key events written by `--fake-keyboard`, as `(code, down)`.

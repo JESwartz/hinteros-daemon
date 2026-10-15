@@ -1518,8 +1518,8 @@ unknown phase keeps the last value, it never goes back and stays below 100; abse
 first standard phase and for builders without phases (`runCommand`, trivial builders). The
 builds part of the job's `percent` is `(builds_done + the running builds' fractions) /
 builds_total`. Nix counts a build as done just before its build activity stops: the most
-advanced running build then stops counting by its fraction; a build that stops before nix counts
-it counts as 1 until nix does.
+advanced running build then stops counting by its fraction (when another one stops first, it was
+that one); a build that stops before nix counts it counts as 1 until nix does.
 
 ### Heartbeat (`runner.rs`, `jobs.rs`)
 

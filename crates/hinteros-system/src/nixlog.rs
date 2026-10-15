@@ -235,7 +235,16 @@ impl Progress {
                 match self.builds.remove(&id) {
                     Some(b) => {
                         if !b.counted {
-                            self.stopped_uncounted += 1;
+                            // Nix counted another running one: it was this one.
+                            match self
+                                .builds
+                                .values_mut()
+                                .filter(|x| x.counted)
+                                .min_by_key(|x| x.seq)
+                            {
+                                Some(other) => other.counted = false,
+                                None => self.stopped_uncounted += 1,
+                            }
                         }
                         true
                     }
@@ -820,6 +829,16 @@ mod tests {
         p.line(&builds(2, 4, 1));
         assert_eq!(p.percent(), Some(55), "(2 + 0.2) / 4: a still counts");
         assert_eq!(shown(&p), ("a".into(), Some(20)));
+        // A builder without phases is done, but a (more advanced) is taken for it until it
+        // stops: then a counts again.
+        p.line(&build_start(13, "etc"));
+        p.line(&builds(2, 4, 2));
+        p.line(&builds(3, 4, 1));
+        assert_eq!(p.percent(), Some(75));
+        p.line(r#"@nix {"action":"stop","id":13}"#);
+        assert_eq!(p.percent(), Some(80), "(3 + 0.2) / 4");
+        p.line(r#"@nix {"action":"stop","id":10}"#);
+        assert_eq!(p.percent(), Some(99), "a stopped before nix counts it");
     }
 
     #[test]

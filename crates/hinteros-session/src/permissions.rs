@@ -7,8 +7,9 @@
 //! record has every permission (existing installs and starter sets keep working). A required
 //! permission is never denied. A change applies the next time the app starts.
 //!
-//! Only enforced permissions are listed: none while the sandbox is off, and not `mic` while
-//! the sound socket for `mic` is the same as the one every app gets.
+//! Only enforced permissions are listed: none while the sandbox is off, not `mic` while the
+//! sound socket for `mic` is the same as the one every app gets, and not `lan` without the local
+//! network filter (`[sandbox] lan_filter`, [`crate::lan`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -35,6 +36,9 @@ pub struct Grants {
     pub mic: bool,
     /// The profile's `~/Downloads`.
     pub downloads: bool,
+    /// The local network. Always true while `lan` is not enforced: then nothing keeps an app off
+    /// it.
+    pub lan: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +71,7 @@ pub fn enforced(cfg: &SandboxConfig) -> Vec<&'static str> {
         .iter()
         .copied()
         .filter(|p| *p != "mic" || cfg.pulse_record_socket != cfg.pulse_socket)
+        .filter(|p| *p != "lan" || cfg.lan_filter)
         .collect()
 }
 
@@ -126,6 +131,7 @@ impl Permissions {
             gamepad: has("gamepad"),
             mic: has("mic"),
             downloads: has("downloads"),
+            lan: has("lan") || !self.enforced.contains(&"lan"),
         }
     }
 
@@ -261,6 +267,60 @@ mod tests {
             ["gamepad", "downloads"],
             "no record socket"
         );
+        let lan = SandboxConfig {
+            lan_filter: true,
+            ..on()
+        };
+        assert_eq!(enforced(&lan), ["gamepad", "mic", "downloads", "lan"]);
+        let off = SandboxConfig {
+            lan_filter: true,
+            ..SandboxConfig::default()
+        };
+        assert!(enforced(&off).is_empty(), "sandbox off, filter or not");
+    }
+
+    #[test]
+    fn lan_is_granted_only_when_declared_and_not_denied() {
+        let lan = enforced(&SandboxConfig {
+            lan_filter: true,
+            ..on()
+        });
+        let p = Permissions::new(None, lan.clone());
+        let optional = declared(&[("lan", Need::Optional)]);
+        let required = declared(&[("lan", Need::Required)]);
+        let none = declared(&[("gamepad", Need::Required)]);
+        assert!(p.grants("a", &optional).lan, "granted by default");
+        assert!(p.grants("a", &required).lan);
+        assert!(!p.grants("a", &none).lan, "not declared: no local network");
+        assert!(p.set("a", Some(&optional), "lan", false).unwrap());
+        assert!(!p.grants("a", &optional).lan, "denied");
+        assert_eq!(
+            p.set("a", Some(&required), "lan", false)
+                .unwrap_err()
+                .kind()
+                .unwrap(),
+            ErrorCode::PermissionRequired
+        );
+        assert_eq!(
+            p.list("a", &optional),
+            [AppPermission {
+                name: "lan".into(),
+                required: false,
+                granted: false
+            }]
+        );
+        // Not enforced (no filter): not listed, and nothing keeps any app off the network.
+        let p = Permissions::new(None, enforced(&on()));
+        assert!(p.list("a", &optional).is_empty());
+        assert!(p.grants("a", &none).lan && p.grants("a", &optional).lan);
+        assert_eq!(
+            p.set("a", Some(&optional), "lan", false)
+                .unwrap_err()
+                .kind()
+                .unwrap(),
+            ErrorCode::UnknownPermission
+        );
+        assert!(Permissions::default().grants("a", &none).lan);
     }
 
     #[test]
@@ -296,7 +356,9 @@ mod tests {
             Grants {
                 gamepad: true,
                 mic: false,
-                downloads: true
+                downloads: true,
+                // Not enforced here: nothing keeps the app off the local network.
+                lan: true,
             }
         );
         assert_eq!(
@@ -352,7 +414,14 @@ mod tests {
         // Sandbox off: nothing listed, nothing granted.
         let off = Permissions::default();
         assert!(off.list("app", &d).is_empty());
-        assert_eq!(off.grants("app", &d), Grants::default());
+        assert_eq!(
+            off.grants("app", &d),
+            Grants {
+                lan: true,
+                ..Grants::default()
+            },
+            "nothing granted but the network, which nothing restricts then"
+        );
     }
 
     #[test]

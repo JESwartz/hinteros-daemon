@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, ErrorObject, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 9);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 10);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/system-api.json");
@@ -1538,6 +1538,38 @@ impl Event for KeyboardHome {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Local network filter (0.10)
+
+/// Longest cgroup path `lan_filter.set` takes.
+pub const MAX_CGROUP_PATH_BYTES: usize = 512;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LanFilterSetParams {
+    /// The caller's cgroup for apps without `lan`, as in `/proc/self/cgroup`
+    /// (`/user.slice/user-<uid>.slice/user@<uid>.service/...`).
+    pub cgroup: String,
+}
+
+/// `lan_filter.set`: the processes in the caller's cgroup `cgroup` (and below it) cannot reach
+/// the local network (but DNS to the box's resolvers). One cgroup per uid: a new call replaces
+/// it. The session daemon's own call, not relayed.
+pub struct LanFilterSet;
+impl Method for LanFilterSet {
+    const NAME: &'static str = "lan_filter.set";
+    type Params = LanFilterSetParams;
+    type Result = Empty;
+}
+
+/// `lan_filter.clear`: the caller's filter is removed (its session ends).
+pub struct LanFilterClear;
+impl Method for LanFilterClear {
+    const NAME: &'static str = "lan_filter.clear";
+    type Params = NoParams;
+    type Result = Empty;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Jobs
 
 /// Result of a job that changed the system.
@@ -1895,6 +1927,8 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<TimeZoneGet>(),
         MethodInfo::of::<TimeZoneList>(),
         MethodInfo::of::<TimeZoneSet>(),
+        MethodInfo::of::<LanFilterSet>(),
+        MethodInfo::of::<LanFilterClear>(),
         MethodInfo::of::<JobsGet>(),
         MethodInfo::of::<JobsList>(),
         MethodInfo::of::<JobsCancel>(),

@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use hinteros_api::server as api_server;
 use hinteros_api::session;
+use hinteros_api::{Method, system};
 use hinteros_session::apps::{ProcessSpawner, SandboxSettings, which};
 use hinteros_session::config::{Cli, Config};
 use hinteros_session::focus::gamescope::{
@@ -153,6 +154,20 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
     let (exit_tx, exit_rx) = mpsc::unbounded_channel();
     forward(exit_rx, shell_tx.clone(), Msg::ChildExit);
     let children = Children::default();
+    // `lan` (lan.rs): our cgroups before anything is started, so every child starts in our leaf.
+    let lan = (config.sandbox.enable && config.sandbox.lan_filter && !cli.greeter).then(|| {
+        let cgroups = match hinteros_session::lan::Cgroups::setup_here() {
+            Ok(c) => {
+                info!(cgroup = %c.nolan(), "apps without lan start in their own cgroup");
+                Some(c)
+            }
+            Err(e) => {
+                warn!("apps without lan cannot start: {e}");
+                None
+            }
+        };
+        hinteros_session::lan::LanFilter::new(cgroups)
+    });
     let apps_display = config.apps_display_setting();
     let mut spawner = ProcessSpawner::new(exe.clone(), env.clone(), exit_tx)
         .with_children(children.clone())
@@ -169,6 +184,9 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
             app_env: cli.apps_profile.clone().or_else(|| config.apps_profile()),
             osk_socket: Some(osk_socket.clone()),
         });
+        if let Some((filter, _)) = &lan {
+            spawner = spawner.with_lan_filter(filter.clone());
+        }
     }
 
     let osk_pid = Arc::new(AtomicU32::new(0));
@@ -380,6 +398,27 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         hinteros_session::system::Relay::disabled()
     };
 
+    // Ask the system service to filter the nolan cgroup (until it says yes).
+    let lan_filter = lan.map(|(filter, ask)| {
+        let set_relay = relay.clone();
+        tokio::spawn(hinteros_session::lan::run(
+            filter.clone(),
+            ask,
+            move |cgroup| {
+                let relay = set_relay.clone();
+                async move {
+                    let params = serde_json::json!({ "cgroup": cgroup });
+                    relay
+                        .call(system::LanFilterSet::NAME, Some(params))
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.message)
+                }
+            },
+        ));
+        (filter, relay.clone())
+    });
+
     let profiles = hinteros_session::profile::Profiles::spawn(
         relay.clone(),
         shell_tx.clone(),
@@ -462,6 +501,17 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
     children
         .shutdown(Duration::from_millis(config.close.shutdown_grace_ms))
         .await;
+    // No app of ours is left: the system service may forget our cgroup.
+    if let Some((filter, relay)) = lan_filter
+        && filter.nolan().is_some()
+    {
+        let clear = relay.call(system::LanFilterClear::NAME, None);
+        match tokio::time::timeout(Duration::from_secs(5), clear).await {
+            Ok(Ok(_)) => info!("local network filter cleared"),
+            Ok(Err(e)) => warn!("local network filter not cleared: {}", e.message),
+            Err(_) => warn!("local network filter not cleared: no answer"),
+        }
+    }
     Ok(())
 }
 

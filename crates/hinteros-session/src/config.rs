@@ -70,6 +70,8 @@
 //! bwrap = "bwrap"              # a path, or a name looked up in PATH
 //! pulse_socket = "pulse/native"         # sound for apps, relative to XDG_RUNTIME_DIR
 //! pulse_record_socket = "pulse/native"  # sound that may record (mic); the same: no mic permission
+//! lan_filter = false           # apps without `lan` are kept off the local network (see `lan`):
+//!                              # needs Delegate=yes and the system's filter; off: no lan permission
 //!
 //! [[apps]]                     # apps.list entries; launchable with apps.launch {id}
 //! id = "jellyfin"
@@ -570,6 +572,10 @@ pub struct SandboxConfig {
     /// The sound socket apps with `mic` get. The same as `pulse_socket`: `mic` is not enforced,
     /// so it is not listed.
     pub pulse_record_socket: PathBuf,
+    /// Apps without `lan` start in the daemon's `nolan` cgroup, which the system service's
+    /// filter keeps off the local network ([`crate::lan`]). Off: `lan` is not enforced, so it
+    /// is not listed.
+    pub lan_filter: bool,
 }
 
 impl Default for SandboxConfig {
@@ -579,6 +585,7 @@ impl Default for SandboxConfig {
             bwrap: "bwrap".into(),
             pulse_socket: "pulse/native".into(),
             pulse_record_socket: "pulse/native".into(),
+            lan_filter: false,
         }
     }
 }

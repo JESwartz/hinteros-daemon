@@ -15,6 +15,7 @@ pub mod greeter;
 pub mod icons;
 pub mod input;
 pub mod keys;
+pub mod lan;
 pub mod osk;
 pub mod permissions;
 pub mod procs;

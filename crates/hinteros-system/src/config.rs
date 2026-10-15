@@ -97,6 +97,24 @@ pub enum Command {
         #[arg(long, default_value = "/etc/localtime")]
         localtime: PathBuf,
     },
+    /// Load the local network filter (`hinteros-lan-filter.service`, system API 0.10): the
+    /// nftables table `inet hinteros_lan` for the cgroups in `<run-dir>/lan-filter.json`
+    LanFilterApply {
+        #[arg(long, default_value = "/run/hinteros")]
+        run_dir: PathBuf,
+        /// The cgroup v2 root
+        #[arg(long, default_value = "/sys/fs/cgroup")]
+        cgroup_root: PathBuf,
+        /// The nameservers DNS may go to
+        #[arg(long, default_value = "/etc/resolv.conf")]
+        resolv_conf: PathBuf,
+        /// Where the route tables are (`net/route`, `net/ipv6_route`)
+        #[arg(long, default_value = "/proc")]
+        proc_dir: PathBuf,
+        /// The nft binary
+        #[arg(long, default_value = "nft")]
+        nft: PathBuf,
+    },
 }
 
 /// Paths of the helper subcommands (defaults: the box's).
@@ -277,6 +295,13 @@ pub struct ServeArgs {
     /// The link `time_zone.set` points at `<zoneinfo-dir>/<zone>`
     #[arg(long, default_value = "/etc/localtime")]
     pub localtime: PathBuf,
+    /// `lan_filter.*` (system API 0.10): the box has the local network filter
+    /// (`hinteros-lan-filter.service`); without it they fail
+    #[arg(long)]
+    pub lan_filter: bool,
+    /// The cgroup v2 root: `lan_filter.set` checks the caller's cgroup there
+    #[arg(long, default_value = "/sys/fs/cgroup")]
+    pub cgroup_root: PathBuf,
 }
 
 impl ServeArgs {

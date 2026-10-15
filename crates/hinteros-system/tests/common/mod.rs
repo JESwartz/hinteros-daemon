@@ -149,6 +149,8 @@ pub struct FakeState {
     pub tz_cmd: Option<(PathBuf, Vec<String>)>,
     /// The time zone unit's job result instead of running it (e.g. "failed").
     pub tz_result: Option<String>,
+    /// How `hinteros-lan-filter.service` runs (`RestartUnit`): the binary and its arguments.
+    pub lan_cmd: Option<(PathBuf, Vec<String>)>,
     /// Jobs started so far (their ids).
     pub next_job: u32,
     /// logind's `State` per uid (absent: `NoSuchUser`).
@@ -341,6 +343,19 @@ impl Systemd {
         self.freezer("ThawUnit", name, "running")
     }
 
+    async fn restart_unit(
+        &self,
+        name: String,
+        _mode: String,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        if name != "hinteros-lan-filter.service" {
+            return Err(zbus::fdo::Error::Failed(format!("unexpected unit {name}")));
+        }
+        let cmd = self.0.lock().unwrap().lan_cmd.clone();
+        Ok(self.run_helper(name, cmd, None, conn.clone()))
+    }
+
     async fn start_unit(
         &self,
         name: String,
@@ -394,11 +409,26 @@ impl Systemd {
     /// Run `hinteros-system time-zone-apply` like the oneshot unit, then send `JobRemoved`
     /// (after the reply, as systemd does).
     fn start_time_zone_unit(&self, name: String, conn: zbus::Connection) -> OwnedObjectPath {
-        let (cmd, result, n) = {
+        let (cmd, result) = {
+            let s = self.0.lock().unwrap();
+            (s.tz_cmd.clone(), s.tz_result.clone())
+        };
+        self.run_helper(name, cmd, result, conn)
+    }
+
+    /// Run a oneshot helper unit's command (or take `result`), then send `JobRemoved`.
+    fn run_helper(
+        &self,
+        name: String,
+        cmd: Option<(PathBuf, Vec<String>)>,
+        result: Option<String>,
+        conn: zbus::Connection,
+    ) -> OwnedObjectPath {
+        let n = {
             let mut s = self.0.lock().unwrap();
             s.units.push(name.clone());
             s.next_job += 1;
-            (s.tz_cmd.clone(), s.tz_result.clone(), 1000 + s.next_job)
+            1000 + s.next_job
         };
         let path = OwnedObjectPath::try_from(format!("/org/freedesktop/systemd1/job/{n}")).unwrap();
         let job = path.clone();
@@ -407,7 +437,7 @@ impl Systemd {
             let result = match result {
                 Some(r) => r,
                 None => {
-                    let (bin, args) = cmd.expect("time zone command configured");
+                    let (bin, args) = cmd.expect("helper command configured");
                     let ok = tokio::task::spawn_blocking(move || {
                         Command::new(bin)
                             .args(args)

@@ -721,13 +721,15 @@ fn relay_matches_the_system_api() {
         .map(|(k, _)| k.as_str())
         .collect();
     assert_eq!(relayed, marked, "relay table vs schema relay flags");
-    // Every system method except the core ones is relayed.
+    // Every system method except the core ones and the session daemon's own (`lan_filter.*`,
+    // 0.10) is relayed.
     let system_methods: BTreeSet<&str> = y["methods"]
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
         .filter(|m| !["hello", "ping", "subscribe", "unsubscribe"].contains(m))
+        .filter(|m| !m.starts_with("lan_filter."))
         .collect();
     let targets: BTreeSet<&str> = session::RELAY.iter().map(|(_, t)| *t).collect();
     assert_eq!(system_methods, targets);

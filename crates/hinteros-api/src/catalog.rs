@@ -36,7 +36,7 @@ pub fn is_box_feature(s: &str) -> bool {
 
 /// Sandbox permissions an app may declare (`permissions`, optional in format 3), in the order
 /// they are shown. Other names are ignored (not enforced, so not listed).
-pub const PERMISSIONS: &[&str] = &["gamepad", "mic", "downloads"];
+pub const PERMISSIONS: &[&str] = &["gamepad", "mic", "downloads", "lan"];
 
 /// Whether an app needs a permission (`permissions` values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

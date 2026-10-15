@@ -46,13 +46,13 @@ use hinteros_api::server::{decode_params, encode_result};
 use hinteros_api::session::{
     App, AppExitedParams, AppKind, AppSource, AppStartedParams, AppsClose, AppsCloseParams,
     AppsCloseResult, AppsFocus, AppsFocusParams, AppsFocusResult, AppsLaunch, AppsLaunchParams,
-    AppsLaunchResult, AppsList, AppsListResult, AppsRunning, AppsRunningResult, EventName,
-    ExitReason, FocusChangedParams, GamesList, GamesListResult, HomePressedParams, InputNavParams,
-    KEYS_TYPE_MAX_CHARS, KeysAction, KeysActionParams, KeysActionResult, KeysKey, KeysKeyParams,
-    KeysKeyResult, KeysType, KeysTypeParams, KeysTypeResult, LaunchRequest, NavAction, NavPhase,
-    OskHide, OskShow, OskState, RunningApp, STEAM_CLIENT_APP_ID, STEAM_CLIENT_GAMESCOPE_APP_ID,
-    STEAM_RUNGAMEID, SteamAttentionParams, SteamAttentionQuery, SteamFocus, SteamFocusResult,
-    SteamWindow,
+    AppsLaunchResult, AppsList, AppsListResult, AppsRunning, AppsRunningResult, AppsSetPermission,
+    AppsSetPermissionParams, AppsSetPermissionResult, EventName, ExitReason, FocusChangedParams,
+    GamesList, GamesListResult, HomePressedParams, InputNavParams, KEYS_TYPE_MAX_CHARS, KeysAction,
+    KeysActionParams, KeysActionResult, KeysKey, KeysKeyParams, KeysKeyResult, KeysType,
+    KeysTypeParams, KeysTypeResult, LaunchRequest, NavAction, NavPhase, OskHide, OskShow, OskState,
+    RunningApp, STEAM_CLIENT_APP_ID, STEAM_CLIENT_GAMESCOPE_APP_ID, STEAM_RUNGAMEID,
+    SteamAttentionParams, SteamAttentionQuery, SteamFocus, SteamFocusResult, SteamWindow,
 };
 use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde::Serialize;
@@ -129,6 +129,7 @@ pub enum Msg {
 /// The methods the shell answers (the connection handles the rest).
 pub const METHODS: &[&str] = &[
     AppsList::NAME,
+    AppsSetPermission::NAME,
     AppsLaunch::NAME,
     AppsRunning::NAME,
     AppsFocus::NAME,
@@ -279,6 +280,10 @@ pub struct ShellConfig {
     pub profile_mode: bool,
     /// Apps whose vendor terms this profile has not accepted.
     pub needs_terms: std::collections::BTreeMap<String, hinteros_api::session::StoreTerms>,
+    /// The profile's app permissions (shared with the Store).
+    pub permissions: crate::permissions::Permissions,
+    /// The catalog index (`apps.set_permission` for apps not installed yet).
+    pub catalog_index: PathBuf,
 }
 
 impl From<&Config> for ShellConfig {
@@ -304,6 +309,8 @@ impl From<&Config> for ShellConfig {
             icon_refresh: Refresher::default(),
             profile_mode: c.icons.profile_share.is_some(),
             needs_terms: Default::default(),
+            permissions: crate::permissions::Permissions::from_config(&c.sandbox),
+            catalog_index: c.store.index.clone(),
         }
     }
 }
@@ -589,6 +596,10 @@ impl Shell {
                 decode_params::<AppsList>(params)?;
                 encode_result::<AppsList>(self.list())
             }
+            AppsSetPermission::NAME => {
+                let p = decode_params::<AppsSetPermission>(params)?;
+                encode_result::<AppsSetPermission>(self.set_permission(p)?)
+            }
             AppsLaunch::NAME => {
                 let p = decode_params::<AppsLaunch>(params)?;
                 encode_result::<AppsLaunch>(self.launch(p, now)?)
@@ -718,10 +729,52 @@ impl Shell {
                     kind: a.kind,
                     icon: self.icon_path(&a.id, a.icon.as_deref()),
                     needs_terms: self.cfg.needs_terms.get(&a.id).cloned(),
-                    permissions: Vec::new(),
+                    permissions: self.app_permissions(a),
                 }))
                 .collect(),
         }
+    }
+
+    /// A configured app's permissions (none for Steam games and unsandboxed apps).
+    fn app_permissions(&self, a: &AppConfig) -> Vec<hinteros_api::session::AppPermission> {
+        if a.steam_app_id.is_some() || !a.sandbox {
+            return Vec::new();
+        }
+        self.cfg.permissions.list(&a.id, &a.permissions)
+    }
+
+    /// `apps.set_permission`: an installed app, else a catalog app (not installed yet).
+    fn set_permission(
+        &mut self,
+        p: AppsSetPermissionParams,
+    ) -> Result<AppsSetPermissionResult, ErrorObject> {
+        let none = BTreeMap::new();
+        let installed = self.cfg.apps.iter().find(|a| a.id == p.id).map(|a| {
+            if a.steam_app_id.is_none() && a.sandbox {
+                a.permissions.clone()
+            } else {
+                none.clone()
+            }
+        });
+        let declared = installed.or_else(|| {
+            let index = hinteros_api::catalog::Index::load(&self.cfg.catalog_index).ok()?;
+            let e = index.app(&p.id)?;
+            Some(if e.sandbox && e.id != STEAM_CLIENT_APP_ID {
+                e.permissions.clone()
+            } else {
+                none.clone()
+            })
+        });
+        let changed =
+            self.cfg
+                .permissions
+                .set(&p.id, declared.as_ref(), &p.permission, p.granted)?;
+        if changed {
+            info!(app = %p.id, permission = %p.permission, granted = p.granted, "permission set");
+        }
+        self.emit(EventName::AppsChanged, serde_json::json!({}));
+        self.emit(EventName::StoreChanged, serde_json::json!({}));
+        Ok(AppsSetPermissionResult {})
     }
 
     /// The resolved icon of an app, else a configured absolute path.
@@ -2855,6 +2908,8 @@ mod tests {
             keymap: BTreeMap::new(),
             address_bar: false,
             pointer: None,
+            permissions: BTreeMap::new(),
+            sandbox: true,
         }
     }
 
@@ -2911,6 +2966,8 @@ mod tests {
                 icon_refresh: Refresher::default(),
                 profile_mode: false,
                 needs_terms: Default::default(),
+                permissions: Default::default(),
+                catalog_index: "/nonexistent/catalog.json".into(),
             };
             f(&mut cfg);
             let log = Log::default();
@@ -3644,6 +3701,96 @@ mod tests {
     }
 
     #[test]
+    fn apps_list_reports_permissions_and_set_permission_changes_them() {
+        use hinteros_api::catalog::Need;
+        let t = tempfile::tempdir().unwrap();
+        let index = t.path().join("catalog.json");
+        std::fs::write(
+            &index,
+            r#"{"indexVersion":3,"apps":[
+              {"id":"kodi","kind":"app","type":"native","name":"Kodi","status":"available",
+               "permissions":{"gamepad":"required","downloads":"optional"}},
+              {"id":"steam","kind":"app","type":"native","name":"Steam","status":"available",
+               "permissions":{"gamepad":"optional"}}]}"#,
+        )
+        .unwrap();
+        let perms = crate::permissions::Permissions::new(
+            Some(t.path().join("permissions.json")),
+            vec!["gamepad", "mic", "downloads"],
+        );
+        let mut t = T::with(|c| {
+            c.permissions = perms.clone();
+            c.catalog_index = index.clone();
+            c.apps[0].permissions = BTreeMap::from([
+                ("gamepad".into(), Need::Required),
+                ("mic".into(), Need::Optional),
+            ]);
+            // A Steam game and an unsandboxed app list nothing.
+            c.apps[1].permissions = c.apps[0].permissions.clone();
+            c.apps[2].permissions = c.apps[0].permissions.clone();
+            c.apps[2].sandbox = false;
+        });
+        let perms_of = |t: &mut T, i: usize| {
+            t.call("apps.list", json!({})).unwrap()["apps"][i]["permissions"].clone()
+        };
+        assert_eq!(perms_of(&mut t, 0), json!([]), "steam");
+        assert_eq!(
+            perms_of(&mut t, 1),
+            json!([
+                {"name": "gamepad", "required": true, "granted": true},
+                {"name": "mic", "required": false, "granted": true}
+            ])
+        );
+        assert_eq!(perms_of(&mut t, 2), json!([]), "steam game");
+        assert_eq!(perms_of(&mut t, 3), json!([]), "sandbox = false");
+
+        t.events();
+        let set = |t: &mut T, id: &str, perm: &str, granted: bool| {
+            t.call(
+                "apps.set_permission",
+                json!({"id": id, "permission": perm, "granted": granted}),
+            )
+        };
+        assert_eq!(set(&mut t, "jellyfin", "mic", false).unwrap(), json!({}));
+        assert_eq!(perms_of(&mut t, 1)[1]["granted"], false);
+        let names: Vec<EventName> = t.events().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, [EventName::AppsChanged, EventName::StoreChanged]);
+        // A catalog app that is not installed yet.
+        set(&mut t, "kodi", "downloads", false).unwrap();
+        assert!(
+            !perms
+                .grants(
+                    "kodi",
+                    &BTreeMap::from([("downloads".into(), Need::Optional)])
+                )
+                .downloads
+        );
+        let code = |r: Result<Value, ErrorObject>| r.unwrap_err().code;
+        assert_eq!(
+            code(set(&mut t, "jellyfin", "gamepad", false)),
+            ErrorCode::PermissionRequired.code()
+        );
+        assert_eq!(
+            code(set(&mut t, "jellyfin", "downloads", false)),
+            ErrorCode::UnknownPermission.code()
+        );
+        assert_eq!(
+            code(set(&mut t, "youtube", "mic", false)),
+            ErrorCode::UnknownPermission.code(),
+            "unsandboxed"
+        );
+        assert_eq!(
+            code(set(&mut t, "steam", "gamepad", false)),
+            ErrorCode::UnknownPermission.code(),
+            "Steam is never sandboxed"
+        );
+        assert_eq!(
+            code(set(&mut t, "nope", "mic", false)),
+            ErrorCode::UnknownApp.code()
+        );
+    }
+
+    #[test]
     fn without_steam_there_is_no_steam_app() {
         let mut t = T::with(|c| c.steam_path = None);
         let ids = |t: &mut T| -> Vec<String> {
@@ -4101,7 +4248,7 @@ mod tests {
         let mut t = T::new();
         assert_eq!(
             t.call("apps.list", json!({})).unwrap()["apps"][0],
-            json!({"id": "steam", "name": "Steam", "kind": "native"})
+            json!({"id": "steam", "name": "Steam", "kind": "native", "permissions": []})
         );
         // Steam not running: start it straight into Big Picture.
         let app = t.launch(json!({"id": "steam"}));

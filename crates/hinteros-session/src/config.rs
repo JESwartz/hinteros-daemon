@@ -64,6 +64,12 @@
 //! hide_command = ["gamescopectl", "paint_cursor_plane", "0"]  # on D-pad/left stick use
 //! show_command = ["gamescopectl", "paint_cursor_plane", "1"]
 //!
+//! [sandbox]                    # catalog apps in bwrap (see `sandbox`); never Steam
+//! enable = false
+//! bwrap = "bwrap"              # a path, or a name looked up in PATH
+//! pulse_socket = "pulse/native"         # sound for apps, relative to XDG_RUNTIME_DIR
+//! pulse_record_socket = "pulse/native"  # sound that may record (mic); the same: no mic permission
+//!
 //! [[apps]]                     # apps.list entries; launchable with apps.launch {id}
 //! id = "jellyfin"
 //! name = "Jellyfin"
@@ -80,6 +86,8 @@
 //! input = "keyboard"           # controller -> key presses (default "gamepad": the pad itself)
 //! back_key = "escape"          # what B sends [default: escape]
 //! pointer = true               # right stick moves a pointer, RT/LT click left/right [default: true]
+//! permissions = { mic = "optional" }  # sandbox permissions from the catalog (required/optional)
+//! # sandbox = false            # run without the sandbox [default: true]
 //! # address_bar = true         # plain Firefox: View = Ctrl+L + on-screen keyboard, LB/RB = back/forward
 //! [apps.keymap]                # more (or other) actions -> keys
 //! context = "f"
@@ -282,6 +290,7 @@ pub struct Config {
     pub auth: AuthConfig,
     pub session: SessionConfig,
     pub store: StoreConfig,
+    pub sandbox: SandboxConfig,
     pub audio: AudioConfig,
     pub display: DisplayConfig,
     pub bluetooth: BluetoothConfig,
@@ -543,6 +552,32 @@ impl Default for SessionConfig {
             restart_services: vec!["greetd".into(), "greetd-greeter".into()],
             unit: None,
             user_bus: None,
+        }
+    }
+}
+
+/// `[sandbox]`: run catalog apps in a bwrap sandbox ([`crate::sandbox`]). Steam and apps with
+/// `sandbox = false` never are.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxConfig {
+    pub enable: bool,
+    /// bwrap: a path, or a name looked up in `$PATH`.
+    pub bwrap: PathBuf,
+    /// The sound socket apps get, relative to `$XDG_RUNTIME_DIR` (it should not record).
+    pub pulse_socket: PathBuf,
+    /// The sound socket apps with `mic` get. The same as `pulse_socket`: `mic` is not enforced,
+    /// so it is not listed.
+    pub pulse_record_socket: PathBuf,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            bwrap: "bwrap".into(),
+            pulse_socket: "pulse/native".into(),
+            pulse_record_socket: "pulse/native".into(),
         }
     }
 }
@@ -948,10 +983,20 @@ pub struct AppConfig {
     pub address_bar: bool,
     /// Keyboard profile: the right stick moves a mouse pointer ([pointer]) [default: true].
     pub pointer: Option<bool>,
+    /// Sandbox permissions the app declares (from the catalog): name -> required / optional.
+    #[serde(default)]
+    pub permissions: BTreeMap<String, hinteros_api::catalog::Need>,
+    /// `false`: the app runs without the sandbox (from the catalog) [default: true].
+    #[serde(default = "yes")]
+    pub sandbox: bool,
 }
 
 fn native() -> AppKind {
     AppKind::Native
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// `~/x` as `$HOME/x`; other paths unchanged.
@@ -1214,6 +1259,17 @@ impl Config {
             self.pointer.speed_pps > 0,
             "pointer.speed_pps must be positive"
         );
+        for (key, p) in [
+            ("pulse_socket", &self.sandbox.pulse_socket),
+            ("pulse_record_socket", &self.sandbox.pulse_record_socket),
+        ] {
+            ensure!(
+                p.is_relative()
+                    && p.components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_))),
+                "sandbox.{key} must be a path relative to XDG_RUNTIME_DIR"
+            );
+        }
         let mut seen = BTreeSet::new();
         for app in &self.apps {
             ensure!(valid_app_id(&app.id), "invalid app id '{}'", app.id);
@@ -1449,6 +1505,33 @@ mod tests {
         c.load_profile_apps(&d.path().join("nowhere"));
         assert!(c.apps.is_empty() && !c.steam.autostart);
         assert_eq!(c.steam.path, PathBuf::new());
+    }
+
+    #[test]
+    fn sandbox_section_and_app_permissions() {
+        let c = Config::parse("").unwrap();
+        assert_eq!(c.sandbox, SandboxConfig::default());
+        assert!(!c.sandbox.enable);
+        let c = Config::parse(
+            "[sandbox]\nenable = true\nbwrap = \"/nix/store/x-bwrap/bin/bwrap\"\npulse_record_socket = \"pulse/record\"\n\
+             [[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"a\"]\npermissions = { mic = \"optional\", gamepad = \"required\" }\n\
+             [[apps]]\nid = \"b\"\nname = \"B\"\ncommand = [\"b\"]\nsandbox = false\n",
+        )
+        .unwrap();
+        assert!(c.sandbox.enable);
+        assert_eq!(c.sandbox.pulse_record_socket, PathBuf::from("pulse/record"));
+        assert!(c.apps[0].sandbox && !c.apps[1].sandbox);
+        assert_eq!(
+            c.apps[0].permissions["mic"],
+            hinteros_api::catalog::Need::Optional
+        );
+        for bad in [
+            "[sandbox]\npulse_socket = \"/run/user/1000/pulse/native\"\n",
+            "[sandbox]\npulse_record_socket = \"../x\"\n",
+            "[sandbox]\nextra = 1\n",
+        ] {
+            assert!(Config::parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

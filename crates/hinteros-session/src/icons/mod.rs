@@ -888,6 +888,8 @@ mod tests {
             keymap: Default::default(),
             address_bar: false,
             pointer: None,
+            permissions: Default::default(),
+            sandbox: true,
         };
         let (tx, rx) = mpsc::channel();
         let store = IconStore::default();

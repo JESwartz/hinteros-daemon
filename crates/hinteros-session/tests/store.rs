@@ -216,3 +216,79 @@ async fn store_list_merges_catalog_and_install_state() {
     assert_eq!(list["more_after_update"], true);
     task.abort();
 }
+
+/// 0.18: a catalog app's permissions before install: `apps.set_permission`, then `store.list`
+/// shows the choice and the profile's permissions.json keeps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn set_permission_before_install() {
+    let d = Daemon::start_with(|dir| {
+        std::fs::write(
+            dir.join("session.toml"),
+            "[sandbox]\nenable = true\npulse_record_socket = \"pulse/record\"\n",
+        )
+        .unwrap();
+        vec!["--config".into(), dir.join("session.toml").into()]
+    });
+    let dir = d.dir.path();
+    std::fs::write(
+        dir.join("catalog.json"),
+        r#"{"indexVersion": 3, "apps": [
+          {"id": "youtube", "kind": "app", "type": "web", "name": "YouTube", "status": "available",
+           "permissions": {"mic": "optional", "gamepad": "required"}},
+          {"id": "steam", "kind": "app", "type": "native", "name": "Steam", "status": "available",
+           "permissions": {"gamepad": "optional"}}]}"#,
+    )
+    .unwrap();
+    let _task = fake_system(&dir.join("system.sock"), Arc::new(Mutex::new(Vec::new())));
+    let mut c = d.client_named("hinteros-launcher").await;
+    let list = eventually("the relay", async || {
+        call(&mut c, "store.list", json!({})).await.ok()
+    })
+    .await;
+    assert_eq!(
+        by_id(&list, "youtube")["permissions"],
+        json!([{"name": "gamepad", "required": true, "granted": true},
+               {"name": "mic", "required": false, "granted": true}])
+    );
+    assert_eq!(by_id(&list, "steam")["permissions"], json!([]));
+
+    call(
+        &mut c,
+        "subscribe",
+        json!({"events": ["store_changed", "apps_changed"]}),
+    )
+    .await
+    .unwrap();
+    let r = call(
+        &mut c,
+        "apps.set_permission",
+        json!({"id": "youtube", "permission": "mic", "granted": false}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r, json!({}));
+    event_named(&mut c, "apps_changed").await;
+    event_named(&mut c, "store_changed").await;
+    let list = call(&mut c, "store.list", json!({})).await.unwrap();
+    assert_eq!(by_id(&list, "youtube")["permissions"][1]["granted"], false);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("state/hinteros/permissions.json")).unwrap(),
+        "{\"version\":1,\"denied\":{\"youtube\":[\"mic\"]}}\n"
+    );
+    let e = call(
+        &mut c,
+        "apps.set_permission",
+        json!({"id": "youtube", "permission": "gamepad", "granted": false}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["code"], ErrorCode::PermissionRequired.code());
+    let e = call(
+        &mut c,
+        "apps.set_permission",
+        json!({"id": "nope", "permission": "mic", "granted": false}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["code"], ErrorCode::UnknownApp.code());
+}

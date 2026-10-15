@@ -16,6 +16,7 @@ pub mod icons;
 pub mod input;
 pub mod keys;
 pub mod osk;
+pub mod permissions;
 pub mod procs;
 pub mod profile;
 pub mod reaper;

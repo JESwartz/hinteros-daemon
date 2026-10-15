@@ -369,9 +369,9 @@ async fn configured_apps_and_launch_errors() {
     assert_eq!(
         list,
         json!({ "apps": [
-            { "id": "steam", "name": "Steam", "kind": "native" },
-            { "id": "shell", "name": "Shell", "kind": "native" },
-            { "id": "broken", "name": "Broken", "kind": "native" },
+            { "id": "steam", "name": "Steam", "kind": "native", "permissions": [] },
+            { "id": "shell", "name": "Shell", "kind": "native", "permissions": [] },
+            { "id": "broken", "name": "Broken", "kind": "native", "permissions": [] },
         ] })
     );
 
@@ -804,7 +804,7 @@ async fn apps_list_resolves_native_icons_from_desktop_files() {
         .join("share/icons/hicolor/512x512/apps/org.example.Player.png");
     assert_eq!(
         list["apps"][1],
-        json!({ "id": "player", "name": "Player", "kind": "native", "icon": icon })
+        json!({ "id": "player", "name": "Player", "kind": "native", "icon": icon, "permissions": [] })
     );
     assert!(list["apps"][2].get("icon").is_none());
 }

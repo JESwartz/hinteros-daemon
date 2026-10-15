@@ -233,7 +233,9 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
             },
         )
     };
+    let permissions = hinteros_session::permissions::Permissions::from_config(&config.sandbox);
     let mut shell_config = ShellConfig::from(&config);
+    shell_config.permissions = permissions.clone();
     shell_config.profile_mode |= cli.greeter;
     shell_config.icons = icon_store.clone();
     shell_config.icon_refresh = icons.refresher();
@@ -374,6 +376,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
     let store = hinteros_session::store::Store::spawn(
         config.store.index.clone(),
         icon_store.clone(),
+        permissions,
         events.clone(),
     );
     store.spawn_terms(

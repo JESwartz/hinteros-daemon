@@ -1786,7 +1786,7 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
 `session.toml`: `[sandbox] enable = true`, `bwrap = "<bubblewrap>/bin/bwrap"`, and, once a
 play-only pulse socket exists, `pulse_socket` / `pulse_record_socket` (relative to
 `XDG_RUNTIME_DIR`). For `lan`: `[sandbox] lan_filter = true`, `Delegate=yes` and no
-`ProtectControlGroups` on the session daemon's unit, `HINTEROS_LAN_FILTER=1` for hinteros-system, and the
+`ProtectControlGroups` on the session daemon's unit, `HINTEROS_LAN_FILTER=true` for hinteros-system, and the
 oneshot `hinteros-lan-filter.service` running `hinteros-system lan-filter-apply --nft <nft>` as
 root with `CAP_NET_ADMIN` and `AF_NETLINK` (not in a private network namespace), started again
 when `/etc/resolv.conf` or the network changes. Drop `ProtectKernelTunables` from the session daemon's unit. Under gamescope:

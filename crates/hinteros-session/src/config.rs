@@ -20,6 +20,7 @@
 //! [gamescope]
 //! enable = true
 //! display = ":0"               # gamescope's Xwayland [default: $DISPLAY, else :0]
+//! apps_display = "auto+2"      # the Xwayland for apps under the reaper [default: display]
 //! wayland_display = "gamescope-0"  # passed to Steam (not to apps) [default: $WAYLAND_DISPLAY, else gamescope-0]
 //! focus_loss_debounce_ms = 1500
 //! unmap_gl_dummies = true      # unmap invisible full-screen override-redirect windows over an app
@@ -649,6 +650,10 @@ impl Default for SteamConfig {
 pub struct GamescopeConfig {
     pub enable: bool,
     pub display: Option<String>,
+    /// The Xwayland for apps (under the reaper: catalog apps, `apps.launch {command}`), so that
+    /// they cannot read or type into the home app and the OSK on `display`. Not Steam (it and
+    /// its games keep `display`). `None`: `display`.
+    pub apps_display: Option<String>,
     pub wayland_display: Option<String>,
     pub focus_loss_debounce_ms: u64,
     /// Unmap invisible override-redirect windows that cover an app's real window (GTK3 GL
@@ -661,6 +666,7 @@ impl Default for GamescopeConfig {
         Self {
             enable: true,
             display: None,
+            apps_display: None,
             wayland_display: None,
             focus_loss_debounce_ms: 1500,
             unmap_gl_dummies: true,
@@ -1277,6 +1283,12 @@ impl Config {
             ensure!(!cmd.is_empty(), "launcher.command is empty");
         }
         self.osk.summon_button()?;
+        if let Some(d) = &self.gamescope.apps_display {
+            ensure!(
+                display_setting_ok(d),
+                "gamescope.apps_display must be \"auto\", \"auto+<n>\" or \":<n>\""
+            );
+        }
         ensure!(
             (0.0..1.0).contains(&self.pointer.activity_deadzone),
             "pointer.activity_deadzone must be in [0, 1)"
@@ -1369,6 +1381,15 @@ impl Config {
             .unwrap_or_else(|| ":0".into())
     }
 
+    /// The display for apps under the reaper, possibly `"auto+<n>"` (resolve it with
+    /// [`try_resolve_display`] at each spawn). `None` when apps use [`Self::child_env`]'s.
+    pub fn apps_display_setting(&self) -> Option<String> {
+        self.gamescope
+            .enable
+            .then(|| self.gamescope.apps_display.clone())
+            .flatten()
+    }
+
     /// gamescope's Wayland display (a socket name in `$XDG_RUNTIME_DIR`, or a path).
     pub fn wayland_display(&self) -> String {
         self.gamescope
@@ -1402,17 +1423,55 @@ impl Config {
 /// Xwayland of this session's gamescope. The daemon is a user service, not gamescope's child, so
 /// it can't inherit `DISPLAY`; and gamescope takes the first free numbers, which are not `:0`
 /// while an ended session's or the picker's Xwayland is still there. `:0` until one exists.
+/// `"auto+<n>"` ([`try_resolve_display`]) is returned as it is (not a display) until it exists.
 /// Anything else is returned as it is.
 pub fn resolve_display(setting: &str) -> String {
-    if setting != "auto" {
-        return setting.to_owned();
-    }
-    own_display(
+    try_resolve_display(setting).unwrap_or_else(|| {
+        if setting == "auto" {
+            ":0".into()
+        } else {
+            setting.to_owned()
+        }
+    })
+}
+
+/// A display setting resolved now; `None` for an `"auto"` one whose display does not exist
+/// (yet). `"auto+<n>"`: this user's `n`-th live X display after the lowest (`"auto"` is `+0`).
+/// gamescope creates its Xwaylands one after the other on the lowest free numbers, so with
+/// `--xwayland-count 3` `"auto+2"` is its third Xwayland, also when another user's display sits
+/// between them.
+pub fn try_resolve_display(setting: &str) -> Option<String> {
+    resolve_display_in(
+        setting,
         Path::new("/tmp"),
         Path::new("/proc"),
         nix::unistd::geteuid().as_raw(),
     )
-    .unwrap_or_else(|| ":0".into())
+}
+
+fn resolve_display_in(setting: &str, tmp: &Path, proc_dir: &Path, uid: u32) -> Option<String> {
+    let Some(index) = auto_index(setting) else {
+        return Some(setting.to_owned());
+    };
+    own_displays(tmp, proc_dir, uid)
+        .get(index)
+        .map(|n| format!(":{n}"))
+}
+
+/// `Some(n)` for `"auto"` (0) and `"auto+<n>"`.
+fn auto_index(setting: &str) -> Option<usize> {
+    match setting.strip_prefix("auto")? {
+        "" => Some(0),
+        rest => rest.strip_prefix('+')?.parse().ok(),
+    }
+}
+
+/// `"auto"`, `"auto+<n>"` or `":<n>"`.
+pub fn display_setting_ok(setting: &str) -> bool {
+    auto_index(setting).is_some()
+        || setting
+            .strip_prefix(':')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// `env` (from [`Config::child_env`]) with a `DISPLAY` of `"auto"` resolved now, for a process
@@ -1433,9 +1492,19 @@ pub fn live_env(env: &[(String, String)]) -> Vec<(String, String)> {
 /// The lowest `n` with a `<tmp>/.X<n>-lock` owned by `uid` whose pid is alive and a
 /// `<tmp>/.X11-unix/X<n>` socket.
 pub fn own_display(tmp: &Path, proc_dir: &Path, uid: u32) -> Option<String> {
+    own_displays(tmp, proc_dir, uid)
+        .first()
+        .map(|n| format!(":{n}"))
+}
+
+/// Every such `n` ([`own_display`]), lowest first.
+pub fn own_displays(tmp: &Path, proc_dir: &Path, uid: u32) -> Vec<u32> {
     use std::os::unix::fs::MetadataExt;
-    let mut best: Option<u32> = None;
-    for e in std::fs::read_dir(tmp).ok()?.flatten() {
+    let mut found = Vec::new();
+    let Ok(dir) = std::fs::read_dir(tmp) else {
+        return found;
+    };
+    for e in dir.flatten() {
         let name = e.file_name();
         let Some(n) = name
             .to_str()
@@ -1463,9 +1532,10 @@ pub fn own_display(tmp: &Path, proc_dir: &Path, uid: u32) -> Option<String> {
         {
             continue;
         }
-        best = Some(best.map_or(n, |b| b.min(n)));
+        found.push(n);
     }
-    best.map(|n| format!(":{n}"))
+    found.sort_unstable();
+    found
 }
 
 #[cfg(test)]
@@ -1494,6 +1564,42 @@ mod tests {
         // Another user's live displays don't count.
         assert_eq!(own_display(t, proc_dir.path(), me + 1), None);
         assert_eq!(resolve_display(":7"), ":7");
+
+        // "auto+<n>": the n-th after the lowest, skipping dead and other users' displays.
+        std::fs::create_dir_all(proc_dir.path().join("52")).unwrap();
+        std::fs::write(t.join(".X7-lock"), "      52\0").unwrap();
+        std::fs::write(t.join(".X11-unix/X7"), "").unwrap();
+        assert_eq!(own_displays(t, proc_dir.path(), me), [4, 5, 7]);
+        let resolve = |s: &str| resolve_display_in(s, t, proc_dir.path(), me);
+        assert_eq!(resolve("auto").as_deref(), Some(":4"));
+        assert_eq!(resolve("auto+0").as_deref(), Some(":4"));
+        assert_eq!(resolve("auto+2").as_deref(), Some(":7"));
+        assert_eq!(resolve("auto+3"), None, "not there (yet)");
+        assert_eq!(resolve(":9").as_deref(), Some(":9"));
+        // Unresolved, "auto+<n>" stays a non-display rather than falling back to :0.
+        assert_eq!(resolve_display("auto+99"), "auto+99");
+    }
+
+    #[test]
+    fn display_settings() {
+        for ok in ["auto", "auto+0", "auto+2", ":0", ":12"] {
+            assert!(display_setting_ok(ok), "{ok}");
+        }
+        for bad in [
+            "", "auto+", "auto2", "auto+-1", ":", ":x", "host:0", "auto+2 ",
+        ] {
+            assert!(!display_setting_ok(bad), "{bad}");
+        }
+        let c = Config::parse("[gamescope]\napps_display = \"auto+2\"\n").unwrap();
+        assert_eq!(c.apps_display_setting().as_deref(), Some("auto+2"));
+        assert!(Config::parse("[gamescope]\napps_display = \"auto2\"\n").is_err());
+        let c = Config::parse("[gamescope]\nenable = false\napps_display = \":2\"\n").unwrap();
+        assert_eq!(
+            c.apps_display_setting(),
+            None,
+            "no gamescope: apps inherit the env"
+        );
+        assert_eq!(Config::default().apps_display_setting(), None);
     }
 
     #[test]

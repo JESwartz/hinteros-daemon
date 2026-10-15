@@ -3,7 +3,7 @@
 //! No auth is needed: gamescope's Xwayland accepts local connections from the same user.
 
 use std::cell::OnceCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -67,8 +67,10 @@ x11rb::atom_manager! {
 /// gamescope starts its Xwaylands with `-terminate`: an Xwayland exits when its last client
 /// disconnects. Connecting before gamescope's own window manager has, finding no
 /// `GAMESCOPE_PID` and disconnecting again would end that Xwayland, and gamescope would wait
-/// for it forever (a black screen at boot). Holding the connection keeps it alive.
-static NOT_YET: Mutex<Option<RustConnection>> = Mutex::new(None);
+/// for it forever (a black screen at boot). Holding the connection keeps it alive. One per
+/// display: the apps' Xwayland has a watcher of its own, and gamescope sets `GAMESCOPE_PID` on
+/// one Xwayland before its window manager connects to the next.
+static NOT_YET: Mutex<BTreeMap<String, RustConnection>> = Mutex::new(BTreeMap::new());
 
 /// One connection to gamescope's Xwayland.
 struct Conn {
@@ -87,10 +89,16 @@ impl Conn {
         let atoms = Atoms::new(&conn)?.reply()?;
         let c = Self { conn, root, atoms };
         if c.cardinals(c.atoms.GAMESCOPE_PID)?.is_empty() {
-            *NOT_YET.lock().unwrap_or_else(|e| e.into_inner()) = Some(c.conn);
+            NOT_YET
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(display.clone(), c.conn);
             bail!("X display {display} is not gamescope's Xwayland (no GAMESCOPE_PID on the root)");
         }
-        NOT_YET.lock().unwrap_or_else(|e| e.into_inner()).take();
+        NOT_YET
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(display);
         Ok(c)
     }
 
@@ -274,6 +282,77 @@ pub fn spawn_watcher(
             }
         })
         .expect("spawning the gamescope watcher thread")
+}
+
+/// Unmap GL dummies ([`dummies`]) on the apps' Xwayland (`gamescope.apps_display`), which the
+/// focus watcher does not follow (focus and Steam's windows are on the first Xwayland). Retries
+/// the connection every `retry`, for the life of the daemon.
+pub fn spawn_dummies_watcher(dpy: String, retry: Duration) -> thread::JoinHandle<()> {
+    thread::Builder::new()
+        .name("gamescope-apps-watch".into())
+        .spawn(move || {
+            let mut warned = false;
+            loop {
+                match watch_dummies(&dpy) {
+                    Ok(()) => {}
+                    Err(e) if !warned => {
+                        warn!(display = %dpy, "apps' Xwayland unavailable, retrying: {e:#}");
+                        warned = true;
+                    }
+                    Err(e) => debug!(display = %dpy, "apps' Xwayland still unavailable: {e:#}"),
+                }
+                thread::sleep(retry);
+            }
+        })
+        .expect("spawning the apps' Xwayland watcher thread")
+}
+
+/// One connection's worth of [`spawn_dummies_watcher`]; returns when the connection breaks.
+fn watch_dummies(dpy: &str) -> Result<()> {
+    let c = Conn::open(dpy)?;
+    c.conn
+        .change_window_attributes(
+            c.root,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY),
+        )?
+        .check()?;
+    let xres = c
+        .conn
+        .extension_information(x11rb::protocol::res::X11_EXTENSION_NAME)?
+        .is_some();
+    for w in c.conn.query_tree(c.root)?.reply()?.children {
+        c.follow(w)?;
+    }
+    info!(display = %dpy, "watching the apps' Xwayland for GL dummies");
+    let mut seen = HashSet::new();
+    let mut blank = c.scan(false, xres, 0, Some(&mut seen))?.blank;
+    loop {
+        let mut batch = vec![c.conn.wait_for_event()?];
+        while let Some(e) = c.conn.poll_for_event()? {
+            batch.push(e);
+        }
+        let mut rescan = false;
+        for event in batch {
+            match event {
+                Event::PropertyNotify(ev) => {
+                    rescan |= ev.window != c.root && c.is_window_atom(ev.atom);
+                }
+                Event::CreateNotify(ev) if ev.parent == c.root => {
+                    c.follow(ev.window)?;
+                    rescan = true;
+                }
+                Event::MapNotify(_)
+                | Event::UnmapNotify(_)
+                | Event::DestroyNotify(_)
+                | Event::ReparentNotify(_) => rescan = true,
+                Event::ConfigureNotify(ev) => rescan |= blank.contains(&ev.window),
+                _ => {}
+            }
+        }
+        if rescan {
+            blank = c.scan(false, xres, 0, Some(&mut seen))?.blank;
+        }
+    }
 }
 
 /// `Ok(None)` for X errors about one window (it went away while we looked); `Err` if the

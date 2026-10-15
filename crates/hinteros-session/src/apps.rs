@@ -88,6 +88,23 @@ pub fn spawn_env(env: &[(String, String)], app: bool) -> Vec<(String, String)> {
         .collect()
 }
 
+/// `env` with `DISPLAY` set to the apps' display (`apps_display`, resolved now). Fails while
+/// that display does not exist: an app never falls back to the home app's display.
+pub fn with_apps_display(
+    mut env: Vec<(String, String)>,
+    apps_display: &str,
+) -> io::Result<Vec<(String, String)>> {
+    let display = crate::config::try_resolve_display(apps_display).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no app display ({apps_display})"),
+        )
+    })?;
+    env.retain(|(k, _)| k != "DISPLAY");
+    env.push(("DISPLAY".into(), display));
+    Ok(env)
+}
+
 /// What sandboxed spawns need from the daemon's config (see [`crate::sandbox`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxSettings {
@@ -109,6 +126,8 @@ pub struct ProcessSpawner {
     exits: mpsc::UnboundedSender<ChildExit>,
     children: Children,
     sandbox: Option<SandboxSettings>,
+    /// `gamescope.apps_display` (possibly `"auto+<n>"`): apps run there, not on `env`'s display.
+    apps_display: Option<String>,
 }
 
 impl ProcessSpawner {
@@ -123,7 +142,14 @@ impl ProcessSpawner {
             exits,
             children: Children::default(),
             sandbox: None,
+            apps_display: None,
         }
+    }
+
+    /// Run apps (under the reaper) on this display (`gamescope.apps_display`).
+    pub fn with_apps_display(mut self, display: Option<String>) -> Self {
+        self.apps_display = display;
+        self
     }
 
     /// Run sandboxed spawns with these settings (without, they fail).
@@ -197,7 +223,10 @@ impl Spawner for ProcessSpawner {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty command"))?;
         // Resolve up front: under the reaper a missing program would only show as exit 127.
         let program = which(program)?;
-        let env = spawn_env(&self.env, app_id.is_some());
+        let mut env = spawn_env(&self.env, app_id.is_some());
+        if let (Some(_), Some(display)) = (app_id, &self.apps_display) {
+            env = with_apps_display(env, display)?;
+        }
         let mut cmd = match (app_id, sandbox) {
             (Some(id), Some(spec)) => {
                 let bwrap = self.sandboxed(spec, &program, argv, &env)?;
@@ -295,6 +324,65 @@ mod tests {
         assert_eq!(keys(true), ["DISPLAY", "HINTEROS_OSK_SOCKET"]);
         // Steam keeps them.
         assert_eq!(keys(false).len(), 4);
+    }
+
+    #[test]
+    fn apps_get_the_apps_display() {
+        let env: Vec<(String, String)> = [("DISPLAY", ":0"), ("HOME", "/home/x")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let display = |e: &[(String, String)]| -> Vec<String> {
+            e.iter()
+                .filter(|(k, _)| k == "DISPLAY")
+                .map(|(_, v)| v.clone())
+                .collect()
+        };
+        let out = with_apps_display(env.clone(), ":2").unwrap();
+        assert_eq!(display(&out), [":2"]);
+        assert_eq!(out.len(), 2);
+        // A display that is not there: no fallback to the home app's.
+        let err = with_apps_display(env, "auto+999").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("no app display"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn spawned_apps_run_on_the_apps_display() {
+        let t = tempfile::tempdir().unwrap();
+        let out = t.path().join("display");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // A stand-in reaper: runs what follows `--`.
+        let reaper = t.path().join("reaper");
+        std::fs::write(
+            &reaper,
+            "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&reaper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = vec![("DISPLAY".to_string(), ":0".to_string())];
+        let mut s = ProcessSpawner::new(reaper, env, tx).with_apps_display(Some(":2".into()));
+        let argv = |f: &Path| -> Vec<String> {
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("printf %s \"$DISPLAY\" > {}", f.display()),
+            ]
+        };
+        // An app (under the reaper) gets the apps' display ...
+        s.spawn("a", &argv(&out), Some(1234), None).unwrap();
+        rx.recv().await.unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), ":2");
+        // ... Steam (no reaper) keeps the session's.
+        s.spawn("steam", &argv(&out), None, None).unwrap();
+        rx.recv().await.unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), ":0");
+        // An apps' display that does not exist fails the launch.
+        let mut s = s.with_apps_display(Some("auto+999".into()));
+        assert!(s.spawn("b", &argv(&out), Some(1235), None).is_err());
     }
 
     #[test]

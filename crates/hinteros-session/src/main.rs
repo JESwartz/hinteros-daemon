@@ -18,7 +18,9 @@ use hinteros_api::server as api_server;
 use hinteros_api::session;
 use hinteros_session::apps::{ProcessSpawner, SandboxSettings, which};
 use hinteros_session::config::{Cli, Config};
-use hinteros_session::focus::gamescope::{GamescopeFocus, WatchOptions, spawn_watcher};
+use hinteros_session::focus::gamescope::{
+    GamescopeFocus, WatchOptions, spawn_dummies_watcher, spawn_watcher,
+};
 use hinteros_session::focus::{FocusControl, NoFocus};
 use hinteros_session::icons::{self, Icons};
 use hinteros_session::input::{
@@ -151,8 +153,13 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
     let (exit_tx, exit_rx) = mpsc::unbounded_channel();
     forward(exit_rx, shell_tx.clone(), Msg::ChildExit);
     let children = Children::default();
-    let mut spawner =
-        ProcessSpawner::new(exe.clone(), env.clone(), exit_tx).with_children(children.clone());
+    let apps_display = config.apps_display_setting();
+    let mut spawner = ProcessSpawner::new(exe.clone(), env.clone(), exit_tx)
+        .with_children(children.clone())
+        .with_apps_display(apps_display.clone());
+    if let Some(d) = &apps_display {
+        info!(display = %d, "apps run on their own Xwayland");
+    }
     if config.sandbox.enable {
         info!(bwrap = %config.sandbox.bwrap.display(), "catalog apps run sandboxed");
         spawner = spawner.with_sandbox(SandboxSettings {
@@ -176,6 +183,12 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
             unmap_gl_dummies: config.gamescope.unmap_gl_dummies,
         };
         spawn_watcher(dpy.clone(), Duration::from_secs(1), opts, tx);
+        if let Some(apps) = apps_display
+            .clone()
+            .filter(|_| config.gamescope.unmap_gl_dummies)
+        {
+            spawn_dummies_watcher(apps, Duration::from_secs(1));
+        }
         Box::new(GamescopeFocus::new(dpy, config.launcher.app_id))
     } else {
         info!("gamescope focus control off");

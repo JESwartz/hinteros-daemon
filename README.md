@@ -313,6 +313,7 @@ shutdown_grace_ms = 3000         # SIGTERM of the daemon: SIGKILL its apps after
 [gamescope]
 enable = true
 display = ":0"                 # gamescope's Xwayland [default: $DISPLAY, else :0]
+apps_display = "auto+2"        # Xwayland for apps under the reaper; "auto+<n>": the user's n-th display after the lowest [default: display]
 wayland_display = "gamescope-0"  # given to Steam (not to apps) [default: $WAYLAND_DISPLAY, else gamescope-0]
 focus_loss_debounce_ms = 1500  # how long the focused app may be without a window
 unmap_gl_dummies = true     # unmap invisible full-screen override-redirect windows (GTK3 GL dummies) over an app
@@ -1749,12 +1750,23 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   `unknown_permission`, `permission_required`; emits `apps_changed` and `store_changed`.
 - Apps get no `WAYLAND_DISPLAY` / `GAMESCOPE_WAYLAND_DISPLAY` with or without the sandbox
   (gamescope's private protocols); only Steam keeps them.
+- **Own display** (`[gamescope] apps_display`, the system sets `"auto+2"`): every app under the
+  reaper (sandboxed or not, also `apps.launch {command}`) gets that Xwayland as `DISPLAY` and,
+  in the sandbox, only its socket; the launcher and the OSK stay on `display`, Steam and its
+  games keep it too. `"auto+<n>"` is resolved at each spawn (this user's live X displays, lowest
+  first); while it does not exist the launch fails (`app_launch_failed`, "no app display"), never
+  falling back to `display`. gamescope's Xwaylands must not listen on abstract sockets (the
+  system patches that), else `--share-net` still reaches every display. A second watcher unmaps
+  GL dummies (`unmap_gl_dummies`) on that display. Under cage (no `[gamescope]`) apps keep the
+  session's display.
 
 ### What the system repo must do (session API 0.18)
 
 `session.toml`: `[sandbox] enable = true`, `bwrap = "<bubblewrap>/bin/bwrap"`, and, once a
 play-only pulse socket exists, `pulse_socket` / `pulse_record_socket` (relative to
-`XDG_RUNTIME_DIR`). Drop `ProtectKernelTunables` from the session daemon's unit.
+`XDG_RUNTIME_DIR`). Drop `ProtectKernelTunables` from the session daemon's unit. Under gamescope:
+`--xwayland-count 3`, Xwaylands without abstract sockets, every one but `#1` sized to the output,
+and `[gamescope] apps_display = "auto+2"`.
 
 ### What the launcher must do (session API 0.18)
 

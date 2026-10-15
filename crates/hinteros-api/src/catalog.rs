@@ -34,6 +34,27 @@ pub fn is_box_feature(s: &str) -> bool {
     BOX_FEATURES.contains(&s)
 }
 
+/// Sandbox permissions an app may declare (`permissions`, optional in format 3), in the order
+/// they are shown. Other names are ignored (not enforced, so not listed).
+pub const PERMISSIONS: &[&str] = &["gamepad", "mic", "downloads"];
+
+/// Whether an app needs a permission (`permissions` values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Need {
+    Required,
+    Optional,
+    /// A value this code does not know: treated like `required` (it cannot be switched off).
+    #[serde(other)]
+    Unknown,
+}
+
+impl Need {
+    pub fn required(self) -> bool {
+        self != Need::Optional
+    }
+}
+
 /// What an entry is (format 3): an app (per profile, in the Store) or a box-wide service.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -178,6 +199,16 @@ pub struct Entry {
     pub free: bool,
     #[serde(default)]
     pub redistributable: bool,
+    /// Sandbox permissions (name -> need; optional, index version 3).
+    #[serde(default)]
+    pub permissions: BTreeMap<String, Need>,
+    /// `false`: the app runs without the sandbox (optional; default true).
+    #[serde(default = "yes")]
+    pub sandbox: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -470,6 +501,21 @@ mod tests {
         let v2 = Index::parse(SAMPLE.as_bytes(), "/".into()).unwrap();
         assert_eq!(v2.get("steam").unwrap().box_features, ["graphics32"]);
         assert_eq!(v2.get("steam").unwrap().entry_kind, EntryKind::App);
+        // Permissions and sandbox are optional.
+        assert!(s.permissions.is_empty() && s.sandbox);
+        let p = Index::parse(
+            br#"{"indexVersion":3,"apps":[
+              {"id":"a","kind":"app","type":"web","name":"A","status":"available",
+               "permissions":{"gamepad":"required","mic":"optional","x":"later"},"sandbox":false}]}"#,
+            "/".into(),
+        )
+        .unwrap();
+        let a = p.get("a").unwrap();
+        assert!(!a.sandbox);
+        assert_eq!(a.permissions["gamepad"], Need::Required);
+        assert_eq!(a.permissions["mic"], Need::Optional);
+        assert!(a.permissions["x"].required());
+        assert!(!Need::Optional.required());
     }
 
     #[test]

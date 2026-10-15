@@ -700,6 +700,7 @@ impl Shell {
             kind: AppKind::Native,
             icon: self.icon_path(STEAM_CLIENT_APP_ID, None),
             needs_terms: self.cfg.needs_terms.get(STEAM_CLIENT_APP_ID).cloned(),
+            permissions: Vec::new(),
         });
         if self.cfg.apps.is_empty() && !self.cfg.profile_mode {
             let mut list = stub_apps();
@@ -717,6 +718,7 @@ impl Shell {
                     kind: a.kind,
                     icon: self.icon_path(&a.id, a.icon.as_deref()),
                     needs_terms: self.cfg.needs_terms.get(&a.id).cloned(),
+                    permissions: Vec::new(),
                 }))
                 .collect(),
         }
@@ -2606,6 +2608,7 @@ pub fn stub_apps() -> AppsListResult {
         kind,
         icon: None,
         needs_terms: None,
+        permissions: Vec::new(),
     };
     AppsListResult {
         apps: vec![

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 17);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 18);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -164,6 +164,8 @@ pub struct App {
     /// 0.12: vendor terms this profile has not accepted yet (an app from the starter set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_terms: Option<StoreTerms>,
+    /// 0.18: what the app may use in its sandbox (empty for Steam and unsandboxed apps).
+    pub permissions: Vec<AppPermission>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +178,35 @@ impl Method for AppsList {
     const NAME: &'static str = "apps.list";
     type Params = AppsListParams;
     type Result = AppsListResult;
+}
+
+/// 0.18: one permission an app declares in the catalog, and this profile's choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppPermission {
+    /// `gamepad`, `mic`, `downloads`; clients show unknown names as they are.
+    pub name: String,
+    /// It cannot be switched off.
+    pub required: bool,
+    /// The app gets it the next time it starts.
+    pub granted: bool,
+}
+
+/// 0.18: `apps.set_permission`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsSetPermissionParams {
+    pub id: String,
+    pub permission: String,
+    pub granted: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsSetPermissionResult {}
+
+pub struct AppsSetPermission;
+impl Method for AppsSetPermission {
+    const NAME: &'static str = "apps.set_permission";
+    type Params = AppsSetPermissionParams;
+    type Result = AppsSetPermissionResult;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -815,6 +846,7 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<Subscribe>(),
         MethodInfo::of::<Unsubscribe>(),
         MethodInfo::of::<AppsList>(),
+        MethodInfo::of::<AppsSetPermission>(),
         MethodInfo::of::<AppsLaunch>(),
         MethodInfo::of::<AppsRunning>(),
         MethodInfo::of::<AppsFocus>(),
@@ -1618,6 +1650,9 @@ pub struct StoreApp {
     #[serde(deserialize_with = "nullable")]
     pub status_reason: Option<String>,
     pub state: StoreState,
+    /// 0.18: what the app may use in its sandbox; for an app that is not installed, the choice
+    /// stored for its install.
+    pub permissions: Vec<AppPermission>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

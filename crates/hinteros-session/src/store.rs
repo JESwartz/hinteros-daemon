@@ -387,6 +387,7 @@ fn empty(id: &str) -> StoreApp {
         status: CatalogStatus::Removed,
         status_reason: None,
         state: StoreState::Unavailable,
+        permissions: Vec::new(),
     }
 }
 
@@ -438,6 +439,7 @@ fn app(index: &Index, e: &Entry, state: StoreState, icon: Option<PathBuf>) -> St
             .as_ref()
             .map(|r| r.chars().take(200).collect()),
         state,
+        permissions: Vec::new(),
     }
 }
 

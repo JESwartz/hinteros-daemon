@@ -351,6 +351,36 @@ fn schema_rejects_what_it_should() {
         ("/methods/keys.action/params", r#"{"action":"jump"}"#),
         ("/methods/osk.show/result", r#"{}"#),
         ("/events/osk_visibility/params", r#"{"visible":"yes"}"#),
+        // 0.18: permissions.
+        (
+            "/methods/apps.list/result",
+            r#"{"apps":[{"id":"a","name":"x","kind":"native"}]}"#,
+        ),
+        (
+            "/methods/apps.list/result",
+            r#"{"apps":[{"id":"a","name":"x","kind":"native","permissions":[{"name":"mic","required":false}]}]}"#,
+        ),
+        (
+            "/methods/apps.list/result",
+            r#"{"apps":[{"id":"a","name":"x","kind":"native","permissions":[{"name":"Mic","required":false,"granted":true}]}]}"#,
+        ),
+        (
+            "/methods/apps.set_permission/params",
+            r#"{"id":"a","permission":"mic"}"#,
+        ),
+        (
+            "/methods/apps.set_permission/params",
+            r#"{"id":"a","permission":"../x","granted":false}"#,
+        ),
+        (
+            "/methods/apps.set_permission/params",
+            r#"{"id":"a","permission":"mic","granted":"no"}"#,
+        ),
+        (
+            "/methods/apps.set_permission/params",
+            r#"{"id":"a","permission":"mic","granted":false,"profile":"x"}"#,
+        ),
+        ("/methods/apps.set_permission/result", r#"{"ok":true}"#),
     ];
     for (pointer, instance) in bad {
         let v: Value = serde_json::from_str(instance).unwrap();

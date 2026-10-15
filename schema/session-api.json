@@ -379,10 +379,10 @@
           "params": { "id": "youtube" },
           "error": {
             "code": 2009,
-            "message": "every app display is in use (4)",
+            "message": "every app display is in use (2)",
             "data": { "apps": [
-              { "id": "jellyfin", "name": "Jellyfin", "source": "command", "gamescope_app_id": 4100000002, "pid": 4243 },
-              { "id": "cmd-1", "name": "YouTube", "source": "command", "gamescope_app_id": 4100000001, "pid": 4242 }
+              { "id": "cmd-1", "name": "Kodi", "source": "command", "gamescope_app_id": 4100000001, "pid": 4200 },
+              { "id": "jellyfin", "name": "Jellyfin", "source": "command", "gamescope_app_id": 4100000002, "pid": 4201 }
             ] }
           }
         },

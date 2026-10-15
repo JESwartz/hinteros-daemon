@@ -319,7 +319,8 @@ shutdown_grace_ms = 3000         # SIGTERM of the daemon: SIGKILL its apps after
 [gamescope]
 enable = true
 display = ":0"                 # gamescope's Xwayland [default: $DISPLAY, else :0]
-apps_display = "auto+2"        # Xwayland for apps under the reaper; "auto+<n>": the user's n-th display after the lowest [default: display]
+apps_display = "auto+2"        # first app display (each app under the reaper gets its own); "auto+<n>": the user's n-th display after the lowest [default: display, shared]
+app_displays = 4               # how many when $XDG_RUNTIME_DIR/hinteros/app-displays is missing; the profile setting's default (1 to 8)
 wayland_display = "gamescope-0"  # given to Steam (not to apps) [default: $WAYLAND_DISPLAY, else gamescope-0]
 focus_loss_debounce_ms = 1500  # how long the focused app may be without a window
 unmap_gl_dummies = true     # unmap invisible full-screen override-redirect windows (GTK3 GL dummies) over an app
@@ -1792,15 +1793,30 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   `unknown_permission`, `permission_required`; emits `apps_changed` and `store_changed`.
 - Apps get no `WAYLAND_DISPLAY` / `GAMESCOPE_WAYLAND_DISPLAY` with or without the sandbox
   (gamescope's private protocols); only Steam keeps them.
-- **Own display** (`[gamescope] apps_display`, the system sets `"auto+2"`): every app under the
-  reaper (sandboxed or not, also `apps.launch {command}`) gets that Xwayland as `DISPLAY` and,
-  in the sandbox, only its socket; the launcher and the OSK stay on `display`, Steam and its
-  games keep it too. `"auto+<n>"` is resolved at each spawn (this user's live X displays, lowest
-  first); while it does not exist the launch fails (`app_launch_failed`, "no app display"), never
-  falling back to `display`. gamescope's Xwaylands must not listen on abstract sockets (the
-  system patches that), else `--share-net` still reaches every display. A second watcher unmaps
-  GL dummies (`unmap_gl_dummies`) on that display. Under cage (no `[gamescope]`) apps keep the
-  session's display.
+- **Own display** (`displays.rs`; `[gamescope] apps_display`, the system sets `"auto+2"`): every
+  app under the reaper (sandboxed or not, also `apps.launch {command}`) gets an Xwayland of its
+  own as `DISPLAY` and, in the sandbox, only that socket, so no app can read, grab or type into
+  another (or into the launcher and the OSK, which stay on `display`). Steam and its games keep
+  `display` and take none. The app displays are `apps_display` and the ones after it
+  (`"auto+2"`, `"auto+3"`, ...); how many this session has is in
+  `$XDG_RUNTIME_DIR/hinteros/app-displays` (written by the compositor wrapper, which starts
+  gamescope with `--xwayland-count` 2 + that number), else `app_displays`. Each is resolved at
+  each launch (this user's live X displays, lowest first). A launch takes the first one that
+  exists, that no running app of ours has, and on which no reaper is left (`DISPLAY` in
+  `/proc/<pid>/environ`: an app given up after SIGKILL, or one from before a daemon restart). A
+  reaper lives until every process below it has ended, so a display is free once its app's
+  whole process tree is gone (`app_exited` follows the reaper's exit). None free:
+  `no_app_display` (2009) with `data.apps`, the running apps that hold one; nothing is closed
+  automatically. None exists: `app_launch_failed` ("no app display"), never falling back to
+  `display`. gamescope's Xwaylands must not listen on abstract sockets (the system patches
+  that), else `--share-net` still reaches every display. One watcher per app display unmaps GL
+  dummies (`unmap_gl_dummies`). Under cage (no `[gamescope]`) apps keep the session's display
+  and nothing limits them.
+- **How many** (`apps.displays.get` / `apps.displays.set {count}`): the profile's setting, 1 to 8,
+  default `app_displays`, in `$XDG_STATE_HOME/hinteros/app-displays` (one number, written
+  atomically). Both answer `{count, active, min, max}`: `active` is what this session started
+  with (`null` without app displays). gamescope makes its Xwaylands at start only, so a new
+  `count` applies at the next session start (`session.restart`).
 
 ### What the system repo must do (session API 0.18)
 
@@ -1811,8 +1827,10 @@ play-only pulse socket exists, `pulse_socket` / `pulse_record_socket` (relative 
 oneshot `hinteros-lan-filter.service` running `hinteros-system lan-filter-apply --nft <nft>` as
 root with `CAP_NET_ADMIN` and `AF_NETLINK` (not in a private network namespace), started again
 when `/etc/resolv.conf` or the network changes. Drop `ProtectKernelTunables` from the session daemon's unit. Under gamescope:
-`--xwayland-count 3`, Xwaylands without abstract sockets, every one but `#1` sized to the output,
-and `[gamescope] apps_display = "auto+2"`.
+`--xwayland-count` 2 + the profile's `$XDG_STATE_HOME/hinteros/app-displays` (default 4), that
+number written to `$XDG_RUNTIME_DIR/hinteros/app-displays` before gamescope starts, Xwaylands
+without abstract sockets, every one but `#1` sized to the output and without `LIBEI_SOCKET` from
+`#2` on, and `[gamescope] apps_display = "auto+2"`, `app_displays = 4`.
 
 ### What the launcher must do (session API 0.18)
 
@@ -1820,6 +1838,9 @@ Hello with `0.18`. Show `permissions` on the install sheet and the app page (req
 locked); call `apps.set_permission` for each optional permission whose switch differs from
 `granted`, then `system.apps.install`. When `full_access` is true (Steam, `sandbox = false`, or the
 sandbox is off), the install sheet warns that the app can use everything the profile can.
+On `no_app_display` from `apps.launch`, ask which app of `data.apps` to close (or Cancel), then
+`apps.close` it, wait for its `app_exited` and launch again. Settings: `apps.displays.get` /
+`apps.displays.set`; when `count` differs from `active`, offer `session.restart`.
 
 ## Local network filter (system API 0.10)
 

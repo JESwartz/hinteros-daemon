@@ -29,14 +29,16 @@ pub struct ChildExit {
 
 pub trait Spawner: Send {
     /// Start `argv`. With `app_id`, under the reaper so that gamescope tags its windows with
-    /// that app id; with `sandbox` too, in that sandbox below the reaper (never without it).
-    /// Reports the end of the process as a [`ChildExit`] with `key`.
+    /// that app id; with `sandbox` too, in that sandbox below the reaper (never without it);
+    /// with `display`, on that X display (an app display, [`crate::displays`]). Reports the end
+    /// of the process as a [`ChildExit`] with `key`.
     fn spawn(
         &mut self,
         key: &str,
         argv: &[String],
         app_id: Option<u32>,
         sandbox: Option<&Spec>,
+        display: Option<&str>,
     ) -> io::Result<u32>;
 }
 
@@ -90,8 +92,8 @@ pub fn spawn_env(env: &[(String, String)], app: bool) -> Vec<(String, String)> {
         .collect()
 }
 
-/// `env` with `DISPLAY` set to the apps' display (`apps_display`, resolved now). Fails while
-/// that display does not exist: an app never falls back to the home app's display.
+/// `env` with `DISPLAY` set to an app display (resolved now). Fails while that display does
+/// not exist: an app never falls back to the home app's display.
 pub fn with_apps_display(
     mut env: Vec<(String, String)>,
     apps_display: &str,
@@ -161,8 +163,9 @@ pub struct ProcessSpawner {
     exits: mpsc::UnboundedSender<ChildExit>,
     children: Children,
     sandbox: Option<SandboxSettings>,
-    /// `gamescope.apps_display` (possibly `"auto+<n>"`): apps run there, not on `env`'s display.
-    apps_display: Option<String>,
+    /// `gamescope.apps_display` is set: an app (under the reaper) runs only on the display it
+    /// is given, never on `env`'s.
+    own_displays: bool,
     /// `[sandbox] lan_filter`: sandboxed apps without `lan` start in the filtered cgroup
     /// ([`crate::lan`]). Without it they do not start.
     lan: Option<LanFilter>,
@@ -180,14 +183,14 @@ impl ProcessSpawner {
             exits,
             children: Children::default(),
             sandbox: None,
-            apps_display: None,
+            own_displays: false,
             lan: None,
         }
     }
 
-    /// Run apps (under the reaper) on this display (`gamescope.apps_display`).
-    pub fn with_apps_display(mut self, display: Option<String>) -> Self {
-        self.apps_display = display;
+    /// Apps (under the reaper) need a display of their own: one started without fails.
+    pub fn with_app_displays(mut self, on: bool) -> Self {
+        self.own_displays = on;
         self
     }
 
@@ -262,6 +265,7 @@ impl Spawner for ProcessSpawner {
         argv: &[String],
         app_id: Option<u32>,
         sandbox: Option<&Spec>,
+        display: Option<&str>,
     ) -> io::Result<u32> {
         let program = argv
             .first()
@@ -269,8 +273,15 @@ impl Spawner for ProcessSpawner {
         // Resolve up front: under the reaper a missing program would only show as exit 127.
         let program = which(program)?;
         let mut env = spawn_env(&self.env, app_id.is_some());
-        if let (Some(_), Some(display)) = (app_id, &self.apps_display) {
-            env = with_apps_display(env, display)?;
+        match (app_id, display) {
+            (Some(_), Some(display)) => env = with_apps_display(env, display)?,
+            (Some(_), None) if self.own_displays => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no app display given",
+                ));
+            }
+            _ => {}
         }
         // A sandboxed app without `lan`: only while the filter is on; its reaper moves into
         // the filtered cgroup before it starts anything.
@@ -443,7 +454,7 @@ mod tests {
             std::fs::set_permissions(&reaper, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let env = vec![("DISPLAY".to_string(), ":0".to_string())];
-        let mut s = ProcessSpawner::new(reaper, env, tx).with_apps_display(Some(":2".into()));
+        let mut s = ProcessSpawner::new(reaper, env, tx).with_app_displays(true);
         let argv = |f: &Path| -> Vec<String> {
             vec![
                 "sh".into(),
@@ -451,17 +462,19 @@ mod tests {
                 format!("printf %s \"$DISPLAY\" > {}", f.display()),
             ]
         };
-        // An app (under the reaper) gets the apps' display ...
-        s.spawn("a", &argv(&out), Some(1234), None).unwrap();
+        // An app (under the reaper) gets its display ...
+        s.spawn("a", &argv(&out), Some(1234), None, Some(":2"))
+            .unwrap();
         rx.recv().await.unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap(), ":2");
         // ... Steam (no reaper) keeps the session's.
-        s.spawn("steam", &argv(&out), None, None).unwrap();
+        s.spawn("steam", &argv(&out), None, None, None).unwrap();
         rx.recv().await.unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap(), ":0");
-        // An apps' display that does not exist fails the launch.
-        let mut s = s.with_apps_display(Some("auto+999".into()));
-        assert!(s.spawn("b", &argv(&out), Some(1235), None).is_err());
+        // An app display that does not exist, or none, fails the launch.
+        let missing = s.spawn("b", &argv(&out), Some(1235), None, Some("auto+999"));
+        assert!(missing.is_err());
+        assert!(s.spawn("b", &argv(&out), Some(1235), None, None).is_err());
     }
 
     #[tokio::test]
@@ -485,7 +498,7 @@ mod tests {
         };
         let argv = ["sh".to_string()];
         let err = |s: &mut ProcessSpawner, lan| {
-            s.spawn("a", &argv, Some(1), Some(&spec(lan)))
+            s.spawn("a", &argv, Some(1), Some(&spec(lan)), None)
                 .unwrap_err()
                 .to_string()
         };
@@ -558,7 +571,7 @@ mod tests {
             kiosk: false,
         };
         let argv = ["sh".to_string()];
-        let pid = s.spawn("a", &argv, Some(1), Some(&spec)).unwrap();
+        let pid = s.spawn("a", &argv, Some(1), Some(&spec), None).unwrap();
         assert_eq!(
             std::fs::read_to_string(unit_dir.join("nolan/cgroup.procs")).unwrap(),
             format!("{pid}\n")
@@ -571,7 +584,7 @@ mod tests {
         );
         // The reaper cannot enter nolan: the launch fails.
         std::fs::remove_dir_all(unit_dir.join("nolan")).unwrap();
-        let e = s.spawn("a", &argv, Some(1), Some(&spec)).unwrap_err();
+        let e = s.spawn("a", &argv, Some(1), Some(&spec), None).unwrap_err();
         assert!(e.to_string().starts_with("no local network filter"), "{e}");
     }
 

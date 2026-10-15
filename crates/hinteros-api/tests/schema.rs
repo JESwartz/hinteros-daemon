@@ -381,6 +381,17 @@ fn schema_rejects_what_it_should() {
             r#"{"id":"a","permission":"mic","granted":false,"profile":"x"}"#,
         ),
         ("/methods/apps.set_permission/result", r#"{"ok":true}"#),
+        ("/methods/apps.displays.set/params", r#"{"count":0}"#),
+        ("/methods/apps.displays.set/params", r#"{"count":9}"#),
+        ("/methods/apps.displays.set/params", r#"{}"#),
+        (
+            "/methods/apps.displays.get/result",
+            r#"{"count":4,"min":1,"max":8}"#,
+        ),
+        (
+            "/methods/apps.displays.get/result",
+            r#"{"count":4,"active":0,"min":1,"max":8}"#,
+        ),
     ];
     for (pointer, instance) in bad {
         let v: Value = serde_json::from_str(instance).unwrap();

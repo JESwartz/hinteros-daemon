@@ -288,15 +288,23 @@ pub fn spawn_watcher(
         .expect("spawning the gamescope watcher thread")
 }
 
-/// Unmap GL dummies ([`dummies`]) on the apps' Xwayland (`gamescope.apps_display`), which the
-/// focus watcher does not follow (focus and Steam's windows are on the first Xwayland). Retries
-/// the connection every `retry`, for the life of the daemon.
-pub fn spawn_dummies_watcher(dpy: String, retry: Duration) -> thread::JoinHandle<()> {
+/// Unmap GL dummies ([`dummies`]) on an app display ([`crate::displays`]), which the focus
+/// watcher does not follow (focus and Steam's windows are on the first Xwayland). `dpy` says
+/// which display (a setting such as `"auto+3"`), `None` while this session has no such display.
+/// Retries the connection every `retry`, for the life of the daemon.
+pub fn spawn_dummies_watcher(
+    dpy: impl Fn() -> Option<String> + Send + 'static,
+    retry: Duration,
+) -> thread::JoinHandle<()> {
     thread::Builder::new()
         .name("gamescope-apps-watch".into())
         .spawn(move || {
             let mut warned = false;
             loop {
+                let Some(dpy) = dpy() else {
+                    thread::sleep(retry);
+                    continue;
+                };
                 match watch_dummies(&dpy) {
                     Ok(()) => {}
                     Err(e) if !warned => {

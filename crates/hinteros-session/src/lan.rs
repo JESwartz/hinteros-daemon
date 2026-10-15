@@ -7,12 +7,12 @@
 //! asks the system service to filter `nolan` (system API `lan_filter.set`): the service loads an
 //! nftables table that matches the sockets of that cgroup and of every cgroup below it.
 //!
-//! An app without `lan` is forked while the daemon is in `nolan` ([`Cgroups::in_nolan`]: in and
-//! straight back out; a child keeps its parent's cgroup, and this crate has no `pre_exec`), so
-//! its reaper, bwrap and the app stay there. A sandboxed app cannot leave it: `/sys` is
-//! read-only inside, and a cgroup namespace only reaches below its root. While the daemon is in
-//! `nolan` for a spawn, sockets its other threads open are filtered too (an icon download from
-//! the local network can fail then); never the other way round.
+//! The daemon itself never leaves `daemon`. An app without `lan` gets `Cgroup=<nolan>` on its
+//! reaper's command line: the reaper moves itself into `nolan` before it starts anything (a
+//! child keeps its parent's cgroup), so bwrap and the app run there too, and tells the daemon
+//! (one byte on a pipe, see [`crate::reaper`]). If the reaper cannot move, it starts nothing and
+//! the launch fails. A sandboxed app cannot leave `nolan`: `/sys` is read-only inside, and a
+//! cgroup namespace only reaches below its root.
 //!
 //! Fail closed: until the system service says the filter is on, an app without `lan` does not
 //! start (`app_launch_failed`, "no local network filter"); each such launch asks again. `nolan`
@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// The leaf the daemon runs in.
 pub const LEAF: &str = "daemon";
@@ -103,25 +103,16 @@ impl Cgroups {
         format!("{}/{NOLAN}", self.base)
     }
 
+    /// `nolan`'s directory, for the reaper's `Cgroup=`.
+    pub fn nolan_dir(&self) -> PathBuf {
+        self.dir(NOLAN)
+    }
+
     /// Move this process (every thread) into `leaf`.
     fn enter(&self, leaf: &str) -> io::Result<()> {
         let procs = self.dir(leaf).join("cgroup.procs");
         std::fs::write(&procs, format!("{}\n", std::process::id()))
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", procs.display())))
-    }
-
-    /// Run `f` (a fork) with this process in `nolan`, then move it back. `Err`: it could not
-    /// go there, and `f` did not run. When it cannot come back it stays in `nolan`: everything
-    /// it starts later is filtered too.
-    pub fn in_nolan<T>(&self, f: impl FnOnce() -> T) -> io::Result<T> {
-        self.enter(NOLAN)?;
-        let out = f();
-        if let Err(e) = self.enter(LEAF) {
-            error!(
-                "cannot leave the nolan cgroup, every app is kept off the local network now: {e}"
-            );
-        }
-        Ok(out)
     }
 }
 
@@ -244,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_moves_into_the_leaf_and_enters_nolan_for_a_spawn() {
+    fn setup_moves_into_the_leaf_and_creates_nolan() {
         let t = tempfile::tempdir().unwrap();
         let unit = t.path().join(&UNIT[1..]);
         std::fs::create_dir_all(&unit).unwrap();
@@ -254,24 +245,12 @@ mod tests {
         assert_eq!(procs(LEAF).unwrap(), me);
         assert!(unit.join(NOLAN).is_dir());
         assert_eq!(c.nolan(), format!("{UNIT}/nolan"));
+        assert_eq!(c.nolan_dir(), unit.join(NOLAN));
+        // The daemon itself never goes there.
+        assert!(procs(NOLAN).is_err());
         // Again from the leaf (a restart in place): the same cgroups.
         let again = Cgroups::setup(t.path(), &format!("{UNIT}/daemon")).unwrap();
         assert_eq!(again, c);
-        // A spawn: in nolan while it runs, back in the leaf after.
-        std::fs::remove_file(unit.join(LEAF).join("cgroup.procs")).unwrap();
-        let seen = c
-            .in_nolan(|| {
-                assert!(procs(LEAF).is_err(), "not back yet");
-                procs(NOLAN).unwrap()
-            })
-            .unwrap();
-        assert_eq!(seen, me);
-        assert_eq!(procs(LEAF).unwrap(), me);
-        // nolan cannot be entered: the spawn does not run.
-        std::fs::remove_dir_all(unit.join(NOLAN)).unwrap();
-        let mut ran = false;
-        assert!(c.in_nolan(|| ran = true).is_err());
-        assert!(!ran);
         // No cgroup of our own, or none to create one in.
         assert!(Cgroups::setup(t.path(), "/").is_err());
         assert!(Cgroups::setup(t.path(), "/daemon").is_err());

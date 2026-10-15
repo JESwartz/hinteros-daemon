@@ -7,6 +7,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -117,6 +118,39 @@ pub struct SandboxSettings {
     pub app_env: Option<PathBuf>,
     /// The text field socket (`osk.sock`).
     pub osk_socket: Option<PathBuf>,
+}
+
+/// How long a launch waits for the reaper to be in the `nolan` cgroup.
+const IN_CGROUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Wait until the reaper writes `1` on `read` (it is in its `Cgroup=`). End of file: it could
+/// not move there and started nothing.
+fn wait_in_cgroup(read: std::io::PipeReader, timeout: Duration) -> io::Result<()> {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    use std::io::Read;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the reaper did not enter the cgroup in time",
+            ));
+        }
+        let left = Timespec::try_from(left).map_err(io::Error::other)?;
+        let mut fds = [PollFd::new(&read, PollFlags::IN)];
+        match poll(&mut fds, Some(&left)) {
+            Ok(0) => continue,
+            Ok(_) => break,
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let mut byte = [0u8; 1];
+    match (&read).read(&mut byte)? {
+        1 if byte == *b"1" => Ok(()),
+        _ => Err(io::Error::other("the reaper could not enter the cgroup")),
+    }
 }
 
 /// Starts real processes with tokio and reports their exit.
@@ -238,14 +272,15 @@ impl Spawner for ProcessSpawner {
         if let (Some(_), Some(display)) = (app_id, &self.apps_display) {
             env = with_apps_display(env, display)?;
         }
-        // A sandboxed app without `lan`: only while the filter is on, forked in its cgroup.
+        // A sandboxed app without `lan`: only while the filter is on; its reaper moves into
+        // the filtered cgroup before it starts anything.
         let nolan = match sandbox {
             Some(spec) if !spec.grants.lan => Some(
                 self.lan
                     .as_ref()
                     .ok_or_else(crate::lan::not_on)?
                     .ready()?
-                    .clone(),
+                    .nolan_dir(),
             ),
             _ => None,
         };
@@ -253,7 +288,7 @@ impl Spawner for ProcessSpawner {
             (Some(id), Some(spec)) => {
                 let bwrap = self.sandboxed(spec, &program, argv, &env)?;
                 let mut cmd = tokio::process::Command::new(&self.reaper_exe);
-                cmd.args(reaper::args(id, &bwrap));
+                cmd.args(reaper::args_in(id, nolan.as_deref(), &bwrap));
                 cmd
             }
             (None, Some(_)) => {
@@ -277,12 +312,28 @@ impl Spawner for ProcessSpawner {
                 cmd.env_remove(k);
             }
         }
-        let mut child = match &nolan {
-            Some(cgroups) => cgroups
-                .in_nolan(|| cmd.spawn())
-                .map_err(|e| io::Error::new(e.kind(), format!("no local network filter: {e}")))??,
-            None => cmd.spawn()?,
+        // The reaper says on this pipe (its stdin) when it is in nolan.
+        let in_nolan = match &nolan {
+            Some(_) => {
+                let (read, write) = std::io::pipe()?;
+                cmd.stdin(write);
+                Some(read)
+            }
+            None => None,
         };
+        let mut child = cmd.spawn()?;
+        // Our copy of the pipe's write end goes with it: end of file once the reaper is gone.
+        drop(cmd);
+        if let Some(read) = in_nolan
+            && let Err(e) = wait_in_cgroup(read, IN_CGROUP_TIMEOUT)
+        {
+            let _ = child.start_kill();
+            tokio::spawn(async move { child.wait().await });
+            return Err(io::Error::new(
+                e.kind(),
+                format!("no local network filter: {e}"),
+            ));
+        }
         let pid = child.id().unwrap_or_default();
         let children = self.children.clone();
         if !children.add(pid) {
@@ -446,6 +497,82 @@ mod tests {
         assert_eq!(err(&mut s, false), "no local network filter");
         // With lan the filter does not matter (here bwrap is missing).
         assert!(err(&mut s, true).contains("bwrap not found"));
+    }
+
+    #[tokio::test]
+    async fn apps_without_lan_start_only_once_their_reaper_is_in_nolan() {
+        use crate::lan::Cgroups;
+        use crate::permissions::Grants;
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let unit = "/user.slice/u.service";
+        let unit_dir = t.path().join("cg/user.slice/u.service");
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        let cgroups = Cgroups::setup(&t.path().join("cg"), unit).unwrap();
+        let (filter, ask) = LanFilter::new(Some(cgroups));
+        tokio::spawn(crate::lan::run(filter.clone(), ask, |_| async { Ok(()) }));
+        while !filter.is_on() {
+            tokio::task::yield_now().await;
+        }
+        // A stand-in reaper: what the real one does with Cgroup= (see tests/reaper.rs), then
+        // stops (here bwrap is sh).
+        let reaper = t.path().join("reaper");
+        std::fs::write(
+            &reaper,
+            "#!/bin/sh\nfor a; do case \"$a\" in Cgroup=*) d=${a#Cgroup=};; --) break;; esac; done\n\
+             [ -n \"$d\" ] || exit 2\necho $$ > \"$d/cgroup.procs\" || exit 125\nprintf 1 >&0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&reaper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let settings = SandboxSettings {
+            bwrap: "sh".into(),
+            pulse_socket: "pulse/native".into(),
+            pulse_record_socket: "pulse/native".into(),
+            app_env: None,
+            osk_socket: None,
+        };
+        let env = [
+            ("HOME", "home"),
+            ("XDG_RUNTIME_DIR", "run"),
+            ("DISPLAY", ":0"),
+        ]
+        .map(|(k, v)| {
+            let v = if v.starts_with(':') {
+                v.to_string()
+            } else {
+                t.path().join(v).display().to_string()
+            };
+            (k.to_string(), v)
+        })
+        .to_vec();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut s = ProcessSpawner::new(reaper, env, tx)
+            .with_sandbox(settings)
+            .with_lan_filter(filter);
+        let spec = Spec {
+            id: "a".into(),
+            grants: Grants {
+                lan: false,
+                ..Grants::default()
+            },
+            kiosk: false,
+        };
+        let argv = ["sh".to_string()];
+        let pid = s.spawn("a", &argv, Some(1), Some(&spec)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(unit_dir.join("nolan/cgroup.procs")).unwrap(),
+            format!("{pid}\n")
+        );
+        assert_eq!(rx.recv().await.unwrap().code, Some(0));
+        // The daemon itself stayed in its leaf.
+        assert_eq!(
+            std::fs::read_to_string(unit_dir.join("daemon/cgroup.procs")).unwrap(),
+            format!("{}\n", std::process::id())
+        );
+        // The reaper cannot enter nolan: the launch fails.
+        std::fs::remove_dir_all(unit_dir.join("nolan")).unwrap();
+        let e = s.spawn("a", &argv, Some(1), Some(&spec)).unwrap_err();
+        assert!(e.to_string().starts_with("no local network filter"), "{e}");
     }
 
     #[test]

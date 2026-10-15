@@ -288,7 +288,8 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
 - **Reaper** (`reaper.rs`): `hinteros-session reaper SteamLaunch AppId=<id> -- <command>` runs
   a command as a child subreaper named `reaper`, which is how gamescope (Steam mode) learns the
   app id of a process's windows, X11 and native Wayland alike. The daemon starts command apps
-  this way; the launcher must be started this way too (see below).
+  this way; the launcher must be started this way too (see below). `Cgroup=<dir>` before `--`:
+  move into that cgroup first, or start nothing (exit 125); see "`lan`" below.
 - **Sandbox** (`sandbox.rs`, `permissions.rs`): catalog apps run in bwrap below the reaper, with
   the permissions the profile granted (`apps.set_permission`); see "App sandbox and permissions".
 
@@ -1773,12 +1774,15 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   to the box's nameservers and the internet work. The daemon's unit has `Delegate=yes` (and no
   `ProtectControlGroups`): at start the daemon moves itself into the leaf `<unit cgroup>/daemon`
   and creates `<unit cgroup>/nolan`, then calls the system API's `lan_filter.set {cgroup}` (at
-  once, then after 1 s doubling to 30 s, and at every launch while it is not on). An app without
-  `lan` is forked while the daemon is in `nolan` (in, spawn, straight back: the reaper, bwrap and
-  the app stay there; this crate has no `pre_exec`); a sandboxed app cannot leave it (`/sys` is
-  read-only inside, a cgroup namespace reaches only below its root). Fail closed: until the system
-  says the filter is on (or when the cgroups cannot be set up) such a launch fails
-  (`app_launch_failed`, "no local network filter"), it never runs with the network open. Apps
+  once, then after 1 s doubling to 30 s, and at every launch while it is not on). The daemon
+  always stays in `daemon`. An app without `lan` gets `reaper ... Cgroup=<nolan dir> -- ...`: the
+  reaper writes its own pid to `nolan`'s `cgroup.procs` before it starts anything (so bwrap and
+  the app run there too) and then writes `1` to its stdin, a pipe the launch waits on (5 s). If
+  it cannot move, it starts nothing and exits 125; the launch fails. A sandboxed app cannot
+  leave `nolan` (`/sys` is read-only inside, a cgroup namespace reaches only below its root).
+  Fail closed: until the system says the filter is on (or when the cgroups cannot be set up, or
+  the reaper cannot enter `nolan`) such a launch fails (`app_launch_failed`, "no local network
+  filter"), it never runs with the network open. Apps
   with `lan`, Steam, `sandbox = false` apps and `apps.launch {command}` are not filtered. At
   shutdown, after the apps, the daemon calls `lan_filter.clear`.
 - `apps.list` and `store.list` entries carry `permissions: [{name, required, granted}]`

@@ -9,6 +9,12 @@
 //! enabled by `services.pipewire.pulse.enable`). There is no subscription: changes made
 //! elsewhere are found by polling while a client is connected, and our own changes are sent
 //! at once.
+//!
+//! A sound card has one profile at a time, and only that profile's outputs are sinks: with
+//! the analog profile on, the TV on HDMI or DisplayPort has no sink. So the outputs are the
+//! sinks plus the outputs of each ALSA card's other available profiles (`list cards`), with
+//! the id their sink will have (`alsa_output.<card>.<mapping>`, PipeWire's naming); picking
+//! one switches the card's profile (`set-card-profile`) first.
 
 use std::process::Stdio;
 use std::sync::Arc;
@@ -175,8 +181,145 @@ async fn default_sink(ctx: &Ctx) -> Result<String, ErrorObject> {
     Ok(pactl(ctx, &["get-default-sink"]).await?.trim().to_owned())
 }
 
+/// An output of a card profile that is not on: its sink appears once one of `profiles` is.
+#[derive(Debug, PartialEq)]
+struct Inactive {
+    /// The name its sink will have: the output's id.
+    id: String,
+    name: String,
+    kind: AudioKind,
+    card: String,
+    /// The available profiles with this output, the one to switch to first.
+    profiles: Vec<String>,
+}
+
+/// The outputs of every ALSA card's available profiles that have no sink now (`cards` is
+/// `pactl --format=json list cards`). Surround variants are left out (the stereo profile of
+/// the same port plays everything), and so are `pro-audio` and `off`.
+fn inactive_outputs(cards: &Value, sinks: &[&str]) -> Vec<Inactive> {
+    let mut out: Vec<Inactive> = Vec::new();
+    for card in cards.as_array().map(Vec::as_slice).unwrap_or_default() {
+        let Some(card_name) = card["name"].as_str() else {
+            continue;
+        };
+        let Some(suffix) = card_name.strip_prefix("alsa_card.") else {
+            continue;
+        };
+        let props = &card["properties"];
+        let card_desc = props["device.description"].as_str().unwrap_or(suffix);
+        let usb = props["device.bus"].as_str() == Some("usb");
+        // The input the card has now ("input:analog-stereo"), kept when switching.
+        let active_input = card["active_profile"]
+            .as_str()
+            .and_then(|p| p.split_once('+'))
+            .map(|(_, input)| input);
+        let Some(profiles) = card["profiles"].as_object() else {
+            continue;
+        };
+        for (profile, info) in profiles {
+            if info["available"].as_bool() != Some(true) {
+                continue;
+            }
+            let output = profile.split('+').next().unwrap_or(profile);
+            let Some(mapping) = output.strip_prefix("output:") else {
+                continue;
+            };
+            if mapping.contains("surround") {
+                continue;
+            }
+            let id = format!("alsa_output.{suffix}.{mapping}");
+            if sinks.contains(&id.as_str()) {
+                continue;
+            }
+            // "Digital Stereo (HDMI) Output + Analog Stereo Input" -> "Digital Stereo (HDMI)",
+            // as the sink's own description will be. The output-only profile's wins ("Analog
+            // Stereo Output", not "Analog Stereo Duplex").
+            let desc = info["description"].as_str().unwrap_or(mapping);
+            let desc = desc.split(" + ").next().unwrap_or(desc);
+            let desc = desc.strip_suffix(" Output").unwrap_or(desc);
+            let name = format!("{card_desc} {desc}");
+            let entry = match out.iter_mut().find(|o| o.id == id) {
+                Some(e) => {
+                    if !profile.contains('+') {
+                        e.name = name;
+                    }
+                    e
+                }
+                None => {
+                    let kind = if mapping.contains("hdmi") {
+                        AudioKind::Hdmi
+                    } else if usb {
+                        AudioKind::Usb
+                    } else if mapping.contains("analog") {
+                        AudioKind::Analog
+                    } else {
+                        AudioKind::Other
+                    };
+                    out.push(Inactive {
+                        id,
+                        name,
+                        kind,
+                        card: card_name.to_owned(),
+                        profiles: Vec::new(),
+                    });
+                    out.last_mut().expect("pushed")
+                }
+            };
+            let rank = profile_rank(profile, active_input);
+            let at = entry
+                .profiles
+                .iter()
+                .position(|p| profile_rank(p, active_input) > rank)
+                .unwrap_or(entry.profiles.len());
+            entry.profiles.insert(at, profile.clone());
+        }
+    }
+    out
+}
+
+/// Which profile to switch to first: one that keeps the card's input (the microphone stays),
+/// then output only, then one with another input.
+fn profile_rank(profile: &str, active_input: Option<&str>) -> u8 {
+    match (profile.split_once('+').map(|(_, i)| i), active_input) {
+        (Some(i), Some(a)) if i == a => 0,
+        (None, _) => 1,
+        _ => 2,
+    }
+}
+
+/// [`inactive_outputs`] now; none if the cards cannot be listed (the sinks still work).
+async fn inactive(ctx: &Ctx, sinks: &[Sink]) -> Vec<Inactive> {
+    let names: Vec<&str> = sinks.iter().map(|s| s.id.as_str()).collect();
+    match pactl(ctx, &["--format=json", "list", "cards"]).await {
+        Ok(out) => match serde_json::from_str::<Value>(&out) {
+            Ok(cards) => inactive_outputs(&cards, &names),
+            Err(e) => {
+                debug!("pactl gave no card list ({e})");
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            debug!("audio cards: {}", e.message);
+            Vec::new()
+        }
+    }
+}
+
+/// Switch the card of the inactive output `id` to its profile; whether there was one.
+async fn activate(ctx: &Ctx, id: &str) -> Result<bool, ErrorObject> {
+    let sinks = sinks(ctx).await?;
+    let Some(output) = inactive(ctx, &sinks).await.into_iter().find(|o| o.id == id) else {
+        return Ok(false);
+    };
+    let profile = output.profiles.first().expect("one profile at least");
+    tracing::info!(card = %output.card, %profile, output = %id, "switching the sound card's profile");
+    pactl(ctx, &["set-card-profile", &output.card, profile]).await?;
+    Ok(true)
+}
+
 async fn read(ctx: &Ctx) -> Result<AudioState, ErrorObject> {
     let sinks = sinks(ctx).await?;
+    let inactive = inactive(ctx, &sinks).await;
     let default = default_sink(ctx).await?;
     // With no default set (or one that went away), PipeWire plays on the first output.
     let current = sinks
@@ -195,6 +338,12 @@ async fn read(ctx: &Ctx) -> Result<AudioState, ErrorObject> {
                 name: s.name.clone(),
                 kind: s.kind,
             })
+            .chain(inactive.into_iter().map(|o| AudioOutput {
+                default: false,
+                id: o.id,
+                name: o.name,
+                kind: o.kind,
+            }))
             .collect(),
         volume,
         muted,
@@ -238,12 +387,29 @@ pub async fn outputs(ctx: &Ctx) -> Result<AudioState, ErrorObject> {
     Ok(state)
 }
 
+/// How long a picked output of another card profile may take to become a sink.
+const SWITCH_WAIT: Duration = Duration::from_secs(5);
+const SWITCH_RETRY: Duration = Duration::from_millis(100);
+
 pub async fn set_output(ctx: &Ctx, p: AudioSetOutputParams) -> Result<AudioState, ErrorObject> {
     let sinks = sinks(ctx).await?;
-    if !sinks.iter().any(|s| s.id == p.id) {
+    if sinks.iter().any(|s| s.id == p.id) {
+        return change(ctx, &["set-default-sink", &p.id]).await;
+    }
+    if !inactive(ctx, &sinks).await.iter().any(|o| o.id == p.id) {
         return Err(not_found(format!("no audio output {}", p.id)));
     }
-    change(ctx, &["set-default-sink", &p.id]).await
+    // Switches the card's profile, then waits for the sink.
+    if make_default(ctx, &p.id, SWITCH_WAIT, SWITCH_RETRY).await {
+        let state = read(ctx).await?;
+        publish(ctx, &state);
+        Ok(state)
+    } else {
+        Err(failed(
+            "output_unavailable",
+            format!("audio output {} did not appear", p.id),
+        ))
+    }
 }
 
 pub async fn volume(ctx: &Ctx, p: AudioVolumeParams) -> Result<AudioState, ErrorObject> {
@@ -291,6 +457,8 @@ trait SharedAudio {
     async fn sinks(&self) -> Result<Vec<String>, ErrorObject>;
     async fn default_sink(&self) -> Result<String, ErrorObject>;
     async fn set_default(&self, node: &str) -> Result<(), ErrorObject>;
+    /// Switch a card to the profile that has `node` ([`activate`]); whether one did.
+    async fn activate(&self, node: &str) -> Result<bool, ErrorObject>;
 }
 
 impl SharedAudio for Ctx {
@@ -302,6 +470,9 @@ impl SharedAudio for Ctx {
     }
     async fn set_default(&self, node: &str) -> Result<(), ErrorObject> {
         change(self, &["set-default-sink", node]).await.map(|_| ())
+    }
+    async fn activate(&self, node: &str) -> Result<bool, ErrorObject> {
+        activate(self, node).await
     }
 }
 
@@ -329,7 +500,8 @@ pub async fn apply_shared(ctx: Arc<Ctx>) {
 /// The sink can be listed before WirePlumber's default metadata is ready: `set-default-sink`
 /// then fails ("Not supported") and works a moment later, or seems to work and the default
 /// stays another sink. So a failure is retried like a missing sink, and a success is checked
-/// by reading the default back. Only giving up is logged above debug.
+/// by reading the default back. Only giving up is logged above debug. A node that is the
+/// output of a card profile that is not on switches the card to it, once.
 async fn make_default(
     audio: &impl SharedAudio,
     node: &str,
@@ -338,15 +510,16 @@ async fn make_default(
 ) -> bool {
     let give_up = tokio::time::Instant::now() + wait;
     let mut set = false;
+    let mut activated = false;
     let mut last_error: Option<String> = None;
     loop {
         match audio.sinks().await {
             Ok(list) if list.iter().any(|s| s == node) => {
                 if audio.default_sink().await.ok().as_deref() == Some(node) {
                     if set {
-                        tracing::info!(%node, "the shared audio output is the default sink");
+                        tracing::info!(%node, "the audio output is the default sink");
                     } else {
-                        debug!(%node, "the shared audio output is already the default");
+                        debug!(%node, "the audio output is already the default");
                     }
                     return true;
                 }
@@ -355,11 +528,11 @@ async fn make_default(
                         set = true;
                         match audio.default_sink().await {
                             Ok(default) if default == node => {
-                                tracing::info!(%node, "the shared audio output is the default sink");
+                                tracing::info!(%node, "the audio output is the default sink");
                                 return true;
                             }
                             Ok(default) => {
-                                debug!(%node, %default, "set the shared audio output, but the default is still another sink");
+                                debug!(%node, %default, "set the audio output, but the default is still another sink");
                                 last_error = Some(format!("the default stayed {default}"));
                             }
                             Err(e) => {
@@ -369,19 +542,28 @@ async fn make_default(
                         }
                     }
                     Err(e) => {
-                        debug!(%node, "cannot use the shared audio output yet: {}", e.message);
+                        debug!(%node, "cannot use the audio output yet: {}", e.message);
                         last_error = Some(e.message);
                     }
                 }
             }
-            Ok(_) => debug!(%node, "the shared audio output is not there (yet)"),
+            // Not a sink: the output of a card profile that is not on, or not there yet.
+            Ok(_) if !activated => match audio.activate(node).await {
+                Ok(true) => activated = true,
+                Ok(false) => debug!(%node, "the audio output is not there (yet)"),
+                Err(e) => {
+                    debug!(%node, "cannot switch to the audio output: {}", e.message);
+                    last_error = Some(e.message);
+                }
+            },
+            Ok(_) => debug!(%node, "the audio output is not there (yet)"),
             Err(e) => debug!("audio not ready: {}", e.message),
         }
         if tokio::time::Instant::now() >= give_up {
             match last_error {
-                Some(e) => tracing::warn!(%node, "cannot use the shared audio output: {e}"),
+                Some(e) => tracing::warn!(%node, "cannot use the audio output: {e}"),
                 None => {
-                    tracing::info!(%node, "the shared audio output did not appear; keeping the default")
+                    tracing::info!(%node, "the audio output did not appear; keeping the default")
                 }
             }
             return false;
@@ -454,6 +636,111 @@ mod tests {
             *self.default.lock().unwrap() = node.into();
             Ok(())
         }
+        async fn activate(&self, _node: &str) -> Result<bool, ErrorObject> {
+            Ok(false)
+        }
+    }
+
+    /// A card whose second output is a sink only after `activate`.
+    struct FakeCard {
+        on: Mutex<bool>,
+        activations: Mutex<u32>,
+        default: Mutex<String>,
+    }
+
+    impl SharedAudio for FakeCard {
+        async fn sinks(&self) -> Result<Vec<String>, ErrorObject> {
+            let mut list = vec!["analog".to_string()];
+            if *self.on.lock().unwrap() {
+                list.push("hdmi".into());
+            }
+            Ok(list)
+        }
+        async fn default_sink(&self) -> Result<String, ErrorObject> {
+            Ok(self.default.lock().unwrap().clone())
+        }
+        async fn set_default(&self, node: &str) -> Result<(), ErrorObject> {
+            *self.default.lock().unwrap() = node.into();
+            Ok(())
+        }
+        async fn activate(&self, node: &str) -> Result<bool, ErrorObject> {
+            *self.activations.lock().unwrap() += 1;
+            if node != "hdmi" {
+                return Ok(false);
+            }
+            *self.on.lock().unwrap() = true;
+            Ok(true)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_output_of_another_profile_switches_the_card_once() {
+        let card = FakeCard {
+            on: Mutex::new(false),
+            activations: Mutex::new(0),
+            default: Mutex::new("analog".into()),
+        };
+        assert!(make_default(&card, "hdmi", SWITCH_WAIT, SWITCH_RETRY).await);
+        assert_eq!(*card.default.lock().unwrap(), "hdmi");
+        assert_eq!(*card.activations.lock().unwrap(), 1);
+        // No card has it (yet: PipeWire still starting): asked again at every retry.
+        let card = FakeCard {
+            on: Mutex::new(false),
+            activations: Mutex::new(0),
+            default: Mutex::new("analog".into()),
+        };
+        assert!(!make_default(&card, "usb", SWITCH_WAIT, SWITCH_RETRY).await);
+        assert_eq!(*card.activations.lock().unwrap(), 51);
+        assert_eq!(*card.default.lock().unwrap(), "analog");
+    }
+
+    /// The living-room box's Intel HDA card (pactl 17 against PipeWire), analog on, the TV on
+    /// HDMI 1 (DisplayPort through a cable): the TV is the output to switch to.
+    #[test]
+    fn outputs_of_profiles_that_are_not_on() {
+        let cards: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/pactl-cards-hda.json"))
+                .unwrap();
+        let analog = "alsa_output.pci-0000_00_1f.3.analog-stereo";
+        assert_eq!(
+            inactive_outputs(&cards, &[analog]),
+            vec![Inactive {
+                id: "alsa_output.pci-0000_00_1f.3.hdmi-stereo".into(),
+                name: "Built-in Audio Digital Stereo (HDMI)".into(),
+                kind: AudioKind::Hdmi,
+                card: "alsa_card.pci-0000_00_1f.3".into(),
+                // The microphone input stays.
+                profiles: vec![
+                    "output:hdmi-stereo+input:analog-stereo".into(),
+                    "output:hdmi-stereo".into()
+                ],
+            }]
+        );
+        // The other way round: HDMI on, analog offered by its own name.
+        let mut cards = cards;
+        cards[0]["active_profile"] = json!("output:hdmi-stereo");
+        let out = inactive_outputs(&cards, &["alsa_output.pci-0000_00_1f.3.hdmi-stereo"]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, analog);
+        assert_eq!(out[0].name, "Built-in Audio Analog Stereo");
+        assert_eq!(out[0].kind, AudioKind::Analog);
+        // No input now: output only first.
+        assert_eq!(
+            out[0].profiles,
+            vec![
+                "output:analog-stereo",
+                "output:analog-stereo+input:analog-stereo"
+            ]
+        );
+        // Not ALSA, or no cards: nothing.
+        assert!(
+            inactive_outputs(
+                &json!([{"name": "bluez_card.AA", "profiles": {"a2dp-sink": {"available": true}}}]),
+                &[]
+            )
+            .is_empty()
+        );
+        assert!(inactive_outputs(&json!({}), &[]).is_empty());
     }
 
     #[tokio::test(start_paused = true)]

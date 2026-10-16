@@ -569,7 +569,7 @@ every method and event is in `schema/session-api.json` with examples.
 |---|---|---|---|
 | Wi-Fi | `network.status`, `wifi.scan`, `wifi.list`, `wifi.connect {ssid, password?}`, `wifi.disconnect`, `wifi.forget {ssid}`, `wifi.enable {enabled}` | `network_changed`, `wifi_list_changed` | NetworkManager (D-Bus) |
 | Bluetooth | `bluetooth.status`, `.scan {enabled, timeout_s?}`, `.devices`, `.pair {address}`, `.confirm {address, accept}`, `.connect`, `.disconnect`, `.forget` | `bluetooth_changed`, `bluetooth_confirm` | BlueZ (D-Bus) |
-| Audio | `audio.outputs`, `.set_output {id}`, `.volume {percent?}`, `.mute {muted}` (all return the same state) | `audio_changed` | `pactl` (PipeWire's pulse server) |
+| Audio | `audio.outputs`, `.set_output {id}`, `.volume {percent?}`, `.mute {muted}` (all return the same state). The outputs are the sinks and the outputs of each ALSA card's other available profiles (id: the sink name it will have, `alsa_output.<card>.<mapping>`; no surround variants); `set_output` on one of those switches the card's profile first (`set-card-profile`, keeping the input), as does the box-wide output at session start | `audio_changed` | `pactl` (PipeWire's pulse server) |
 | Display | `display.modes`, `.set_mode {width, height, refresh}`, `.keep`, `.revert` | | gamescope (Wayland output, Xwayland, mode save file) |
 | Power | `power.capabilities`, `.suspend`, `.reboot`, `.poweroff` | | logind (D-Bus) |
 

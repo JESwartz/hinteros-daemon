@@ -648,7 +648,7 @@ mod tests {
             },
             kiosk: false,
         };
-        s.spawn("a", &["sh".to_string()], Some(1), Some(&spec))
+        s.spawn("a", &["sh".to_string()], Some(1), Some(&spec), None)
             .unwrap();
         assert_eq!(rx.recv().await.unwrap().code, Some(0));
         assert_eq!(

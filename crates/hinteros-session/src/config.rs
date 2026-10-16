@@ -20,7 +20,9 @@
 //! [gamescope]
 //! enable = true
 //! display = ":0"               # gamescope's Xwayland [default: $DISPLAY, else :0]
-//! wayland_display = "gamescope-0"  # passed to launched apps [default: $WAYLAND_DISPLAY, else gamescope-0]
+//! apps_display = "auto+2"      # the first app display: each app under the reaper gets its own [default: display, shared]
+//! app_displays = 4             # how many, when the compositor did not say ($XDG_RUNTIME_DIR/hinteros/app-displays); the setting's default
+//! wayland_display = "gamescope-0"  # passed to Steam (not to apps) [default: $WAYLAND_DISPLAY, else gamescope-0]
 //! focus_loss_debounce_ms = 1500
 //! unmap_gl_dummies = true      # unmap invisible full-screen override-redirect windows over an app
 //!
@@ -64,6 +66,14 @@
 //! hide_command = ["gamescopectl", "paint_cursor_plane", "0"]  # on D-pad/left stick use
 //! show_command = ["gamescopectl", "paint_cursor_plane", "1"]
 //!
+//! [sandbox]                    # catalog apps in bwrap (see `sandbox`); never Steam
+//! enable = false
+//! bwrap = "bwrap"              # a path, or a name looked up in PATH
+//! pulse_socket = "pulse/native"         # sound for apps, relative to XDG_RUNTIME_DIR
+//! pulse_record_socket = "pulse/native"  # sound that may record (mic); the same: no mic permission
+//! lan_filter = false           # apps without `lan` are kept off the local network (see `lan`):
+//!                              # needs Delegate=yes and the system's filter; off: no lan permission
+//!
 //! [[apps]]                     # apps.list entries; launchable with apps.launch {id}
 //! id = "jellyfin"
 //! name = "Jellyfin"
@@ -76,10 +86,13 @@
 //! kind = "web"
 //! command = ["firefox", "--kiosk", "https://www.youtube.com/tv"]
 //! site_url = "https://www.youtube.com/tv"  # icon from the site's manifest/favicon (or icon_url)
+//! # icon_sha256 = "<64 hex digits>"  # with icon_url: keep the download only if it has this SHA-256
 //! # firefox_profile = "~/.local/share/hinteros/firefox/youtube"  # fallback: the favicon Firefox stored
 //! input = "keyboard"           # controller -> key presses (default "gamepad": the pad itself)
 //! back_key = "escape"          # what B sends [default: escape]
 //! pointer = true               # right stick moves a pointer, RT/LT click left/right [default: true]
+//! permissions = { mic = "optional" }  # sandbox permissions from the catalog (required/optional)
+//! # sandbox = false            # run without the sandbox [default: true]
 //! # address_bar = true         # plain Firefox: View = Ctrl+L + on-screen keyboard, LB/RB = back/forward
 //! [apps.keymap]                # more (or other) actions -> keys
 //! context = "f"
@@ -282,6 +295,7 @@ pub struct Config {
     pub auth: AuthConfig,
     pub session: SessionConfig,
     pub store: StoreConfig,
+    pub sandbox: SandboxConfig,
     pub audio: AudioConfig,
     pub display: DisplayConfig,
     pub bluetooth: BluetoothConfig,
@@ -547,6 +561,37 @@ impl Default for SessionConfig {
     }
 }
 
+/// `[sandbox]`: run catalog apps in a bwrap sandbox ([`crate::sandbox`]). Steam and apps with
+/// `sandbox = false` never are.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxConfig {
+    pub enable: bool,
+    /// bwrap: a path, or a name looked up in `$PATH`.
+    pub bwrap: PathBuf,
+    /// The sound socket apps get, relative to `$XDG_RUNTIME_DIR` (it should not record).
+    pub pulse_socket: PathBuf,
+    /// The sound socket apps with `mic` get. The same as `pulse_socket`: `mic` is not enforced,
+    /// so it is not listed.
+    pub pulse_record_socket: PathBuf,
+    /// Apps without `lan` start in the daemon's `nolan` cgroup, which the system service's
+    /// filter keeps off the local network ([`crate::lan`]). Off: `lan` is not enforced, so it
+    /// is not listed.
+    pub lan_filter: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            bwrap: "bwrap".into(),
+            pulse_socket: "pulse/native".into(),
+            pulse_record_socket: "pulse/native".into(),
+            lan_filter: false,
+        }
+    }
+}
+
 /// The App Store (`store.list`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -614,6 +659,14 @@ impl Default for SteamConfig {
 pub struct GamescopeConfig {
     pub enable: bool,
     pub display: Option<String>,
+    /// The first app display (under the reaper: catalog apps, `apps.launch {command}`): each
+    /// app runs on one of its own ([`crate::displays`]), so that it cannot read or type into
+    /// the home app and the OSK on `display`, nor into another app. Not Steam (it and its games
+    /// keep `display`). `None`: `display`, shared by every app.
+    pub apps_display: Option<String>,
+    /// How many app displays there are when the compositor did not say, and the default of
+    /// the profile's setting (`apps.displays.set`). 1 to 8.
+    pub app_displays: u32,
     pub wayland_display: Option<String>,
     pub focus_loss_debounce_ms: u64,
     /// Unmap invisible override-redirect windows that cover an app's real window (GTK3 GL
@@ -626,6 +679,8 @@ impl Default for GamescopeConfig {
         Self {
             enable: true,
             display: None,
+            apps_display: None,
+            app_displays: 4,
             wayland_display: None,
             focus_loss_debounce_ms: 1500,
             unmap_gl_dummies: true,
@@ -926,6 +981,8 @@ pub struct AppConfig {
     pub desktop_id: Option<String>,
     /// Web apps: an https URL of the icon image.
     pub icon_url: Option<String>,
+    /// Hex SHA-256 of the `icon_url` file: a download with another hash is refused.
+    pub icon_sha256: Option<String>,
     /// Web apps: an https page whose manifest, apple-touch-icon or favicon is the icon.
     pub site_url: Option<String>,
     /// Web apps: the app's Firefox profile directory (`~/` allowed). When the site refuses the icon
@@ -948,10 +1005,20 @@ pub struct AppConfig {
     pub address_bar: bool,
     /// Keyboard profile: the right stick moves a mouse pointer ([pointer]) [default: true].
     pub pointer: Option<bool>,
+    /// Sandbox permissions the app declares (from the catalog): name -> required / optional.
+    #[serde(default)]
+    pub permissions: BTreeMap<String, hinteros_api::catalog::Need>,
+    /// `false`: the app runs without the sandbox (from the catalog) [default: true].
+    #[serde(default = "yes")]
+    pub sandbox: bool,
 }
 
 fn native() -> AppKind {
     AppKind::Native
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// `~/x` as `$HOME/x`; other paths unchanged.
@@ -1063,6 +1130,31 @@ impl Config {
         self.icons.profile_share = Some(profile.join("share"));
     }
 
+    /// Sandboxed apps see their sandbox home as `$HOME`: their `firefox_profile` (`~/...`) is
+    /// in it ([`crate::sandbox::outside_path`]).
+    pub fn resolve_sandbox_paths(&mut self) {
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            self.resolve_sandbox_paths_in(Path::new(&home));
+        }
+    }
+
+    /// [`Config::resolve_sandbox_paths`] for the profile's `home`.
+    pub fn resolve_sandbox_paths_in(&mut self, home: &Path) {
+        if !self.sandbox.enable {
+            return;
+        }
+        for app in self
+            .apps
+            .iter_mut()
+            .filter(|a| a.sandbox && a.command.is_some())
+        {
+            if let Some(p) = &app.firefox_profile {
+                app.firefox_profile =
+                    Some(crate::sandbox::outside_path(&expand_home(p), home, &app.id));
+            }
+        }
+    }
+
     /// The config file: the one named on the command line, else the default location (which
     /// may not exist yet).
     pub fn config_path(cli: &Cli) -> Option<PathBuf> {
@@ -1098,6 +1190,7 @@ impl Config {
             config.icons.profile_share = Some(p.join("share"));
             config.load_profile_apps(p);
         }
+        config.resolve_sandbox_paths();
         config.validate()?;
         Ok(config)
     }
@@ -1206,6 +1299,16 @@ impl Config {
             ensure!(!cmd.is_empty(), "launcher.command is empty");
         }
         self.osk.summon_button()?;
+        if let Some(d) = &self.gamescope.apps_display {
+            ensure!(
+                display_setting_ok(d),
+                "gamescope.apps_display must be \"auto\", \"auto+<n>\" or \":<n>\""
+            );
+        }
+        ensure!(
+            (1..=8).contains(&self.gamescope.app_displays),
+            "gamescope.app_displays must be 1 to 8"
+        );
         ensure!(
             (0.0..1.0).contains(&self.pointer.activity_deadzone),
             "pointer.activity_deadzone must be in [0, 1)"
@@ -1214,6 +1317,17 @@ impl Config {
             self.pointer.speed_pps > 0,
             "pointer.speed_pps must be positive"
         );
+        for (key, p) in [
+            ("pulse_socket", &self.sandbox.pulse_socket),
+            ("pulse_record_socket", &self.sandbox.pulse_record_socket),
+        ] {
+            ensure!(
+                p.is_relative()
+                    && p.components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_))),
+                "sandbox.{key} must be a path relative to XDG_RUNTIME_DIR"
+            );
+        }
         let mut seen = BTreeSet::new();
         for app in &self.apps {
             ensure!(valid_app_id(&app.id), "invalid app id '{}'", app.id);
@@ -1255,6 +1369,13 @@ impl Config {
                     );
                 }
             }
+            if let Some(hash) = &app.icon_sha256 {
+                ensure!(
+                    app.icon_url.is_some() && crate::icons::web::is_sha256_hex(hash),
+                    "app '{}': icon_sha256 must be 64 hex digits and needs icon_url",
+                    app.id
+                );
+            }
             ensure!(
                 app.firefox_profile.is_none() || app.site_url.is_some(),
                 "app '{}': firefox_profile needs site_url",
@@ -1287,6 +1408,15 @@ impl Config {
             .unwrap_or_else(|| ":0".into())
     }
 
+    /// The display for apps under the reaper, possibly `"auto+<n>"` (resolve it with
+    /// [`try_resolve_display`] at each spawn). `None` when apps use [`Self::child_env`]'s.
+    pub fn apps_display_setting(&self) -> Option<String> {
+        self.gamescope
+            .enable
+            .then(|| self.gamescope.apps_display.clone())
+            .flatten()
+    }
+
     /// gamescope's Wayland display (a socket name in `$XDG_RUNTIME_DIR`, or a path).
     pub fn wayland_display(&self) -> String {
         self.gamescope
@@ -1300,8 +1430,9 @@ impl Config {
             .unwrap_or_else(|| "gamescope-0".into())
     }
 
-    /// Environment for apps the daemon starts, so they land in gamescope. Empty when gamescope
-    /// integration is off (apps inherit the daemon's environment).
+    /// Environment for processes the daemon starts, so they land in gamescope. Empty when
+    /// gamescope integration is off (they inherit the daemon's environment). Apps get it without
+    /// the Wayland displays ([`crate::apps::spawn_env`]); only Steam keeps them.
     pub fn child_env(&self) -> Vec<(String, String)> {
         if !self.gamescope.enable {
             return Vec::new();
@@ -1319,17 +1450,55 @@ impl Config {
 /// Xwayland of this session's gamescope. The daemon is a user service, not gamescope's child, so
 /// it can't inherit `DISPLAY`; and gamescope takes the first free numbers, which are not `:0`
 /// while an ended session's or the picker's Xwayland is still there. `:0` until one exists.
+/// `"auto+<n>"` ([`try_resolve_display`]) is returned as it is (not a display) until it exists.
 /// Anything else is returned as it is.
 pub fn resolve_display(setting: &str) -> String {
-    if setting != "auto" {
-        return setting.to_owned();
-    }
-    own_display(
+    try_resolve_display(setting).unwrap_or_else(|| {
+        if setting == "auto" {
+            ":0".into()
+        } else {
+            setting.to_owned()
+        }
+    })
+}
+
+/// A display setting resolved now; `None` for an `"auto"` one whose display does not exist
+/// (yet). `"auto+<n>"`: this user's `n`-th live X display after the lowest (`"auto"` is `+0`).
+/// gamescope creates its Xwaylands one after the other on the lowest free numbers, so with
+/// `--xwayland-count 3` `"auto+2"` is its third Xwayland, also when another user's display sits
+/// between them.
+pub fn try_resolve_display(setting: &str) -> Option<String> {
+    resolve_display_in(
+        setting,
         Path::new("/tmp"),
         Path::new("/proc"),
         nix::unistd::geteuid().as_raw(),
     )
-    .unwrap_or_else(|| ":0".into())
+}
+
+fn resolve_display_in(setting: &str, tmp: &Path, proc_dir: &Path, uid: u32) -> Option<String> {
+    let Some(index) = auto_index(setting) else {
+        return Some(setting.to_owned());
+    };
+    own_displays(tmp, proc_dir, uid)
+        .get(index)
+        .map(|n| format!(":{n}"))
+}
+
+/// `Some(n)` for `"auto"` (0) and `"auto+<n>"`.
+fn auto_index(setting: &str) -> Option<usize> {
+    match setting.strip_prefix("auto")? {
+        "" => Some(0),
+        rest => rest.strip_prefix('+')?.parse().ok(),
+    }
+}
+
+/// `"auto"`, `"auto+<n>"` or `":<n>"`.
+pub fn display_setting_ok(setting: &str) -> bool {
+    auto_index(setting).is_some()
+        || setting
+            .strip_prefix(':')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// `env` (from [`Config::child_env`]) with a `DISPLAY` of `"auto"` resolved now, for a process
@@ -1350,9 +1519,19 @@ pub fn live_env(env: &[(String, String)]) -> Vec<(String, String)> {
 /// The lowest `n` with a `<tmp>/.X<n>-lock` owned by `uid` whose pid is alive and a
 /// `<tmp>/.X11-unix/X<n>` socket.
 pub fn own_display(tmp: &Path, proc_dir: &Path, uid: u32) -> Option<String> {
+    own_displays(tmp, proc_dir, uid)
+        .first()
+        .map(|n| format!(":{n}"))
+}
+
+/// Every such `n` ([`own_display`]), lowest first.
+pub fn own_displays(tmp: &Path, proc_dir: &Path, uid: u32) -> Vec<u32> {
     use std::os::unix::fs::MetadataExt;
-    let mut best: Option<u32> = None;
-    for e in std::fs::read_dir(tmp).ok()?.flatten() {
+    let mut found = Vec::new();
+    let Ok(dir) = std::fs::read_dir(tmp) else {
+        return found;
+    };
+    for e in dir.flatten() {
         let name = e.file_name();
         let Some(n) = name
             .to_str()
@@ -1380,9 +1559,10 @@ pub fn own_display(tmp: &Path, proc_dir: &Path, uid: u32) -> Option<String> {
         {
             continue;
         }
-        best = Some(best.map_or(n, |b| b.min(n)));
+        found.push(n);
     }
-    best.map(|n| format!(":{n}"))
+    found.sort_unstable();
+    found
 }
 
 #[cfg(test)]
@@ -1411,6 +1591,48 @@ mod tests {
         // Another user's live displays don't count.
         assert_eq!(own_display(t, proc_dir.path(), me + 1), None);
         assert_eq!(resolve_display(":7"), ":7");
+
+        // "auto+<n>": the n-th after the lowest, skipping dead and other users' displays.
+        std::fs::create_dir_all(proc_dir.path().join("52")).unwrap();
+        std::fs::write(t.join(".X7-lock"), "      52\0").unwrap();
+        std::fs::write(t.join(".X11-unix/X7"), "").unwrap();
+        assert_eq!(own_displays(t, proc_dir.path(), me), [4, 5, 7]);
+        let resolve = |s: &str| resolve_display_in(s, t, proc_dir.path(), me);
+        assert_eq!(resolve("auto").as_deref(), Some(":4"));
+        assert_eq!(resolve("auto+0").as_deref(), Some(":4"));
+        assert_eq!(resolve("auto+2").as_deref(), Some(":7"));
+        assert_eq!(resolve("auto+3"), None, "not there (yet)");
+        assert_eq!(resolve(":9").as_deref(), Some(":9"));
+        // Unresolved, "auto+<n>" stays a non-display rather than falling back to :0.
+        assert_eq!(resolve_display("auto+99"), "auto+99");
+    }
+
+    #[test]
+    fn display_settings() {
+        for ok in ["auto", "auto+0", "auto+2", ":0", ":12"] {
+            assert!(display_setting_ok(ok), "{ok}");
+        }
+        for bad in [
+            "", "auto+", "auto2", "auto+-1", ":", ":x", "host:0", "auto+2 ",
+        ] {
+            assert!(!display_setting_ok(bad), "{bad}");
+        }
+        let c = Config::parse("[gamescope]\napps_display = \"auto+2\"\n").unwrap();
+        assert_eq!(c.apps_display_setting().as_deref(), Some("auto+2"));
+        assert!(Config::parse("[gamescope]\napps_display = \"auto2\"\n").is_err());
+        let c = Config::parse("[gamescope]\nenable = false\napps_display = \":2\"\n").unwrap();
+        assert_eq!(
+            c.apps_display_setting(),
+            None,
+            "no gamescope: apps inherit the env"
+        );
+        assert_eq!(Config::default().apps_display_setting(), None);
+        let c = Config::parse("[gamescope]\napp_displays = 6\n").unwrap();
+        assert_eq!(c.gamescope.app_displays, 6);
+        assert_eq!(Config::default().gamescope.app_displays, 4);
+        for bad in [0, 9] {
+            assert!(Config::parse(&format!("[gamescope]\napp_displays = {bad}\n")).is_err());
+        }
     }
 
     #[test]
@@ -1448,6 +1670,33 @@ mod tests {
         c.load_profile_apps(&d.path().join("nowhere"));
         assert!(c.apps.is_empty() && !c.steam.autostart);
         assert_eq!(c.steam.path, PathBuf::new());
+    }
+
+    #[test]
+    fn sandbox_section_and_app_permissions() {
+        let c = Config::parse("").unwrap();
+        assert_eq!(c.sandbox, SandboxConfig::default());
+        assert!(!c.sandbox.enable);
+        let c = Config::parse(
+            "[sandbox]\nenable = true\nbwrap = \"/nix/store/x-bwrap/bin/bwrap\"\npulse_record_socket = \"pulse/record\"\n\
+             [[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"a\"]\npermissions = { mic = \"optional\", gamepad = \"required\" }\n\
+             [[apps]]\nid = \"b\"\nname = \"B\"\ncommand = [\"b\"]\nsandbox = false\n",
+        )
+        .unwrap();
+        assert!(c.sandbox.enable);
+        assert_eq!(c.sandbox.pulse_record_socket, PathBuf::from("pulse/record"));
+        assert!(c.apps[0].sandbox && !c.apps[1].sandbox);
+        assert_eq!(
+            c.apps[0].permissions["mic"],
+            hinteros_api::catalog::Need::Optional
+        );
+        for bad in [
+            "[sandbox]\npulse_socket = \"/run/user/1000/pulse/native\"\n",
+            "[sandbox]\npulse_record_socket = \"../x\"\n",
+            "[sandbox]\nextra = 1\n",
+        ] {
+            assert!(Config::parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -1800,6 +2049,8 @@ mod tests {
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nicon_url = \"http://x.test/i.png\"",
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\ndesktop_id = \"a/b\"",
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nfirefox_profile = \"/p\"",
+            "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nicon_sha256 = \"00\"\nicon_url = \"https://x.test/i.png\"",
+            "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nicon_sha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"",
         ] {
             assert!(Config::parse(bad).is_err(), "accepted: {bad}");
         }
@@ -1828,5 +2079,34 @@ mod tests {
             );
         }
         assert_eq!(expand_home(Path::new("/abs/p")), Path::new("/abs/p"));
+    }
+
+    #[test]
+    fn sandboxed_firefox_profiles_are_in_the_sandbox_home() {
+        let text = "[[apps]]\nid = \"cr\"\nname = \"CR\"\ncommand = [\"x\"]\nsite_url = \"https://c/\"\n\
+                    firefox_profile = \"/home/tv/.local/share/hinteros/firefox/cr\"\n\
+                    [[apps]]\nid = \"open\"\nname = \"O\"\ncommand = [\"x\"]\nsite_url = \"https://o/\"\n\
+                    firefox_profile = \"/home/tv/ff/open\"\nsandbox = false\n";
+        let home = Path::new("/home/tv");
+        // Sandbox off: unchanged.
+        let mut c = Config::parse(text).unwrap();
+        c.resolve_sandbox_paths_in(home);
+        assert_eq!(
+            c.apps[0].firefox_profile.as_deref(),
+            Some(Path::new("/home/tv/.local/share/hinteros/firefox/cr"))
+        );
+        let mut c = Config::parse(&format!("[sandbox]\nenable = true\n{text}")).unwrap();
+        c.resolve_sandbox_paths_in(home);
+        assert_eq!(
+            c.apps[0].firefox_profile.as_deref(),
+            Some(Path::new(
+                "/home/tv/.local/share/hinteros/sandbox/cr/.local/share/hinteros/firefox/cr"
+            ))
+        );
+        assert_eq!(
+            c.apps[1].firefox_profile.as_deref(),
+            Some(Path::new("/home/tv/ff/open")),
+            "not sandboxed"
+        );
     }
 }

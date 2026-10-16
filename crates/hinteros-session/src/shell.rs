@@ -45,14 +45,15 @@ use std::time::{Duration, Instant};
 use hinteros_api::server::{decode_params, encode_result};
 use hinteros_api::session::{
     App, AppExitedParams, AppKind, AppSource, AppStartedParams, AppsClose, AppsCloseParams,
-    AppsCloseResult, AppsFocus, AppsFocusParams, AppsFocusResult, AppsLaunch, AppsLaunchParams,
-    AppsLaunchResult, AppsList, AppsListResult, AppsRunning, AppsRunningResult, EventName,
-    ExitReason, FocusChangedParams, GamesList, GamesListResult, HomePressedParams, InputNavParams,
-    KEYS_TYPE_MAX_CHARS, KeysAction, KeysActionParams, KeysActionResult, KeysKey, KeysKeyParams,
-    KeysKeyResult, KeysType, KeysTypeParams, KeysTypeResult, LaunchRequest, NavAction, NavPhase,
-    OskHide, OskShow, OskState, RunningApp, STEAM_CLIENT_APP_ID, STEAM_CLIENT_GAMESCOPE_APP_ID,
-    STEAM_RUNGAMEID, SteamAttentionParams, SteamAttentionQuery, SteamFocus, SteamFocusResult,
-    SteamWindow,
+    AppsCloseResult, AppsDisplaysGet, AppsDisplaysSet, AppsFocus, AppsFocusParams, AppsFocusResult,
+    AppsLaunch, AppsLaunchParams, AppsLaunchResult, AppsList, AppsListResult, AppsRunning,
+    AppsRunningResult, AppsSetPermission, AppsSetPermissionParams, AppsSetPermissionResult,
+    EventName, ExitReason, FocusChangedParams, GamesList, GamesListResult, HomePressedParams,
+    InputNavParams, KEYS_TYPE_MAX_CHARS, KeysAction, KeysActionParams, KeysActionResult, KeysKey,
+    KeysKeyParams, KeysKeyResult, KeysType, KeysTypeParams, KeysTypeResult, LaunchRequest,
+    NavAction, NavPhase, OskHide, OskShow, OskState, RunningApp, STEAM_CLIENT_APP_ID,
+    STEAM_CLIENT_GAMESCOPE_APP_ID, STEAM_RUNGAMEID, SteamAttentionParams, SteamAttentionQuery,
+    SteamFocus, SteamFocusResult, SteamWindow,
 };
 use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde::Serialize;
@@ -62,6 +63,7 @@ use tracing::{debug, info, warn};
 
 use crate::apps::{ChildExit, Spawner};
 use crate::config::{AppConfig, Config, FieldSummon};
+use crate::displays::DisplayPool;
 use crate::focus::{
     FocusControl, GamescopeEvent, GamescopeState, baselayer_for, baselayer_for_steam_client,
     baselayer_for_steam_game,
@@ -129,6 +131,9 @@ pub enum Msg {
 /// The methods the shell answers (the connection handles the rest).
 pub const METHODS: &[&str] = &[
     AppsList::NAME,
+    AppsSetPermission::NAME,
+    AppsDisplaysGet::NAME,
+    AppsDisplaysSet::NAME,
     AppsLaunch::NAME,
     AppsRunning::NAME,
     AppsFocus::NAME,
@@ -279,6 +284,12 @@ pub struct ShellConfig {
     pub profile_mode: bool,
     /// Apps whose vendor terms this profile has not accepted.
     pub needs_terms: std::collections::BTreeMap<String, hinteros_api::session::StoreTerms>,
+    /// The profile's app permissions (shared with the Store).
+    pub permissions: crate::permissions::Permissions,
+    /// The catalog index (`apps.set_permission` for apps not installed yet).
+    pub catalog_index: PathBuf,
+    /// `[sandbox] enable`: catalog apps run in bwrap ([`crate::sandbox`]).
+    pub sandbox: bool,
 }
 
 impl From<&Config> for ShellConfig {
@@ -304,6 +315,9 @@ impl From<&Config> for ShellConfig {
             icon_refresh: Refresher::default(),
             profile_mode: c.icons.profile_share.is_some(),
             needs_terms: Default::default(),
+            permissions: crate::permissions::Permissions::from_config(&c.sandbox),
+            catalog_index: c.store.index.clone(),
+            sandbox: c.sandbox.enable,
         }
     }
 }
@@ -341,6 +355,8 @@ struct Running {
     pointer: bool,
     /// The keyboard input profile's keymap (`None`: gamepad).
     keymap: Option<Keymap>,
+    /// The app display it was started on (resolved), if it has one of its own.
+    display: Option<String>,
 }
 
 /// How an app takes controller input (from its config).
@@ -444,6 +460,8 @@ pub struct Shell {
     clicking: BTreeMap<NavAction, (String, MouseButton)>,
     /// Our last left click (RT) in a keyboard-profile app: the app and when.
     left_click: Option<(String, Instant)>,
+    /// The app displays (one per app we start) and their setting.
+    displays: DisplayPool,
 }
 
 impl Shell {
@@ -467,6 +485,7 @@ impl Shell {
             cursor: Box::new(NoCursor),
             clicking: BTreeMap::new(),
             left_click: None,
+            displays: DisplayPool::new(None, 4).with_files(None, None),
             cfg,
             focus,
             input,
@@ -501,6 +520,13 @@ impl Shell {
             raw_names: BTreeMap::new(),
             guide_others: Vec::new(),
         }
+    }
+
+    /// Give each app we start a display of its own from `pool` (default: none, apps share the
+    /// daemon's display).
+    pub fn with_displays(mut self, pool: DisplayPool) -> Self {
+        self.displays = pool;
+        self
     }
 
     /// Use `cursor` to hide and show gamescope's pointer (default: nothing).
@@ -588,6 +614,27 @@ impl Shell {
             AppsList::NAME => {
                 decode_params::<AppsList>(params)?;
                 encode_result::<AppsList>(self.list())
+            }
+            AppsSetPermission::NAME => {
+                let p = decode_params::<AppsSetPermission>(params)?;
+                encode_result::<AppsSetPermission>(self.set_permission(p)?)
+            }
+            AppsDisplaysGet::NAME => {
+                decode_params::<AppsDisplaysGet>(params)?;
+                encode_result::<AppsDisplaysGet>(self.displays.info())
+            }
+            AppsDisplaysSet::NAME => {
+                let p = decode_params::<AppsDisplaysSet>(params)?;
+                self.displays.set(p.count).map_err(|e| {
+                    let code = if e.kind() == std::io::ErrorKind::InvalidInput {
+                        ErrorCode::InvalidParams
+                    } else {
+                        ErrorCode::InternalError
+                    };
+                    ErrorObject::new(code, e.to_string())
+                })?;
+                info!(count = p.count, "app displays set (next session)");
+                encode_result::<AppsDisplaysSet>(self.displays.info())
             }
             AppsLaunch::NAME => {
                 let p = decode_params::<AppsLaunch>(params)?;
@@ -700,6 +747,7 @@ impl Shell {
             kind: AppKind::Native,
             icon: self.icon_path(STEAM_CLIENT_APP_ID, None),
             needs_terms: self.cfg.needs_terms.get(STEAM_CLIENT_APP_ID).cloned(),
+            permissions: Vec::new(),
         });
         if self.cfg.apps.is_empty() && !self.cfg.profile_mode {
             let mut list = stub_apps();
@@ -717,9 +765,52 @@ impl Shell {
                     kind: a.kind,
                     icon: self.icon_path(&a.id, a.icon.as_deref()),
                     needs_terms: self.cfg.needs_terms.get(&a.id).cloned(),
+                    permissions: self.app_permissions(a),
                 }))
                 .collect(),
         }
+    }
+
+    /// A configured app's permissions (none for Steam games and unsandboxed apps).
+    fn app_permissions(&self, a: &AppConfig) -> Vec<hinteros_api::session::AppPermission> {
+        if a.steam_app_id.is_some() || !a.sandbox {
+            return Vec::new();
+        }
+        self.cfg.permissions.list(&a.id, &a.permissions)
+    }
+
+    /// `apps.set_permission`: an installed app, else a catalog app (not installed yet).
+    fn set_permission(
+        &mut self,
+        p: AppsSetPermissionParams,
+    ) -> Result<AppsSetPermissionResult, ErrorObject> {
+        let none = BTreeMap::new();
+        let installed = self.cfg.apps.iter().find(|a| a.id == p.id).map(|a| {
+            if a.steam_app_id.is_none() && a.sandbox {
+                a.permissions.clone()
+            } else {
+                none.clone()
+            }
+        });
+        let declared = installed.or_else(|| {
+            let index = hinteros_api::catalog::Index::load(&self.cfg.catalog_index).ok()?;
+            let e = index.app(&p.id)?;
+            Some(if e.sandbox && e.id != STEAM_CLIENT_APP_ID {
+                e.permissions.clone()
+            } else {
+                none.clone()
+            })
+        });
+        let changed =
+            self.cfg
+                .permissions
+                .set(&p.id, declared.as_ref(), &p.permission, p.granted)?;
+        if changed {
+            info!(app = %p.id, permission = %p.permission, granted = p.granted, "permission set");
+        }
+        self.emit(EventName::AppsChanged, serde_json::json!({}));
+        self.emit(EventName::StoreChanged, serde_json::json!({}));
+        Ok(AppsSetPermissionResult {})
     }
 
     /// The resolved icon of an app, else a configured absolute path.
@@ -781,6 +872,14 @@ impl Shell {
             LaunchRequest::Id(id) => self.cfg.apps.iter().find(|a| &a.id == id),
             _ => None,
         };
+        // Catalog apps run sandboxed (not Steam games, not `sandbox = false` apps).
+        let sandbox = configured
+            .filter(|a| self.cfg.sandbox && a.sandbox && a.command.is_some())
+            .map(|a| crate::sandbox::Spec {
+                id: a.id.clone(),
+                grants: self.cfg.permissions.grants(&a.id, &a.permissions),
+                kiosk: a.kind == AppKind::Web || a.input == crate::config::InputProfile::Keyboard,
+            });
         let keymap = configured.and_then(|a| a.keymap().ok().flatten());
         let input = AppInput {
             address_bar: configured.is_some_and(|a| a.address_bar),
@@ -879,12 +978,20 @@ impl Shell {
                 format!("cannot start {what}: {e}"),
             )
         };
+        let mut app_display = None;
         let info = match target {
             Target::Command(argv) => {
+                app_display = self.free_display()?;
                 let gamescope_app_id = self.allocate_app_id();
                 let pid = self
                     .spawner
-                    .spawn(&key, &argv, Some(gamescope_app_id))
+                    .spawn(
+                        &key,
+                        &argv,
+                        Some(gamescope_app_id),
+                        sandbox.as_ref(),
+                        app_display.as_deref(),
+                    )
                     .map_err(|e| failed(e, &argv[0]))?;
                 if key.starts_with("cmd-") {
                     self.next_command += 1;
@@ -908,7 +1015,7 @@ impl Shell {
                 // Not under our reaper: the game runs under Steam's own reaper, which tags it
                 // with its Steam app id, and an outer reaper would override that.
                 self.spawner
-                    .spawn(&key, &argv, None)
+                    .spawn(&key, &argv, None, None, None)
                     .map_err(|e| failed(e, &steam_path))?;
                 self.steam_action_at = Some(now);
                 RunningApp {
@@ -929,7 +1036,7 @@ impl Shell {
                     "-gamepadui"
                 };
                 self.spawner
-                    .spawn(&key, &[steam_path.clone(), arg.into()], None)
+                    .spawn(&key, &[steam_path.clone(), arg.into()], None, None, None)
                     .map_err(|e| failed(e, &steam_path))?;
                 // Opened from the launcher: closing it goes back there.
                 self.steam_return = None;
@@ -937,8 +1044,11 @@ impl Shell {
                 steam_client_app()
             }
         };
-        info!(app = %info.id, gamescope_app_id = info.gamescope_app_id, "launched");
+        info!(app = %info.id, gamescope_app_id = info.gamescope_app_id, on = app_display.as_deref().unwrap_or("-"), "launched");
         self.track(info.clone(), input, now);
+        if let Some(app) = self.apps.get_mut(&key) {
+            app.display = app_display;
+        }
         self.set_focus(Some(key));
         Ok(AppsLaunchResult { app: info })
     }
@@ -959,9 +1069,53 @@ impl Shell {
                 keymap: input.keymap,
                 address_bar: input.address_bar,
                 pointer: input.pointer,
+                display: None,
             },
         );
         self.emit(EventName::AppStarted, AppStartedParams { app: info });
+    }
+
+    /// A free app display for an app about to start (`None`: apps share the daemon's display):
+    /// the first one that exists, that no running app of ours has, and on which no process we
+    /// started is left (an app we gave up on after SIGKILL, or one from before a daemon
+    /// restart, holds its display until it is gone). None free: `no_app_display` with the apps
+    /// that hold one, for the launcher to offer closing one.
+    fn free_display(&mut self) -> Result<Option<String>, ErrorObject> {
+        if !self.displays.enabled() {
+            return Ok(None);
+        }
+        let displays = self.displays.displays();
+        if displays.is_empty() {
+            return Err(ErrorObject::new(
+                ErrorCode::AppLaunchFailed,
+                format!(
+                    "cannot start it: no app display ({})",
+                    self.displays.first().unwrap_or_default()
+                ),
+            ));
+        }
+        for d in &displays {
+            let held = self.apps.values().any(|r| r.display.as_ref() == Some(d));
+            if held {
+                continue;
+            }
+            let left = self.procs.display_users(d);
+            if left.is_empty() {
+                return Ok(Some(d.clone()));
+            }
+            info!(display = %d, processes = ?left, "app display still in use by an app we no longer track");
+        }
+        let holders: Vec<RunningApp> = self
+            .apps
+            .values()
+            .filter(|r| r.display.is_some())
+            .map(|r| r.info.clone())
+            .collect();
+        Err(ErrorObject::with_data(
+            ErrorCode::NoAppDisplay,
+            format!("every app display is in use ({})", displays.len()),
+            serde_json::json!({ "apps": holders }),
+        ))
     }
 
     /// A gamescope app id for a command app: above the launcher's, skipping ids in use.
@@ -1018,7 +1172,7 @@ impl Shell {
                 match self.steam_binary(ErrorCode::AppNotFound) {
                     Ok(steam_path) => {
                         let argv = [steam_path, "-shutdown".into()];
-                        if let Err(e) = self.spawner.spawn("steam-close", &argv, None) {
+                        if let Err(e) = self.spawner.spawn("steam-close", &argv, None, None, None) {
                             warn!("cannot ask Steam to shut down: {e}");
                         }
                     }
@@ -2606,6 +2760,7 @@ pub fn stub_apps() -> AppsListResult {
         kind,
         icon: None,
         needs_terms: None,
+        permissions: Vec::new(),
     };
     AppsListResult {
         apps: vec![
@@ -2665,6 +2820,10 @@ mod tests {
             argv: Vec<String>,
             app_id: Option<u32>,
         },
+        /// The next spawn runs in this sandbox.
+        Sandbox(crate::sandbox::Spec),
+        /// The next spawn runs on this app display.
+        Display(String),
         Signal(u32, Sig),
         Osk(bool),
         Keys(Vec<KeyOp>),
@@ -2768,9 +2927,17 @@ mod tests {
             key: &str,
             argv: &[String],
             app_id: Option<u32>,
+            sandbox: Option<&crate::sandbox::Spec>,
+            display: Option<&str>,
         ) -> std::io::Result<u32> {
             if self.fail {
                 return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "nope"));
+            }
+            if let Some(spec) = sandbox {
+                self.log.push(Call::Sandbox(spec.clone()));
+            }
+            if let Some(d) = display {
+                self.log.push(Call::Display(d.into()));
             }
             self.log.push(Call::Spawn {
                 key: key.into(),
@@ -2788,6 +2955,8 @@ mod tests {
         trees: BTreeMap<u32, Vec<u32>>,
         steam_reapers: BTreeMap<u32, Vec<u32>>,
         steam_running: bool,
+        /// Reapers left on an X display (by display).
+        display_users: BTreeMap<String, Vec<u32>>,
     }
 
     struct MockProcs {
@@ -2822,6 +2991,10 @@ mod tests {
         fn steam_running(&mut self) -> bool {
             self.table.lock().unwrap().steam_running
         }
+        fn display_users(&mut self, display: &str) -> Vec<u32> {
+            let t = self.table.lock().unwrap();
+            t.display_users.get(display).cloned().unwrap_or_default()
+        }
     }
 
     const L: u32 = 4000;
@@ -2843,6 +3016,7 @@ mod tests {
             icon: None,
             desktop_id: None,
             icon_url: None,
+            icon_sha256: None,
             site_url: None,
             firefox_profile: None,
             command: command.map(|c| vec![c.into()]),
@@ -2852,6 +3026,8 @@ mod tests {
             keymap: BTreeMap::new(),
             address_bar: false,
             pointer: None,
+            permissions: BTreeMap::new(),
+            sandbox: true,
         }
     }
 
@@ -2908,6 +3084,9 @@ mod tests {
                 icon_refresh: Refresher::default(),
                 profile_mode: false,
                 needs_terms: Default::default(),
+                permissions: Default::default(),
+                catalog_index: "/nonexistent/catalog.json".into(),
+                sandbox: false,
             };
             f(&mut cfg);
             let log = Log::default();
@@ -3423,6 +3602,151 @@ mod tests {
         assert_eq!(t.launch(json!({"command": ["b"]})).gamescope_app_id, 2);
     }
 
+    /// App displays `auto+2`.. as `:12`.. (up to `auto+5`), with this session's number.
+    fn with_displays(t: &mut T, dir: &std::path::Path, active: u32) {
+        std::fs::write(dir.join("active"), format!("{active}\n")).unwrap();
+        t.shell.displays = DisplayPool::new(Some("auto+2".into()), 4)
+            .with_files(Some(dir.join("state")), Some(dir.join("active")))
+            .with_resolver(Arc::new(|s: &str| {
+                let k: u32 = s.strip_prefix("auto+")?.parse().ok()?;
+                (k <= 5).then(|| format!(":{}", 10 + k))
+            }));
+    }
+
+    fn displays_of(log: Vec<Call>) -> Vec<String> {
+        log.into_iter()
+            .filter_map(|c| match c {
+                Call::Display(d) => Some(d),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_app_gets_a_display_of_its_own_until_it_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = T::new();
+        with_displays(&mut t, dir.path(), 2);
+        let jellyfin = t.launch(json!({"id": "jellyfin"}));
+        let youtube = t.launch(json!({"id": "youtube"}));
+        assert_eq!(displays_of(t.log.take()), [":12", ":13"]);
+        // Launching a running app only focuses it.
+        t.launch(json!({"id": "jellyfin"}));
+        assert!(displays_of(t.log.take()).is_empty());
+
+        // Full: nothing starts; the error names the apps that hold one.
+        t.events();
+        let e = t
+            .call("apps.launch", json!({"command": ["/usr/bin/xterm"]}))
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::NoAppDisplay.code());
+        assert_eq!(e.data, Some(json!({"apps": [jellyfin, youtube]})));
+        assert!(
+            !t.log.take().iter().any(|c| matches!(c, Call::Spawn { .. })),
+            "nothing started"
+        );
+        assert!(t.events().is_empty());
+        // Steam and its games never take one.
+        t.launch(json!({"url": "steam://rungameid/620"}));
+        t.launch(json!({"id": "steam"}));
+        assert!(displays_of(t.log.take()).is_empty());
+
+        // Closing frees the display once the app has exited, not before.
+        t.call("apps.close", json!({"id": "jellyfin"})).unwrap();
+        let e = t
+            .call("apps.launch", json!({"command": ["/usr/bin/xterm"]}))
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::NoAppDisplay.code());
+        exit(&mut t, "jellyfin", jellyfin.pid.unwrap(), 0);
+        let xterm = t.launch(json!({"command": ["/usr/bin/xterm"]}));
+        assert_eq!(displays_of(t.log.take()), [":12"]);
+        assert_eq!(xterm.id, "cmd-1");
+    }
+
+    #[test]
+    fn a_display_with_processes_left_is_not_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = T::new();
+        with_displays(&mut t, dir.path(), 2);
+        // A reaper from before a daemon restart is still on :12.
+        t.procs
+            .lock()
+            .unwrap()
+            .display_users
+            .insert(":12".into(), vec![77]);
+        let jellyfin = t.launch(json!({"id": "jellyfin"}));
+        assert_eq!(displays_of(t.log.take()), [":13"]);
+        // Only apps we track can be closed: the error lists just those.
+        let e = t.call("apps.launch", json!({"id": "youtube"})).unwrap_err();
+        assert_eq!(e.data, Some(json!({"apps": [jellyfin]})));
+        // Gone: :12 is free again.
+        t.procs.lock().unwrap().display_users.clear();
+        t.launch(json!({"id": "youtube"}));
+        assert_eq!(displays_of(t.log.take()), [":12"]);
+
+        // An app we gave up on after SIGKILL keeps its display while its processes are left.
+        t.call("apps.close", json!({"id": "youtube"})).unwrap();
+        t.advance(MS(10_001));
+        assert!(!t.shell.apps.contains_key("youtube"));
+        t.procs
+            .lock()
+            .unwrap()
+            .display_users
+            .insert(":12".into(), vec![102]);
+        let e = t.call("apps.launch", json!({"id": "youtube"})).unwrap_err();
+        assert_eq!(e.code, ErrorCode::NoAppDisplay.code());
+    }
+
+    #[test]
+    fn no_app_display_at_all_fails_the_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = T::new();
+        with_displays(&mut t, dir.path(), 2);
+        t.shell.displays = t.shell.displays.clone().with_resolver(Arc::new(|_| None));
+        let e = t
+            .call("apps.launch", json!({"id": "jellyfin"}))
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::AppLaunchFailed.code());
+        assert!(
+            e.message.contains("no app display (auto+2)"),
+            "{}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn apps_displays_get_and_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = T::new();
+        // No pool: the setting works, nothing is active.
+        t.shell.displays =
+            DisplayPool::new(None, 4).with_files(Some(dir.path().join("state")), None);
+        assert_eq!(
+            t.call("apps.displays.get", json!({})).unwrap(),
+            json!({"count": 4, "active": null, "min": 1, "max": 8})
+        );
+        with_displays(&mut t, dir.path(), 4);
+        assert_eq!(
+            t.call("apps.displays.set", json!({"count": 6})).unwrap(),
+            json!({"count": 6, "active": 4, "min": 1, "max": 8})
+        );
+        assert_eq!(
+            t.call("apps.displays.get", json!({})).unwrap(),
+            json!({"count": 6, "active": 4, "min": 1, "max": 8})
+        );
+        for bad in [0, 9] {
+            let e = t
+                .call("apps.displays.set", json!({ "count": bad }))
+                .unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidParams.code());
+        }
+        // This session keeps 4 displays.
+        for id in ["jellyfin", "youtube"] {
+            t.launch(json!({ "id": id }));
+        }
+        assert_eq!(displays_of(t.log.take()), [":12", ":13"]);
+    }
+
     fn exit(t: &mut T, key: &str, pid: u32, code: i32) {
         t.shell.handle(
             Msg::ChildExit(ChildExit {
@@ -3638,6 +3962,203 @@ mod tests {
         assert_eq!(icon(2).as_deref(), Some("/configured/portal.png"));
         // A theme name alone is not a path.
         assert_eq!(icon(3), None);
+    }
+
+    #[test]
+    fn apps_list_reports_permissions_and_set_permission_changes_them() {
+        use hinteros_api::catalog::Need;
+        let t = tempfile::tempdir().unwrap();
+        let index = t.path().join("catalog.json");
+        std::fs::write(
+            &index,
+            r#"{"indexVersion":3,"apps":[
+              {"id":"kodi","kind":"app","type":"native","name":"Kodi","status":"available",
+               "permissions":{"gamepad":"required","downloads":"optional"}},
+              {"id":"steam","kind":"app","type":"native","name":"Steam","status":"available",
+               "permissions":{"gamepad":"optional"}}]}"#,
+        )
+        .unwrap();
+        let perms = crate::permissions::Permissions::new(
+            Some(t.path().join("permissions.json")),
+            vec!["gamepad", "mic", "downloads"],
+        );
+        let mut t = T::with(|c| {
+            c.permissions = perms.clone();
+            c.catalog_index = index.clone();
+            c.apps[0].permissions = BTreeMap::from([
+                ("gamepad".into(), Need::Required),
+                ("mic".into(), Need::Optional),
+            ]);
+            // A Steam game and an unsandboxed app list nothing.
+            c.apps[1].permissions = c.apps[0].permissions.clone();
+            c.apps[2].permissions = c.apps[0].permissions.clone();
+            c.apps[2].sandbox = false;
+        });
+        let perms_of = |t: &mut T, i: usize| {
+            t.call("apps.list", json!({})).unwrap()["apps"][i]["permissions"].clone()
+        };
+        assert_eq!(perms_of(&mut t, 0), json!([]), "steam");
+        assert_eq!(
+            perms_of(&mut t, 1),
+            json!([
+                {"name": "gamepad", "required": true, "granted": true},
+                {"name": "mic", "required": false, "granted": true}
+            ])
+        );
+        assert_eq!(perms_of(&mut t, 2), json!([]), "steam game");
+        assert_eq!(perms_of(&mut t, 3), json!([]), "sandbox = false");
+
+        t.events();
+        let set = |t: &mut T, id: &str, perm: &str, granted: bool| {
+            t.call(
+                "apps.set_permission",
+                json!({"id": id, "permission": perm, "granted": granted}),
+            )
+        };
+        assert_eq!(set(&mut t, "jellyfin", "mic", false).unwrap(), json!({}));
+        assert_eq!(perms_of(&mut t, 1)[1]["granted"], false);
+        let names: Vec<EventName> = t.events().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, [EventName::AppsChanged, EventName::StoreChanged]);
+        // A catalog app that is not installed yet.
+        set(&mut t, "kodi", "downloads", false).unwrap();
+        assert!(
+            !perms
+                .grants(
+                    "kodi",
+                    &BTreeMap::from([("downloads".into(), Need::Optional)])
+                )
+                .downloads
+        );
+        let code = |r: Result<Value, ErrorObject>| r.unwrap_err().code;
+        assert_eq!(
+            code(set(&mut t, "jellyfin", "gamepad", false)),
+            ErrorCode::PermissionRequired.code()
+        );
+        assert_eq!(
+            code(set(&mut t, "jellyfin", "downloads", false)),
+            ErrorCode::UnknownPermission.code()
+        );
+        assert_eq!(
+            code(set(&mut t, "youtube", "mic", false)),
+            ErrorCode::UnknownPermission.code(),
+            "unsandboxed"
+        );
+        assert_eq!(
+            code(set(&mut t, "steam", "gamepad", false)),
+            ErrorCode::UnknownPermission.code(),
+            "Steam is never sandboxed"
+        );
+        assert_eq!(
+            code(set(&mut t, "nope", "mic", false)),
+            ErrorCode::UnknownApp.code()
+        );
+    }
+
+    #[test]
+    fn catalog_apps_launch_sandboxed_with_their_grants() {
+        use crate::permissions::Grants;
+        use hinteros_api::catalog::Need;
+        let perms = crate::permissions::Permissions::new(None, vec!["gamepad", "mic", "downloads"]);
+        let mut t = T::with(|c| {
+            c.sandbox = true;
+            c.permissions = perms.clone();
+            c.apps[0].permissions = BTreeMap::from([
+                ("gamepad".into(), Need::Required),
+                ("downloads".into(), Need::Optional),
+            ]);
+            c.apps[2].permissions = BTreeMap::from([("mic".into(), Need::Optional)]);
+            c.apps.push(AppConfig {
+                sandbox: false,
+                ..app_config("open", Some("open-app"), None)
+            });
+        });
+        t.call(
+            "apps.set_permission",
+            json!({"id": "jellyfin", "permission": "downloads", "granted": false}),
+        )
+        .unwrap();
+        let sandboxes = |t: &mut T| -> Vec<crate::sandbox::Spec> {
+            t.log
+                .take()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Call::Sandbox(s) => Some(s),
+                    _ => None,
+                })
+                .collect()
+        };
+        t.launch(json!({"id": "jellyfin"}));
+        assert_eq!(
+            sandboxes(&mut t),
+            [crate::sandbox::Spec {
+                id: "jellyfin".into(),
+                grants: Grants {
+                    gamepad: true,
+                    mic: false,
+                    downloads: false,
+                    // `lan` is not enforced here.
+                    lan: true,
+                },
+                kiosk: false,
+            }]
+        );
+        // A keyboard-profile app gets the text field socket.
+        t.launch(json!({"id": "youtube"}));
+        let s = sandboxes(&mut t);
+        assert!(s[0].kiosk && s[0].grants.mic && !s[0].grants.gamepad);
+        // Not sandboxed: sandbox = false, a Steam game, a plain command.
+        t.launch(json!({"id": "open"}));
+        t.launch(json!({"id": "portal"}));
+        t.launch(json!({"command": ["sh"]}));
+        assert!(sandboxes(&mut t).is_empty());
+        // Sandbox off: none.
+        let mut t = T::with(|c| c.permissions = perms.clone());
+        t.launch(json!({"id": "jellyfin"}));
+        assert!(sandboxes(&mut t).is_empty());
+    }
+
+    #[test]
+    fn only_apps_with_lan_get_the_local_network() {
+        use hinteros_api::catalog::Need;
+        let perms = crate::permissions::Permissions::new(None, vec!["gamepad", "lan"]);
+        let mut t = T::with(|c| {
+            c.sandbox = true;
+            c.permissions = perms.clone();
+            c.apps[2].permissions = BTreeMap::from([("lan".into(), Need::Optional)]);
+        });
+        let lan = |t: &mut T, id: &str| -> bool {
+            let pid = t.launch(json!({ "id": id })).pid.unwrap();
+            let grants = t
+                .log
+                .take()
+                .into_iter()
+                .find_map(|c| match c {
+                    Call::Sandbox(s) => Some(s.grants),
+                    _ => None,
+                })
+                .unwrap();
+            exit(t, id, pid, 0);
+            grants.lan
+        };
+        assert!(!lan(&mut t, "jellyfin"), "does not declare lan");
+        assert!(lan(&mut t, "youtube"), "declares it, granted by default");
+        let list = t.call("apps.list", json!({})).unwrap();
+        let youtube = list["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "youtube")
+            .unwrap();
+        assert_eq!(
+            youtube["permissions"],
+            json!([{"name": "lan", "required": false, "granted": true}])
+        );
+        t.call(
+            "apps.set_permission",
+            json!({"id": "youtube", "permission": "lan", "granted": false}),
+        )
+        .unwrap();
+        assert!(!lan(&mut t, "youtube"), "denied");
     }
 
     #[test]
@@ -4098,7 +4619,7 @@ mod tests {
         let mut t = T::new();
         assert_eq!(
             t.call("apps.list", json!({})).unwrap()["apps"][0],
-            json!({"id": "steam", "name": "Steam", "kind": "native"})
+            json!({"id": "steam", "name": "Steam", "kind": "native", "permissions": []})
         );
         // Steam not running: start it straight into Big Picture.
         let app = t.launch(json!({"id": "steam"}));

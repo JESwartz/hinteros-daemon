@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 17);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 18);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -164,6 +164,8 @@ pub struct App {
     /// 0.12: vendor terms this profile has not accepted yet (an app from the starter set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_terms: Option<StoreTerms>,
+    /// 0.18: what the app may use in its sandbox (empty for Steam and unsandboxed apps).
+    pub permissions: Vec<AppPermission>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +178,74 @@ impl Method for AppsList {
     const NAME: &'static str = "apps.list";
     type Params = AppsListParams;
     type Result = AppsListResult;
+}
+
+/// 0.18: one permission an app declares in the catalog, and this profile's choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppPermission {
+    /// `gamepad`, `mic`, `downloads`; clients show unknown names as they are.
+    pub name: String,
+    /// It cannot be switched off.
+    pub required: bool,
+    /// The app gets it the next time it starts.
+    pub granted: bool,
+}
+
+/// 0.18: `apps.set_permission`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsSetPermissionParams {
+    pub id: String,
+    pub permission: String,
+    pub granted: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsSetPermissionResult {}
+
+pub struct AppsSetPermission;
+impl Method for AppsSetPermission {
+    const NAME: &'static str = "apps.set_permission";
+    type Params = AppsSetPermissionParams;
+    type Result = AppsSetPermissionResult;
+}
+
+/// 0.18: the fewest and most app displays (`apps.displays.set`).
+pub const APP_DISPLAYS_MIN: u32 = 1;
+pub const APP_DISPLAYS_MAX: u32 = 8;
+
+/// 0.18: how many apps can run at once, each on an X display of its own (`apps.displays.*`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppDisplays {
+    /// The setting: the number of app displays the next session starts with.
+    pub count: u32,
+    /// The number this session has (fixed when it started); `None` when apps do not get
+    /// displays of their own (no gamescope).
+    #[serde(deserialize_with = "nullable_u32")]
+    pub active: Option<u32>,
+    pub min: u32,
+    pub max: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsDisplaysGetParams {}
+
+pub struct AppsDisplaysGet;
+impl Method for AppsDisplaysGet {
+    const NAME: &'static str = "apps.displays.get";
+    type Params = AppsDisplaysGetParams;
+    type Result = AppDisplays;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppsDisplaysSetParams {
+    pub count: u32,
+}
+
+pub struct AppsDisplaysSet;
+impl Method for AppsDisplaysSet {
+    const NAME: &'static str = "apps.displays.set";
+    type Params = AppsDisplaysSetParams;
+    type Result = AppDisplays;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -815,6 +885,9 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<Subscribe>(),
         MethodInfo::of::<Unsubscribe>(),
         MethodInfo::of::<AppsList>(),
+        MethodInfo::of::<AppsSetPermission>(),
+        MethodInfo::of::<AppsDisplaysGet>(),
+        MethodInfo::of::<AppsDisplaysSet>(),
         MethodInfo::of::<AppsLaunch>(),
         MethodInfo::of::<AppsRunning>(),
         MethodInfo::of::<AppsFocus>(),
@@ -962,6 +1035,10 @@ fn nullable<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D:
 
 fn nullable_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
     Option::<u64>::deserialize(d)
+}
+
+fn nullable_u32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
+    Option::<u32>::deserialize(d)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1618,6 +1695,13 @@ pub struct StoreApp {
     #[serde(deserialize_with = "nullable")]
     pub status_reason: Option<String>,
     pub state: StoreState,
+    /// 0.18: what the app may use in its sandbox; for an app that is not installed, the choice
+    /// stored for its install.
+    pub permissions: Vec<AppPermission>,
+    /// 0.18: runs without the app sandbox (Steam, `sandbox = false`, or the sandbox is off on
+    /// this box): it can use everything the profile can.
+    #[serde(default)]
+    pub full_access: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

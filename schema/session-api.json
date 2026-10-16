@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.17",
+  "version": "0.18",
   "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). Responses to system.*, auth.*, store.list and session.restart may arrive out of order relative to other calls on the same connection (match them by id): a relayed call can wait minutes for an admin password. See hinteros-docs/design/api.md for the protocol rules.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -37,16 +37,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.17", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
-          "result": { "api_version": "0.17", "server": { "name": "hinteros-session", "version": "0.1.0" } }
+          "params": { "api_version": "0.18", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
+          "result": { "api_version": "0.18", "server": { "name": "hinteros-session", "version": "0.1.0" } }
         },
         {
           "name": "major mismatch",
           "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 1.0, server 0.17",
-            "data": { "client_api_version": "1.0", "server_api_version": "0.17" }
+            "message": "API version mismatch: client 1.0, server 0.18",
+            "data": { "client_api_version": "1.0", "server_api_version": "0.18" }
           }
         }
       ]
@@ -146,12 +146,70 @@
           "params": {},
           "result": {
             "apps": [
-              { "id": "steam", "name": "Steam", "kind": "native" },
-              { "id": "jellyfin", "name": "Jellyfin", "kind": "native", "icon": "/run/current-system/sw/share/icons/hicolor/scalable/apps/jellyfin.svg" },
-              { "id": "youtube", "name": "YouTube", "kind": "web" }
+              { "id": "steam", "name": "Steam", "kind": "native", "permissions": [] },
+              {
+                "id": "jellyfin", "name": "Jellyfin", "kind": "native", "icon": "/run/current-system/sw/share/icons/hicolor/scalable/apps/jellyfin.svg",
+                "permissions": [{ "name": "gamepad", "required": true, "granted": true }, { "name": "downloads", "required": false, "granted": false }]
+              },
+              { "id": "youtube", "name": "YouTube", "kind": "web", "permissions": [{ "name": "mic", "required": false, "granted": true }] }
             ]
           }
         }
+      ]
+    },
+    "apps.set_permission": {
+      "summary": "0.18: grant or deny one optional permission of an app, for this profile. Applies the next time the app starts.",
+      "description": "id: an installed app (apps.list) or a catalog app that is not installed yet (store.list): the launcher calls this for each permission switched off on the install sheet, then system.apps.install. The choice is kept per profile ($XDG_STATE_HOME/hinteros/permissions.json); only denials are stored, so an app without a stored choice has every permission. Emits apps_changed and store_changed. Errors: unknown_app (not installed and not in the catalog), unknown_permission (the app does not declare it, or it is not enforced on this box), permission_required (granted false for a required one). Granting a required one is accepted and changes nothing.",
+      "since": "0.18",
+      "params": {
+        "type": "object",
+        "required": ["id", "permission", "granted"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/AppId" },
+          "permission": { "$ref": "#/$defs/PermissionName" },
+          "granted": { "type": "boolean" }
+        }
+      },
+      "result": { "type": "object", "additionalProperties": false, "properties": {} },
+      "errors": ["unknown_app", "unknown_permission", "permission_required"],
+      "examples": [
+        { "name": "deny mic", "params": { "id": "youtube", "permission": "mic", "granted": false }, "result": {} },
+        { "name": "grant again", "params": { "id": "youtube", "permission": "mic", "granted": true }, "result": {} },
+        { "name": "required", "params": { "id": "jellyfin", "permission": "gamepad", "granted": false }, "error": { "code": 2008, "message": "jellyfin needs gamepad" } },
+        { "name": "not declared", "params": { "id": "youtube", "permission": "downloads", "granted": false }, "error": { "code": 2007, "message": "youtube does not use downloads" } },
+        { "name": "unknown app", "params": { "id": "nope", "permission": "mic", "granted": false }, "error": { "code": 2006, "message": "no app with id 'nope'" } }
+      ]
+    },
+    "apps.displays.get": {
+      "summary": "0.18: how many apps can run at once. Each app the daemon starts gets an X display of its own, from a fixed set.",
+      "description": "count: the setting, which the next session starts with (kept per profile in $XDG_STATE_HOME/hinteros/app-displays; default 4). active: the number this session started with (gamescope makes its Xwaylands at start only), null when apps do not get displays of their own (no gamescope; then nothing limits them). Steam and its games never use one. A display is free again once every process of its app has ended. apps.launch answers no_app_display while all are in use.",
+      "since": "0.18",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "$ref": "#/$defs/AppDisplays" },
+      "errors": [],
+      "examples": [
+        { "name": "four", "params": {}, "result": { "count": 4, "active": 4, "min": 1, "max": 8 } },
+        { "name": "changed, not applied yet", "params": {}, "result": { "count": 6, "active": 4, "min": 1, "max": 8 } },
+        { "name": "no gamescope", "params": {}, "result": { "count": 4, "active": null, "min": 1, "max": 8 } }
+      ]
+    },
+    "apps.displays.set": {
+      "summary": "0.18: set how many apps can run at once. Applies at the next session start (session.restart).",
+      "description": "Saves count for this profile and answers with apps.displays.get's result: active stays what this session started with, so count != active means a session restart is needed. invalid_params for a count outside min..max.",
+      "since": "0.18",
+      "params": {
+        "type": "object",
+        "required": ["count"],
+        "additionalProperties": false,
+        "properties": {
+          "count": { "type": "integer", "minimum": 1, "maximum": 8 }
+        }
+      },
+      "result": { "type": "object", "$ref": "#/$defs/AppDisplays" },
+      "errors": [],
+      "examples": [
+        { "name": "more", "params": { "count": 6 }, "result": { "count": 6, "active": 4, "min": 1, "max": 8 } }
       ]
     },
     "games.list": {
@@ -254,7 +312,7 @@
     },
     "apps.launch": {
       "summary": "Start an app and give it focus. Returns once it is spawned, before it shows a window.",
-      "description": "Exactly one of: 'id' (an app from apps.list), 'command' (argv, run as the session user), or 'url' (a Steam game, handed to the running Steam client; use it for games.list entries). If the app is already running it is focused instead and the result describes the running instance. Its windows are shown as soon as they appear; until then the launcher stays visible. Progress is reported through app_started, focus_changed and app_exited. The built-in id 'steam' opens Steam's Big Picture mode (steam://open/bigpicture, or 'steam -gamepadui' when Steam is not running) and shows Steam's own windows; it runs as the app 'steam' with source 'steam_client'. A Steam game's name comes from its Steam library manifest when it is installed.",
+      "description": "Exactly one of: 'id' (an app from apps.list), 'command' (argv, run as the session user), or 'url' (a Steam game, handed to the running Steam client; use it for games.list entries). If the app is already running it is focused instead and the result describes the running instance. Its windows are shown as soon as they appear; until then the launcher stays visible. Progress is reported through app_started, focus_changed and app_exited. The built-in id 'steam' opens Steam's Big Picture mode (steam://open/bigpicture, or 'steam -gamepadui' when Steam is not running) and shows Steam's own windows; it runs as the app 'steam' with source 'steam_client'. A Steam game's name comes from its Steam library manifest when it is installed. 0.18: an app the daemon starts itself (from apps.list, or a command) gets an X display of its own (apps.displays.get); while all are in use it is not started: no_app_display names the running apps that hold one (close one with apps.close, wait for its app_exited, then launch again).",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -284,7 +342,7 @@
           "app": { "$ref": "#/$defs/RunningApp" }
         }
       },
-      "errors": ["app_not_found", "app_launch_failed", "terms_required"],
+      "errors": ["app_not_found", "app_launch_failed", "terms_required", "no_app_display"],
       "examples": [
         {
           "name": "steam game",
@@ -315,6 +373,18 @@
           "name": "unknown app",
           "params": { "id": "nope" },
           "error": { "code": 2001, "message": "no app with id 'nope'" }
+        },
+        {
+          "name": "every app display in use",
+          "params": { "id": "youtube" },
+          "error": {
+            "code": 2009,
+            "message": "every app display is in use (2)",
+            "data": { "apps": [
+              { "id": "cmd-1", "name": "Kodi", "source": "command", "gamescope_app_id": 4100000001, "pid": 4200 },
+              { "id": "jellyfin", "name": "Jellyfin", "source": "command", "gamescope_app_id": 4100000002, "pid": 4201 }
+            ] }
+          }
         },
         {
           "name": "spawn failed",
@@ -4374,7 +4444,9 @@
                 "icon": { "desktop_id": "com.moonlight_stream.Moonlight", "site_url": "https://moonlight-stream.org", "firefox_profile": false, "path": "/usr/share/icons/hicolor/256x256/apps/com.moonlight_stream.Moonlight.png" },
                 "requires": [], "depends": [], "conflicts": [], "installer": true, "on_iso": false, "installer_default": false,
                 "data_paths": [".config/Moonlight Game Streaming Project"], "terms": null, "builds_on_device": false,
-                "free": true, "redistributable": true, "status": "available", "status_reason": null, "state": "installed"
+                "free": true, "redistributable": true, "status": "available", "status_reason": null, "state": "installed",
+                "permissions": [{ "name": "gamepad", "required": true, "granted": true }, { "name": "mic", "required": false, "granted": false }],
+                "full_access": false
               },
               {
                 "id": "steam", "name": "Steam", "summary": "Play your Steam library on the TV.",
@@ -4384,7 +4456,9 @@
                 "requires": ["graphics32"], "depends": [], "conflicts": [], "installer": true, "on_iso": false, "installer_default": false,
                 "data_paths": [".local/share/Steam", ".steam"],
                 "terms": { "title": "Steam Subscriber Agreement", "version": "2026-09-10", "url": "https://store.steampowered.com/subscriber_agreement/", "retrieved": "2026-10-06", "file": "/run/current-system/sw/share/hinteros/terms/steam-2026-09-10.txt" },
-                "builds_on_device": false, "free": false, "redistributable": true, "status": "available", "status_reason": null, "state": "available"
+                "builds_on_device": false, "free": false, "redistributable": true, "status": "available", "status_reason": null, "state": "available",
+                "permissions": [],
+                "full_access": true
               }
             ],
             "more_after_update": false
@@ -4491,7 +4565,7 @@
       "examples": [{ "name": "changed", "params": {} }]
     },
     "apps_changed": {
-      "summary": "The apps.list result changed: an app's resolved icon became available or changed (for example a web app's icon finished downloading), or (0.9) the daemon reloaded its app list after a switch installed or removed apps. Call apps.list again.",
+      "summary": "The apps.list result changed: an app's resolved icon became available or changed (for example a web app's icon finished downloading), or (0.9) the daemon reloaded its app list after a switch installed or removed apps, or (0.18) apps.set_permission changed a permission. Call apps.list again.",
       "description": "Sent only when the apps.list result actually changed. Since 0.9 the daemon also reloads its app list (the generated session.toml) when it changes on disk or an apps job finished, so newly installed apps appear without a restart; apps that are running and were removed keep running until they exit. The daemon resolves icons at runtime from the box (desktop files and icon themes) or fetches and caches them (web apps), never from files it ships; fetching happens in the background after startup, so apps.list may first return apps without an icon.",
       "since": "0.5",
       "params": {
@@ -4610,14 +4684,14 @@
             "job_id": "3f9a0c2b7e4d1a65",
             "kind": "update_apply",
             "stage": "building",
-            "percent": 58,
+            "percent": 59,
             "detail": {
               "paths_done": 30,
               "paths_total": 30,
               "builds_done": 2,
               "builds_total": 12,
               "builds_running": 1,
-              "building": { "name": "hinteros-daemon", "version": "0.7.1", "phase": "build" }
+              "building": { "name": "hinteros-daemon", "version": "0.7.1", "phase": "build", "percent": 20 }
             },
             "started_at": 1791300000,
             "last_activity_at": 1791300412
@@ -4813,7 +4887,7 @@
       "examples": [{ "name": "authorized", "params": { "cookie": "3-6f1c0e2a9b7d4c58-1-0a9f3e1d2c4b5a69", "outcome": "authorized" } }]
     },
     "store_changed": {
-      "summary": "What store.list returns may have changed: an apps job started or finished, any other job that switched the system finished, or an update check changed more_after_update, or (0.9) a catalog app's icon was resolved (icon.path). Query store.list again.",
+      "summary": "What store.list returns may have changed: an apps job started or finished, any other job that switched the system finished, or an update check changed more_after_update, or (0.9) a catalog app's icon was resolved (icon.path), or (0.18) apps.set_permission changed a permission. Query store.list again.",
       "since": "0.8",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "examples": [{ "name": "changed", "params": {} }]
@@ -5083,6 +5157,22 @@
     "steam_no_windows": { "code": 2003, "since": "0.3", "summary": "steam.focus: Steam has no windows that could be shown (not running, or no gamescope)." },
     "keyboard_unavailable": { "code": 2004, "since": "0.4", "summary": "keys.*: nothing can deliver the input (no virtual keyboard because /dev/uinput could not be opened, and, for text and some actions, no gamescope input method)." },
     "osk_unavailable": { "code": 2005, "since": "0.4", "summary": "osk.show: the on-screen keyboard is disabled in the daemon's config." },
+    "unknown_app": { "code": 2006, "since": "0.18", "summary": "apps.set_permission: the app is not installed and not in the catalog." },
+    "unknown_permission": { "code": 2007, "since": "0.18", "summary": "apps.set_permission: the app does not declare this permission (or it is not enforced on this box)." },
+    "permission_required": { "code": 2008, "since": "0.18", "summary": "apps.set_permission: a required permission cannot be denied." },
+    "no_app_display": {
+      "code": 2009,
+      "since": "0.18",
+      "summary": "apps.launch: every app display is in use (apps.displays.get). apps: the running apps that hold one; closing one frees it once it has exited (app_exited).",
+      "data": {
+        "type": "object",
+        "required": ["apps"],
+        "additionalProperties": false,
+        "properties": {
+          "apps": { "type": "array", "items": { "$ref": "#/$defs/RunningApp" } }
+        }
+      }
+    },
     "permission_denied": {
       "code": 3002,
       "since": "0.6",
@@ -5452,7 +5542,7 @@
     },
     "App": {
       "type": "object",
-      "required": ["id", "name", "kind"],
+      "required": ["id", "name", "kind", "permissions"],
       "additionalProperties": false,
       "properties": {
         "id": { "description": "Stable identifier, used by apps.launch.", "$ref": "#/$defs/AppId" },
@@ -5471,7 +5561,36 @@
             "retrieved": { "type": "string", "maxLength": 10 },
             "file": { "description": "Absolute path of the full text on this box.", "type": "string" }
           }
-        }
+        },
+        "permissions": { "description": "0.18: what the app may use in its sandbox, in catalog order. Empty for Steam and for apps that run without a sandbox.", "type": "array", "items": { "$ref": "#/$defs/AppPermission" } }
+      }
+    },
+    "AppDisplays": {
+      "description": "0.18: how many apps can run at once (apps.displays.get).",
+      "type": "object",
+      "required": ["count", "active", "min", "max"],
+      "additionalProperties": false,
+      "properties": {
+        "count": { "description": "The setting: what the next session starts with.", "type": "integer", "minimum": 1, "maximum": 8 },
+        "active": { "description": "What this session has; null: apps do not get displays of their own.", "oneOf": [{ "type": "integer", "minimum": 1, "maximum": 8 }, { "type": "null" }] },
+        "min": { "type": "integer", "minimum": 1 },
+        "max": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "PermissionName": {
+      "description": "0.18: a sandbox permission: gamepad (controllers), mic (a sound socket that may record), downloads (the profile's Downloads folder), lan (the local network: other devices at home and this box's own services). More may come; show unknown names as they are.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$"
+    },
+    "AppPermission": {
+      "description": "0.18: a permission the app declares in the catalog, and this profile's choice. Only permissions this box enforces are listed.",
+      "type": "object",
+      "required": ["name", "required", "granted"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/PermissionName" },
+        "required": { "description": "Cannot be switched off (no switch).", "type": "boolean" },
+        "granted": { "description": "The app gets it the next time it starts. Always true when required.", "type": "boolean" }
       }
     },
     "InstallState": {
@@ -5649,7 +5768,7 @@
       "required": [
         "id", "name", "summary", "description", "category", "homepage", "kind", "size_mib", "icon", "requires", "depends",
         "conflicts", "installer", "on_iso", "installer_default", "data_paths", "terms", "builds_on_device", "free",
-        "redistributable", "status", "status_reason", "state"
+        "redistributable", "status", "status_reason", "state", "permissions", "full_access"
       ],
       "additionalProperties": false,
       "properties": {
@@ -5704,7 +5823,9 @@
         "redistributable": { "type": "boolean" },
         "status": { "$ref": "#/$defs/CatalogStatus" },
         "status_reason": { "oneOf": [{ "type": "string", "maxLength": 200 }, { "type": "null" }] },
-        "state": { "$ref": "#/$defs/StoreState" }
+        "state": { "$ref": "#/$defs/StoreState" },
+        "permissions": { "description": "0.18: what the app may use in its sandbox, in catalog order. Not installed: the stored choice for its install (default granted). Empty for Steam, apps without a sandbox and tombstones.", "type": "array", "items": { "$ref": "#/$defs/AppPermission" } },
+        "full_access": { "description": "0.18: runs without the app sandbox (Steam, apps with sandbox = false, or every app while the sandbox is off on this box): it can use everything the profile can. The install sheet warns. False for tombstones.", "type": "boolean" }
       }
     },
 
@@ -6150,7 +6271,8 @@
       "properties": {
         "name": { "type": "string", "maxLength": 320 },
         "version": { "type": "string", "maxLength": 320 },
-        "phase": { "type": "string", "maxLength": 160 }
+        "phase": { "type": "string", "maxLength": 160 },
+        "percent": { "description": "System API 0.10, session API 0.18: how far this derivation is, from the last standard stdenv phase it started (unpack 0, patch 5, updateAutotoolsGnuConfigScripts 8, configure 10, build 20, check 80, install 88, fixup 94, installCheck 98, dist 99; other phases keep the value); never goes back; below 100. Absent before the first standard phase and for builders without phases.", "type": "integer", "minimum": 0, "maximum": 99 }
       }
     },
     "SubjectProfile": {

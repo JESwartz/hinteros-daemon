@@ -351,6 +351,47 @@ fn schema_rejects_what_it_should() {
         ("/methods/keys.action/params", r#"{"action":"jump"}"#),
         ("/methods/osk.show/result", r#"{}"#),
         ("/events/osk_visibility/params", r#"{"visible":"yes"}"#),
+        // 0.18: permissions.
+        (
+            "/methods/apps.list/result",
+            r#"{"apps":[{"id":"a","name":"x","kind":"native"}]}"#,
+        ),
+        (
+            "/methods/apps.list/result",
+            r#"{"apps":[{"id":"a","name":"x","kind":"native","permissions":[{"name":"mic","required":false}]}]}"#,
+        ),
+        (
+            "/methods/apps.list/result",
+            r#"{"apps":[{"id":"a","name":"x","kind":"native","permissions":[{"name":"Mic","required":false,"granted":true}]}]}"#,
+        ),
+        (
+            "/methods/apps.set_permission/params",
+            r#"{"id":"a","permission":"mic"}"#,
+        ),
+        (
+            "/methods/apps.set_permission/params",
+            r#"{"id":"a","permission":"../x","granted":false}"#,
+        ),
+        (
+            "/methods/apps.set_permission/params",
+            r#"{"id":"a","permission":"mic","granted":"no"}"#,
+        ),
+        (
+            "/methods/apps.set_permission/params",
+            r#"{"id":"a","permission":"mic","granted":false,"profile":"x"}"#,
+        ),
+        ("/methods/apps.set_permission/result", r#"{"ok":true}"#),
+        ("/methods/apps.displays.set/params", r#"{"count":0}"#),
+        ("/methods/apps.displays.set/params", r#"{"count":9}"#),
+        ("/methods/apps.displays.set/params", r#"{}"#),
+        (
+            "/methods/apps.displays.get/result",
+            r#"{"count":4,"min":1,"max":8}"#,
+        ),
+        (
+            "/methods/apps.displays.get/result",
+            r#"{"count":4,"active":0,"min":1,"max":8}"#,
+        ),
     ];
     for (pointer, instance) in bad {
         let v: Value = serde_json::from_str(instance).unwrap();
@@ -541,6 +582,19 @@ fn system_schema_rejects_what_it_should() {
             "/events/job_progress/params",
             r#"{"job_id":"3f9a0c2b7e4d1a65","stage":"downloading","percent":101}"#,
         ),
+        // 0.10: a build's percent stays below 100 and is a whole number.
+        (
+            "/events/job_progress/params",
+            r#"{"job_id":"3f9a0c2b7e4d1a65","kind":"rebuild","stage":"building","detail":{"building":{"name":"x","percent":100}}}"#,
+        ),
+        (
+            "/events/job_progress/params",
+            r#"{"job_id":"3f9a0c2b7e4d1a65","kind":"rebuild","stage":"building","detail":{"building":{"name":"x","percent":-1}}}"#,
+        ),
+        (
+            "/events/job_progress/params",
+            r#"{"job_id":"3f9a0c2b7e4d1a65","kind":"rebuild","stage":"building","detail":{"building":{"name":"x","percent":"20"}}}"#,
+        ),
     ];
     for (pointer, instance) in bad {
         let v: Value = serde_json::from_str(instance).unwrap();
@@ -569,6 +623,21 @@ fn system_schema_rejects_what_it_should() {
             )
             .is_err()
     );
+}
+
+/// System API 0.10 (session API 0.18): `Building.percent`, in both documents, relayed unchanged.
+#[test]
+fn building_percent() {
+    let ok = r#"{"job_id":"3f9a0c2b7e4d1a65","kind":"rebuild","stage":"building","started_at":1,"last_activity_at":1,"detail":{"building":{"name":"x","phase":"build","percent":20}}}"#;
+    let bad = r#"{"job_id":"3f9a0c2b7e4d1a65","kind":"rebuild","stage":"building","started_at":1,"last_activity_at":1,"detail":{"building":{"name":"x","percent":99.5}}}"#;
+    for schema in [ApiSchema::system(), ApiSchema::session()] {
+        let v: Value = serde_json::from_str(ok).unwrap();
+        schema.check("/events/job_progress/params", &v).unwrap();
+        let v: Value = serde_json::from_str(bad).unwrap();
+        assert!(schema.check("/events/job_progress/params", &v).is_err());
+    }
+    let p: system::JobProgressParams = serde_json::from_str(ok).unwrap();
+    assert_eq!(p.detail.unwrap().building.unwrap().percent, Some(20));
 }
 
 /// 0.8: the schema's ZoneName and `is_zone_name` agree; nothing path-like gets through.
@@ -691,13 +760,15 @@ fn relay_matches_the_system_api() {
         .map(|(k, _)| k.as_str())
         .collect();
     assert_eq!(relayed, marked, "relay table vs schema relay flags");
-    // Every system method except the core ones is relayed.
+    // Every system method except the core ones and the session daemon's own (`lan_filter.*`,
+    // 0.10) is relayed.
     let system_methods: BTreeSet<&str> = y["methods"]
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
         .filter(|m| !["hello", "ping", "subscribe", "unsubscribe"].contains(m))
+        .filter(|m| !m.starts_with("lan_filter."))
         .collect();
     let targets: BTreeSet<&str> = session::RELAY.iter().map(|(_, t)| *t).collect();
     assert_eq!(system_methods, targets);

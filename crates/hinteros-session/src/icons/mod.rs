@@ -98,7 +98,7 @@ impl IconSpec {
             icon: app.icon.clone(),
             desktop_id: app.desktop_id.clone(),
             web: match (&app.icon_url, &app.site_url) {
-                (Some(url), _) => Some(web::Source::IconUrl(url.clone())),
+                (Some(url), _) => Some(web::Source::IconUrl(url.clone(), app.icon_sha256.clone())),
                 (None, Some(url)) => Some(web::Source::Site(url.clone())),
                 _ => None,
             },
@@ -391,7 +391,7 @@ pub fn catalog_specs(index: &hinteros_api::catalog::Index) -> Vec<IconSpec> {
             id: e.id.clone(),
             desktop_id: e.icon.desktop_id.clone(),
             web: match (&e.icon.icon_url, &e.icon.site_url) {
-                (Some(url), _) => Some(web::Source::IconUrl(url.clone())),
+                (Some(url), _) => Some(web::Source::IconUrl(url.clone(), e.icon.sha256.clone())),
                 (None, Some(url)) => Some(web::Source::Site(url.clone())),
                 _ => None,
             },
@@ -818,11 +818,11 @@ mod tests {
         };
         let store = IconStore::default();
         let ok = IconSpec {
-            web: Some(web::Source::IconUrl(format!("{base}/logo.png"))),
+            web: Some(web::Source::IconUrl(format!("{base}/logo.png"), None)),
             ..spec("ok")
         };
         let bad = IconSpec {
-            web: Some(web::Source::IconUrl(format!("{base}/missing.png"))),
+            web: Some(web::Source::IconUrl(format!("{base}/missing.png"), None)),
             ..spec("bad")
         };
         let fetcher = web::Fetcher::new(true);
@@ -867,7 +867,7 @@ mod tests {
         let catalog = |ids: &[&str]| -> Vec<IconSpec> {
             ids.iter()
                 .map(|id| IconSpec {
-                    web: Some(web::Source::IconUrl(format!("{base}/{id}.png"))),
+                    web: Some(web::Source::IconUrl(format!("{base}/{id}.png"), None)),
                     ..spec(id)
                 })
                 .collect()
@@ -879,6 +879,7 @@ mod tests {
             icon: None,
             desktop_id: None,
             icon_url: Some(format!("{base}/{id}.png")),
+            icon_sha256: None,
             site_url: None,
             firefox_profile: None,
             command: Some(vec!["x".into()]),
@@ -888,6 +889,8 @@ mod tests {
             keymap: Default::default(),
             address_bar: false,
             pointer: None,
+            permissions: Default::default(),
+            sandbox: true,
         };
         let (tx, rx) = mpsc::channel();
         let store = IconStore::default();

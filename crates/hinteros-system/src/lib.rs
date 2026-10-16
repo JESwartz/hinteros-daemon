@@ -21,6 +21,7 @@ pub mod guest;
 pub mod job;
 pub mod jobs;
 pub mod keyboard;
+pub mod lanfilter;
 pub mod nixlog;
 pub mod pam;
 pub mod peer;

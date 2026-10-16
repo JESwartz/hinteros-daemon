@@ -17,6 +17,7 @@ rusqlite.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 signal-hook.workspace = true
 tempfile.workspace = true
@@ -36,8 +37,14 @@ nix = { workspace = true, features = ["user"] }
 
 [dev-dependencies]
 hinteros-api = { workspace = true, features = ["conformance"] }
+nix = { workspace = true, features = ["personality", "sched", "user"] }
 wayland-server.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true
+
+# A probe that bwrap runs: single-threaded (it makes a user namespace).
+[[test]]
+name = "seccomp"
+harness = false

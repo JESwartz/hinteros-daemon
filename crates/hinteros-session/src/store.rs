@@ -23,6 +23,7 @@ use tokio::sync::broadcast;
 use tracing::debug;
 
 use crate::icons::IconStore;
+use crate::permissions::Permissions;
 use crate::system::Relay;
 use crate::{Audience, Broadcast};
 
@@ -38,6 +39,7 @@ struct State {
 struct Inner {
     index: PathBuf,
     icons: IconStore,
+    permissions: Permissions,
     events: broadcast::Sender<Broadcast>,
     state: Mutex<State>,
     /// Look at the profile's unaccepted terms again (an `apps.accept_terms` went through).
@@ -58,11 +60,17 @@ pub struct Store {
 
 impl Store {
     /// Start watching job events.
-    pub fn spawn(index: PathBuf, icons: IconStore, events: broadcast::Sender<Broadcast>) -> Self {
+    pub fn spawn(
+        index: PathBuf,
+        icons: IconStore,
+        permissions: Permissions,
+        events: broadcast::Sender<Broadcast>,
+    ) -> Self {
         let store = Self {
             inner: Arc::new(Inner {
                 index,
                 icons,
+                permissions,
                 events: events.clone(),
                 state: Mutex::new(State::default()),
                 terms_wake: tokio::sync::Notify::new(),
@@ -272,6 +280,7 @@ impl Store {
             &installing,
             &removing,
             &self.inner.icons,
+            &self.inner.permissions,
         );
         encode_result::<StoreList>(StoreListResult {
             index_version: index.version,
@@ -315,6 +324,7 @@ pub fn merge(
     installing: &BTreeSet<String>,
     removing: &BTreeSet<String>,
     icons: &IconStore,
+    permissions: &Permissions,
 ) -> Vec<StoreApp> {
     let mut out: Vec<StoreApp> = Vec::new();
     for e in index.apps.values() {
@@ -339,7 +349,17 @@ pub fn merge(
                 Status::Retired | Status::Unknown => StoreState::Retired,
             }
         };
-        out.push(app(index, e, state, icons.get(&e.id)));
+        let mut a = app(index, e, state, icons.get(&e.id));
+        // Steam and apps that opt out of the sandbox have no permissions: they have full access.
+        if e.sandbox
+            && e.id != hinteros_api::session::STEAM_CLIENT_APP_ID
+            && permissions.sandboxed()
+        {
+            a.permissions = permissions.list(&e.id, &e.permissions);
+        } else {
+            a.full_access = e.status != Status::Removed;
+        }
+        out.push(a);
     }
     // Installed, but unknown to this catalog: shown so it can be removed.
     for id in installed.iter().filter(|i| index.get(i).is_none()) {
@@ -387,6 +407,8 @@ fn empty(id: &str) -> StoreApp {
         status: CatalogStatus::Removed,
         status_reason: None,
         state: StoreState::Unavailable,
+        permissions: Vec::new(),
+        full_access: false,
     }
 }
 
@@ -438,6 +460,8 @@ fn app(index: &Index, e: &Entry, state: StoreState, icon: Option<PathBuf>) -> St
             .as_ref()
             .map(|r| r.chars().take(200).collect()),
         state,
+        permissions: Vec::new(),
+        full_access: false,
     }
 }
 
@@ -472,9 +496,10 @@ mod tests {
     fn merges_index_and_install_state() {
         let index = Index::parse(
             br#"{"indexVersion":2,"apps":[
-              {"id":"steam","name":"Steam","status":"available","kind":"native","sizeMiB":1000,
+              {"id":"steam","name":"Steam","status":"available","kind":"native","sizeMiB":1000,"permissions":{"gamepad":"optional"},
                "terms":{"title":"SSA","version":"2026-09-10","url":"https://x","retrieved":"2026-10-06","file":"terms/steam-2026-09-10.txt"}},
-              {"id":"youtube","name":"YouTube","status":"available","kind":"web"},
+              {"id":"youtube","name":"YouTube","status":"available","kind":"web",
+               "permissions":{"mic":"optional","gamepad":"required"}},
               {"id":"moonlight","name":"moonlight","status":"available"},
               {"id":"retired-in","name":"R1","status":"retired","statusReason":"old"},
               {"id":"retired-out","name":"R2","status":"retired","statusReason":"old"},
@@ -490,7 +515,16 @@ mod tests {
         let removing = BTreeSet::from(["moonlight".to_string()]);
         let icons = IconStore::default();
         icons.set("youtube", Some("/cache/youtube.png".into()));
-        let apps = merge(&index, &installed, &installing, &removing, &icons);
+        let perms = Permissions::new(None, vec!["gamepad", "mic", "downloads"]);
+        perms
+            .set(
+                "youtube",
+                Some(&index.get("youtube").unwrap().permissions),
+                "mic",
+                false,
+            )
+            .unwrap();
+        let apps = merge(&index, &installed, &installing, &removing, &icons, &perms);
         let view: Vec<(&str, StoreState)> = apps.iter().map(|a| (a.id.as_str(), a.state)).collect();
         assert_eq!(
             view,
@@ -515,6 +549,30 @@ mod tests {
             apps.iter().find(|a| a.id == "youtube").unwrap().kind,
             AppKind::Web
         );
+        let perms_of = |id: &str| {
+            serde_json::to_value(&apps.iter().find(|a| a.id == id).unwrap().permissions).unwrap()
+        };
+        assert_eq!(
+            perms_of("youtube"),
+            json!([{"name":"gamepad","required":true,"granted":true},{"name":"mic","required":false,"granted":false}])
+        );
+        assert_eq!(perms_of("steam"), json!([]), "never sandboxed");
+        assert_eq!(perms_of("mystery"), json!([]));
+        let full = |id: &str| apps.iter().find(|a| a.id == id).unwrap().full_access;
+        assert!(full("steam"), "Steam has full access");
+        assert!(!full("youtube") && !full("moonlight"));
+        assert!(!full("mystery") && !full("gone"), "tombstones");
+        // With the sandbox off, every app has full access and no permissions.
+        let off = merge(
+            &index,
+            &installed,
+            &installing,
+            &removing,
+            &icons,
+            &Permissions::default(),
+        );
+        let yt = off.iter().find(|a| a.id == "youtube").unwrap();
+        assert!(yt.full_access && yt.permissions.is_empty());
         // Every app is valid against the schema.
         let schema = hinteros_api::conformance::ApiSchema::session();
         for a in &apps {

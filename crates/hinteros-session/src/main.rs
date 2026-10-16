@@ -16,9 +16,13 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use hinteros_api::server as api_server;
 use hinteros_api::session;
-use hinteros_session::apps::{ProcessSpawner, which};
+use hinteros_api::{Method, system};
+use hinteros_session::apps::{ProcessSpawner, SandboxSettings, which};
 use hinteros_session::config::{Cli, Config};
-use hinteros_session::focus::gamescope::{GamescopeFocus, WatchOptions, spawn_watcher};
+use hinteros_session::displays::DisplayPool;
+use hinteros_session::focus::gamescope::{
+    GamescopeFocus, WatchOptions, spawn_dummies_watcher, spawn_watcher,
+};
 use hinteros_session::focus::{FocusControl, NoFocus};
 use hinteros_session::icons::{self, Icons};
 use hinteros_session::input::{
@@ -151,8 +155,41 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
     let (exit_tx, exit_rx) = mpsc::unbounded_channel();
     forward(exit_rx, shell_tx.clone(), Msg::ChildExit);
     let children = Children::default();
-    let spawner =
-        ProcessSpawner::new(exe.clone(), env.clone(), exit_tx).with_children(children.clone());
+    // `lan` (lan.rs): our cgroups before anything is started, so every child starts in our leaf.
+    let lan = (config.sandbox.enable && config.sandbox.lan_filter && !cli.greeter).then(|| {
+        let cgroups = match hinteros_session::lan::Cgroups::setup_here() {
+            Ok(c) => {
+                info!(cgroup = %c.nolan(), "apps without lan start in their own cgroup");
+                Some(c)
+            }
+            Err(e) => {
+                warn!("apps without lan cannot start: {e}");
+                None
+            }
+        };
+        hinteros_session::lan::LanFilter::new(cgroups)
+    });
+    let apps_display = config.apps_display_setting();
+    let displays = DisplayPool::new(apps_display.clone(), config.gamescope.app_displays);
+    let mut spawner = ProcessSpawner::new(exe.clone(), env.clone(), exit_tx)
+        .with_children(children.clone())
+        .with_app_displays(apps_display.is_some());
+    if let Some(d) = &apps_display {
+        info!(first = %d, count = ?displays.active(), "each app runs on an Xwayland of its own");
+    }
+    if config.sandbox.enable {
+        info!(bwrap = %config.sandbox.bwrap.display(), "catalog apps run sandboxed");
+        spawner = spawner.with_sandbox(SandboxSettings {
+            bwrap: config.sandbox.bwrap.clone(),
+            pulse_socket: config.sandbox.pulse_socket.clone(),
+            pulse_record_socket: config.sandbox.pulse_record_socket.clone(),
+            app_env: cli.apps_profile.clone().or_else(|| config.apps_profile()),
+            osk_socket: Some(osk_socket.clone()),
+        });
+        if let Some((filter, _)) = &lan {
+            spawner = spawner.with_lan_filter(filter.clone());
+        }
+    }
 
     let osk_pid = Arc::new(AtomicU32::new(0));
     let focus: Box<dyn FocusControl> = if config.gamescope.enable {
@@ -166,6 +203,25 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
             unmap_gl_dummies: config.gamescope.unmap_gl_dummies,
         };
         spawn_watcher(dpy.clone(), Duration::from_secs(1), opts, tx);
+        if let Some(first) = apps_display
+            .clone()
+            .filter(|_| config.gamescope.unmap_gl_dummies)
+        {
+            // One per app display this session may have (the number is read each time: the
+            // compositor may write it after we started).
+            for i in 0..hinteros_api::session::APP_DISPLAYS_MAX {
+                let pool = displays.clone();
+                let first = first.clone();
+                spawn_dummies_watcher(
+                    move || {
+                        (i < pool.active()?)
+                            .then(|| hinteros_session::displays::slot_setting(&first, i))
+                            .flatten()
+                    },
+                    Duration::from_secs(1),
+                );
+            }
+        }
         Box::new(GamescopeFocus::new(dpy, config.launcher.app_id))
     } else {
         info!("gamescope focus control off");
@@ -233,7 +289,9 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
             },
         )
     };
+    let permissions = hinteros_session::permissions::Permissions::from_config(&config.sandbox);
     let mut shell_config = ShellConfig::from(&config);
+    shell_config.permissions = permissions.clone();
     shell_config.profile_mode |= cli.greeter;
     shell_config.icons = icon_store.clone();
     shell_config.icon_refresh = icons.refresher();
@@ -253,7 +311,8 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         Box::new(spawner),
         Box::new(Procs),
         events.clone(),
-    );
+    )
+    .with_displays(displays);
     // gamescope's pointer is only ours to hide under gamescope.
     let shell = if config.gamescope.enable {
         shell.with_cursor(Box::new(pointer::CommandCursor {
@@ -355,6 +414,27 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         hinteros_session::system::Relay::disabled()
     };
 
+    // Ask the system service to filter the nolan cgroup (until it says yes).
+    let lan_filter = lan.map(|(filter, ask)| {
+        let set_relay = relay.clone();
+        tokio::spawn(hinteros_session::lan::run(
+            filter.clone(),
+            ask,
+            move |cgroup| {
+                let relay = set_relay.clone();
+                async move {
+                    let params = serde_json::json!({ "cgroup": cgroup });
+                    relay
+                        .call(system::LanFilterSet::NAME, Some(params))
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.message)
+                }
+            },
+        ));
+        (filter, relay.clone())
+    });
+
     let profiles = hinteros_session::profile::Profiles::spawn(
         relay.clone(),
         shell_tx.clone(),
@@ -374,6 +454,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
     let store = hinteros_session::store::Store::spawn(
         config.store.index.clone(),
         icon_store.clone(),
+        permissions,
         events.clone(),
     );
     store.spawn_terms(
@@ -436,6 +517,17 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
     children
         .shutdown(Duration::from_millis(config.close.shutdown_grace_ms))
         .await;
+    // No app of ours is left: the system service may forget our cgroup.
+    if let Some((filter, relay)) = lan_filter
+        && filter.nolan().is_some()
+    {
+        let clear = relay.call(system::LanFilterClear::NAME, None);
+        match tokio::time::timeout(Duration::from_secs(5), clear).await {
+            Ok(Ok(_)) => info!("local network filter cleared"),
+            Ok(Err(e)) => warn!("local network filter not cleared: {}", e.message),
+            Err(_) => warn!("local network filter not cleared: no answer"),
+        }
+    }
     Ok(())
 }
 

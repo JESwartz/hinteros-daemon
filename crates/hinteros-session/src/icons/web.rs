@@ -3,16 +3,18 @@
 //! From a `site_url`: fetch the page, read its `<link>` tags (web app manifest, apple-touch-icon,
 //! favicon), read the manifest's `icons`, and take the best candidate (the largest square icon
 //! of at least 192 px, preferring ones not made only for masking), falling back to
-//! `/favicon.ico`. From an `icon_url`: just that file. Only https is used (also for every
-//! redirect), requests have timeouts, responses are limited to [`MAX_BYTES`] and must be an
-//! image (checked by Content-Type and by the file's first bytes).
+//! `/favicon.ico`. From an `icon_url`: just that file, and only if its SHA-256 is the pinned
+//! one, when the catalog gives one. Only https is used (also for every redirect), requests have
+//! timeouts, responses are limited to [`MAX_BYTES`] and must be an image (checked by
+//! Content-Type and by the file's first bytes).
 
 use std::io::Read;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
-use tracing::debug;
+use sha2::{Digest, Sha256};
+use tracing::{debug, warn};
 use url::Url;
 
 /// Largest response (page, manifest or image) we read.
@@ -26,8 +28,8 @@ pub const WANTED_SIZE: u32 = 192;
 /// Where a web app's icon comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-    /// This image.
-    IconUrl(String),
+    /// This image; with a hex SHA-256, only if the file has it.
+    IconUrl(String, Option<String>),
     /// Discover the icon from this page.
     Site(String),
 }
@@ -69,7 +71,16 @@ impl Fetcher {
 
     pub fn fetch_icon(&self, source: &Source) -> Result<Image> {
         match source {
-            Source::IconUrl(url) => self.fetch_image(&self.parse(url)?),
+            Source::IconUrl(url, None) => self.fetch_image(&self.parse(url)?),
+            Source::IconUrl(url, Some(sha256)) => {
+                let image = self.fetch_image(&self.parse(url)?)?;
+                let got = sha256_hex(&image.bytes);
+                if !got.eq_ignore_ascii_case(sha256) {
+                    warn!(url, want = %sha256, got = %got, "icon refused: its SHA-256 is not the catalog's");
+                    bail!("{url}: SHA-256 {got} is not the pinned {sha256}");
+                }
+                Ok(image)
+            }
             Source::Site(url) => self.discover(&self.parse(url)?),
         }
     }
@@ -179,6 +190,19 @@ impl Fetcher {
         }
         Err(last.unwrap_or_else(|| anyhow::anyhow!("{page}: no icon candidates")))
     }
+}
+
+/// Lowercase hex SHA-256 of `bytes`.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// 64 hex digits.
+pub fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The image format of `bytes`, from its first bytes.
@@ -636,11 +660,36 @@ mod tests {
             ])
         });
         let f = Fetcher::new(true);
-        let get = |p: &str| f.fetch_icon(&Source::IconUrl(server.url(p)));
+        let get = |p: &str| f.fetch_icon(&Source::IconUrl(server.url(p), None));
         assert_eq!(get("/ok.svg").unwrap().ext, "svg");
         assert!(get("/text.png").is_err());
         assert!(get("/huge.png").unwrap_err().to_string().contains("larger"));
         assert!(get("/missing.png").unwrap_err().to_string().contains("404"));
+    }
+
+    #[test]
+    fn icon_url_with_a_hash_only_takes_that_file() {
+        let server = Server::start(|_| HashMap::from([("/logo.png", ok("image/png", PNG))]));
+        let f = Fetcher::new(true);
+        let pinned = |hash: &str| {
+            f.fetch_icon(&Source::IconUrl(
+                server.url("/logo.png"),
+                Some(hash.to_string()),
+            ))
+        };
+        let right = sha256_hex(PNG);
+        assert!(is_sha256_hex(&right));
+        assert_eq!(pinned(&right).unwrap().bytes, PNG);
+        assert_eq!(pinned(&right.to_uppercase()).unwrap().bytes, PNG);
+        let wrong = "0".repeat(64);
+        let err = pinned(&wrong).unwrap_err().to_string();
+        assert!(err.contains("SHA-256"), "{err}");
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert!(!is_sha256_hex("abc"));
+        assert!(!is_sha256_hex(&"g".repeat(64)));
     }
 
     #[test]
@@ -653,9 +702,12 @@ mod tests {
             ])
         });
         let f = Fetcher::new(true);
-        assert!(f.fetch_icon(&Source::IconUrl(server.url("/a"))).is_ok());
         assert!(
-            f.fetch_icon(&Source::IconUrl(server.url("/loop")))
+            f.fetch_icon(&Source::IconUrl(server.url("/a"), None))
+                .is_ok()
+        );
+        assert!(
+            f.fetch_icon(&Source::IconUrl(server.url("/loop"), None))
                 .unwrap_err()
                 .to_string()
                 .contains("redirects")
@@ -664,7 +716,7 @@ mod tests {
         let strict = Fetcher::new(false);
         assert!(
             strict
-                .fetch_icon(&Source::IconUrl(server.url("/b")))
+                .fetch_icon(&Source::IconUrl(server.url("/b"), None))
                 .is_err()
         );
         assert!(

@@ -34,6 +34,27 @@ pub fn is_box_feature(s: &str) -> bool {
     BOX_FEATURES.contains(&s)
 }
 
+/// Sandbox permissions an app may declare (`permissions`, optional in format 3), in the order
+/// they are shown. Other names are ignored (not enforced, so not listed).
+pub const PERMISSIONS: &[&str] = &["gamepad", "mic", "downloads", "lan"];
+
+/// Whether an app needs a permission (`permissions` values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Need {
+    Required,
+    Optional,
+    /// A value this code does not know: treated like `required` (it cannot be switched off).
+    #[serde(other)]
+    Unknown,
+}
+
+impl Need {
+    pub fn required(self) -> bool {
+        self != Need::Optional
+    }
+}
+
 /// What an entry is (format 3): an app (per profile, in the Store) or a box-wide service.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,6 +122,9 @@ pub struct Icon {
     pub desktop_id: Option<String>,
     pub site_url: Option<String>,
     pub icon_url: Option<String>,
+    /// Hex SHA-256 of the `icon_url` file (optional in index version 3): the session daemon
+    /// keeps a download only if it matches.
+    pub sha256: Option<String>,
     #[serde(default)]
     pub firefox_profile: bool,
 }
@@ -178,6 +202,16 @@ pub struct Entry {
     pub free: bool,
     #[serde(default)]
     pub redistributable: bool,
+    /// Sandbox permissions (name -> need; optional, index version 3).
+    #[serde(default)]
+    pub permissions: BTreeMap<String, Need>,
+    /// `false`: the app runs without the sandbox (optional; default true).
+    #[serde(default = "yes")]
+    pub sandbox: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -444,7 +478,7 @@ mod tests {
               {"id":"jellyfin-server","kind":"service","type":"service","name":"Jellyfin server",
                "status":"available","box":[]},
               {"id":"youtube","kind":"app","type":"web","name":"YouTube","status":"available",
-               "starter":"ticked"},
+               "starter":"ticked","icon":{"iconUrl":"https://x.test/i.png","sha256":"ab12"}},
               {"id":"gone","kind":"app","name":"Gone","status":"removed","statusReason":"x"}]}"#,
             "/".into(),
         )
@@ -456,6 +490,12 @@ mod tests {
         assert_eq!(s.box_features, ["graphics32", "steam-devices"]);
         assert_eq!(s.starter.as_deref(), Some("offered"));
         assert_eq!(i.get("youtube").unwrap().kind, "web");
+        // The icon hash is optional (older indexes have none).
+        assert_eq!(
+            i.get("youtube").unwrap().icon.sha256.as_deref(),
+            Some("ab12")
+        );
+        assert_eq!(s.icon.sha256, None);
         assert_eq!(
             i.get("jellyfin-server").unwrap().entry_kind,
             EntryKind::Service
@@ -470,6 +510,21 @@ mod tests {
         let v2 = Index::parse(SAMPLE.as_bytes(), "/".into()).unwrap();
         assert_eq!(v2.get("steam").unwrap().box_features, ["graphics32"]);
         assert_eq!(v2.get("steam").unwrap().entry_kind, EntryKind::App);
+        // Permissions and sandbox are optional.
+        assert!(s.permissions.is_empty() && s.sandbox);
+        let p = Index::parse(
+            br#"{"indexVersion":3,"apps":[
+              {"id":"a","kind":"app","type":"web","name":"A","status":"available",
+               "permissions":{"gamepad":"required","mic":"optional","x":"later"},"sandbox":false}]}"#,
+            "/".into(),
+        )
+        .unwrap();
+        let a = p.get("a").unwrap();
+        assert!(!a.sandbox);
+        assert_eq!(a.permissions["gamepad"], Need::Required);
+        assert_eq!(a.permissions["mic"], Need::Optional);
+        assert!(a.permissions["x"].required());
+        assert!(!Need::Optional.required());
     }
 
     #[test]

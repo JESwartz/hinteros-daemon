@@ -98,6 +98,8 @@ impl Daemon {
                 dir.path().join("no-helper.socket"),
             )
             .env("HINTEROS_CATALOG_INDEX", dir.path().join("catalog.json"))
+            // App permissions never land in this desktop's state directory.
+            .env("XDG_STATE_HOME", dir.path().join("state"))
             .env_remove("GAMESCOPE_PATCHED_EDID_FILE")
             .env_remove("GAMESCOPE_MODE_SAVE_FILE")
             .envs(extra_env)

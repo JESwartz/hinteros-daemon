@@ -7,6 +7,14 @@
 //! device that appears later (one per pad). If there is no bus or no InputPlumber, this logs
 //! and waits; the rest of the daemon works without it.
 //!
+//! The intercept mode is also what keeps controller input from sandboxed apps while HinterOS
+//! UI is in front (a PIN, a password): apps with the `gamepad` permission get `/dev/input`,
+//! where only the virtual pads are readable (InputPlumber grabs and hides the physical ones),
+//! and in `All` InputPlumber sends a pad's events only to D-Bus, i.e. to us. Each event goes
+//! either to the virtual pad or to D-Bus, never both, so nothing the launcher gets from a pad
+//! reaches an app. A new pad starts in `None` (all to the virtual pad), so its worker sets
+//! the mode before anything else.
+//!
 //! Every InputPlumber method and property read goes through polkit, so nothing here may cost a
 //! D-Bus round trip per input event: the signal loop forwards events at once, and the mapping
 //! from a D-Bus target to its pad is looked up once per target and cached (also when the
@@ -578,8 +586,8 @@ impl Task {
     }
 }
 
-/// One pad's worker: classifies it, applies the routing (profile, then mode), sends its mouse
-/// buttons, and watches that InputPlumber still does what we asked.
+/// One pad's worker: sets its mode at once, classifies it, applies the routing (profile, then
+/// mode), sends its mouse buttons, and watches that InputPlumber still does what we asked.
 struct Worker {
     conn: Connection,
     path: OwnedObjectPath,
@@ -598,6 +606,7 @@ struct Worker {
 
 impl Worker {
     async fn run(mut self, mut ops: mpsc::UnboundedReceiver<Op>) {
+        self.set_mode_first().await;
         self.classify().await;
         self.apply().await;
         let mut watchdog = tokio::time::interval(self.settings.watchdog);
@@ -635,6 +644,24 @@ impl Worker {
             );
         }
         self.answering = ok;
+    }
+
+    /// A new pad (hotplug, or InputPlumber restarted) starts in InputPlumber's default mode,
+    /// `None`: all its input goes to its virtual pad, which every app with the `gamepad`
+    /// permission can read, also while the launcher asks for a PIN. So the wanted mode is set
+    /// before the pad is classified (several polkit-checked reads). [`Self::apply`] then sets
+    /// the profile and the mode again, in their order. A failure here is left to `apply`.
+    async fn set_mode_first(&mut self) {
+        let mode = self.routing.borrow().mode;
+        let result = async {
+            let proxy = device_proxy(&self.conn, &self.path).await?;
+            proxy.set_property("InterceptMode", mode as u32).await?;
+            zbus::Result::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            debug!(device = %self.path, ?mode, "setting InterceptMode before classifying: {e}");
+        }
     }
 
     /// Decide (and log) the Xbox label swap, and whether our pointer profile is still loaded

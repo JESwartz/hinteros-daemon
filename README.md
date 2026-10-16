@@ -48,6 +48,11 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   the system service sends `keyboard_home` to the daemon of the active seat0 session over the
   system relay (`system.rs`; see "Keyboard Home" under "System service").
   `[input] keyboard_home = false` ignores it; the greeter has no relay.
+  ALL is also what keeps the pad from sandboxed apps while the launcher asks for a PIN or a
+  password: an app with the `gamepad` permission can only read the virtual pads (InputPlumber
+  grabs and hides the physical ones), and in ALL their events go only to us. A new pad starts
+  in InputPlumber's default mode (NONE: all to its virtual pad), so its mode is set first,
+  before the pad is classified.
   Re-applies everything when InputPlumber restarts or a pad appears. Without
   InputPlumber it logs and carries on. `--dev-gamepad` reads
   pads directly instead, for desktop previews only (see "Desktop preview").
@@ -243,12 +248,17 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   on the box at runtime. Per app, first match wins: `icon` (an absolute path or an icon theme
   name), then `desktop_id` (the app's freedesktop `.desktop` file, its `Icon=`, looked up in the
   icon themes), then for web apps `icon_url` / `site_url`, then `firefox_profile`. The built-in `steam`
-  entry uses Steam's own `steam.desktop`. Desktop files and icons are searched in `$XDG_DATA_HOME`,
-  `$XDG_DATA_DIRS`, `/run/current-system/sw/share`, `/etc/profiles/per-user/$USER/share`,
-  `~/.nix-profile/share` and the Flatpak exports; themes searched are the active one (GTK's
+  entry uses Steam's own `steam.desktop`. Desktop files and icons are searched in the profile's
+  app env (`[apps] profile`, its `share`, first; the session's `PATH` and `XDG_DATA_DIRS` never
+  have it), `$XDG_DATA_HOME`, `$XDG_DATA_DIRS`, `/run/current-system/sw/share`,
+  `/etc/profiles/per-user/$USER/share`, `~/.nix-profile/share` and the Flatpak exports. An
+  absolute `Icon=` in a desktop file counts only when the file is inside the same package
+  (`/nix/store` path) as the desktop file, or inside the data directory it was found in; themes
+  searched are the active one (GTK's
   `gtk-icon-theme-name`, or `icons.theme`), what it inherits, and `hicolor`, plus `pixmaps/`.
   The best file wins: the largest PNG of at least 256 px, else an SVG, else the largest
-  smaller PNG. Web apps: the daemon fetches `icon_url`, or finds the icon of `site_url` (web app
+  smaller PNG. Web apps: the daemon fetches `icon_url` (and, with `icon_sha256`, the catalog's
+  `icon.sha256`, keeps it only if its SHA-256 matches; else it logs and retries later), or finds the icon of `site_url` (web app
   manifest icons, `apple-touch-icon`, `<link rel=icon>`, `/favicon.ico`; the largest square one
   of at least 192 px, not mask-only), over https only (also through redirects), with timeouts,
   a 1 MiB limit and an image check, in a background thread; it caches the file as
@@ -283,7 +293,10 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
 - **Reaper** (`reaper.rs`): `hinteros-session reaper SteamLaunch AppId=<id> -- <command>` runs
   a command as a child subreaper named `reaper`, which is how gamescope (Steam mode) learns the
   app id of a process's windows, X11 and native Wayland alike. The daemon starts command apps
-  this way; the launcher must be started this way too (see below).
+  this way; the launcher must be started this way too (see below). `Cgroup=<dir>` before `--`:
+  move into that cgroup first, or start nothing (exit 125); see "`lan`" below.
+- **Sandbox** (`sandbox.rs`, `permissions.rs`): catalog apps run in bwrap below the reaper, with
+  the permissions the profile granted (`apps.set_permission`); see "App sandbox and permissions".
 
 ### Configuration
 
@@ -311,7 +324,9 @@ shutdown_grace_ms = 3000         # SIGTERM of the daemon: SIGKILL its apps after
 [gamescope]
 enable = true
 display = ":0"                 # gamescope's Xwayland [default: $DISPLAY, else :0]
-wayland_display = "gamescope-0"  # given to launched apps [default: $WAYLAND_DISPLAY, else gamescope-0]
+apps_display = "auto+2"        # first app display (each app under the reaper gets its own); "auto+<n>": the user's n-th display after the lowest [default: display, shared]
+app_displays = 4               # how many when $XDG_RUNTIME_DIR/hinteros/app-displays is missing; the profile setting's default (1 to 8)
+wayland_display = "gamescope-0"  # given to Steam (not to apps) [default: $WAYLAND_DISPLAY, else gamescope-0]
 focus_loss_debounce_ms = 1500  # how long the focused app may be without a window
 unmap_gl_dummies = true     # unmap invisible full-screen override-redirect windows (GTK3 GL dummies) over an app
 
@@ -392,6 +407,12 @@ apply_timeout_ms = 6000        # display.set_mode: how long gamescope gets to sw
 pair_timeout_s = 45            # bluetooth.pair gives up
 confirm_timeout_s = 30         # a numeric comparison nobody answers is rejected
 
+[sandbox]                      # catalog apps in bwrap (not Steam); see "App sandbox and permissions"
+enable = false
+bwrap = "bwrap"                # a path, or a name looked up in PATH
+pulse_socket = "pulse/native"  # sound for apps, relative to XDG_RUNTIME_DIR
+pulse_record_socket = "pulse/native"  # with mic; the same as pulse_socket: mic is not listed
+
 [[apps]]                       # what apps.list returns after the built-in "steam" (a stub list if none)
 id = "jellyfin"
 name = "Jellyfin"
@@ -404,11 +425,14 @@ name = "YouTube"
 kind = "web"
 command = ["firefox", "--kiosk", "--new-instance", "https://www.youtube.com/tv"]
 site_url = "https://www.youtube.com/tv"     # icon from the site (or: icon_url = "https://.../icon.png")
+# icon_sha256 = "<64 hex digits>"           # with icon_url: refuse a download with another SHA-256
 # firefox_profile = "~/.local/share/hinteros/firefox/youtube"  # fallback: the favicon Firefox stored
 input = "keyboard"             # "gamepad" (default) or "keyboard"
 back_key = "escape"            # what B sends [default: escape]; e.g. "backspace", "alt+left"
 pointer = true                 # keyboard profile: right stick = mouse pointer [default: true]
 address_bar = false            # plain Firefox (not kiosk): View = Ctrl+L + on-screen keyboard, LB/RB = back/forward
+permissions = { mic = "optional" }  # sandbox permissions (catalog): "required" or "optional"
+# sandbox = false              # run without the sandbox [default: true]
 
 [apps.keymap]                  # controller action = key, on top of the defaults ("none" unmaps)
 context = "ctrl+l"             # Y
@@ -508,8 +532,10 @@ nothing: it never takes part in the TV setup.
   (or set `launcher.command` and let the daemon start it). Steam itself must **not** run under
   a reaper with an app id: the outermost one wins, and games must get their Steam app ids.
 - The daemon reaching gamescope's Xwayland: `DISPLAY` (or `gamescope.display`), `:0` when
-  gamescope is the only X server. No Xauthority is needed. Launched apps get `DISPLAY` and
-  `WAYLAND_DISPLAY` from the config, since a user service does not inherit gamescope's.
+  gamescope is the only X server. No Xauthority is needed. Launched apps get `DISPLAY` from the
+  config, since a user service does not inherit gamescope's. Only Steam also gets
+  `WAYLAND_DISPLAY` and `GAMESCOPE_WAYLAND_DISPLAY`: apps run as X11 clients and never see
+  gamescope's private Wayland protocols (input method, action bindings, control).
 - InputPlumber: polkit, the session user in group `inputplumber`, its udev rules. The daemon
   sets `ManageAllDevices` itself on every InputPlumber (re)start.
 - A `steam` binary on the daemon's `PATH`, or `steam.path`, for the built-in `steam` app (left
@@ -798,7 +824,7 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.9 (0.9: `keyboard_home`, see "Keyboard Home" below; channel switches to a verified, confirmed revision, see "Channel switches" below, and the admin PIN is refused until a reboot after 10 wrong tries, `pin_required {reboot_required}`, see "Admin PIN limit" below; 0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.10 (0.10: a build's own percent, `building.percent`, see "Job progress" below, and `lan_filter.set`/`lan_filter.clear`, see "Local network filter" below; 0.9: `keyboard_home`, see "Keyboard Home" below; channel switches to a verified, confirmed revision, see "Channel switches" below, and the admin PIN is refused until a reboot after 10 wrong tries, `pin_required {reboot_required}`, see "Admin PIN limit" below; 0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
 box-wide actions, `guest.end`, rollback re-adds box features; see "Profiles and per-profile apps" below)
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
@@ -932,11 +958,17 @@ All paths default to the box's; tests point them at a temporary root.
 | `--localtime` | `/etc/localtime` (the link `time_zone.set` replaces) |
 | `--keyboard-socket`, `--keyboard-group` | `/run/hinteros/keyboard.sock`, `hinteros-keyboard` (no socket without the group) |
 | `--freeze-inactive` | off (the system repo sets it): freeze profiles whose session is not the active one |
+| `--lan-filter` (`HINTEROS_LAN_FILTER`) | off (the system repo sets it with `lan`): `lan_filter.*` work; without it they fail |
+| `--cgroup-root` | `/sys/fs/cgroup` (where `lan_filter.set` checks the caller's cgroup) |
 
 `hinteros-system job [--run-dir DIR] <id>` runs one job (the job unit's `ExecStart`).
 
 `hinteros-system keyboard-home [--socket PATH] [--input-dir DIR]` reads the keyboards for
 Ctrl + Super + D (see "Keyboard Home"; the `hinteros-keyboard` unit's `ExecStart`).
+
+`hinteros-system lan-filter-apply [--run-dir DIR] [--cgroup-root DIR] [--resolv-conf FILE]
+[--proc-dir DIR] [--nft PATH]` loads the local network filter (see "Local network filter"; the
+`hinteros-lan-filter` unit's `ExecStart`).
 
 `hinteros-system check-state FILE...` parses each file with the same `State::parse` the service
 uses, without starting the service (no root, sockets or D-Bus). It prints `ok <file>` or
@@ -1498,6 +1530,16 @@ bytes; builds), each weighted equally; it never goes back (when nix finds more w
 then covers the rest of the way) and stays below 100 until nix ends. It is rough: derivations
 differ hugely in build time, so the count is what the launcher shows prominently.
 
+`building.percent` (system API 0.10, session API 0.18) is how far that one derivation is, from
+the last standard stdenv phase it started: unpack 0, patch 5, updateAutotoolsGnuConfigScripts 8,
+configure 10, build 20, check 80, install 88, fixup 94, installCheck 98, dist 99 (`PHASES`). An
+unknown phase keeps the last value, it never goes back and stays below 100; absent before the
+first standard phase and for builders without phases (`runCommand`, trivial builders). The
+builds part of the job's `percent` is `(builds_done + the running builds' fractions) /
+builds_total`. Nix counts a build as done just before its build activity stops: the most
+advanced running build then stops counting by its fraction (when another one stops first, it was
+that one); a build that stops before nix counts it counts as 1 until nix does.
+
 ### Heartbeat (`runner.rs`, `jobs.rs`)
 
 The job writes a progress line at once on a stage change, at most 4 per second otherwise (a
@@ -1694,6 +1736,174 @@ older than the one on the box), and on confirm call `system.channel.set {channel
 result.target.rev, admin_pin}`. `update_verification_failed {reason: older_than_seen}` (from either
 job): the server offers an older version than one the box already saw; nothing changed.
 `state_conflict {reason: channel_rev}`: check again. Job kind `channel_check`.
+
+## App sandbox and permissions (session API 0.18, system API 0.10)
+
+Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command line),
+`permissions.rs` (the profile's choices), `apps.rs` (`ProcessSpawner`), `reaper.rs`, `lan.rs`
+(the session side of `lan`), and in the system service `lanfilter.rs` and `service/lan.rs`.
+
+- **Sandbox** (`[sandbox] enable`, default off; the system turns it on): every configured
+  command app with `sandbox = true` (the default) runs as reaper -> bwrap -> app. Not Steam, not
+  Steam games, not `sandbox = false` apps, not `apps.launch {command}`. bwrap gets
+  `--unshare-all --share-net --die-with-parent --new-session`; read-only `/nix/store`, `/etc`,
+  `/sys`, `/run/current-system`, `/run/opengl-driver{,-32}`, `/run/systemd/resolve` and
+  `/run/nscd` if present, `/bin` and `/usr` if present, the profile's app env (the
+  `[apps] profile` link, resolved); a new `/proc`, a minimal `/dev` with the GPU render nodes
+  (`/dev/dri/renderD*`, not the display nodes `card*`), empty `/tmp` and `/run`.
+  Home: `~/.local/share/hinteros/sandbox/<id>` (created 0700 before the spawn) at the real `$HOME`
+  path; the app's data starts fresh there and `firefox_profile` is resolved
+  inside it (icons read the favicon there). Runtime dir: a new `$XDG_RUNTIME_DIR` with only
+  `pulse/native` and, for web and keyboard-profile apps, `hinteros/osk.sock`. Display: only
+  `/tmp/.X11-unix/X<n>`; `DISPLAY`, `HOME`, `XDG_RUNTIME_DIR` set, Wayland displays, D-Bus
+  addresses and other sockets unset. Nothing else of `/run` (`/run/hinteros`, `/run/dbus`,
+  `session.sock`, `bus`, `pipewire-0`, `gamescope-0`), `/dev/uinput` or the real home is there.
+- bwrap is looked up (`[sandbox] bwrap`, a path or a `PATH` name) before each sandboxed spawn; if
+  it is missing the launch fails (`app_launch_failed`, "no sandbox: bwrap not found"), it never
+  runs the app unsandboxed. The daemon's unit must not have `ProtectKernelTunables` (bwrap
+  cannot mount `/proc` then).
+- **System call filter** (`sandbox/seccomp.rs`): bwrap loads a seccomp BPF program (`--seccomp
+  <fd>`, a pipe the daemon fills and the reaper and bwrap inherit) before it starts the app. A
+  Flatpak-style denylist: keyrings, io_uring, `bpf`, `perf_event_open`, `userfaultfd`, NUMA
+  policy, modules, kexec, reboot, swap, clocks, `syslog`, quotas, `acct`, `open_by_handle_at`,
+  `iopl`/`ioperm`, `vhangup`, obsolete calls (`EPERM`); the new mount API (`ENOSYS`); `ioctl`
+  `TIOCSTI`/`TIOCLINUX`; `personality` other than Linux/32-bit/`UNAME26`/query; sockets other
+  than Unix, IPv4, IPv6, netlink (`EAFNOSUPPORT`). Only the x86-64 ABI (i386 kills the process,
+  x32 gets `ENOSYS`). User namespaces, `mount`, `pivot_root`, `chroot` stay allowed (Firefox,
+  Chromium and Plex's FHS bwrap sandbox themselves inside). No filter, no launch
+  (`app_launch_failed`, "no sandbox: no system call filter"); bwrap that cannot load it starts
+  nothing.
+- `--new-session` puts the app out of reach of the reaper's group signal, so the reaper sends
+  forwarded signals to the process group of each process below it whose parent is bwrap, and
+  not to bwrap (bwrap dies on SIGTERM and takes the sandbox with it; it gets the signal only
+  before it has started the app). So `apps.close` stays a clean SIGTERM first, an app can still
+  ignore it, and the SIGKILL after `close.timeout_ms` goes to every process below the reaper.
+- **Permissions**: the catalog declares them (`permissions = { gamepad = "required"; mic =
+  "optional"; }`, in the app-env manifest entry), `gamepad` (`/dev/input`, `/run/udev`), `mic`
+  (`[sandbox] pulse_record_socket` at `pulse/native` instead of `pulse_socket`), `downloads`
+  (`~/Downloads`, created, read-write). The profile's opt-outs are in
+  `$XDG_STATE_HOME/hinteros/permissions.json` (`{"version":1,"denied":{"<id>":["mic"]}}`,
+  written atomically); no record means every permission, a required one is never denied, a
+  change applies at the next start. Only enforced permissions are listed: none while the sandbox
+  is off, and not `mic` while `pulse_record_socket` equals `pulse_socket` (both default
+  `pulse/native`), and not `lan` without `[sandbox] lan_filter`. `[sandbox]` changes need a
+  daemon restart.
+- **`lan`** (`[sandbox] lan_filter`, default off; the system turns it on): a sandboxed app without
+  it (not declared, or denied) reaches neither the home network nor this box's own services; DNS
+  to the box's nameservers and the internet work. The daemon's unit has `Delegate=yes` (and no
+  `ProtectControlGroups`): at start the daemon moves itself into the leaf `<unit cgroup>/daemon`
+  and creates `<unit cgroup>/nolan`, then calls the system API's `lan_filter.set {cgroup}` (at
+  once, then after 1 s doubling to 30 s, and at every launch while it is not on). The daemon
+  always stays in `daemon`. An app without `lan` gets `reaper ... Cgroup=<nolan dir> -- ...`: the
+  reaper writes its own pid to `nolan`'s `cgroup.procs` before it starts anything (so bwrap and
+  the app run there too) and then writes `1` to its stdin, a pipe the launch waits on (5 s). If
+  it cannot move, it starts nothing and exits 125; the launch fails. A sandboxed app cannot
+  leave `nolan` (`/sys` is read-only inside, a cgroup namespace reaches only below its root).
+  Fail closed: until the system says the filter is on (or when the cgroups cannot be set up, or
+  the reaper cannot enter `nolan`) such a launch fails (`app_launch_failed`, "no local network
+  filter"), it never runs with the network open. Apps
+  with `lan`, Steam, `sandbox = false` apps and `apps.launch {command}` are not filtered. At
+  shutdown, after the apps, the daemon calls `lan_filter.clear`.
+- `apps.list` and `store.list` entries carry `permissions: [{name, required, granted}]`
+  (display order gamepad, mic, downloads; empty for Steam and unsandboxed apps; for a Store app
+  that is not installed, the stored choice). `apps.set_permission {id, permission, granted}`
+  takes installed apps and catalog apps not installed yet; errors `unknown_app`,
+  `unknown_permission`, `permission_required`; emits `apps_changed` and `store_changed`.
+- Apps get no `WAYLAND_DISPLAY` / `GAMESCOPE_WAYLAND_DISPLAY` with or without the sandbox
+  (gamescope's private protocols); only Steam keeps them.
+- **Own display** (`displays.rs`; `[gamescope] apps_display`, the system sets `"auto+2"`): every
+  app under the reaper (sandboxed or not, also `apps.launch {command}`) gets an Xwayland of its
+  own as `DISPLAY` and, in the sandbox, only that socket, so no app can read, grab or type into
+  another (or into the launcher and the OSK, which stay on `display`). Steam and its games keep
+  `display` and take none. The app displays are `apps_display` and the ones after it
+  (`"auto+2"`, `"auto+3"`, ...); how many this session has is in
+  `$XDG_RUNTIME_DIR/hinteros/app-displays` (written by the compositor wrapper, which starts
+  gamescope with `--xwayland-count` 2 + that number), else `app_displays`. Each is resolved at
+  each launch (this user's live X displays, lowest first). A launch takes the first one that
+  exists, that no running app of ours has, and on which no reaper is left (`DISPLAY` in
+  `/proc/<pid>/environ`: an app given up after SIGKILL, or one from before a daemon restart). A
+  reaper lives until every process below it has ended, so a display is free once its app's
+  whole process tree is gone (`app_exited` follows the reaper's exit). None free:
+  `no_app_display` (2009) with `data.apps`, the running apps that hold one; nothing is closed
+  automatically. None exists: `app_launch_failed` ("no app display"), never falling back to
+  `display`. gamescope's Xwaylands must not listen on abstract sockets (the system patches
+  that), else `--share-net` still reaches every display. One watcher per app display unmaps GL
+  dummies (`unmap_gl_dummies`). Under cage (no `[gamescope]`) apps keep the session's display
+  and nothing limits them.
+- **How many** (`apps.displays.get` / `apps.displays.set {count}`): the profile's setting, 1 to 8,
+  default `app_displays`, in `$XDG_STATE_HOME/hinteros/app-displays` (one number, written
+  atomically). Both answer `{count, active, min, max}`: `active` is what this session started
+  with (`null` without app displays). gamescope makes its Xwaylands at start only, so a new
+  `count` applies at the next session start (`session.restart`).
+
+### What the system repo must do (session API 0.18)
+
+`session.toml`: `[sandbox] enable = true`, `bwrap = "<bubblewrap>/bin/bwrap"`, and, once a
+play-only pulse socket exists, `pulse_socket` / `pulse_record_socket` (relative to
+`XDG_RUNTIME_DIR`). For `lan`: `[sandbox] lan_filter = true`, `Delegate=yes` and no
+`ProtectControlGroups` on the session daemon's unit, `HINTEROS_LAN_FILTER=true` for hinteros-system, and the
+oneshot `hinteros-lan-filter.service` running `hinteros-system lan-filter-apply --nft <nft>` as
+root with `CAP_NET_ADMIN` and `AF_NETLINK` (not in a private network namespace), started again
+when `/etc/resolv.conf` or the network changes. Drop `ProtectKernelTunables` from the session daemon's unit. Under gamescope:
+`--xwayland-count` 2 + the profile's `$XDG_STATE_HOME/hinteros/app-displays` (default 4), that
+number written to `$XDG_RUNTIME_DIR/hinteros/app-displays` before gamescope starts, Xwaylands
+without abstract sockets, every one but `#1` sized to the output and without `LIBEI_SOCKET` from
+`#2` on, and `[gamescope] apps_display = "auto+2"`, `app_displays = 4`.
+
+### What the launcher must do (session API 0.18)
+
+Hello with `0.18`. Show `permissions` on the install sheet and the app page (required ones
+locked); call `apps.set_permission` for each optional permission whose switch differs from
+`granted`, then `system.apps.install`. When `full_access` is true (Steam, `sandbox = false`, or the
+sandbox is off), the install sheet warns that the app can use everything the profile can.
+On `no_app_display` from `apps.launch`, ask which app of `data.apps` to close (or Cancel), then
+`apps.close` it, wait for its `app_exited` and launch again. Settings: `apps.displays.get` /
+`apps.displays.set`; when `count` differs from `active`, offer `session.restart`.
+
+## Local network filter (system API 0.10)
+
+The system side of the `lan` permission (design: `hinteros-docs/design/sandbox.md`; the session
+side is in "App sandbox and permissions"). Code: `lanfilter.rs`, `service/lan.rs`.
+
+- `lan_filter.set {cgroup}` and `lan_filter.clear {}`: the session daemon's own calls, not
+  relayed. They only restrict the caller's own processes, so no seat or polkit check; rate
+  limited (a bucket of their own, at least 30 a minute, burst 10) and audited (no action).
+  `cgroup` must be below `/user.slice/user-<uid>.slice/user@<uid>.service/` of the caller's uid
+  (parts of `[A-Za-z0-9._@:-]`, no `.` or `..`, at most 16 below the manager, 512 bytes), a
+  directory under `--cgroup-root` owned by the caller; else `invalid_params {field: cgroup,
+  reason: bad_format | not_found | not_owned}` (checked before the rate limit). One cgroup per
+  uid; a new call replaces it.
+- The service writes `<run-dir>/lan-filter.json`
+  (`{"version":1,"cgroups":{"<uid>":"user.slice/..."}}`, 0600, atomically; an unreadable file is
+  an error, never an empty filter), drops the cgroups that are gone, then restarts
+  `hinteros-lan-filter.service` over D-Bus (`RestartUnit`) and waits for its job (30 s; a failed
+  job, e.g. a run the path unit started that the restart ended, is tried once more); a failure is
+  `internal_error` and the table stays what it was. Without
+  `--lan-filter`: `internal_error`. The service itself has no network and no `CAP_NET_ADMIN`.
+- `lan-filter-apply` (the unit) reads the state file (cgroups that are gone are left out), the
+  nameservers of `/etc/resolv.conf` (scope ids dropped) and the on-link routes of
+  `/proc/net/route` and `/proc/net/ipv6_route` (up, no gateway, not `lo`, not default), and loads
+  `table inet hinteros_lan` with `nft -f -` in one transaction (no cgroup: the table is removed).
+  Its output hook sends the sockets of each cgroup (`socket cgroupv2 level <n> "<path>"`, so the
+  cgroups below it too) to a chain that accepts port 53 (UDP, TCP) to the nameservers, then
+  refuses (TCP: reset, so `connect` gets `ECONNREFUSED`; anything else: dropped, so the sender
+  gets `EPERM`) every destination in 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 127/8,
+  224/4, 255.255.255.255, fc00::/7, fe80::/10, ff00::/8, ::1 and the on-link networks (nested
+  ones merged), and every address of type local, broadcast or multicast (`fib daddr type`: the
+  box's own public or global addresses too). Everything else passes: the internet.
+- nftables resolves a cgroup path to its id when it loads the table: a cgroup removed and created
+  again (a session daemon restart) is matched only after the next load, which the new daemon's
+  `lan_filter.set` does before any app without `lan` starts.
+- The system repo runs the unit again when `/etc/resolv.conf` changes (a path unit) and when
+  NetworkManager changes a connection (a dispatcher hook): new nameservers, new on-link networks.
+
+Why this and not cgroup BPF hooks (`connect4/6`, `sendmsg4/6` from hinteros-system): those need a
+BPF loader and `CAP_BPF`/`CAP_SYS_ADMIN` in the service, pinned programs to outlive a restart,
+and they see neither ICMP nor raw sockets. Not a network namespace per app with pasta: a
+userspace copy of every packet (video streams) on a small box, pasta forwards to the home network
+anyway (it filters ports, not destinations), and multicast, IPv6 and DNS need their own handling.
+nftables matches every protocol in the kernel, on any firewall backend (its own table), with
+`nft` doing the work in a small unit of its own.
 
 ## Development
 

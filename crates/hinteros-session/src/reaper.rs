@@ -11,10 +11,27 @@
 //! command's status once every descendant is gone.
 //!
 //! The process must not be started below another reaper with an app id: the outermost one wins.
+//!
+//! `Cgroup=<dir>` (before `--`): first move into that cgroup (write our pid to its
+//! `cgroup.procs`), so that the command and everything it starts runs there; the session
+//! daemon uses it for apps without `lan` ([`crate::lan`]). If that fails, run nothing and exit
+//! with [`NO_CGROUP`]. Once in the cgroup, write one byte (`1`) to stdin when it is a pipe's
+//! write end: the daemon waits for it, and sees end of file when the move failed. The command
+//! gets no stdin.
+//!
+//! A sandboxed app (reaper -> bwrap -> app, see [`crate::sandbox`]) runs in a session of its own
+//! (`bwrap --new-session`), out of reach of the group signal: forwarded signals go to the process
+//! group of each process below us whose parent is bwrap, and not to bwrap. bwrap does not handle
+//! SIGTERM: it would die, and with it (`--die-with-parent`, `--unshare-pid`) the whole sandbox, so
+//! the app could not quit cleanly or refuse to quit. Only while bwrap has not started the app
+//! yet does bwrap get the signal. SIGKILL after the close timeout comes from the session daemon
+//! to every process below us.
 
 use std::ffi::CString;
+use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use rustix::io::Errno;
 use rustix::process::{
@@ -26,34 +43,62 @@ use signal_hook::iterator::Signals;
 /// The subcommand name (also the process name gamescope looks for).
 pub const SUBCOMMAND: &str = "reaper";
 
+/// Exit code when the reaper could not move into its `Cgroup=` (the command did not run).
+pub const NO_CGROUP: i32 = 125;
+
+/// What the reaper got before the `--`, and the command after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parsed {
+    /// `AppId=<n>` (needs `SteamLaunch`).
+    pub app_id: Option<u32>,
+    /// `Cgroup=<dir>`: the cgroup to run in.
+    pub cgroup: Option<PathBuf>,
+    pub command: Vec<String>,
+}
+
 /// The arguments for running `argv` under the reaper with gamescope app id `app_id`, after the
 /// executable path.
 pub fn args(app_id: u32, argv: &[String]) -> Vec<String> {
+    args_in(app_id, None, argv)
+}
+
+/// [`args`], and the reaper first moves into the cgroup directory `cgroup` (if any).
+pub fn args_in(app_id: u32, cgroup: Option<&Path>, argv: &[String]) -> Vec<String> {
     let mut args = vec![
         SUBCOMMAND.to_string(),
         "SteamLaunch".into(),
         format!("AppId={app_id}"),
-        "--".into(),
     ];
+    if let Some(dir) = cgroup {
+        args.push(format!("Cgroup={}", dir.display()));
+    }
+    args.push("--".into());
     args.extend(argv.iter().cloned());
     args
 }
 
-/// Parse what follows `reaper`: the app id (from `AppId=<n>`, needs `SteamLaunch`) and the
-/// command after `--`.
-pub fn parse(args: &[String]) -> Result<(Option<u32>, Vec<String>), String> {
+/// Parse what follows `reaper`: the app id (from `AppId=<n>`, needs `SteamLaunch`), the cgroup
+/// (`Cgroup=<absolute dir>`) and the command after `--`.
+pub fn parse(args: &[String]) -> Result<Parsed, String> {
     let split = args
         .iter()
         .position(|a| a == "--")
-        .ok_or("usage: reaper [SteamLaunch AppId=<id>] -- <command> [args...]")?;
+        .ok_or("usage: reaper [SteamLaunch AppId=<id>] [Cgroup=<dir>] -- <command> [args...]")?;
     let (before, command) = (&args[..split], &args[split + 1..]);
     if command.is_empty() {
         return Err("reaper: no command after --".into());
     }
     let steam_launch = before.iter().any(|a| a == "SteamLaunch");
     let mut app_id = None;
+    let mut cgroup = None;
     for a in before {
-        if let Some(id) = a.strip_prefix("AppId=") {
+        if let Some(dir) = a.strip_prefix("Cgroup=") {
+            let dir = Path::new(dir);
+            if !dir.is_absolute() || cgroup.is_some() {
+                return Err(format!("reaper: bad {a}"));
+            }
+            cgroup = Some(dir.to_path_buf());
+        } else if let Some(id) = a.strip_prefix("AppId=") {
             app_id = Some(
                 id.parse::<u32>()
                     .ok()
@@ -69,7 +114,57 @@ pub fn parse(args: &[String]) -> Result<(Option<u32>, Vec<String>), String> {
             "reaper: AppId= needs SteamLaunch before it (gamescope ignores it otherwise)".into(),
         );
     }
-    Ok((app_id, command.to_vec()))
+    Ok(Parsed {
+        app_id,
+        cgroup,
+        command: command.to_vec(),
+    })
+}
+
+/// Move this process into the cgroup directory `dir` (cgroup v2: write our pid to its
+/// `cgroup.procs`).
+pub fn enter_cgroup(dir: &Path) -> std::io::Result<()> {
+    std::fs::write(
+        dir.join("cgroup.procs"),
+        format!("{}\n", std::process::id()),
+    )
+}
+
+/// Processes below `root` whose parent is bwrap and that are not bwrap themselves: the apps
+/// in a bwrap sandbox (each leads its own session).
+pub fn sandboxed_apps(procs: &[crate::procs::Proc], root: u32) -> Vec<u32> {
+    let below = crate::procs::descendants_of(procs, root);
+    procs
+        .iter()
+        .filter(|p| below.contains(&p.pid) && p.comm != "bwrap")
+        .filter(|p| procs.iter().any(|q| q.pid == p.ppid && q.comm == "bwrap"))
+        .map(|p| p.pid)
+        .collect()
+}
+
+/// The process groups to forward a signal to: those of the sandboxed apps below `root`, and the
+/// command's own (`child`) unless the command is bwrap and has started its app. bwrap dies on
+/// SIGTERM and takes the sandbox with it, so it gets the signal only before the app exists.
+pub fn signal_groups(procs: &[crate::procs::Proc], root: u32, child: u32) -> Vec<u32> {
+    let apps = sandboxed_apps(procs, root);
+    let child_is_bwrap = procs.iter().any(|p| p.pid == child && p.comm == "bwrap");
+    let mut groups = Vec::new();
+    if !child_is_bwrap || apps.is_empty() {
+        groups.push(child);
+    }
+    groups.extend(apps);
+    groups
+}
+
+/// Send `sig` to the process groups of [`signal_groups`].
+fn forward(child: Pid, sig: Signal) {
+    let me = getpid().as_raw_nonzero().get() as u32;
+    let child = child.as_raw_nonzero().get() as u32;
+    for pid in signal_groups(&crate::procs::list(), me, child) {
+        if let Some(pid) = Pid::from_raw(pid as i32) {
+            let _ = kill_process_group(pid, sig);
+        }
+    }
 }
 
 /// Exit status for a child that ended with `status` (shell convention: 128 + signal).
@@ -82,13 +177,24 @@ fn status_code(status: rustix::process::WaitStatus) -> i32 {
 
 /// Run the reaper with the arguments after `reaper`. Returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    let command = match parse(args) {
-        Ok((_, command)) => command,
+    let Parsed {
+        cgroup, command, ..
+    } = match parse(args) {
+        Ok(parsed) => parsed,
         Err(e) => {
             eprintln!("{e}");
             return 2;
         }
     };
+    // Before anything else runs: the cgroup, or nothing at all.
+    if let Some(dir) = &cgroup {
+        if let Err(e) = enter_cgroup(dir) {
+            eprintln!("reaper: cannot enter cgroup {}: {e}", dir.display());
+            return NO_CGROUP;
+        }
+        // Tell the daemon (stdin is the write end of its pipe); else stdin is /dev/null.
+        let _ = rustix::io::write(std::io::stdin().as_fd(), b"1");
+    }
     let parent = rustix::process::getppid();
     // Best effort: without these the command still runs, gamescope just can't tag it.
     if let Err(e) = rustix::thread::set_name(&CString::new(SUBCOMMAND).expect("no NUL")) {
@@ -100,6 +206,7 @@ pub fn run(args: &[String]) -> i32 {
 
     let child = match Command::new(&command[0])
         .args(&command[1..])
+        .stdin(Stdio::null())
         .process_group(0)
         .spawn()
     {
@@ -124,7 +231,7 @@ pub fn run(args: &[String]) -> i32 {
                         SIGHUP => Signal::HUP,
                         _ => Signal::TERM,
                     };
-                    let _ = kill_process_group(child_pid, sig);
+                    forward(child_pid, sig);
                 }
             });
         }
@@ -137,7 +244,7 @@ pub fn run(args: &[String]) -> i32 {
     match rustix::process::set_parent_process_death_signal(Some(Signal::TERM)) {
         Ok(()) if rustix::process::getppid() != parent => {
             // The parent was already gone.
-            let _ = kill_process_group(child_pid, Signal::TERM);
+            forward(child_pid, Signal::TERM);
         }
         Ok(()) => {}
         Err(e) => eprintln!("reaper: cannot ask for the parent's death: {e}"),
@@ -170,13 +277,34 @@ mod tests {
 
     #[test]
     fn parses_steam_style_args() {
+        let parsed = |app_id, cgroup: Option<&str>, command: &[&str]| Parsed {
+            app_id,
+            cgroup: cgroup.map(PathBuf::from),
+            command: strings(command),
+        };
         assert_eq!(
             parse(&strings(&["SteamLaunch", "AppId=570", "--", "game", "-x"])),
-            Ok((Some(570), strings(&["game", "-x"])))
+            Ok(parsed(Some(570), None, &["game", "-x"]))
         );
-        assert_eq!(parse(&strings(&["--", "a"])), Ok((None, strings(&["a"]))));
+        assert_eq!(
+            parse(&strings(&["--", "a"])),
+            Ok(parsed(None, None, &["a"]))
+        );
+        assert_eq!(
+            parse(&strings(&[
+                "SteamLaunch",
+                "AppId=7",
+                "Cgroup=/sys/fs/cgroup/u/nolan",
+                "--",
+                "a"
+            ])),
+            Ok(parsed(Some(7), Some("/sys/fs/cgroup/u/nolan"), &["a"]))
+        );
         for bad in [
-            &["SteamLaunch", "AppId=570", "game"][..],
+            &["Cgroup=nolan", "--", "a"][..],
+            &["Cgroup=", "--", "a"],
+            &["Cgroup=/a", "Cgroup=/b", "--", "a"],
+            &["SteamLaunch", "AppId=570", "game"],
             &["SteamLaunch", "AppId=570", "--"],
             &["AppId=570", "--", "a"],
             &["SteamLaunch", "AppId=0", "--", "a"],
@@ -188,12 +316,87 @@ mod tests {
     }
 
     #[test]
+    fn finds_sandboxed_apps_below_us() {
+        use crate::procs::Proc;
+        let p = |pid, ppid, comm: &str| Proc {
+            pid,
+            ppid,
+            comm: comm.into(),
+        };
+        // reaper 10 -> bwrap 11 -> bwrap 12 -> firefox 13 -> content 14; another reaper's app.
+        let procs = [
+            p(10, 1, "reaper"),
+            p(11, 10, "bwrap"),
+            p(12, 11, "bwrap"),
+            p(13, 12, "firefox"),
+            p(14, 13, "Isolated Web Co"),
+            p(20, 1, "reaper"),
+            p(21, 20, "bwrap"),
+            p(22, 21, "kodi"),
+        ];
+        assert_eq!(sandboxed_apps(&procs, 10), [13]);
+        assert_eq!(sandboxed_apps(&procs, 20), [22]);
+        // Not sandboxed: nothing extra.
+        assert!(sandboxed_apps(&[p(30, 1, "reaper"), p(31, 30, "jellyfin")], 30).is_empty());
+    }
+
+    #[test]
+    fn signals_the_sandboxed_app_not_bwrap() {
+        use crate::procs::Proc;
+        let p = |pid, ppid, comm: &str| Proc {
+            pid,
+            ppid,
+            comm: comm.into(),
+        };
+        // reaper 10 -> bwrap 11 -> bwrap 12 (pid 1 inside) -> app 13.
+        let sandboxed = [
+            p(10, 1, "reaper"),
+            p(11, 10, "bwrap"),
+            p(12, 11, "bwrap"),
+            p(13, 12, "stubborn-app"),
+        ];
+        assert_eq!(signal_groups(&sandboxed, 10, 11), [13]);
+        // bwrap has not started the app yet (its child is still a bwrap): bwrap gets it.
+        assert_eq!(signal_groups(&sandboxed[..3], 10, 11), [11]);
+        // Not sandboxed: the command's group only.
+        let plain = [p(30, 1, "reaper"), p(31, 30, "jellyfin")];
+        assert_eq!(signal_groups(&plain, 30, 31), [31]);
+        // A command that is not bwrap but runs a bwrap of its own (Steam's FHS env): both.
+        let fhs = [
+            p(40, 1, "reaper"),
+            p(41, 40, "steam"),
+            p(42, 41, "bwrap"),
+            p(43, 42, "steam-runtime"),
+        ];
+        assert_eq!(signal_groups(&fhs, 40, 41), [41, 43]);
+    }
+
+    #[test]
     fn args_round_trip() {
         let a = args(7, &strings(&["firefox", "--kiosk"]));
         assert_eq!(a[0], SUBCOMMAND);
+        let p = parse(&a[1..]).unwrap();
+        assert_eq!((p.app_id, p.cgroup), (Some(7), None));
+        assert_eq!(p.command, strings(&["firefox", "--kiosk"]));
+        let dir = Path::new("/sys/fs/cgroup/x/nolan");
+        let a = args_in(7, Some(dir), &strings(&["moonlight"]));
+        let p = parse(&a[1..]).unwrap();
+        assert_eq!((p.app_id, p.cgroup.as_deref()), (Some(7), Some(dir)));
+        assert_eq!(p.command, strings(&["moonlight"]));
+        // gamescope and Steam's checks still see a Steam reaper.
+        let cmdline = a[..].join("\0");
+        assert!(crate::procs::is_steam_reaper_cmdline(cmdline.as_bytes(), 7));
+        assert_eq!(crate::procs::reaper_app_id(cmdline.as_bytes()), Some(7));
+    }
+
+    #[test]
+    fn enters_the_cgroup_or_fails() {
+        let t = tempfile::tempdir().unwrap();
+        enter_cgroup(t.path()).unwrap();
         assert_eq!(
-            parse(&a[1..]),
-            Ok((Some(7), strings(&["firefox", "--kiosk"])))
+            std::fs::read_to_string(t.path().join("cgroup.procs")).unwrap(),
+            format!("{}\n", std::process::id())
         );
+        assert!(enter_cgroup(&t.path().join("gone")).is_err());
     }
 }

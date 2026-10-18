@@ -1,5 +1,5 @@
 //! Audio against a fake `pactl` (a shell script with the sinks in a state directory): the same
-//! commands and JSON output as the real one for `list sinks`, `get-default-sink`,
+//! commands and JSON output as the real one for `list sinks`, `list cards`, `set-card-profile`, `get-default-sink`,
 //! `set-default-sink`, `set-sink-volume` and `set-sink-mute`. Never the desktop's PipeWire.
 
 use std::path::{Path, PathBuf};
@@ -41,14 +41,30 @@ sink_json() {{
   case $mute in yes) m=true;; *) m=false;; esac
   echo "$2" | sed "s|@VOL@|$vol|g; s|@MUTE@|$m|g"
 }}
+builtin() {{ m=${{1#output:}}; echo "alsa_output.pci-0000_00_1f.3.${{m%%+*}}"; }}
 case "$1" in
   --format=json)
+    if [ "$2 $3" = "list cards" ]; then
+      if [ ! -f "$S/card" ]; then echo '[]'; exit 0; fi
+      echo '[{{"name":"alsa_card.pci-0000_00_1f.3","active_profile":"'"$(cat "$S/card")"'","properties":{{"device.description":"Built-in Audio","device.bus":"pci"}},"profiles":{{"off":{{"description":"Off","available":true}},"output:analog-stereo+input:analog-stereo":{{"description":"Analog Stereo Duplex","available":true}},"output:analog-stereo":{{"description":"Analog Stereo Output","available":true}},"output:hdmi-stereo+input:analog-stereo":{{"description":"Digital Stereo (HDMI) Output + Analog Stereo Input","available":true}},"output:hdmi-stereo":{{"description":"Digital Stereo (HDMI) Output","available":true}},"output:hdmi-stereo-extra1":{{"description":"Digital Stereo (HDMI 2) Output","available":false}},"output:hdmi-surround":{{"description":"Digital Surround 5.1 (HDMI) Output","available":true}},"pro-audio":{{"description":"Pro Audio","available":true}}}}}}]'
+      exit 0
+    fi
     [ "$2 $3" = "list sinks" ] || exit 2
     echo '['
     sink_json alsa_output.pci-0000_01_00.1.hdmi-stereo '{{"index":50,"state":"RUNNING","name":"alsa_output.pci-0000_01_00.1.hdmi-stereo","description":"HDMI / DisplayPort","mute":@MUTE@,"volume":{{"front-left":{{"value":39321,"value_percent":"@VOL@%","db":"-13 dB"}},"front-right":{{"value":39321,"value_percent":"@VOL@%","db":"-13 dB"}}}},"active_port":"hdmi-output-0","ports":[{{"name":"hdmi-output-0","type":"HDMI"}}],"properties":{{"device.bus":"pci"}}}},'
     sink_json alsa_output.usb-Foo-00.analog-stereo '{{"index":51,"state":"IDLE","name":"alsa_output.usb-Foo-00.analog-stereo","description":"USB DAC Analog Stereo","mute":@MUTE@,"volume":{{"mono":{{"value":19660,"value_percent":"@VOL@%","db":"-31 dB"}}}},"active_port":null,"ports":[],"properties":{{"device.bus":"usb"}}}},'
     sink_json bluez_output.AA_BB_CC_DD_EE_02.1 '{{"index":52,"state":"SUSPENDED","name":"bluez_output.AA_BB_CC_DD_EE_02.1","description":"Headphones","mute":@MUTE@,"volume":{{"front-left":{{"value":85196,"value_percent":"@VOL@%","db":"7 dB"}}}},"active_port":null,"ports":[],"properties":{{"device.bus":"bluetooth","api.bluez5.address":"AA:BB:CC:DD:EE:02"}}}}'
+    if [ -f "$S/card" ]; then
+      b=$(builtin "$(cat "$S/card")")
+      sink_json "$b" ',{{"index":53,"state":"IDLE","name":"'"$b"'","description":"Built-in Audio '"$b"'","mute":@MUTE@,"volume":{{"mono":{{"value_percent":"@VOL@%"}}}},"active_port":null,"ports":[],"properties":{{"device.bus":"pci"}}}}'
+    fi
     echo ']'
+    ;;
+  set-card-profile)
+    echo "$3" > "$S/card"
+    b=$(builtin "$3")
+    [ -f "$S/volume-$b" ] || echo 40 > "$S/volume-$b"
+    [ -f "$S/mute-$b" ] || echo no > "$S/mute-$b"
     ;;
   get-default-sink) cat "$S/default"; echo ;;
   set-default-sink) echo "$2" > "$S/default" ;;
@@ -203,6 +219,63 @@ async fn switching_outputs_follows_the_new_default() {
         .await
         .unwrap_err();
     assert_eq!(e["code"], 3010);
+}
+
+/// A sound card with the analog profile on: the TV on HDMI is listed too (by the name its sink
+/// will have) and picking it switches the card's profile, keeping the microphone input.
+#[tokio::test]
+async fn an_output_of_another_card_profile_switches_the_profile() {
+    const ANALOG: &str = "alsa_output.pci-0000_00_1f.3.analog-stereo";
+    const TV: &str = "alsa_output.pci-0000_00_1f.3.hdmi-stereo";
+    let mut state = PathBuf::new();
+    let d = Daemon::start_env(
+        |_| Vec::new(),
+        |dir| {
+            let pactl = fake_pactl(dir);
+            state = dir.join("pactl-state");
+            std::fs::write(
+                state.join("card"),
+                "output:analog-stereo+input:analog-stereo",
+            )
+            .unwrap();
+            for (f, v) in [("volume", "50"), ("mute", "no")] {
+                std::fs::write(state.join(format!("{f}-{ANALOG}")), v).unwrap();
+            }
+            vec![("HINTEROS_PACTL".into(), pactl.into_os_string())]
+        },
+    );
+    let mut c = d.client().await;
+    let s = call(&mut c, "audio.outputs", json!({})).await.unwrap();
+    // The 3 sinks, the card's analog sink, and the TV (no surround, no unavailable HDMI 2).
+    assert_eq!(s["outputs"].as_array().unwrap().len(), 5, "{s}");
+    assert_eq!(
+        output(&s, TV),
+        &json!({"id": TV, "name": "Built-in Audio Digital Stereo (HDMI)", "kind": "hdmi", "default": false})
+    );
+    let s = call(&mut c, "audio.set_output", json!({"id": TV}))
+        .await
+        .unwrap();
+    assert_eq!(output(&s, TV)["default"], true, "{s}");
+    assert_eq!(s["volume"], 40);
+    assert!(
+        calls(&state).contains(
+            &"set-card-profile alsa_card.pci-0000_00_1f.3 output:hdmi-stereo+input:analog-stereo"
+                .to_string()
+        )
+    );
+    assert!(calls(&state).contains(&format!("set-default-sink {TV}")));
+    // Analog is now the one to switch to.
+    assert_eq!(output(&s, ANALOG)["name"], "Built-in Audio Analog Stereo");
+    // An id that is neither: not found, nothing switched.
+    let e = call(
+        &mut c,
+        "audio.set_output",
+        json!({"id": "alsa_output.pci-0000_00_1f.3.hdmi-stereo-extra1"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["code"], 3010, "{e}");
+    assert!(!calls(&state).iter().any(|c| c.contains("extra1")));
 }
 
 #[tokio::test]
@@ -367,4 +440,40 @@ async fn the_shared_output_waits_for_its_sink() {
             calls(&state)
         );
     }
+}
+
+/// The box-wide output is the TV on HDMI, but this profile's card has the analog profile on:
+/// the card is switched, then the TV becomes the default.
+#[tokio::test]
+async fn the_shared_output_switches_the_card_profile() {
+    const TV: &str = "alsa_output.pci-0000_00_1f.3.hdmi-stereo";
+    let mut state = PathBuf::new();
+    let _d = Daemon::start_env(
+        |_| Vec::new(),
+        |dir| {
+            let pactl = fake_pactl(dir);
+            state = dir.join("pactl-state");
+            std::fs::write(state.join("card"), "output:analog-stereo").unwrap();
+            for (f, v) in [("volume", "50"), ("mute", "no")] {
+                std::fs::write(
+                    state.join(format!("{f}-alsa_output.pci-0000_00_1f.3.analog-stereo")),
+                    v,
+                )
+                .unwrap();
+            }
+            let file = dir.join("audio-output");
+            std::fs::write(&file, format!("{TV}\n")).unwrap();
+            vec![
+                ("HINTEROS_PACTL".into(), pactl.into_os_string()),
+                ("HINTEROS_AUDIO_OUTPUT_FILE".into(), file.into_os_string()),
+            ]
+        },
+    );
+    eventually_default(&state, TV).await;
+    // No input on the card before: output only.
+    assert!(
+        calls(&state).contains(
+            &"set-card-profile alsa_card.pci-0000_00_1f.3 output:hdmi-stereo".to_string()
+        )
+    );
 }

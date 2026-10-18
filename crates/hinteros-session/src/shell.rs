@@ -2047,7 +2047,32 @@ impl Shell {
             self.set_osk(false, false);
         }
         self.emit(EventName::HomePressed, HomePressedParams {});
+        self.close_steam_keyboard();
         self.set_focus(None);
+    }
+
+    /// Steam's on-screen keyboard is on Steam's overlay layer, which gamescope shows over every
+    /// app, the launcher too. Home from Steam or a Steam game closes it (the URL SDL uses).
+    fn close_steam_keyboard(&mut self) {
+        let from_steam = self.focused_app().is_some_and(|app| {
+            matches!(app.info.source, AppSource::Steam | AppSource::SteamClient)
+        });
+        if !from_steam || !self.cfg.gamescope || !self.procs.steam_running() {
+            return;
+        }
+        let Some(steam) = self.cfg.steam_path.as_ref() else {
+            return;
+        };
+        let argv = [
+            steam.to_string_lossy().into_owned(),
+            "steam://close/keyboard".into(),
+        ];
+        if let Err(e) = self
+            .spawner
+            .spawn("steam-keyboard", &argv, None, None, None)
+        {
+            warn!("closing the Steam keyboard: {e}");
+        }
     }
 
     /// Whether a long Guide press goes to Steam now: Steam (Big Picture) or a Steam game (one
@@ -5070,9 +5095,18 @@ mod tests {
         t.input("ui_guide", 0.0);
         assert_eq!(t.shell.focused(), None);
         assert!(home_pressed(&t.events()));
+        // Steam's keyboard, on Steam's overlay layer, would stay over the launcher: closed.
         assert_eq!(
             t.log.take(),
-            [Call::FocusLauncher, Call::Mode(InterceptMode::All)]
+            [
+                Call::Spawn {
+                    key: "steam-keyboard".into(),
+                    argv: vec!["/fake/steam".into(), "steam://close/keyboard".into()],
+                    app_id: None,
+                },
+                Call::FocusLauncher,
+                Call::Mode(InterceptMode::All)
+            ]
         );
         // Nothing left to happen later.
         t.advance(Duration::from_secs(2));
@@ -5087,8 +5121,13 @@ mod tests {
         t.shell.handle(Msg::Home, t.now);
         assert_eq!(t.shell.focused(), None);
         assert!(home_pressed(&t.events()));
+        let log = t.log.take();
+        assert!(
+            matches!(&log[0], Call::Spawn { argv, .. } if argv[1] == "steam://close/keyboard"),
+            "{log:?}"
+        );
         assert_eq!(
-            t.log.take(),
+            log[1..],
             [Call::FocusLauncher, Call::Mode(InterceptMode::All)]
         );
         // No Guide tap for Steam later.

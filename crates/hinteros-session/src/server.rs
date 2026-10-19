@@ -36,12 +36,14 @@ pub struct Services {
 }
 
 /// Methods answered by a task of their own, so a slow one (a relayed call waiting for the admin
-/// password) never holds up the connection: the launcher answers the password prompt on the
-/// same connection. Their responses may come out of order (clients match them by id).
+/// password, a Wi-Fi scan) never holds up the connection: the launcher answers the password
+/// prompt on the same connection, and its controller input comes as events on it. Their
+/// responses may come out of order (clients match them by id).
 fn concurrent(method: &str) -> bool {
     session::relay_target(method).is_some()
         || crate::profile::METHODS.contains(&method)
         || crate::greeter::METHODS.contains(&method)
+        || Runtime::waits(method)
         || matches!(
             method,
             "auth.respond" | "auth.cancel" | "store.list" | "session.restart"
@@ -277,6 +279,7 @@ async fn slow(
             hinteros_api::server::decode_params::<session::SessionRestart>(params.clone())?;
             s.restarter.restart(params).await
         }
+        m if Runtime::waits(m) => s.runtime.call(m, params).await,
         m if crate::profile::METHODS.contains(&m) => s.profiles.call(m, params).await,
         m if crate::greeter::METHODS.contains(&m) => match &s.greeter {
             Some(g) => g.call(m, params, client).await,

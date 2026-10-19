@@ -57,6 +57,8 @@ struct Model {
     scans: u32,
     /// Refuse scans, like NetworkManager does right after another one.
     refuse_scan: bool,
+    /// Take scans and never finish them (LastScan stays).
+    hold_scan: bool,
 }
 
 type Shared = Arc<Mutex<Model>>;
@@ -248,6 +250,9 @@ impl Wireless {
             ));
         }
         m.scans += 1;
+        if m.hold_scan {
+            return Ok(());
+        }
         m.last_scan += 1000;
         // A new network shows up with the scan.
         if m.scans == 1 && !m.aps.iter().any(|a| a.ssid == "NewNet") {
@@ -491,6 +496,7 @@ impl Fake {
             last_scan: 1000,
             scans: 0,
             refuse_scan: false,
+            hold_scan: false,
         }));
         let mut b = zbus::connection::Builder::address(bus.address.as_str())
             .unwrap()
@@ -852,4 +858,30 @@ async fn no_networkmanager() {
     let status = call(&mut c, "network.status", json!({})).await.unwrap();
     assert_eq!(status["wifi_ssid"], "Home");
     drop(fake);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_does_not_hold_up_the_connection() {
+    let Some((_bus, fake, _d, mut c)) = start(true).await else {
+        return;
+    };
+    fake.model.lock().unwrap().hold_scan = true;
+    // While a scan runs, other calls are answered (and events, the controller input among
+    // them, go out): responses come by id.
+    c.send_line(r#"{"jsonrpc":"2.0","id":1,"method":"wifi.scan","params":{}}"#)
+        .await
+        .unwrap();
+    c.send_line(r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#)
+        .await
+        .unwrap();
+    let first = c.read_raw().await.unwrap().unwrap();
+    assert_eq!(first["id"], 2, "{first}");
+    // The scan ends: its answer comes after.
+    while fake.model.lock().unwrap().scans == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    fake.model.lock().unwrap().last_scan += 1000;
+    let second = c.read_raw().await.unwrap().unwrap();
+    assert_eq!(second["id"], 1, "{second}");
+    assert!(second["result"]["networks"].is_array(), "{second}");
 }

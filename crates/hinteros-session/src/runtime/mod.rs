@@ -162,6 +162,16 @@ impl Runtime {
         session::METHODS.contains(&method)
     }
 
+    /// The methods that wait seconds for NetworkManager or BlueZ. The server answers them from a
+    /// task of their own: on the connection they would hold up the events, the controller input
+    /// included.
+    pub fn waits(method: &str) -> bool {
+        matches!(
+            method,
+            "wifi.scan" | "wifi.connect" | "bluetooth.pair" | "bluetooth.connect"
+        )
+    }
+
     /// Run one runtime method.
     pub async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, ErrorObject> {
         let ctx = &*self.ctx;

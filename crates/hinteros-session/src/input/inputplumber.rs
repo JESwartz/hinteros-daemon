@@ -74,6 +74,12 @@ pub const DBUS_DEVICE_IFACE: &str = "org.shadowblip.Input.DBusDevice";
 /// `DbusDevices`, not `DBusDevices`.
 pub const DBUS_DEVICES_PROPERTY: &str = "DbusDevices";
 
+/// In `Pass`, InputPlumber switches the pad to `All` by itself on a Guide press, so that the
+/// rest of the press reaches us. For this long after a Guide press the watchdog leaves that
+/// `All` alone: setting `Pass` back mid-press sent the release to the game, and the daemon took
+/// a short press for a hold. The session's answer (Home, the Guide tap for Steam) sets the mode.
+pub const GUIDE_SWITCH_GRACE: Duration = Duration::from_secs(2);
+
 /// Where input should go: the intercept mode, and whether the pointer profile is loaded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Routing {
@@ -187,10 +193,14 @@ enum Op {
     GuideTap { mode: InterceptMode },
 }
 
+/// When a pad's last Guide press arrived (set by the signal loop, read by its worker).
+type GuideAt = Arc<std::sync::Mutex<Option<std::time::Instant>>>;
+
 /// One composite device (pad): its worker and what the signal loop needs to know.
 struct Device {
     /// Its `ui_action`/`ui_context` labels get swapped (set by the worker once classified).
     swap: Arc<AtomicBool>,
+    guide_at: GuideAt,
     ops: mpsc::UnboundedSender<Op>,
     worker: JoinHandle<()>,
 }
@@ -290,6 +300,9 @@ async fn run(
                         } else {
                             event
                         };
+                        if event == "ui_guide" && value > 0.5 {
+                            task.guide_pressed(&source).await;
+                        }
                         if events.send(RawInput { source, event, value }).is_err() {
                             return Ok(());
                         }
@@ -493,6 +506,7 @@ impl Task {
     /// routing).
     fn add(&mut self, path: OwnedObjectPath) {
         let swap = Arc::new(AtomicBool::new(false));
+        let guide_at = GuideAt::default();
         let (ops, rx) = mpsc::unbounded_channel();
         let worker = Worker {
             conn: self.conn.clone(),
@@ -500,13 +514,22 @@ impl Task {
             settings: self.settings.clone(),
             routing: self.routing.clone(),
             swap: swap.clone(),
+            guide_at: guide_at.clone(),
             pointer: false,
             previous_profile: None,
             dirty: true,
             answering: true,
         };
         let worker = tokio::spawn(worker.run(rx));
-        self.devices.insert(path, Device { swap, ops, worker });
+        self.devices.insert(
+            path,
+            Device {
+                swap,
+                guide_at,
+                ops,
+                worker,
+            },
+        );
         self.targets.clear();
     }
 
@@ -540,6 +563,17 @@ impl Task {
             }
         }
         self.targets.get(source).cloned().flatten()
+    }
+
+    /// A Guide press came from the D-Bus target `source` (all pads when it is unknown).
+    async fn guide_pressed(&mut self, source: &str) {
+        let now = std::time::Instant::now();
+        let path = self.device_of(source).await;
+        for (p, d) in &self.devices {
+            if path.as_ref().is_none_or(|path| path == p) {
+                *d.guide_at.lock().unwrap() = Some(now);
+            }
+        }
     }
 
     /// Whether events from the D-Bus target `source` get their labels swapped.
@@ -594,6 +628,8 @@ struct Worker {
     settings: Arc<Settings>,
     routing: watch::Receiver<Routing>,
     swap: Arc<AtomicBool>,
+    /// The pad's last Guide press ([`GUIDE_SWITCH_GRACE`]).
+    guide_at: GuideAt,
     /// Our pointer profile is loaded (as far as we know).
     pointer: bool,
     /// The profile that was loaded before ours (YAML), to put back.
@@ -780,6 +816,18 @@ impl Worker {
                     warn!(device = %self.path, %profile, want_pointer = want.pointer, "unexpected device profile; re-applying");
                     self.pointer = ours;
                     self.dirty = true;
+                }
+                let guide_switch = want.mode == InterceptMode::Pass
+                    && mode == InterceptMode::All as u32
+                    && self
+                        .guide_at
+                        .lock()
+                        .unwrap()
+                        .is_some_and(|at| at.elapsed() < GUIDE_SWITCH_GRACE);
+                if guide_switch {
+                    // Anything else waits for the next check too (`dirty` stays).
+                    debug!(device = %self.path, "InputPlumber's switch to All on a Guide press; left alone");
+                    return;
                 }
                 if mode != want.mode as u32 {
                     warn!(device = %self.path, mode, want = ?want.mode, "unexpected InterceptMode; re-applying");

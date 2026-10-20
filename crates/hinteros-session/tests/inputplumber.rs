@@ -1216,3 +1216,69 @@ async fn guide_tap_for_steam_reaches_the_pad_not_us() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert!(events.try_recv().is_err(), "the tap came back as input");
 }
+
+/// In PASS (a game in front) InputPlumber switches the pad to ALL by itself on a Guide press,
+/// so that the release reaches us. The watchdog set PASS back in the middle of the press (seen
+/// on the dev box): the release went to the game, and a short press became a hold. Now it
+/// leaves that ALL alone for GUIDE_SWITCH_GRACE after a Guide press; an ALL without a press,
+/// or one that outlasts the grace, still gets PASS back.
+#[tokio::test(flavor = "multi_thread")]
+async fn watchdog_leaves_inputplumbers_guide_switch_alone() {
+    use hinteros_session::input::inputplumber::{
+        self, GUIDE_SWITCH_GRACE, PointerProfile, Settings,
+    };
+    use hinteros_session::input::{InterceptMode, LabelSwap, pointer};
+    use std::time::{Duration, Instant};
+
+    let Some(bus) = Bus::start() else { return };
+    let fake = Fake::start(&bus.address).await;
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let _input = inputplumber::spawn(
+        Settings {
+            bus: Some(bus.address.clone()),
+            initial: InterceptMode::Pass,
+            swap: LabelSwap::Off,
+            profile: PointerProfile {
+                yaml: pointer::profile_yaml(600, 0.1),
+            },
+            call_timeout: Duration::from_secs(5),
+            watchdog: Duration::from_millis(100),
+        },
+        tx,
+    );
+    ready(&fake, 0, 1).await;
+
+    // ALL without a Guide press: PASS again at the next check.
+    fake.modes[0].store(2, Ordering::SeqCst);
+    ready(&fake, 0, 1).await;
+
+    // The user's Guide press: InputPlumber switches to ALL and sends ui_guide.
+    fake.modes[0].store(2, Ordering::SeqCst);
+    let pressed = Instant::now();
+    fake.press("ui_guide", 1.0).await;
+    let ev = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((ev.event.as_str(), ev.value), ("ui_guide", 1.0));
+    // Several checks within the grace: ALL stays, so the release still comes to us.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        fake.mode(0),
+        2,
+        "the watchdog undid InputPlumber's Guide switch"
+    );
+    fake.press("ui_guide", 0.0).await;
+    let ev = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((ev.event.as_str(), ev.value), ("ui_guide", 0.0));
+    // Nobody set the mode afterwards: once the grace is over, PASS for the game again.
+    ready(&fake, 0, 1).await;
+    assert!(
+        pressed.elapsed() >= GUIDE_SWITCH_GRACE,
+        "{:?}",
+        pressed.elapsed()
+    );
+}

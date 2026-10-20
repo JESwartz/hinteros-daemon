@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 19);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 18);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -640,13 +640,7 @@ impl Method for SteamAttentionQuery {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SteamFocusParams {
-    /// 0.19: Steam is the screen saver: its own one starts after its idle time. Until focus
-    /// changes, input stays with the daemon (Steam gets none); the first press goes back to
-    /// where the user was and goes no further (nor does its release).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub screensaver: bool,
-}
+pub struct SteamFocusParams {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SteamFocusResult {

@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.19",
+  "version": "0.18",
   "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). Responses to system.*, auth.*, store.list and session.restart may arrive out of order relative to other calls on the same connection (match them by id): a relayed call can wait minutes for an admin password. See hinteros-docs/design/api.md for the protocol rules.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -37,16 +37,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.19", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
-          "result": { "api_version": "0.19", "server": { "name": "hinteros-session", "version": "0.1.0" } }
+          "params": { "api_version": "0.18", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
+          "result": { "api_version": "0.18", "server": { "name": "hinteros-session", "version": "0.1.0" } }
         },
         {
           "name": "major mismatch",
           "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 1.0, server 0.19",
-            "data": { "client_api_version": "1.0", "server_api_version": "0.19" }
+            "message": "API version mismatch: client 1.0, server 0.18",
+            "data": { "client_api_version": "1.0", "server_api_version": "0.18" }
           }
         }
       ]
@@ -289,14 +289,12 @@
     },
     "steam.focus": {
       "summary": "Bring Steam's own windows to the front (e.g. after steam_attention). Controller input goes to Steam.",
-      "description": "Steam then runs as the app 'steam' (source 'steam_client'; app_started if it was not running) and has focus; its pending windows no longer need attention. When Steam's windows close, focus returns to the app that had it before (or the launcher). Home brings the launcher back as usual. 0.19: with 'screensaver', Steam is the screen saver (its own one starts after Steam's idle time): controller input stays with the daemon instead, and the first press brings back the app that had focus before (or the launcher); neither that press nor its release goes anywhere else. Any focus change, also steam.focus without 'screensaver', ends it.",
+      "description": "Steam then runs as the app 'steam' (source 'steam_client'; app_started if it was not running) and has focus; its pending windows no longer need attention. When Steam's windows close, focus returns to the app that had it before (or the launcher). Home brings the launcher back as usual.",
       "since": "0.3",
       "params": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {
-          "screensaver": { "description": "0.19: Steam is the screen saver (see above). Default false.", "type": "boolean" }
-        }
+        "properties": {}
       },
       "result": {
         "type": "object",
@@ -309,8 +307,7 @@
       "errors": ["steam_no_windows"],
       "examples": [
         { "name": "dialog shown", "params": {}, "result": { "app": { "id": "steam", "name": "Steam", "source": "steam_client", "gamescope_app_id": 769 } } },
-        { "name": "nothing to show", "params": {}, "error": { "code": 2003, "message": "Steam has no windows to show" } },
-        { "name": "as the screen saver", "params": { "screensaver": true }, "result": { "app": { "id": "steam", "name": "Steam", "source": "steam_client", "gamescope_app_id": 769 } } }
+        { "name": "nothing to show", "params": {}, "error": { "code": 2003, "message": "Steam has no windows to show" } }
       ]
     },
     "apps.launch": {

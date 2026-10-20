@@ -426,6 +426,9 @@ pub struct Shell {
     attention: Vec<SteamWindow>,
     /// Who gets focus back when Steam, focused through steam.focus, closes its windows.
     steam_return: Option<String>,
+    /// Steam is in front as the screen saver (`steam.focus` with `screensaver`): input stays
+    /// with us, and the first press goes back. Any focus change ends it.
+    steam_saver: bool,
     /// Games Steam started from its library while it was in front: Steam gets focus back
     /// when they end.
     from_steam: BTreeSet<String>,
@@ -516,6 +519,7 @@ impl Shell {
             seen_windows: BTreeSet::new(),
             attention: Vec::new(),
             steam_return: None,
+            steam_saver: false,
             from_steam: BTreeSet::new(),
             adopted: BTreeSet::new(),
             steam_action_at: None,
@@ -678,8 +682,8 @@ impl Shell {
                 })
             }
             SteamFocus::NAME => {
-                decode_params::<SteamFocus>(params)?;
-                encode_result::<SteamFocus>(self.steam_focus(now)?)
+                let p = decode_params::<SteamFocus>(params)?;
+                encode_result::<SteamFocus>(self.steam_focus(p.screensaver, now)?)
             }
             OskShow::NAME => {
                 decode_params::<OskShow>(params)?;
@@ -1565,7 +1569,11 @@ impl Shell {
     }
 
     /// `steam.focus`: show Steam's windows, with Steam tracked as the app `steam`.
-    fn steam_focus(&mut self, now: Instant) -> Result<SteamFocusResult, ErrorObject> {
+    fn steam_focus(
+        &mut self,
+        screensaver: bool,
+        now: Instant,
+    ) -> Result<SteamFocusResult, ErrorObject> {
         if self.steam_windows.is_empty() {
             return Err(ErrorObject::new(
                 ErrorCode::SteamNoWindows,
@@ -1580,6 +1588,14 @@ impl Shell {
             self.set_focus(Some(STEAM_CLIENT_APP_ID.into()));
             self.steam_return = previous;
         }
+        if screensaver {
+            info!(back = ?self.steam_return, "Steam is the screen saver: the first press goes back");
+        }
+        // Steam opened for itself (Steam already in front as the screen saver) gets the pad.
+        if self.steam_saver != screensaver {
+            self.steam_saver = screensaver;
+            self.apply_input();
+        }
         Ok(SteamFocusResult {
             app: self.apps[STEAM_CLIENT_APP_ID].info.clone(),
         })
@@ -1588,6 +1604,7 @@ impl Shell {
     /// Give focus to `target` (`None`: the launcher): tell gamescope and InputPlumber, and
     /// announce it if it changed.
     fn set_focus(&mut self, target: Option<String>) {
+        self.steam_saver = false;
         self.repeat.clear();
         self.held.clear();
         self.focus_lost_at = None;
@@ -1729,6 +1746,10 @@ impl Shell {
     /// The InputPlumber mode for the current focus and on-screen keyboard. With the pointer,
     /// `GamepadOnly`: the right stick's mouse events still reach the pointer.
     fn intercept_mode(&self) -> InterceptMode {
+        if self.steam_saver {
+            // Steam's screen saver: the press that ends it must not reach Steam.
+            return InterceptMode::All;
+        }
         match self.route() {
             Route::App => InterceptMode::Pass,
             Route::Keys if self.pointer_app() => InterceptMode::GamepadOnly,
@@ -2027,7 +2048,7 @@ impl Shell {
             .is_some_and(|at| now.duration_since(at) <= STEAM_ANSWER_WINDOW);
         if new && answer && self.focused.is_none() {
             info!("a Steam window answers our Steam request → Steam gets focus");
-            if let Err(e) = self.steam_focus(now) {
+            if let Err(e) = self.steam_focus(false, now) {
                 debug!("{}", e.message);
             }
         }
@@ -2230,6 +2251,9 @@ impl Shell {
     }
 
     fn input(&mut self, input: RawInput, now: Instant) {
+        if self.steam_saver {
+            return self.steam_saver_input(&input);
+        }
         let Some(intent) = translate(&input.event) else {
             debug!(event = %input.event, "unmapped input");
             if input.pressed() {
@@ -2332,6 +2356,28 @@ impl Shell {
                 self.nav(action, phase, route);
             }
         }
+    }
+
+    /// Input while Steam is the screen saver: the first press goes back to where the user was
+    /// (the launcher, mostly), and neither it nor its release goes anywhere else.
+    fn steam_saver_input(&mut self, input: &RawInput) {
+        if !input.pressed() {
+            return;
+        }
+        match translate(&input.event) {
+            Some(Intent::Nav(action)) => {
+                self.swallow.insert(action);
+            }
+            // Its release then finds no press (ignored).
+            Some(Intent::Home) => self.guide = None,
+            Some(Intent::Pointer) | None => {}
+        }
+        let back = self
+            .steam_return
+            .take()
+            .filter(|r| self.apps.contains_key(r));
+        info!(button = %input.event, ?back, "a press ends Steam's screen saver");
+        self.set_focus(back);
     }
 
     /// A button pressed in a keyboard-profile app that means more than its key: a click (RT left,
@@ -4913,6 +4959,64 @@ mod tests {
             t.log.take(),
             [Call::FocusSteamGame(620), Call::Mode(InterceptMode::Pass)]
         );
+    }
+
+    #[test]
+    fn steam_as_the_screen_saver() {
+        let mut t = T::new();
+        // Steam runs (a window) behind the launcher.
+        steam_windows(&mut t, &[(5, "Steam Big Picture Mode")]);
+        t.events();
+        t.log.take();
+        let r = t.call("steam.focus", json!({"screensaver": true})).unwrap();
+        assert_eq!(r, json!({"app": steam_client_app()}));
+        let log = t.log.take();
+        assert!(log.contains(&Call::FocusApp(769)), "{log:?}");
+        // Input stays with us: Steam never gets the press that ends it.
+        assert_eq!(log.last(), Some(&Call::Mode(InterceptMode::All)), "{log:?}");
+        t.events();
+        // The first press goes back to the launcher; neither it nor its release goes anywhere.
+        t.input("ui_accept", 1.0);
+        assert_eq!(t.shell.focused(), None);
+        t.input("ui_accept", 0.0);
+        t.advance(MS(1000));
+        assert_eq!(
+            t.events(),
+            [ev(EventName::FocusChanged, json!({"app": null}))]
+        );
+        assert_eq!(t.log.take().last(), Some(&Call::Mode(InterceptMode::All)));
+        // The next press is the launcher's.
+        t.input("ui_accept", 1.0);
+        assert_eq!(
+            t.events(),
+            [ev(
+                EventName::InputNav,
+                json!({"action": "accept", "phase": "press"})
+            )]
+        );
+        t.input("ui_accept", 0.0);
+        t.events();
+
+        // Home ends it too, without a second Home on its release.
+        t.call("steam.focus", json!({"screensaver": true})).unwrap();
+        t.events();
+        t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
+        t.advance(MS(1000));
+        assert_eq!(
+            t.events(),
+            [ev(EventName::FocusChanged, json!({"app": null}))]
+        );
+
+        // Any other focus change ends it: Steam opened normally gets the pad.
+        t.call("steam.focus", json!({"screensaver": true})).unwrap();
+        t.call("steam.focus", json!({})).unwrap();
+        assert!(!t.shell.steam_saver);
+        t.call("apps.focus", json!({"id": null})).unwrap();
+        t.call("steam.focus", json!({})).unwrap();
+        assert_eq!(t.log.take().last(), Some(&Call::Mode(InterceptMode::Pass)));
+        t.input("ui_accept", 1.0);
+        assert_eq!(t.shell.focused(), Some("steam"));
     }
 
     #[test]

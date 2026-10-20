@@ -162,6 +162,10 @@ const REASSERT_GAP: Duration = Duration::from_millis(500);
 /// the focus changes, or Steam shows the game by itself).
 const REASSERT_WINDOW: Duration = Duration::from_secs(30);
 const REASSERT_MAX: usize = 6;
+/// gamescope's state can lag behind our writes: until it shows our last focus order, a copy of
+/// an earlier one is ours, late, for this long. After that (or once it showed our last one) it
+/// is Steam's: Steam writes back the game's order after Home.
+const ECHO_GRACE: Duration = Duration::from_secs(1);
 
 /// State for writing our focus order again when Steam changed it (see `Shell::check_order`).
 #[derive(Debug, Default)]
@@ -175,6 +179,9 @@ struct OrderGuard {
     /// We sent Steam a Guide tap (its menu): Steam's order goes; the order at that time, so
     /// that Steam showing the game again (another order) ends it.
     steam_menu: Option<Vec<u32>>,
+    /// An earlier order of ours came while gamescope did not show our last one yet: taken as
+    /// late until this time ([`ECHO_GRACE`]).
+    late_until: Option<Instant>,
 }
 
 /// The app that a focus order shows: the first one with a window (the launcher always has
@@ -408,6 +415,8 @@ pub struct Shell {
     order: OrderGuard,
     /// The last few focus orders we wrote; gamescope state can lag behind our writes.
     written: std::collections::VecDeque<Vec<u32>>,
+    /// gamescope showed the last order we wrote.
+    written_seen: bool,
     next_command: u64,
     /// Steam's mapped dialogs and main windows (from the gamescope watcher).
     steam_windows: Vec<SteamWindow>,
@@ -501,6 +510,7 @@ impl Shell {
             focus_retry_at: None,
             order: OrderGuard::default(),
             written: std::collections::VecDeque::new(),
+            written_seen: false,
             next_command: 1,
             steam_windows: Vec::new(),
             seen_windows: BTreeSet::new(),
@@ -1653,6 +1663,8 @@ impl Shell {
             self.written.pop_front();
         }
         self.written.push_back(order);
+        self.written_seen = false;
+        self.order.late_until = None;
         let result = match plan {
             FocusPlan::SteamClient(games) => self.focus.focus_steam_client(&games),
             FocusPlan::SteamGame(id) => self.focus.focus_steam_game(id),
@@ -2498,6 +2510,10 @@ impl Shell {
                 self.steam_windows(Vec::new(), now);
             }
             GamescopeEvent::State(state) => {
+                if self.written.back() == Some(&state.baselayer_apps) {
+                    self.written_seen = true;
+                    self.order.late_until = None;
+                }
                 if !state.baselayer_apps.is_empty() && !self.written.contains(&state.baselayer_apps)
                 {
                     warn!(
@@ -2587,8 +2603,20 @@ impl Shell {
         }
         let Some(state) = &self.gamescope else { return };
         let found = &state.baselayer_apps;
-        if !(steam_game || launcher_focused) || found.is_empty() || self.written.contains(found) {
+        if !(steam_game || launcher_focused)
+            || found.is_empty()
+            || self.written.back() == Some(found)
+        {
             return;
+        }
+        // An earlier order of ours: late while gamescope did not show our last one yet (for
+        // ECHO_GRACE at most); otherwise Steam wrote it back (it does after Home in a game).
+        if self.written.contains(found) && !self.written_seen {
+            let until = *self.order.late_until.get_or_insert(now + ECHO_GRACE);
+            if now < until {
+                self.order.at = Some(until);
+                return;
+            }
         }
         let launcher = self.cfg.launcher_app_id;
         let theirs = shown_by(found, &state.focusable_apps, launcher);
@@ -4633,6 +4661,62 @@ mod tests {
             matches!(writes.last(), Some(Call::FocusSteamClient(_))),
             "{writes:?}"
         );
+    }
+
+    #[test]
+    fn home_in_a_steam_game_when_steam_writes_the_games_order_back() {
+        // Home in a Steam game: we write the launcher's order, then Steam writes back the order
+        // we had written for the game. It was taken for a late copy of our own write and left
+        // alone: the picture showed the game, the input went to the launcher.
+        let mut t = zombie_force(true);
+        zombie_force_window(&mut t, &[769, L], false, &[]);
+        t.advance(Duration::from_secs(1));
+        assert_eq!(t.shell.focused(), Some(ZOMBIE_APP));
+        let game_order = t.shell.written.back().unwrap().clone();
+        t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
+        assert_eq!(t.shell.focused(), None);
+        let launcher_order = t.shell.written.back().unwrap().clone();
+        assert_ne!(launcher_order, game_order);
+        t.log.take();
+        // gamescope shows our order, then Steam's.
+        t.gamescope_order(Some(769), &[769, L], &launcher_order);
+        t.advance(MS(100));
+        t.gamescope_order(Some(769), &[769, L], &game_order);
+        t.advance(Duration::from_secs(2));
+        assert_eq!(focus_calls(t.log.take()), [Call::FocusLauncher]);
+        assert_eq!(t.shell.focused(), None);
+        // A copy of our earlier write that comes late (gamescope lags) right after Home is
+        // not Steam's: no write for it.
+        let mut t = zombie_force(true);
+        zombie_force_window(&mut t, &[769, L], false, &[]);
+        t.advance(Duration::from_secs(1));
+        let game_order = t.shell.written.back().unwrap().clone();
+        t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
+        let launcher_order = t.shell.written.back().unwrap().clone();
+        t.log.take();
+        t.gamescope_order(Some(769), &[769, L], &game_order);
+        t.advance(MS(100));
+        t.gamescope_order(Some(769), &[769, L], &launcher_order);
+        t.advance(Duration::from_secs(2));
+        assert_eq!(focus_calls(t.log.take()), []);
+        assert_eq!(t.shell.focused(), None);
+        // gamescope never shows ours (Steam wrote the game's order back at once): Steam's,
+        // once ECHO_GRACE is over.
+        let mut t = zombie_force(true);
+        zombie_force_window(&mut t, &[769, L], false, &[]);
+        t.advance(Duration::from_secs(1));
+        let game_order = t.shell.written.back().unwrap().clone();
+        t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
+        t.log.take();
+        t.gamescope_order(Some(769), &[769, L], &game_order);
+        t.advance(ECHO_GRACE - MS(100));
+        assert_eq!(focus_calls(t.log.take()), []);
+        t.advance(MS(200));
+        assert_eq!(focus_calls(t.log.take()), [Call::FocusLauncher]);
+        assert_eq!(t.shell.focused(), None);
     }
 
     #[test]

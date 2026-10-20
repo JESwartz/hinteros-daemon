@@ -2565,14 +2565,19 @@ impl Shell {
     ///   again, at most every [`REASSERT_GAP`] and [`REASSERT_MAX`] times per
     ///   [`REASSERT_WINDOW`], then leave it to Steam. Not while Steam shows its menu (our
     ///   Guide tap), and only for a Steam game: Steam with focus orders its windows itself.
+    /// - The launcher has focus and Steam's order shows Steam (it does when a game ends or is
+    ///   closed): the screen showed Steam while the input went to the launcher, and A started
+    ///   whatever the launcher had selected. Ours again, the same way; when Steam does not stop,
+    ///   Steam gets focus, so that the input goes where the picture is. Steam's dialogs still
+    ///   come to the launcher as `steam_attention`.
     fn check_order(&mut self, now: Instant) {
-        let Some(app) = self.focused_app() else {
-            return;
+        let steam_game = match self.focused_app() {
+            None => false,
+            Some(app) if app.info.source == AppSource::Steam => true,
+            Some(app) if app.info.source == AppSource::SteamClient => false,
+            Some(_) => return,
         };
-        let steam_game = app.info.source == AppSource::Steam;
-        if !steam_game && app.info.source != AppSource::SteamClient {
-            return;
-        }
+        let launcher_focused = self.focused.is_none();
         let (_, ours) = self.focus_plan();
         if self.written.back() != Some(&ours) {
             info!(order = ?ours, app = ?self.focused, "focus order changes");
@@ -2582,7 +2587,7 @@ impl Shell {
         }
         let Some(state) = &self.gamescope else { return };
         let found = &state.baselayer_apps;
-        if !steam_game || found.is_empty() || self.written.contains(found) {
+        if !(steam_game || launcher_focused) || found.is_empty() || self.written.contains(found) {
             return;
         }
         let launcher = self.cfg.launcher_app_id;
@@ -2614,6 +2619,14 @@ impl Shell {
             return;
         }
         if self.order.times.len() >= REASSERT_MAX {
+            if launcher_focused && self.apps.contains_key(STEAM_CLIENT_APP_ID) {
+                warn!(
+                    ?found,
+                    "Steam keeps showing itself over the launcher; Steam gets focus"
+                );
+                self.set_focus(Some(STEAM_CLIENT_APP_ID.to_string()));
+                return;
+            }
             warn!(
                 ?found,
                 ours = ?ours,
@@ -2629,7 +2642,8 @@ impl Shell {
             focusable = ?state.focusable_apps,
             ?theirs,
             ?wanted,
-            "Steam's focus order hides the game: writing ours again"
+            "Steam's focus order hides {}: writing ours again",
+            if launcher_focused { "the launcher" } else { "the game" }
         );
         self.order.times.push_back(now);
         self.order.at = None;
@@ -4573,13 +4587,52 @@ mod tests {
             focus_calls(t.log.take()),
             [Call::FocusSteamClient(vec![ZOMBIE, 480])]
         );
-        // Home: the launcher; Steam's orders are its own business then.
+        // Home: the launcher. Steam showing itself over it gets ours again (it must not
+        // show Steam while the input goes to the launcher).
         t.input("ui_guide", 1.0);
         t.input("ui_guide", 0.0);
         assert_eq!(focus_calls(t.log.take()), [Call::FocusLauncher]);
         t.gamescope_order(Some(769), &[769, 480, L], &steams);
         t.advance(Duration::from_secs(5));
+        assert_eq!(focus_calls(t.log.take()), [Call::FocusLauncher]);
+        assert_eq!(t.shell.focused(), None);
+        // An order of Steam's that shows the launcher anyway is left alone.
+        t.gamescope_order(Some(L), &[769, 480, L], &[STEAM_FIRST, L, 769]);
+        t.advance(Duration::from_secs(5));
         assert!(focus_calls(t.log.take()).is_empty());
+    }
+
+    #[test]
+    fn steam_does_not_show_itself_over_the_launcher_with_the_input_on_the_launcher() {
+        // A game started from the launcher is closed with Home (or ends by itself); Steam
+        // then puts its own window first. The picture showed Steam, the input went to the
+        // launcher, and A started the app the launcher had selected.
+        let mut t = zombie_force(true);
+        zombie_force_window(&mut t, &[769, L], false, &[]);
+        t.advance(Duration::from_secs(1));
+        t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
+        assert_eq!(t.shell.focused(), None);
+        t.log.take();
+        t.gamescope_order(Some(769), &[769, 480, L], &[STEAM_FIRST, 769, 480]);
+        t.advance(Duration::from_secs(1));
+        assert_eq!(focus_calls(t.log.take()), [Call::FocusLauncher]);
+        assert_eq!(t.shell.focused(), None);
+        // Steam does not stop: Steam gets focus, so the input goes where the picture is.
+        for _ in 0..100 {
+            if t.shell.focused().is_some() {
+                break;
+            }
+            t.gamescope_order(Some(769), &[769, L], &[STEAM_FIRST, 769]);
+            t.advance(MS(600));
+        }
+        assert_eq!(t.shell.focused(), Some("steam"));
+        let writes = focus_calls(t.log.take());
+        assert!((2..=REASSERT_MAX + 1).contains(&writes.len()), "{writes:?}");
+        assert!(
+            matches!(writes.last(), Some(Call::FocusSteamClient(_))),
+            "{writes:?}"
+        );
     }
 
     #[test]

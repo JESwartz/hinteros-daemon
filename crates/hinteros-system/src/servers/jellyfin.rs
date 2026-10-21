@@ -261,17 +261,12 @@ impl Client {
         serde_json::from_slice(&r.body).map_err(|e| Error::Refused(format!("GET {path}: {e}")))
     }
 
-    /// Jellyfin answers (`GET /System/Info/Public`, open without a key).
+    /// Jellyfin is up (`GET /health` says `Healthy`, open without a key). While it starts,
+    /// Jellyfin 10.11+ runs a stand-in server on the same port that answers `/health` with
+    /// `Degraded` and even `/System/Info/Public`; the real server comes up only after it stops.
     pub fn ping(addr: SocketAddr, timeout: Duration) -> bool {
-        http::request(
-            Target::Tcp(addr),
-            "GET",
-            "/System/Info/Public",
-            &[],
-            None,
-            timeout,
-        )
-        .is_ok_and(|r| r.ok())
+        http::request(Target::Tcp(addr), "GET", "/health", &[], None, timeout)
+            .is_ok_and(|r| r.ok() && r.body.trim_ascii() == b"Healthy")
     }
 
     pub fn virtual_folders(&self) -> Result<Vec<VirtualFolder>, Error> {
@@ -866,6 +861,40 @@ mod tests {
 
     fn hex(n: u8) -> String {
         format!("{n:032x}")
+    }
+
+    /// One connection per body, like Jellyfin's stand-in server during startup, then the real one.
+    fn answers(bodies: &'static [&'static str]) -> SocketAddr {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for body in bodies {
+                let (mut s, _) = l.accept().unwrap();
+                let mut req = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !req.ends_with(b"\r\n\r\n") {
+                    let n = s.read(&mut buf).unwrap();
+                    assert!(n > 0);
+                    req.extend_from_slice(&buf[..n]);
+                }
+                assert!(req.starts_with(b"GET /health "));
+                let r = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                s.write_all(r.as_bytes()).unwrap();
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn ping_waits_for_the_real_server() {
+        let addr = answers(&["Degraded", "Healthy"]);
+        let t = Duration::from_secs(2);
+        assert!(!Client::ping(addr, t));
+        assert!(Client::ping(addr, t));
     }
 
     #[test]

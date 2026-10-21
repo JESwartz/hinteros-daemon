@@ -173,6 +173,9 @@ fn fake_jellyfin() -> (SocketAddr, Arc<Mutex<Jellyfin>>) {
         let mut j = s.lock().unwrap();
         j.log.push(format!("{} {}", r.method, r.path));
         let route = r.path.split('?').next().unwrap().to_owned();
+        if route == "/health" {
+            return (200, "Healthy".into());
+        }
         if route == "/System/Info/Public" {
             return (
                 200,

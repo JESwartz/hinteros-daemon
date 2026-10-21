@@ -38,7 +38,8 @@ const CLAIM: &str = "claim-AbCdEfGhIjKlMnOpQrSt";
 const INDEX: &str = r#"{"indexVersion": 3, "apps": [
   {"id": "jellyfin-server", "kind": "service", "type": "service", "name": "Jellyfin server", "status": "available",
    "ports": [{"port": 8096, "proto": "tcp", "from": "lan"}, {"port": 7359, "proto": "udp", "from": "lan"}],
-   "setup": "jellyfin", "stateDirs": ["jellyfin"]},
+   "setup": "jellyfin", "stateDirs": ["jellyfin"],
+   "icon": {"iconUrl": "https://example.org/jellyfin.svg", "sha256": "817c25b47442b192250448fe48cd5f265fe9183bc75aa12030bbe335495255d1", "siteUrl": "https://jellyfin.org"}},
   {"id": "plex-media-server", "kind": "service", "type": "service", "name": "Plex Media Server", "status": "available",
    "ports": [{"port": 32400, "proto": "tcp", "from": "any"}], "setup": "plex", "stateDirs": ["plex"],
    "terms": {"title": "Plex Terms of Service", "version": "2025-10-30", "url": "https://www.plex.tv/", "retrieved": "2026-10-20",
@@ -475,6 +476,19 @@ async fn services_jellyfin_and_delete_data() {
     );
     assert_eq!(service(&list, "jellyfin-server")["detail"], Value::Null);
     assert_eq!(service(&list, "jellyfin-server")["status"], Value::Null);
+    // The catalog's icon (the session daemon adds the resolved path); data to delete.
+    let icon = &service(&list, "jellyfin-server")["icon"];
+    assert_eq!(icon["icon_url"], "https://example.org/jellyfin.svg");
+    assert_eq!(icon["site_url"], "https://jellyfin.org");
+    assert_eq!(icon["sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(icon.get("path"), None);
+    assert_eq!(
+        service(&list, "tailscale")["icon"],
+        json!({"firefox_profile": false})
+    );
+    for s in list["services"].as_array().unwrap() {
+        assert_eq!(s["has_data"], true, "{s}");
+    }
     let terms = &service(&list, "plex-media-server")["terms"];
     assert_eq!(terms["version"], "2025-10-30");
     assert!(Path::new(terms["file"].as_str().unwrap()).is_file());

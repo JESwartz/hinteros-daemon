@@ -13,7 +13,7 @@ use hinteros_api::system::{
     JellyfinClientTokenResult, JellyfinDetail, JellyfinLibrariesAddParams,
     JellyfinLibrariesRemoveParams, JellyfinProfileAccount, JellyfinUserRef,
     JellyfinUsersRevealResult, JobKind, JobSubject, MediaFoldersParams, MediaFoldersResult,
-    PinParams, PlexClaimParams, PlexDetail, ServiceDetail, ServiceInfo, ServiceTerms,
+    PinParams, PlexClaimParams, PlexDetail, ServiceDetail, ServiceIcon, ServiceInfo, ServiceTerms,
     ServicesDisableParams, ServicesEnableParams, ServicesListResult, Setup, SubjectLibrary,
     UnitState,
 };
@@ -389,6 +389,19 @@ impl Service {
                         .unwrap_or_default(),
                 }),
                 detail: None,
+                icon: entry.map(|e| ServiceIcon {
+                    desktop_id: e.icon.desktop_id.clone(),
+                    site_url: e.icon.site_url.clone(),
+                    icon_url: e.icon.icon_url.clone(),
+                    sha256: e.icon.sha256.clone(),
+                    firefox_profile: e.icon.firefox_profile,
+                    path: None,
+                }),
+                has_data: entry.is_some_and(|e| {
+                    servers::delete_targets(e, &self.paths.server, &self.paths.state_dir)
+                        .iter()
+                        .any(|(base, rel)| servers::delete_allowed(base, rel, &self.paths.server))
+                }),
                 id,
             });
         }

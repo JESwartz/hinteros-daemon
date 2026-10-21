@@ -1922,7 +1922,12 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   value is on/off only) and `stateDirs` (checked like `dataPaths`: relative to `/var/lib`, no
   `.`/`..`, `[A-Za-z0-9._-]` parts); all optional, so older indexes still parse.
 - **`services.list`** (read-only, open): `{revision, services: [{id, name, available, enabled,
-  status, setup, terms, detail}]}` for every available service and every enabled one. `status`:
+  status, setup, terms, detail, icon?, has_data}]}` for every available service and every enabled
+  one. `icon`: the catalog entry's `icon` (`desktop_id`, `icon_url` with `sha256`, `site_url`,
+  `firefox_profile`; absent when the catalog no longer has the entry); the session daemon adds
+  `icon.path` when relaying it, resolved and cached like `store.list`'s catalog icons (the
+  catalog's service entries are resolved too; `store_changed` when one arrives). `has_data`:
+  `delete_data` has something to delete (the entry has `stateDirs`; Jellyfin always). `status`:
   the unit's `ActiveState` (`jellyfin.service`, `plex.service`, `tailscaled.service`,
   `hinteros-cloudflared.service`). `detail` (enabled services with a setup, no secrets): Jellyfin
   `{setup_done, url, libraries, users}` (libraries live from Jellyfin, else the last list a job or
@@ -2040,14 +2045,15 @@ names the server's store path (`<hash>-jellyfin-<version>`). VM tests (system re
 
 ### What the launcher must do (session API 0.19)
 
-Hello with 0.19. Server tab: `system.services.list` (re-query on `job_finished` of the new kinds
-and after reconnecting); "Turn on" with the admin PIN (`terms` shown in full, then
+Hello with 0.19. Server tab: `system.services.list` (re-query on `job_finished` of the new kinds,
+on `store_changed`, since a service's icon may have arrived, and after reconnecting; the icon is
+`icon.path`, else a letter tile); "Turn on" with the admin PIN (`terms` shown in full, then
 `accepted_terms`); job pages from `job_progress` (the new stages `configuring` and `signing_in`;
 for `tailscale_login` the QR of `detail.auth_url`, also in `system.jobs.get`); Jellyfin libraries
 (`system.media.folders` to pick a folder, `system.jellyfin.libraries.add/remove`), Accounts
 (`system.jellyfin.users.reveal`), Plex claim code (`claim-` prefilled), Cloudflare token, Turn
-off (+ delete data, second confirmation); `job_failed.data.reason` and `unavailable {service,
-reason}` for the messages.
+off (+ delete data when `has_data`, second confirmation); `job_failed.data.reason` and
+`unavailable {service, reason}` for the messages.
 
 ## Development
 

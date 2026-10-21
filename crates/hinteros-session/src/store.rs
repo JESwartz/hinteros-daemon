@@ -88,6 +88,13 @@ impl Store {
             .send((EventName::StoreChanged, json!({}), Audience::All));
     }
 
+    /// `system.services.list`: each service's resolved icon (`icon.path`), from the same
+    /// resolution and cache as the catalog apps' icons (the catalog's service entries are
+    /// resolved too; `store_changed` is sent when one arrives).
+    pub fn service_icons(&self, result: &mut Value) {
+        add_service_icons(&self.inner.icons, result);
+    }
+
     /// After a relayed call succeeded: remember apps jobs, and the update check's result.
     pub fn relayed(&self, session_method: &str, params: Option<&Value>, result: &Value) {
         let target = hinteros_api::session::relay_target(session_method);
@@ -488,8 +495,52 @@ async fn watch(store: Store, mut rx: broadcast::Receiver<Broadcast>) {
     }
 }
 
+/// Set or clear `icon.path` of every service in a `services.list` result.
+fn add_service_icons(icons: &IconStore, result: &mut Value) {
+    let Some(services) = result.get_mut("services").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for s in services {
+        let Some(id) = s.get("id").and_then(Value::as_str).map(str::to_owned) else {
+            continue;
+        };
+        let Some(icon) = s.get_mut("icon").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        match icons.get(&id) {
+            Some(p) => {
+                icon.insert(
+                    "path".into(),
+                    Value::String(p.to_string_lossy().into_owned()),
+                );
+            }
+            None => {
+                icon.remove("path");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn service_icons_get_their_resolved_path() {
+        let icons = IconStore::default();
+        icons.set("jellyfin-server", Some("/cache/jellyfin-server.svg".into()));
+        let mut list = json!({"revision": "r", "services": [
+            {"id": "jellyfin-server", "icon": {"icon_url": "https://x/j.svg", "firefox_profile": false}},
+            {"id": "tailscale", "icon": {"site_url": "https://tailscale.com", "firefox_profile": false, "path": "/forged"}},
+            {"id": "gone"}
+        ]});
+        add_service_icons(&icons, &mut list);
+        assert_eq!(
+            list["services"][0]["icon"]["path"],
+            "/cache/jellyfin-server.svg"
+        );
+        assert_eq!(list["services"][1]["icon"].get("path"), None);
+        assert_eq!(list["services"][2].get("icon"), None);
+    }
+
     use super::*;
 
     #[test]

@@ -3063,7 +3063,7 @@
           "result": {
             "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
             "services": [
-              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": false, "status": null, "setup": "cloudflare", "terms": null, "detail": null },
+              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": false, "status": null, "setup": "cloudflare", "terms": null, "detail": null, "icon": { "site_url": "https://www.cloudflare.com/products/tunnel/", "firefox_profile": false }, "has_data": true },
               {
                 "id": "jellyfin-server",
                 "name": "Jellyfin server",
@@ -3080,7 +3080,9 @@
                     { "id": "a2c4e6f8a0b2c4d6e8f0a2b4c6d8e0f2", "name": "Books", "kind": "other", "folder": null }
                   ],
                   "users": [{ "profile_id": "p1", "jellyfin_user": "Alex" }, { "profile_id": "p2", "jellyfin_user": "Sam" }]
-                }
+                },
+                "icon": { "icon_url": "https://raw.githubusercontent.com/jellyfin/jellyfin-ux/master/branding/SVG/icon-transparent.svg", "sha256": "817c25b47442b192250448fe48cd5f265fe9183bc75aa12030bbe335495255d1", "site_url": "https://jellyfin.org", "firefox_profile": false, "path": "/home/tv/.cache/hinteros/icons/jellyfin-server.svg" },
+                "has_data": true
               },
               {
                 "id": "plex-media-server",
@@ -3090,9 +3092,11 @@
                 "status": null,
                 "setup": "plex",
                 "terms": { "title": "Plex Terms of Service", "version": "2025-10-30", "url": "https://www.plex.tv/about/privacy-legal/plex-terms-of-service/", "file": "/run/current-system/sw/share/hinteros/terms/plex-media-server-2025-10-30.txt" },
-                "detail": null
+                "detail": null,
+                "icon": { "icon_url": "https://watch.plex.tv/icons/icon-512x512.png", "sha256": "78072fd57aacff1f73dee6432fb8d7f0360f300b4545422fb767cce638c4e7d3", "site_url": "https://www.plex.tv", "firefox_profile": false },
+                "has_data": true
               },
-              { "id": "tailscale", "name": "Tailscale", "available": true, "enabled": false, "status": null, "setup": "tailscale", "terms": null, "detail": null }
+              { "id": "tailscale", "name": "Tailscale", "available": true, "enabled": false, "status": null, "setup": "tailscale", "terms": null, "detail": null, "icon": { "site_url": "https://tailscale.com", "firefox_profile": false, "path": "/home/tv/.cache/hinteros/icons/tailscale.png" }, "has_data": true }
             ]
           }
         },
@@ -3102,9 +3106,9 @@
           "result": {
             "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
             "services": [
-              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": true, "status": "inactive", "setup": "cloudflare", "terms": null, "detail": { "token_set": false, "connected": false, "local_ip": "192.168.1.42" } },
-              { "id": "plex-media-server", "name": "Plex Media Server", "available": true, "enabled": true, "status": "active", "setup": "plex", "terms": null, "detail": { "claimed": false, "server_name": "hinteros", "url": "http://192.168.1.42:32400" } },
-              { "id": "tailscale", "name": "Tailscale", "available": true, "enabled": true, "status": "active", "setup": "tailscale", "terms": null, "detail": { "state": "running", "name": "hinteros", "ip4": "100.101.102.103", "dns_name": "hinteros.tail1234.ts.net", "tailnet": "owner@example.com", "key_expiry": 1808042400 } }
+              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": true, "status": "inactive", "setup": "cloudflare", "terms": null, "detail": { "token_set": false, "connected": false, "local_ip": "192.168.1.42" }, "icon": { "site_url": "https://www.cloudflare.com/products/tunnel/", "firefox_profile": false }, "has_data": true },
+              { "id": "plex-media-server", "name": "Plex Media Server", "available": true, "enabled": true, "status": "active", "setup": "plex", "terms": null, "detail": { "claimed": false, "server_name": "hinteros", "url": "http://192.168.1.42:32400" }, "icon": { "icon_url": "https://watch.plex.tv/icons/icon-512x512.png", "sha256": "78072fd57aacff1f73dee6432fb8d7f0360f300b4545422fb767cce638c4e7d3", "site_url": "https://www.plex.tv", "firefox_profile": false }, "has_data": true },
+              { "id": "tailscale", "name": "Tailscale", "available": true, "enabled": true, "status": "active", "setup": "tailscale", "terms": null, "detail": { "state": "running", "name": "hinteros", "ip4": "100.101.102.103", "dns_name": "hinteros.tail1234.ts.net", "tailnet": "owner@example.com", "key_expiry": 1808042400 }, "icon": { "site_url": "https://tailscale.com", "firefox_profile": false, "path": "/home/tv/.cache/hinteros/icons/tailscale.png" }, "has_data": true }
             ]
           }
         }
@@ -6690,7 +6694,7 @@
     "ServiceInfo": {
       "description": "0.11: one service of the Server section.",
       "type": "object",
-      "required": ["id", "name", "available", "enabled", "status", "setup", "terms", "detail"],
+      "required": ["id", "name", "available", "enabled", "status", "setup", "terms", "detail", "has_data"],
       "additionalProperties": false,
       "properties": {
         "id": { "$ref": "#/$defs/CatalogId" },
@@ -6709,7 +6713,23 @@
             { "$ref": "#/$defs/CloudflareDetail" },
             { "type": "null" }
           ]
-        }
+        },
+        "icon": { "description": "The catalog entry's icon, as store.list shows an app's; absent when the catalog no longer has the entry.", "$ref": "#/$defs/ServiceIcon" },
+        "has_data": { "description": "services.disable with delete_data has something to delete (the entry has stateDirs; Jellyfin always).", "type": "boolean" }
+      }
+    },
+    "ServiceIcon": {
+      "description": "0.11: where a service's real icon is (HinterOS ships no logos): the catalog entry's desktopId, iconUrl (with sha256: a download with another SHA-256 is not kept) or siteUrl (discovery on the site).",
+      "type": "object",
+      "required": ["firefox_profile"],
+      "additionalProperties": false,
+      "properties": {
+        "desktop_id": { "type": "string" },
+        "site_url": { "type": "string" },
+        "icon_url": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "firefox_profile": { "type": "boolean" },
+        "path": { "description": "The resolved icon on this box (absolute path to an image). Only the session daemon sets it, in system.services.list: the same resolution and cache as store.list's icon.path. Absent until resolved; store_changed is sent when it appears.", "type": "string" }
       }
     },
     "JellyfinDetail": {

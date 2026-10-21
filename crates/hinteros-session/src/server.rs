@@ -281,7 +281,10 @@ async fn slow(
 ) -> Result<Value, ErrorObject> {
     if let Some(target) = session::relay_target(method) {
         let kept = params.clone();
-        let result = s.relay.call(target, params).await?;
+        let mut result = s.relay.call(target, params).await?;
+        if target == hinteros_api::system::ServicesList::NAME {
+            s.store.service_icons(&mut result);
+        }
         s.store.relayed(method, kept.as_ref(), &result);
         return Ok(result);
     }

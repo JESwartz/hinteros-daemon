@@ -1808,6 +1808,29 @@ pub enum ServiceDetail {
     Cloudflare(CloudflareDetail),
 }
 
+/// Where a service's real icon is: the catalog entry's `icon`, as `store.list` shows an app's
+/// (HinterOS ships no logos).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceIcon {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
+    /// Hex SHA-256 of the `icon_url` file: a download with another one is not kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub firefox_profile: bool,
+    /// The resolved icon on this box (an absolute path to an image). Only the session daemon
+    /// sets it, in `system.services.list` (the same cache as `store.list`'s `icon.path`);
+    /// absent until resolved, and `store_changed` is sent when it appears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceInfo {
@@ -1829,6 +1852,13 @@ pub struct ServiceInfo {
     /// Per-setup detail (enabled services with a setup only).
     #[serde(deserialize_with = "nullable")]
     pub detail: Option<ServiceDetail>,
+    /// The catalog entry's icon; absent when the catalog no longer has the entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<ServiceIcon>,
+    /// `services.disable {delete_data: true}` has something to delete (the entry has
+    /// `stateDirs`; Jellyfin always).
+    #[serde(default)]
+    pub has_data: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -208,6 +208,102 @@ pub struct Entry {
     /// `false`: the app runs without the sandbox (optional; default true).
     #[serde(default = "yes")]
     pub sandbox: bool,
+    /// Services (M10): ports the system opens while the service is on (optional; older indexes
+    /// have none).
+    #[serde(default)]
+    pub ports: Vec<Port>,
+    /// Services (M10): the setup flow the Server section shows (`jellyfin`, `plex`,
+    /// `tailscale`, `cloudflare`), as written; see [`Entry::setup_kind`]. Optional.
+    #[serde(default)]
+    pub setup: Option<String>,
+    /// Services (M10): directories below `/var/lib` that `services.disable {delete_data}`
+    /// removes (checked with [`is_state_dir`]). Optional.
+    #[serde(default)]
+    pub state_dirs: Vec<String>,
+}
+
+/// The setup flows the Server section knows (catalog `setup`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Setup {
+    Jellyfin,
+    Plex,
+    Tailscale,
+    Cloudflare,
+}
+
+impl Setup {
+    pub const ALL: &[Setup] = &[
+        Setup::Jellyfin,
+        Setup::Plex,
+        Setup::Tailscale,
+        Setup::Cloudflare,
+    ];
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "jellyfin" => Some(Setup::Jellyfin),
+            "plex" => Some(Setup::Plex),
+            "tailscale" => Some(Setup::Tailscale),
+            "cloudflare" => Some(Setup::Cloudflare),
+            _ => None,
+        }
+    }
+}
+
+/// A port a service opens (catalog `ports`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Port {
+    pub port: u16,
+    pub proto: Proto,
+    pub from: PortFrom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Proto {
+    Tcp,
+    Udp,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortFrom {
+    Lan,
+    Any,
+    #[serde(other)]
+    Unknown,
+}
+
+impl Entry {
+    /// The setup flow (`None`: no setup, or a value this code does not know: on/off only).
+    pub fn setup_kind(&self) -> Option<Setup> {
+        self.setup.as_deref().and_then(Setup::from_name)
+    }
+
+    /// The first TCP port (the address a service is used at).
+    pub fn tcp_port(&self) -> Option<u16> {
+        self.ports
+            .iter()
+            .find(|p| p.proto == Proto::Tcp)
+            .map(|p| p.port)
+    }
+}
+
+/// A `stateDirs` entry: relative to `/var/lib`, `^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`, no `.` or
+/// `..` component, at most 200 bytes.
+pub fn is_state_dir(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 200
+        && s.split('/').all(|c| {
+            !c.is_empty()
+                && c != "."
+                && c != ".."
+                && c.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        })
 }
 
 fn yes() -> bool {
@@ -383,6 +479,11 @@ fn check_entry(e: &Entry) -> Result<(), String> {
             return Err(format!("{}: bad data path {p:?}", e.id));
         }
     }
+    for d in &e.state_dirs {
+        if !is_state_dir(d) {
+            return Err(format!("{}: bad state dir {d:?}", e.id));
+        }
+    }
     if let Some(t) = &e.terms {
         let name_ok = t.file.strip_prefix("terms/").is_some_and(|n| {
             n.ends_with(".txt")
@@ -537,6 +638,61 @@ mod tests {
             "a\nb", "a\\b",
         ] {
             assert!(!is_data_path(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn service_fields() {
+        let i = Index::parse(
+            br#"{"indexVersion":3,"apps":[
+              {"id":"jellyfin-server","kind":"service","type":"service","name":"Jellyfin",
+               "status":"available","ports":[{"port":8096,"proto":"tcp","from":"lan"},
+               {"port":7359,"proto":"udp","from":"lan"}],"setup":"jellyfin","stateDirs":["jellyfin"]},
+              {"id":"cloudflare-tunnel","kind":"service","type":"service","name":"C",
+               "status":"available","ports":[],"setup":"cloudflare",
+               "stateDirs":["hinteros/services/cloudflare-tunnel"]},
+              {"id":"later","kind":"service","type":"service","name":"L","status":"available",
+               "ports":[{"port":1,"proto":"sctp","from":"wan"}],"setup":"later"},
+              {"id":"old","kind":"service","type":"service","name":"O","status":"available"}]}"#,
+            "/".into(),
+        )
+        .unwrap();
+        let j = i.get("jellyfin-server").unwrap();
+        assert_eq!(j.setup_kind(), Some(Setup::Jellyfin));
+        assert_eq!(j.tcp_port(), Some(8096));
+        assert_eq!(j.state_dirs, ["jellyfin"]);
+        let c = i.get("cloudflare-tunnel").unwrap();
+        assert_eq!(c.setup_kind(), Some(Setup::Cloudflare));
+        assert_eq!(c.tcp_port(), None);
+        // Unknown values: on/off only; unknown protocols are no TCP port.
+        let l = i.get("later").unwrap();
+        assert_eq!(l.setup_kind(), None);
+        assert_eq!(l.ports[0].proto, Proto::Unknown);
+        assert_eq!(l.ports[0].from, PortFrom::Unknown);
+        assert_eq!(l.tcp_port(), None);
+        // Older indexes: none of the three fields.
+        let o = i.get("old").unwrap();
+        assert!(o.ports.is_empty() && o.setup.is_none() && o.state_dirs.is_empty());
+        for bad in [
+            "..", "a/../b", "/var", "a//b", "a/", "a b", "$x", "a/./b", "",
+        ] {
+            let text = format!(
+                r#"{{"indexVersion":3,"apps":[{{"id":"a","kind":"service","name":"A","status":"available","stateDirs":[{}]}}]}}"#,
+                serde_json::to_string(bad).unwrap()
+            );
+            assert!(
+                Index::parse(text.as_bytes(), "/".into()).is_err(),
+                "{bad:?}"
+            );
+            assert!(!is_state_dir(bad), "{bad:?}");
+        }
+        for ok in [
+            "plex",
+            "hinteros/services/cloudflare-tunnel",
+            "a.b_c-d",
+            ".x",
+        ] {
+            assert!(is_state_dir(ok), "{ok}");
         }
     }
 

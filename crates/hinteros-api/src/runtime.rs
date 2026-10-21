@@ -45,6 +45,11 @@ pub enum Service {
     Polkit,
     /// 0.4/0.12: per-profile apps and profiles (`unavailable {service: profiles, reason: schema1}`).
     Profiles,
+    /// 0.19 (system API 0.11): the Server section's services (`off`, `not_ready`).
+    Jellyfin,
+    Plex,
+    Tailscale,
+    Cloudflare,
 }
 
 impl Service {
@@ -57,6 +62,10 @@ impl Service {
         Service::Catalog,
         Service::Polkit,
         Service::Profiles,
+        Service::Jellyfin,
+        Service::Plex,
+        Service::Tailscale,
+        Service::Cloudflare,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -69,6 +78,10 @@ impl Service {
             Service::Catalog => "catalog",
             Service::Profiles => "profiles",
             Service::Polkit => "polkit",
+            Service::Jellyfin => "jellyfin",
+            Service::Plex => "plex",
+            Service::Tailscale => "tailscale",
+            Service::Cloudflare => "cloudflare",
         }
     }
 }

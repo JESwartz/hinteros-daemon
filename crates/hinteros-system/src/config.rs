@@ -303,6 +303,40 @@ pub struct ServeArgs {
     /// The cgroup v2 root: `lan_filter.set` checks the caller's cgroup there
     #[arg(long, default_value = "/sys/fs/cgroup")]
     pub cgroup_root: PathBuf,
+    /// Server section (0.11): the media folder Jellyfin libraries are made from
+    #[arg(long, default_value = "/srv/media")]
+    pub media_dir: PathBuf,
+    /// Where services keep their state (`stateDirs` are below it)
+    #[arg(long, default_value = "/var/lib", hide = true)]
+    pub var_lib_dir: PathBuf,
+    /// Where services keep caches (Jellyfin's is deleted with its data)
+    #[arg(long, default_value = "/var/cache", hide = true)]
+    pub var_cache_dir: PathBuf,
+    /// Jellyfin's HTTP address (loopback only)
+    #[arg(long, default_value = "127.0.0.1:8096", hide = true)]
+    pub jellyfin_addr: std::net::SocketAddr,
+    /// Plex Media Server's HTTP address (loopback only)
+    #[arg(long, default_value = "127.0.0.1:32400", hide = true)]
+    pub plex_addr: std::net::SocketAddr,
+    /// Plex Media Server's settings (`PlexOnlineToken`, `FriendlyName`)
+    #[arg(
+        long,
+        default_value = "/var/lib/plex/Plex Media Server/Preferences.xml",
+        hide = true
+    )]
+    pub plex_preferences: PathBuf,
+    /// tailscaled's LocalAPI socket
+    #[arg(long, default_value = "/run/tailscale/tailscaled.sock", hide = true)]
+    pub tailscale_socket: PathBuf,
+    /// The tailscale CLI (jobs: sign-in and sign-out)
+    #[arg(long, default_value = "tailscale", hide = true)]
+    pub tailscale: String,
+    /// cloudflared's metrics address (`/ready`; loopback only)
+    #[arg(long, default_value = "127.0.0.1:20241", hide = true)]
+    pub cloudflared_metrics: std::net::SocketAddr,
+    /// How long `tailscale.login` waits for the person to sign in, in seconds
+    #[arg(long, default_value_t = 600, hide = true)]
+    pub tailscale_login_timeout_s: u64,
 }
 
 impl ServeArgs {
@@ -326,6 +360,18 @@ impl ServeArgs {
             proc_dir: self.test_proc_dir.clone().unwrap_or_else(default_proc),
             zoneinfo_dir: self.zoneinfo_dir.clone(),
             localtime: self.localtime.clone(),
+            server: ServerPaths {
+                media_dir: self.media_dir.clone(),
+                var_lib: self.var_lib_dir.clone(),
+                var_cache: self.var_cache_dir.clone(),
+                jellyfin: self.jellyfin_addr,
+                plex: self.plex_addr,
+                plex_preferences: self.plex_preferences.clone(),
+                tailscale_socket: self.tailscale_socket.clone(),
+                tailscale: self.tailscale.clone(),
+                cloudflared_metrics: self.cloudflared_metrics,
+                tailscale_login_timeout_s: self.tailscale_login_timeout_s,
+            },
         }
     }
 
@@ -388,6 +434,43 @@ pub struct Paths {
     /// The link to the box's time zone file.
     #[serde(default = "default_localtime")]
     pub localtime: PathBuf,
+    /// The Server section's services (0.11).
+    #[serde(default)]
+    pub server: ServerPaths,
+}
+
+/// Where the Server section's services are (the system repo's contract; tests point them at a
+/// temporary root and fakes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerPaths {
+    pub media_dir: PathBuf,
+    pub var_lib: PathBuf,
+    pub var_cache: PathBuf,
+    pub jellyfin: std::net::SocketAddr,
+    pub plex: std::net::SocketAddr,
+    pub plex_preferences: PathBuf,
+    pub tailscale_socket: PathBuf,
+    pub tailscale: String,
+    pub cloudflared_metrics: std::net::SocketAddr,
+    pub tailscale_login_timeout_s: u64,
+}
+
+impl Default for ServerPaths {
+    fn default() -> Self {
+        Self {
+            media_dir: "/srv/media".into(),
+            var_lib: "/var/lib".into(),
+            var_cache: "/var/cache".into(),
+            jellyfin: ([127, 0, 0, 1], 8096).into(),
+            plex: ([127, 0, 0, 1], 32400).into(),
+            plex_preferences: "/var/lib/plex/Plex Media Server/Preferences.xml".into(),
+            tailscale_socket: "/run/tailscale/tailscaled.sock".into(),
+            tailscale: "tailscale".into(),
+            cloudflared_metrics: ([127, 0, 0, 1], 20241).into(),
+            tailscale_login_timeout_s: 600,
+        }
+    }
 }
 
 fn default_proc() -> PathBuf {
@@ -501,6 +584,10 @@ impl Paths {
     /// replacing `/etc/hinteros` ([`crate::state::lock`]).
     pub fn state_lock(&self) -> PathBuf {
         self.run_dir.join("state.lock")
+    }
+    /// Per-service state of the Server section (`services/<id>/`, 0700 root).
+    pub fn services_dir(&self) -> PathBuf {
+        self.state_dir.join("services")
     }
 }
 

@@ -406,6 +406,7 @@ impl Progress {
             builds_total: nz(builds_total),
             builds_running: nz(running),
             building: self.building(),
+            auth_url: None,
         }
     }
 

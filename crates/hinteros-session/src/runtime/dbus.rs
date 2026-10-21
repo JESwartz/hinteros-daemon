@@ -137,6 +137,10 @@ pub fn service_name(service: Service) -> &'static str {
         Service::Catalog => "the app catalog",
         Service::Polkit => "polkit",
         Service::Profiles => "profiles",
+        Service::Jellyfin => "Jellyfin",
+        Service::Plex => "Plex",
+        Service::Tailscale => "Tailscale",
+        Service::Cloudflare => "Cloudflare Tunnel",
     }
 }
 

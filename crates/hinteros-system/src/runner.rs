@@ -36,6 +36,7 @@ use crate::update::{Git, GitError, SeenTips};
 
 mod apps;
 mod profiles;
+mod servers;
 mod storage;
 
 /// Files of a config dir that belong to a generation (the snapshot; device-config.nix).
@@ -106,6 +107,11 @@ fn run(dir: &Path) -> anyhow::Result<()> {
         Action::GuestEnd(j) => r.guest_end(&j),
         Action::StorageMeasure(j) => r.storage_measure(&j),
         Action::Cleanup(j) => r.cleanup(&j),
+        Action::Services(j) => r.services_job(&j),
+        Action::Jellyfin(j) => r.jellyfin_job(&j),
+        Action::Plex(j) => r.plex_job(&j),
+        Action::Tailscale(j) => r.tailscale_job(&j),
+        Action::Cloudflare(j) => r.cloudflare_job(&j),
     };
     let subject = (r.subject != r.spec.subject).then(|| r.subject.clone());
     let staging = r.spec.paths.staging();
@@ -1291,6 +1297,7 @@ mod tests {
             proc_dir: "/proc".into(),
             zoneinfo_dir: d.join("zoneinfo"),
             localtime: d.join("localtime"),
+            server: Default::default(),
         };
         let tools = crate::config::Tools {
             nix: "nix".into(),

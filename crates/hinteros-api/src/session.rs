@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 18);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 19);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -950,6 +950,19 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<RelayJobsGet>(),
         MethodInfo::of::<RelayJobsList>(),
         MethodInfo::of::<RelayJobsCancel>(),
+        MethodInfo::of::<RelayServicesList>(),
+        MethodInfo::of::<RelayServicesEnable>(),
+        MethodInfo::of::<RelayServicesDisable>(),
+        MethodInfo::of::<RelayMediaFolders>(),
+        MethodInfo::of::<RelayJellyfinLibrariesAdd>(),
+        MethodInfo::of::<RelayJellyfinLibrariesRemove>(),
+        MethodInfo::of::<RelayJellyfinUsersReveal>(),
+        MethodInfo::of::<RelayJellyfinClientToken>(),
+        MethodInfo::of::<RelayPlexClaim>(),
+        MethodInfo::of::<RelayTailscaleLogin>(),
+        MethodInfo::of::<RelayTailscaleLogout>(),
+        MethodInfo::of::<RelayCloudflareSetToken>(),
+        MethodInfo::of::<RelayCloudflareClearToken>(),
         MethodInfo::of::<NetworkStatusMethod>(),
         MethodInfo::of::<WifiScan>(),
         MethodInfo::of::<WifiListMethod>(),
@@ -1112,6 +1125,19 @@ relay! {
     RelayJobsGet = "system.jobs.get" => crate::system::JobsGet;
     RelayJobsList = "system.jobs.list" => crate::system::JobsList;
     RelayJobsCancel = "system.jobs.cancel" => crate::system::JobsCancel;
+    RelayServicesList = "system.services.list" => crate::system::ServicesList;
+    RelayServicesEnable = "system.services.enable" => crate::system::ServicesEnable;
+    RelayServicesDisable = "system.services.disable" => crate::system::ServicesDisable;
+    RelayMediaFolders = "system.media.folders" => crate::system::MediaFolders;
+    RelayJellyfinLibrariesAdd = "system.jellyfin.libraries.add" => crate::system::JellyfinLibrariesAdd;
+    RelayJellyfinLibrariesRemove = "system.jellyfin.libraries.remove" => crate::system::JellyfinLibrariesRemove;
+    RelayJellyfinUsersReveal = "system.jellyfin.users.reveal" => crate::system::JellyfinUsersReveal;
+    RelayJellyfinClientToken = "system.jellyfin.client_token" => crate::system::JellyfinClientToken;
+    RelayPlexClaim = "system.plex.claim" => crate::system::PlexClaim;
+    RelayTailscaleLogin = "system.tailscale.login" => crate::system::TailscaleLogin;
+    RelayTailscaleLogout = "system.tailscale.logout" => crate::system::TailscaleLogout;
+    RelayCloudflareSetToken = "system.cloudflare.set_token" => crate::system::CloudflareSetToken;
+    RelayCloudflareClearToken = "system.cloudflare.clear_token" => crate::system::CloudflareClearToken;
 }
 
 /// The system method a session method relays to, if it is a relay method.

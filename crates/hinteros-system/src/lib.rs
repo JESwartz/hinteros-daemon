@@ -30,6 +30,7 @@ pub mod profiles;
 pub mod public;
 pub mod resetpin;
 pub mod runner;
+pub mod servers;
 pub mod service;
 pub mod splash;
 pub mod splashdraw;

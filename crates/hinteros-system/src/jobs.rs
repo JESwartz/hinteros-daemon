@@ -504,6 +504,7 @@ mod tests {
             proc_dir: "/proc".into(),
             zoneinfo_dir: d.join("zoneinfo"),
             localtime: d.join("localtime"),
+            server: Default::default(),
         }
     }
 

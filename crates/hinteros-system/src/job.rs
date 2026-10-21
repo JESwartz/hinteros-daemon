@@ -108,6 +108,88 @@ pub enum Action {
     StorageMeasure(MeasureJob),
     /// Remove old generations (system or app envs), then collect garbage.
     Cleanup(CleanupJob),
+    /// 0.11: services turned on or off (the apply flow), then their follow-up (Jellyfin users,
+    /// deleting data).
+    Services(ServicesJob),
+    /// 0.11: a Jellyfin library added or removed.
+    Jellyfin(JellyfinJob),
+    /// 0.11: Plex linked to an account.
+    Plex(PlexJob),
+    /// 0.11: Tailscale sign-in or sign-out.
+    Tailscale(TailscaleJob),
+    /// 0.11: the Cloudflare tunnel restarted on a new token, or stopped and its token deleted.
+    Cloudflare(CloudflareJob),
+}
+
+/// 0.11: `services.enable` / `services.disable`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServicesJob {
+    /// The apply flow (the new `services`, accepted terms).
+    pub apply: Apply,
+    /// Services turned on (Jellyfin: its users are made once its setup is done).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enabled: Vec<String>,
+    /// After a successful switch: data to delete (checked again by the job).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delete: Vec<DeleteTarget>,
+}
+
+/// A service's data directory: `rel` below `base` (`/var/lib`, `/var/cache`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteTarget {
+    pub base: PathBuf,
+    pub rel: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum JellyfinOp {
+    AddLibrary {
+        name: String,
+        kind: hinteros_api::system::LibraryKind,
+        /// A `media.folders` id (resolved again by the job).
+        folder: String,
+    },
+    RemoveLibrary {
+        library_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JellyfinJob {
+    pub op: JellyfinOp,
+}
+
+/// The claim code is short-lived (minutes) and single-use; the spec is root-only.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlexJob {
+    pub code: String,
+}
+
+impl std::fmt::Debug for PlexJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PlexJob { .. }")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TailscaleJob {
+    /// Sign in (else sign out).
+    pub login: bool,
+}
+
+/// The token itself is written by the service (0600) before the job starts; it is never in a
+/// spec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudflareJob {
+    /// Restart the tunnel on the new token (else stop it and delete the token).
+    pub set: bool,
 }
 
 /// A home to measure.
@@ -406,6 +488,16 @@ impl Status {
             subject: None,
         }
     }
+}
+
+/// `job_failed` with `reason` (0.11: why a Server section job failed: `unreachable`,
+/// `not_ready`, `refused`, `timeout`, `not_connected`).
+pub fn job_failed_because(stage: Stage, hint: &str, reason: &str) -> ErrorObject {
+    let mut e = job_failed(stage, hint);
+    if let Some(d) = e.data.as_mut() {
+        d["reason"] = json!(reason);
+    }
+    e
 }
 
 /// `job_failed` (3003) with `{stage, log_hint}`.

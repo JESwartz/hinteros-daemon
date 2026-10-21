@@ -60,10 +60,31 @@ pub fn delete_in_home(home: &Path, uid: u32, rel: &str) -> Result<Deleted, Refus
     if st.st_uid != uid {
         return Err(Refused::BadHome(shown, format!("not owned by uid {uid}")));
     }
-    let dev = st.st_dev;
+    delete_below(home_fd, st.st_dev, shown, rel)
+}
 
+/// Delete `rel` (a catalog `stateDirs` entry: checked with
+/// [`hinteros_api::catalog::is_state_dir`]) below `base` (`/var/lib`, `/var/cache`), as for app
+/// data: no symlink followed anywhere (the base itself included), nothing on another filesystem.
+pub fn delete_under(base: &Path, rel: &str) -> Result<Deleted, Refused> {
+    if !hinteros_api::catalog::is_state_dir(rel) {
+        return Err(Refused::BadPath(rel.to_owned()));
+    }
+    let shown = base.display().to_string();
+    if !base.is_absolute() || base == Path::new("/") {
+        return Err(Refused::BadHome(shown, "not an absolute directory".into()));
+    }
+    let fd = rustix::fs::open(base, DIR_FLAGS, Mode::empty())
+        .map_err(|e| Refused::BadHome(shown.clone(), e.to_string()))?;
+    let st = fstat(&fd).map_err(|e| Refused::BadHome(shown.clone(), e.to_string()))?;
+    delete_below(fd, st.st_dev, shown, rel)
+}
+
+/// Delete the checked relative path `rel` below the open directory `base_fd` (on `dev`).
+fn delete_below(base_fd: OwnedFd, dev: u64, shown: String, rel: &str) -> Result<Deleted, Refused> {
+    let home_fd = base_fd;
     let parts: Vec<&str> = rel.split('/').collect();
-    let (last, parents) = parts.split_last().expect("is_data_path: not empty");
+    let (last, parents) = parts.split_last().expect("checked: not empty");
     let mut dir: OwnedFd = home_fd;
     let mut here = shown.clone();
     for part in parents {
@@ -437,5 +458,45 @@ mod tests {
             Err(Refused::BadHome(..))
         ));
         assert!(home.join(".config").exists());
+    }
+
+    #[test]
+    fn service_state_dirs() {
+        let d = tempfile::tempdir().unwrap();
+        let var = d.path().join("var/lib");
+        let outside = d.path().join("outside");
+        fs::create_dir_all(var.join("jellyfin/data/x")).unwrap();
+        fs::write(var.join("jellyfin/data/x/f"), "x").unwrap();
+        fs::create_dir_all(var.join("hinteros/services")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep"), "x").unwrap();
+        // A link where a state dir should be: the link goes, not its target.
+        std::os::unix::fs::symlink(&outside, var.join("plex")).unwrap();
+        // A link in the middle of the path: refused.
+        std::os::unix::fs::symlink(&outside, var.join("hinteros/services/cloudflare-tunnel"))
+            .unwrap();
+        assert_eq!(delete_under(&var, "jellyfin"), Ok(Deleted::Removed(4)));
+        assert!(!var.join("jellyfin").exists());
+        assert_eq!(delete_under(&var, "plex"), Ok(Deleted::Removed(1)));
+        assert!(outside.join("keep").exists());
+        assert!(matches!(
+            delete_under(&var, "hinteros/services/cloudflare-tunnel/token"),
+            Err(Refused::NotADirectory(_))
+        ));
+        assert_eq!(delete_under(&var, "nothing"), Ok(Deleted::Missing));
+        for bad in ["../outside", "/etc", "a/../b", ""] {
+            assert!(
+                matches!(delete_under(&var, bad), Err(Refused::BadPath(_))),
+                "{bad}"
+            );
+        }
+        // The base itself must not be a link.
+        let linked = d.path().join("linked");
+        std::os::unix::fs::symlink(&outside, &linked).unwrap();
+        assert!(matches!(
+            delete_under(&linked, "keep"),
+            Err(Refused::BadHome(..))
+        ));
+        assert!(outside.join("keep").exists());
     }
 }

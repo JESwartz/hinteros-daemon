@@ -625,6 +625,163 @@ fn system_schema_rejects_what_it_should() {
     );
 }
 
+/// System API 0.11 (session API 0.19): the Server section's inputs are closed and strict in both
+/// documents, and its secrets stay out of debug output.
+#[test]
+fn server_section() {
+    use hinteros_api::system::{
+        CloudflareSetTokenParams, JellyfinAccount, JellyfinProfileAccount,
+        JellyfinUsersRevealResult, LibraryKind, LibraryKindShown, PlexClaimParams, Setup,
+        TailscaleState, UnitState,
+    };
+    let rev = "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d";
+    for (schema, prefix) in [(ApiSchema::system(), ""), (ApiSchema::session(), "system.")] {
+        assert_eq!(schema_enum(&schema, "UnitState"), rust_enum(UnitState::ALL));
+        assert_eq!(schema_enum(&schema, "Setup"), rust_enum(Setup::ALL));
+        assert_eq!(
+            schema_enum(&schema, "LibraryKind"),
+            rust_enum(LibraryKind::ALL)
+        );
+        assert_eq!(
+            schema_enum(&schema, "LibraryKindShown"),
+            rust_enum(LibraryKindShown::ALL)
+        );
+        assert_eq!(
+            schema_enum(&schema, "TailscaleState"),
+            rust_enum(TailscaleState::ALL)
+        );
+        let bad = [
+            (
+                "services.enable",
+                format!(r#"{{"ids":["a"],"pin":"1234","revision":"{rev}","uid":0}}"#),
+            ),
+            (
+                "services.enable",
+                format!(r#"{{"ids":["a","a"],"pin":"1234","revision":"{rev}"}}"#),
+            ),
+            (
+                "services.enable",
+                format!(r#"{{"ids":["../x"],"pin":"1234","revision":"{rev}"}}"#),
+            ),
+            (
+                "services.enable",
+                format!(r#"{{"ids":["a"],"revision":"{rev}"}}"#),
+            ),
+            (
+                "services.disable",
+                format!(r#"{{"ids":["a"],"pin":"1234","revision":"{rev}"}}"#),
+            ),
+            ("media.folders", r#"{"folder_id":"../etc"}"#.into()),
+            ("media.folders", r#"{"folder_id":"/srv/media"}"#.into()),
+            ("media.folders", r#"{"folder_id":"a/.hidden"}"#.into()),
+            ("media.folders", r#"{"path":"/"}"#.into()),
+            (
+                "jellyfin.libraries.add",
+                r#"{"pin":"1234","name":"M","kind":"books","folder":"M"}"#.into(),
+            ),
+            (
+                "jellyfin.libraries.add",
+                r#"{"pin":"1234","name":"","kind":"movies","folder":"M"}"#.into(),
+            ),
+            (
+                "jellyfin.libraries.add",
+                r#"{"pin":"1234","name":"M","kind":"movies","folder":"M/../.."}"#.into(),
+            ),
+            (
+                "jellyfin.libraries.remove",
+                r#"{"pin":"1234","library_id":"F137A2DD21BBC1B99AA5C0F6BF02A805"}"#.into(),
+            ),
+            ("jellyfin.users.reveal", r#"{}"#.into()),
+            ("plex.claim", r#"{"pin":"1234","code":"claim-abc"}"#.into()),
+            (
+                "plex.claim",
+                r#"{"pin":"1234","code":"AbCdEfGhIjKlMnOpQrStUv"}"#.into(),
+            ),
+            (
+                "tailscale.login",
+                r#"{"pin":"1234","exit_node":"x"}"#.into(),
+            ),
+            (
+                "tailscale.login",
+                r#"{"pin":"1234","authkey":"tskey-x"}"#.into(),
+            ),
+            (
+                "cloudflare.set_token",
+                r#"{"pin":"1234","token":"not base64!"}"#.into(),
+            ),
+            (
+                "cloudflare.set_token",
+                format!(r#"{{"pin":"1234","token":"{}"}}"#, "A".repeat(600)),
+            ),
+            (
+                "cloudflare.clear_token",
+                r#"{"pin":"1234","token":"x"}"#.into(),
+            ),
+        ];
+        for (m, p) in bad {
+            let v: Value = serde_json::from_str(&p).unwrap();
+            assert!(
+                schema.check_params(&format!("{prefix}{m}"), &v).is_err(),
+                "{prefix}{m} accepted {p}"
+            );
+        }
+        // A Server section job failure says why; job_progress carries the sign-in URL.
+        schema
+            .check_error(&serde_json::json!({"code": 3003, "message": "m", "data": {"stage": "signing_in", "log_hint": "x", "reason": "timeout"}}))
+            .unwrap();
+        assert!(
+            schema
+                .check_error(&serde_json::json!({"code": 3003, "message": "m", "data": {"stage": "configuring", "log_hint": "x", "reason": "mood"}}))
+                .is_err()
+        );
+        schema
+            .check_error(&serde_json::json!({"code": 4001, "message": "m", "data": {"service": "jellyfin", "reason": "not_ready"}}))
+            .unwrap();
+        let progress = serde_json::json!({"job_id": "3f9a0c2b7e4d1a65", "kind": "tailscale_login", "stage": "signing_in", "started_at": 1, "detail": {"auth_url": "https://login.tailscale.com/a/1a2b3c"}});
+        schema.check_event("job_progress", &progress).unwrap();
+        let mut bad_url = progress.clone();
+        bad_url["detail"]["auth_url"] = "javascript:alert(1)".into();
+        assert!(schema.check_event("job_progress", &bad_url).is_err());
+    }
+    let p: PlexClaimParams =
+        serde_json::from_str(r#"{"pin":"1234","code":"claim-AbCdEfGhIjKlMnOpQrSt"}"#).unwrap();
+    assert!(!format!("{p:?}").contains("claim-") && !format!("{p:?}").contains("1234"));
+    let t: CloudflareSetTokenParams =
+        serde_json::from_str(r#"{"pin":"1234","token":"c2VjcmV0"}"#).unwrap();
+    assert!(!format!("{t:?}").contains("c2VjcmV0"));
+    let r = JellyfinUsersRevealResult {
+        admin: Some(JellyfinAccount {
+            name: "admin".into(),
+            password: "s3cret-a".into(),
+        }),
+        users: vec![JellyfinProfileAccount {
+            profile_id: "p1".into(),
+            profile_name: "A".into(),
+            name: "A".into(),
+            password: "s3cret-b".into(),
+        }],
+    };
+    assert!(!format!("{r:?}").contains("s3cret"));
+    for m in system::MUTATING {
+        if m.starts_with("services.")
+            || m.starts_with("jellyfin.")
+            || m.starts_with("plex.")
+            || m.starts_with("tailscale.")
+            || m.starts_with("cloudflare.")
+        {
+            assert_eq!(
+                system::polkit_action(m),
+                Some("org.hinteros.system.services"),
+                "{m}"
+            );
+        }
+    }
+    assert!(
+        !system::MUTATING.contains(&"services.list")
+            && !system::MUTATING.contains(&"media.folders")
+    );
+}
+
 /// System API 0.10 (session API 0.18): `Building.percent`, in both documents, relayed unchanged.
 #[test]
 fn building_percent() {

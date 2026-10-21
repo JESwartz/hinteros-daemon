@@ -244,7 +244,7 @@ impl ProfilesRequest {
 }
 
 impl Service {
-    fn require_schema2(&self) -> Result<(State, String), ErrorObject> {
+    pub(super) fn require_schema2(&self) -> Result<(State, String), ErrorObject> {
         let (state, rev) = self.load_state()?;
         if !state.is_schema2() {
             // Before the migration the box has one implicit profile; nothing to manage yet.
@@ -643,6 +643,8 @@ impl Service {
                     profiles::check_name(&p.name)?;
                 self.save_file(&file)?;
                 self.profiles_changed();
+                // The profile's Jellyfin user follows the new name.
+                self.jellyfin_sync_later();
                 empty()
             }
             R::SetAppearance(p) => {

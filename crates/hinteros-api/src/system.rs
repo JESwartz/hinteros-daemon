@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, ErrorObject, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 10);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 11);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/system-api.json");
@@ -114,6 +114,24 @@ pub enum JobKind {
     CleanupSet,
     /// 0.9: the tip of another channel verified before `channel.set`.
     ChannelCheck,
+    /// 0.11: services turned on (a rebuild).
+    ServicesEnable,
+    /// 0.11: services turned off (a rebuild), their data deleted on request.
+    ServicesDisable,
+    /// 0.11: a Jellyfin library added.
+    JellyfinLibraryAdd,
+    /// 0.11: a Jellyfin library removed (the media files stay).
+    JellyfinLibraryRemove,
+    /// 0.11: Plex linked to the owner's account.
+    PlexClaim,
+    /// 0.11: Tailscale sign-in (waits for the person at the sign-in URL).
+    TailscaleLogin,
+    /// 0.11: Tailscale sign-out.
+    TailscaleLogout,
+    /// 0.11: the Cloudflare tunnel token written and the tunnel restarted.
+    CloudflareSetToken,
+    /// 0.11: the Cloudflare tunnel stopped and its token deleted.
+    CloudflareClearToken,
 }
 
 impl JobKind {
@@ -141,6 +159,15 @@ impl JobKind {
         JobKind::CleanupProfiles,
         JobKind::CleanupSet,
         JobKind::ChannelCheck,
+        JobKind::ServicesEnable,
+        JobKind::ServicesDisable,
+        JobKind::JellyfinLibraryAdd,
+        JobKind::JellyfinLibraryRemove,
+        JobKind::PlexClaim,
+        JobKind::TailscaleLogin,
+        JobKind::TailscaleLogout,
+        JobKind::CloudflareSetToken,
+        JobKind::CloudflareClearToken,
     ];
 }
 
@@ -184,6 +211,10 @@ pub enum Stage {
     Collecting,
     /// 0.4: after a system switch, every profile's app env is rebuilt against the new system.
     Apps,
+    /// 0.11: talking to a local service (Jellyfin, Plex, Tailscale, cloudflared).
+    Configuring,
+    /// 0.11: waiting for the person to sign in at `detail.auth_url` (Tailscale).
+    SigningIn,
     Finishing,
 }
 
@@ -201,6 +232,8 @@ impl Stage {
         Stage::Cleaning,
         Stage::Collecting,
         Stage::Apps,
+        Stage::Configuring,
+        Stage::SigningIn,
         Stage::Finishing,
     ];
 }
@@ -1570,6 +1603,514 @@ impl Method for LanFilterClear {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Server section (0.11, server.md): box-wide services, Jellyfin, Plex, Tailscale, Cloudflare
+
+pub use crate::catalog::Setup;
+
+/// Most services one `services.enable` / `services.disable` may name.
+pub const MAX_SERVICE_IDS: usize = 8;
+
+/// A service unit's state, as systemd's `ActiveState` says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnitState {
+    Active,
+    Reloading,
+    Inactive,
+    Failed,
+    Activating,
+    Deactivating,
+    Maintenance,
+    Refreshing,
+    /// A value this code does not know, or the unit is not loaded (`inactive` in practice).
+    #[serde(other)]
+    Unknown,
+}
+
+impl UnitState {
+    pub const ALL: &[UnitState] = &[
+        UnitState::Active,
+        UnitState::Reloading,
+        UnitState::Inactive,
+        UnitState::Failed,
+        UnitState::Activating,
+        UnitState::Deactivating,
+        UnitState::Maintenance,
+        UnitState::Refreshing,
+        UnitState::Unknown,
+    ];
+
+    pub fn from_systemd(s: &str) -> Self {
+        serde_json::from_value(serde_json::Value::String(s.to_owned())).unwrap_or(Self::Unknown)
+    }
+}
+
+/// The vendor terms of a service (Plex), with the absolute path of the text on the box.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceTerms {
+    pub title: String,
+    pub version: String,
+    pub url: String,
+    /// The text, next to the running generation's catalog index.
+    pub file: String,
+}
+
+/// What a Jellyfin library holds, as `services.list` shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryKindShown {
+    Movies,
+    Shows,
+    Music,
+    /// Mixed movies and shows (no collection type, or Jellyfin's `mixed`).
+    Mixed,
+    /// A type made in Jellyfin's own dashboard (books, photos, music videos, ...).
+    Other,
+}
+
+impl LibraryKindShown {
+    pub const ALL: &[LibraryKindShown] = &[
+        LibraryKindShown::Movies,
+        LibraryKindShown::Shows,
+        LibraryKindShown::Music,
+        LibraryKindShown::Mixed,
+        LibraryKindShown::Other,
+    ];
+}
+
+/// What a new Jellyfin library holds (`jellyfin.libraries.add`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryKind {
+    Movies,
+    Shows,
+    Music,
+    Mixed,
+}
+
+impl LibraryKind {
+    pub const ALL: &[LibraryKind] = &[
+        LibraryKind::Movies,
+        LibraryKind::Shows,
+        LibraryKind::Music,
+        LibraryKind::Mixed,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JellyfinLibrary {
+    /// Jellyfin's item id (32 lowercase hex digits).
+    pub id: String,
+    pub name: String,
+    pub kind: LibraryKindShown,
+    /// The `media.folders` id of its (first) folder; null when it is not in `/srv/media`.
+    #[serde(deserialize_with = "nullable")]
+    pub folder: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JellyfinUserRef {
+    pub profile_id: String,
+    /// The profile's Jellyfin user name.
+    pub jellyfin_user: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JellyfinDetail {
+    /// HinterOS made the first-run setup (admin user, API key).
+    pub setup_done: bool,
+    /// `http://<local IP>:8096`; null without a local network address.
+    #[serde(deserialize_with = "nullable")]
+    pub url: Option<String>,
+    pub libraries: Vec<JellyfinLibrary>,
+    pub users: Vec<JellyfinUserRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlexDetail {
+    /// Linked to a Plex account (`plex.claim`).
+    pub claimed: bool,
+    #[serde(deserialize_with = "nullable")]
+    pub server_name: Option<String>,
+    #[serde(deserialize_with = "nullable")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TailscaleState {
+    /// Not signed in (`tailscale.login`).
+    NeedsLogin,
+    /// Signed in; the tailnet's admin must approve the device.
+    NeedsApproval,
+    Starting,
+    Running,
+    Stopped,
+    /// tailscaled does not answer.
+    Unavailable,
+}
+
+impl TailscaleState {
+    pub const ALL: &[TailscaleState] = &[
+        TailscaleState::NeedsLogin,
+        TailscaleState::NeedsApproval,
+        TailscaleState::Starting,
+        TailscaleState::Running,
+        TailscaleState::Stopped,
+        TailscaleState::Unavailable,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TailscaleDetail {
+    pub state: TailscaleState,
+    /// The device's name in the tailnet.
+    #[serde(deserialize_with = "nullable")]
+    pub name: Option<String>,
+    /// The tailnet IPv4 address.
+    #[serde(deserialize_with = "nullable")]
+    pub ip4: Option<String>,
+    /// The MagicDNS name (without the trailing dot).
+    #[serde(deserialize_with = "nullable")]
+    pub dns_name: Option<String>,
+    /// The tailnet's name.
+    #[serde(deserialize_with = "nullable")]
+    pub tailnet: Option<String>,
+    /// When the device's key expires (Unix seconds); null: never, or unknown.
+    #[serde(deserialize_with = "nullable")]
+    pub key_expiry: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudflareDetail {
+    pub token_set: bool,
+    /// cloudflared has a connection to Cloudflare.
+    pub connected: bool,
+    /// The box's address on its local network, for the private-network route.
+    #[serde(deserialize_with = "nullable")]
+    pub local_ip: Option<String>,
+}
+
+/// Per-setup detail of an enabled service (`setup` says which).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ServiceDetail {
+    Jellyfin(JellyfinDetail),
+    Plex(PlexDetail),
+    Tailscale(TailscaleDetail),
+    Cloudflare(CloudflareDetail),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceInfo {
+    pub id: String,
+    pub name: String,
+    /// The catalog offers it (status available).
+    pub available: bool,
+    /// In `state.json` `services`.
+    pub enabled: bool,
+    /// The service's unit (enabled services only).
+    #[serde(deserialize_with = "nullable")]
+    pub status: Option<UnitState>,
+    /// The setup flow (null: on/off only).
+    #[serde(deserialize_with = "nullable")]
+    pub setup: Option<Setup>,
+    /// Vendor terms to accept before `services.enable`.
+    #[serde(deserialize_with = "nullable")]
+    pub terms: Option<ServiceTerms>,
+    /// Per-setup detail (enabled services with a setup only).
+    #[serde(deserialize_with = "nullable")]
+    pub detail: Option<ServiceDetail>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServicesListResult {
+    /// The hash of `state.json`, for `services.enable`/`services.disable`.
+    pub revision: String,
+    pub services: Vec<ServiceInfo>,
+}
+
+/// `services.list`: every service the catalog offers, and the enabled ones (read-only).
+pub struct ServicesList;
+impl Method for ServicesList {
+    const NAME: &'static str = "services.list";
+    type Params = NoParams;
+    type Result = ServicesListResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServicesEnableParams {
+    pub ids: Vec<String>,
+    /// The admin PIN.
+    pub pin: String,
+    /// `services.list`'s revision.
+    pub revision: String,
+    /// The terms version accepted, per service id with vendor terms.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub accepted_terms: BTreeMap<String, String>,
+}
+
+/// `services.enable`: job `services_enable` (a rebuild).
+pub struct ServicesEnable;
+impl Method for ServicesEnable {
+    const NAME: &'static str = "services.enable";
+    type Params = ServicesEnableParams;
+    type Result = JobRef;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServicesDisableParams {
+    pub ids: Vec<String>,
+    pub pin: String,
+    pub revision: String,
+    /// After the switch, also delete each service's data (`stateDirs`).
+    pub delete_data: bool,
+}
+
+/// `services.disable`: job `services_disable` (a rebuild).
+pub struct ServicesDisable;
+impl Method for ServicesDisable {
+    const NAME: &'static str = "services.disable";
+    type Params = ServicesDisableParams;
+    type Result = JobRef;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaFoldersParams {
+    /// A folder id from an earlier answer; absent: the top of `/srv/media`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaFolder {
+    /// The folder's path relative to `/srv/media`.
+    pub id: String,
+    pub name: String,
+    /// It has folders of its own.
+    pub has_children: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaFoldersResult {
+    #[serde(deserialize_with = "nullable")]
+    pub folder_id: Option<String>,
+    pub folders: Vec<MediaFolder>,
+}
+
+/// `media.folders`: one level of folders under `/srv/media` (read-only).
+pub struct MediaFolders;
+impl Method for MediaFolders {
+    const NAME: &'static str = "media.folders";
+    type Params = MediaFoldersParams;
+    type Result = MediaFoldersResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JellyfinLibrariesAddParams {
+    pub pin: String,
+    pub name: String,
+    pub kind: LibraryKind,
+    /// A `media.folders` id.
+    pub folder: String,
+}
+
+/// `jellyfin.libraries.add`: job `jellyfin_library_add`.
+pub struct JellyfinLibrariesAdd;
+impl Method for JellyfinLibrariesAdd {
+    const NAME: &'static str = "jellyfin.libraries.add";
+    type Params = JellyfinLibrariesAddParams;
+    type Result = JobRef;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JellyfinLibrariesRemoveParams {
+    pub pin: String,
+    pub library_id: String,
+}
+
+/// `jellyfin.libraries.remove`: job `jellyfin_library_remove` (the media files stay).
+pub struct JellyfinLibrariesRemove;
+impl Method for JellyfinLibrariesRemove {
+    const NAME: &'static str = "jellyfin.libraries.remove";
+    type Params = JellyfinLibrariesRemoveParams;
+    type Result = JobRef;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JellyfinAccount {
+    pub name: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JellyfinProfileAccount {
+    pub profile_id: String,
+    /// The profile's name now.
+    pub profile_name: String,
+    pub name: String,
+    pub password: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JellyfinUsersRevealResult {
+    /// The admin user; null when setup has not written it yet.
+    #[serde(deserialize_with = "nullable")]
+    pub admin: Option<JellyfinAccount>,
+    pub users: Vec<JellyfinProfileAccount>,
+}
+
+impl std::fmt::Debug for JellyfinUsersRevealResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Passwords never reach a log.
+        f.debug_struct("JellyfinUsersRevealResult")
+            .field("admin", &self.admin.as_ref().map(|a| &a.name))
+            .field("users", &self.users.len())
+            .finish()
+    }
+}
+
+/// `jellyfin.users.reveal`: the admin's and every profile's Jellyfin password (admin PIN; no
+/// job). Makes missing profile users first.
+pub struct JellyfinUsersReveal;
+impl Method for JellyfinUsersReveal {
+    const NAME: &'static str = "jellyfin.users.reveal";
+    type Params = PinParams;
+    type Result = JellyfinUsersRevealResult;
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlexClaimParams {
+    pub pin: String,
+    /// From plex.tv/claim: `claim-` and 20 letters, digits, `_` or `-`.
+    pub code: String,
+}
+
+impl std::fmt::Debug for PlexClaimParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PlexClaimParams { .. }")
+    }
+}
+
+/// `plex.claim`: job `plex_claim` (links the server to the owner's Plex account).
+pub struct PlexClaim;
+impl Method for PlexClaim {
+    const NAME: &'static str = "plex.claim";
+    type Params = PlexClaimParams;
+    type Result = JobRef;
+}
+
+/// `tailscale.login`: job `tailscale_login` (the sign-in URL comes in `job_progress`).
+pub struct TailscaleLogin;
+impl Method for TailscaleLogin {
+    const NAME: &'static str = "tailscale.login";
+    type Params = PinParams;
+    type Result = JobRef;
+}
+
+/// `tailscale.logout`: job `tailscale_logout`.
+pub struct TailscaleLogout;
+impl Method for TailscaleLogout {
+    const NAME: &'static str = "tailscale.logout";
+    type Params = PinParams;
+    type Result = JobRef;
+}
+
+/// The caller's own Jellyfin session (spike S1: the Jellyfin app on the box signs in by itself).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JellyfinClientTokenResult {
+    /// Jellyfin's server id (32 hex digits).
+    pub server_id: String,
+    /// The profile's Jellyfin user id.
+    pub user_id: String,
+    /// `hinteros-<profile id>`: the device the token belongs to (one live token per profile).
+    pub device_id: String,
+    pub access_token: String,
+}
+
+impl std::fmt::Debug for JellyfinClientTokenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JellyfinClientTokenResult")
+            .field("user_id", &self.user_id)
+            .field("device_id", &self.device_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `jellyfin.client_token`: a Jellyfin access token for the caller's own profile (no PIN; the
+/// guest and other accounts are refused). Made with the profile's password, kept, made again
+/// when Jellyfin no longer takes it.
+pub struct JellyfinClientToken;
+impl Method for JellyfinClientToken {
+    const NAME: &'static str = "jellyfin.client_token";
+    type Params = NoParams;
+    type Result = JellyfinClientTokenResult;
+}
+
+/// Longest Cloudflare tunnel token accepted.
+pub const MAX_TUNNEL_TOKEN_BYTES: usize = 512;
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudflareSetTokenParams {
+    pub pin: String,
+    /// The tunnel token from the Zero Trust dashboard.
+    pub token: String,
+}
+
+impl std::fmt::Debug for CloudflareSetTokenParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CloudflareSetTokenParams { .. }")
+    }
+}
+
+/// `cloudflare.set_token`: job `cloudflare_set_token`.
+pub struct CloudflareSetToken;
+impl Method for CloudflareSetToken {
+    const NAME: &'static str = "cloudflare.set_token";
+    type Params = CloudflareSetTokenParams;
+    type Result = JobRef;
+}
+
+/// `cloudflare.clear_token`: job `cloudflare_clear_token`.
+pub struct CloudflareClearToken;
+impl Method for CloudflareClearToken {
+    const NAME: &'static str = "cloudflare.clear_token";
+    type Params = PinParams;
+    type Result = JobRef;
+}
+
+/// 0.11: the library a Jellyfin job is about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubjectLibrary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<LibraryKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+}
+
+// ---------------------------------------------------------------------------------------------
 // Jobs
 
 /// Result of a job that changed the system.
@@ -1712,6 +2253,12 @@ pub struct JobSubject {
     pub keep_system: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_profiles: Option<u32>,
+    /// 0.11: services turned on or off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<CatalogApp>>,
+    /// 0.11: the Jellyfin library added or removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<SubjectLibrary>,
 }
 
 impl JobSubject {
@@ -1801,6 +2348,10 @@ pub struct ProgressDetail {
     /// 0.7: the most recently started derivation that is still building.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub building: Option<Building>,
+    /// 0.11: `tailscale_login`, stage `signing_in`: the URL to sign in at (the launcher shows it
+    /// as a QR code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_url: Option<String>,
 }
 
 /// 0.7: a derivation being built.
@@ -1933,6 +2484,19 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<TimeZoneSet>(),
         MethodInfo::of::<LanFilterSet>(),
         MethodInfo::of::<LanFilterClear>(),
+        MethodInfo::of::<ServicesList>(),
+        MethodInfo::of::<ServicesEnable>(),
+        MethodInfo::of::<ServicesDisable>(),
+        MethodInfo::of::<MediaFolders>(),
+        MethodInfo::of::<JellyfinLibrariesAdd>(),
+        MethodInfo::of::<JellyfinLibrariesRemove>(),
+        MethodInfo::of::<JellyfinUsersReveal>(),
+        MethodInfo::of::<JellyfinClientToken>(),
+        MethodInfo::of::<PlexClaim>(),
+        MethodInfo::of::<TailscaleLogin>(),
+        MethodInfo::of::<TailscaleLogout>(),
+        MethodInfo::of::<CloudflareSetToken>(),
+        MethodInfo::of::<CloudflareClearToken>(),
         MethodInfo::of::<JobsGet>(),
         MethodInfo::of::<JobsList>(),
         MethodInfo::of::<JobsCancel>(),
@@ -1987,6 +2551,16 @@ pub const MUTATING: &[&str] = &[
     StorageCleanupProfiles::NAME,
     CleanupSet::NAME,
     TimeZoneSet::NAME,
+    ServicesEnable::NAME,
+    ServicesDisable::NAME,
+    JellyfinLibrariesAdd::NAME,
+    JellyfinLibrariesRemove::NAME,
+    JellyfinUsersReveal::NAME,
+    PlexClaim::NAME,
+    TailscaleLogin::NAME,
+    TailscaleLogout::NAME,
+    CloudflareSetToken::NAME,
+    CloudflareClearToken::NAME,
     JobsCancel::NAME,
 ];
 
@@ -2003,6 +2577,9 @@ pub const GREETER_METHODS: &[&str] = &[
 
 /// Methods whose params carry PINs (never logged; the audit summary redacts them).
 pub const PIN_FIELDS: &[&str] = &["pin", "current_pin", "new_pin", "admin_pin"];
+
+/// 0.11: other secret params (a Plex claim code, a Cloudflare tunnel token): never logged either.
+pub const SECRET_FIELDS: &[&str] = &["code", "token"];
 
 /// The polkit action that guards a mutating method.
 pub fn polkit_action(method: &str) -> Option<&'static str> {
@@ -2040,6 +2617,17 @@ pub fn polkit_action(method: &str) -> Option<&'static str> {
         StorageCleanupSystem::NAME | StorageCleanupProfiles::NAME => "org.hinteros.system.rebuild",
         // 0.8: an existing action, so the policy file needs no change.
         TimeZoneSet::NAME => "org.hinteros.system.settings",
+        // 0.11: the admin PIN is checked by the service.
+        ServicesEnable::NAME
+        | ServicesDisable::NAME
+        | JellyfinLibrariesAdd::NAME
+        | JellyfinLibrariesRemove::NAME
+        | JellyfinUsersReveal::NAME
+        | PlexClaim::NAME
+        | TailscaleLogin::NAME
+        | TailscaleLogout::NAME
+        | CloudflareSetToken::NAME
+        | CloudflareClearToken::NAME => "org.hinteros.system.services",
         _ => return None,
     })
 }

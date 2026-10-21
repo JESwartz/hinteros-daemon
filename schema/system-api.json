@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.10",
+  "version": "0.11",
   "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. The lan_filter methods (0.10) are the session daemon's own (not relayed): they only restrict the caller's processes, so they need no seat or polkit check, but are rate limited and audited. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -36,16 +36,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.10", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.10", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "0.11", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "0.11", "server": { "name": "hinteros-system", "version": "0.1.0" } }
         },
         {
           "name": "mismatch",
           "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 0.1, server 0.10",
-            "data": { "client_api_version": "0.1", "server_api_version": "0.10" }
+            "message": "API version mismatch: client 0.1, server 0.11",
+            "data": { "client_api_version": "0.1", "server_api_version": "0.11" }
           }
         }
       ]
@@ -2067,6 +2067,338 @@
       "errors": ["rate_limited"],
       "examples": [{ "name": "session ends", "params": {}, "result": {} }]
     },
+    "services.list": {
+      "summary": "0.11: the Server section: every service the catalog offers (kind service, status available) and every enabled one, with its unit's state and its setup flow's detail. Read-only, open to every caller.",
+      "description": "revision is the hash of state.json (pass it to services.enable/services.disable). status: systemd's ActiveState of the service's unit (jellyfin.service, plex.service, tailscaled.service, hinteros-cloudflared.service; inactive when not loaded), null when the service is off or has no known unit. setup: the catalog's setup flow (null: none, or one this daemon does not know: show only on/off). terms: the vendor terms to show before services.enable (file: the absolute path of the text next to the running catalog). detail: null unless the service is on and has a setup flow; no secrets. Jellyfin: setup_done (the first-run setup by HinterOS is done), url (http://<local IP>:<port>), libraries (from Jellyfin's API on loopback, or the last list a job or read saw while Jellyfin does not answer), users (each profile's Jellyfin user name). Plex: claimed (linked to a Plex account), server_name, url. Tailscale: state from tailscaled (unavailable: it does not answer), name, tailnet IPv4, MagicDNS name, tailnet, key_expiry (Unix seconds; null: never or unknown); all null unless signed in. Cloudflare: token_set, connected (cloudflared has a connection), local_ip (the box's address on its local network, for the private-network route). Each service is asked with a 1 s timeout.",
+      "since": "0.11",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": {
+        "type": "object",
+        "required": ["revision", "services"],
+        "additionalProperties": false,
+        "properties": {
+          "revision": { "$ref": "#/$defs/Revision" },
+          "services": { "type": "array", "items": { "$ref": "#/$defs/ServiceInfo" } }
+        }
+      },
+      "errors": [],
+      "examples": [
+        {
+          "name": "Jellyfin on, the others off",
+          "params": {},
+          "result": {
+            "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
+            "services": [
+              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": false, "status": null, "setup": "cloudflare", "terms": null, "detail": null },
+              {
+                "id": "jellyfin-server",
+                "name": "Jellyfin server",
+                "available": true,
+                "enabled": true,
+                "status": "active",
+                "setup": "jellyfin",
+                "terms": null,
+                "detail": {
+                  "setup_done": true,
+                  "url": "http://192.168.1.42:8096",
+                  "libraries": [
+                    { "id": "f137a2dd21bbc1b99aa5c0f6bf02a805", "name": "Movies", "kind": "movies", "folder": "Movies" },
+                    { "id": "a2c4e6f8a0b2c4d6e8f0a2b4c6d8e0f2", "name": "Books", "kind": "other", "folder": null }
+                  ],
+                  "users": [{ "profile_id": "p1", "jellyfin_user": "Alex" }, { "profile_id": "p2", "jellyfin_user": "Sam" }]
+                }
+              },
+              {
+                "id": "plex-media-server",
+                "name": "Plex Media Server",
+                "available": true,
+                "enabled": false,
+                "status": null,
+                "setup": "plex",
+                "terms": { "title": "Plex Terms of Service", "version": "2025-10-30", "url": "https://www.plex.tv/about/privacy-legal/plex-terms-of-service/", "file": "/run/current-system/sw/share/hinteros/terms/plex-media-server-2025-10-30.txt" },
+                "detail": null
+              },
+              { "id": "tailscale", "name": "Tailscale", "available": true, "enabled": false, "status": null, "setup": "tailscale", "terms": null, "detail": null }
+            ]
+          }
+        },
+        {
+          "name": "Plex, Tailscale and Cloudflare on",
+          "params": {},
+          "result": {
+            "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
+            "services": [
+              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": true, "status": "inactive", "setup": "cloudflare", "terms": null, "detail": { "token_set": false, "connected": false, "local_ip": "192.168.1.42" } },
+              { "id": "plex-media-server", "name": "Plex Media Server", "available": true, "enabled": true, "status": "active", "setup": "plex", "terms": null, "detail": { "claimed": false, "server_name": "hinteros", "url": "http://192.168.1.42:32400" } },
+              { "id": "tailscale", "name": "Tailscale", "available": true, "enabled": true, "status": "active", "setup": "tailscale", "terms": null, "detail": { "state": "running", "name": "hinteros", "ip4": "100.101.102.103", "dns_name": "hinteros.tail1234.ts.net", "tailnet": "owner@example.com", "key_expiry": 1808042400 } }
+            ]
+          }
+        }
+      ]
+    },
+    "services.enable": {
+      "summary": "0.11: turn services on (job services_enable, a rebuild). Admin PIN. Action org.hinteros.system.services.",
+      "description": "ids: 1 to 8 different catalog ids, each kind service with status available in the running generation's catalog (not_found: not in the catalog; invalid_params {field: ids, reason: not_a_service | not_available}). Ids already on are skipped; job_id null when nothing is left. revision: services.list's (state_conflict otherwise). A service with vendor terms (Plex) needs accepted_terms[id] equal to the catalog's terms.version (terms_required {id, version}; terms for ids not being turned on: invalid_params {field: accepted_terms, reason: not_requested}); the acceptance is audited and recorded in /var/lib/hinteros/terms-accepted.json by the caller's user, with the admin profile's id. Schema-1 boxes: unavailable {service: profiles, reason: schema1}. The job writes state.json's services and runs the apply flow (stages preparing, evaluating, downloading, building, activating, finishing); for jellyfin-server it then waits up to 3 minutes for HinterOS's first-run setup (stage configuring) and makes each profile's Jellyfin user (best effort: jellyfin.users.reveal and every Jellyfin job make missing users too). Result: the applied generation.",
+      "since": "0.11",
+      "params": {
+        "type": "object",
+        "required": ["ids", "pin", "revision"],
+        "additionalProperties": false,
+        "properties": {
+          "ids": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "$ref": "#/$defs/CatalogId" } },
+          "pin": { "$ref": "#/$defs/Pin" },
+          "revision": { "$ref": "#/$defs/Revision" },
+          "accepted_terms": {
+            "description": "Service id to the terms version accepted (after reading the full text).",
+            "type": "object",
+            "maxProperties": 8,
+            "propertyNames": { "$ref": "#/$defs/CatalogId" },
+            "additionalProperties": { "$ref": "#/$defs/TermsVersion" }
+          }
+        }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "state_conflict", "not_found", "terms_required", "pin_required", "unavailable"],
+      "examples": [
+        { "name": "Jellyfin", "params": { "ids": ["jellyfin-server"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "Plex, terms accepted", "params": { "ids": ["plex-media-server"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "accepted_terms": { "plex-media-server": "2025-10-30" } }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "already on", "params": { "ids": ["tailscale"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "result": { "job_id": null } },
+        {
+          "name": "Plex terms not accepted",
+          "params": { "ids": ["plex-media-server"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" },
+          "error": { "code": 3014, "message": "plex-media-server needs its terms accepted (version 2025-10-30)", "data": { "id": "plex-media-server", "version": "2025-10-30" } }
+        },
+        { "name": "wrong PIN", "params": { "ids": ["tailscale"], "pin": "1111", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "error": { "code": 3016, "message": "that PIN didn't match", "data": { "pin": "admin" } } },
+        { "name": "an app", "params": { "ids": ["steam"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "error": { "code": -32602, "message": "steam is not a service", "data": { "field": "ids", "reason": "not_a_service" } } }
+      ]
+    },
+    "services.disable": {
+      "summary": "0.11: turn services off (job services_disable, a rebuild), their data deleted on request. Admin PIN. Action org.hinteros.system.services.",
+      "description": "ids: 1 to 8 different ids, each on (not_found otherwise). revision: services.list's. The job writes state.json without them and runs the apply flow. With delete_data (the launcher confirms twice), after a successful switch it deletes each service's catalog stateDirs below /var/lib, and for jellyfin-server also /var/cache/jellyfin and /var/lib/hinteros/services/jellyfin-server (admin password, API key, profile users), as root without following a symlink anywhere and without entering another filesystem; anything outside /var/lib and /var/cache is refused. Media files in /srv/media are never deleted. Without delete_data the data stays and turning the service on again finds it.",
+      "since": "0.11",
+      "params": {
+        "type": "object",
+        "required": ["ids", "pin", "revision", "delete_data"],
+        "additionalProperties": false,
+        "properties": {
+          "ids": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "$ref": "#/$defs/CatalogId" } },
+          "pin": { "$ref": "#/$defs/Pin" },
+          "revision": { "$ref": "#/$defs/Revision" },
+          "delete_data": { "type": "boolean" }
+        }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "state_conflict", "not_found", "pin_required", "unavailable"],
+      "examples": [
+        { "name": "keep data", "params": { "ids": ["plex-media-server"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": false }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "delete server data", "params": { "ids": ["jellyfin-server"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": true }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "not on", "params": { "ids": ["tailscale"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": false }, "error": { "code": 3010, "message": "tailscale is not on" } }
+      ]
+    },
+    "media.folders": {
+      "summary": "0.11: one level of folders under /srv/media, for a Jellyfin library. Read-only, open to every caller.",
+      "description": "Without folder_id: the folders directly in /srv/media (an empty list when it does not exist); with it: the folders in that folder. An id is the folder's path relative to /srv/media (no empty, . or .. component, no component starting with a dot, no control characters, at most 1024 bytes; else invalid_params {field: folder_id}). Every component is opened without following symlinks: a symlink is neither listed nor entered (not_found), so no id leads out of /srv/media. Hidden folders, files, symlinks and names that are not UTF-8 are left out. Sorted by name, at most 500. has_children: the folder has folders of its own.",
+      "since": "0.11",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "folder_id": { "$ref": "#/$defs/FolderId" } }
+      },
+      "result": {
+        "type": "object",
+        "required": ["folder_id", "folders"],
+        "additionalProperties": false,
+        "properties": {
+          "folder_id": { "oneOf": [{ "$ref": "#/$defs/FolderId" }, { "type": "null" }] },
+          "folders": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/MediaFolder" } }
+        }
+      },
+      "errors": ["not_found"],
+      "examples": [
+        { "name": "top", "params": {}, "result": { "folder_id": null, "folders": [{ "id": "Movies", "name": "Movies", "has_children": true }, { "id": "Music", "name": "Music", "has_children": false }] } },
+        { "name": "inside", "params": { "folder_id": "Movies" }, "result": { "folder_id": "Movies", "folders": [{ "id": "Movies/Kids", "name": "Kids", "has_children": false }] } },
+        { "name": "a symlink", "params": { "folder_id": "Elsewhere" }, "error": { "code": 3010, "message": "no such folder" } }
+      ]
+    },
+    "jellyfin.libraries.add": {
+      "summary": "0.11: add a Jellyfin library on a folder in /srv/media (job jellyfin_library_add). Admin PIN. Action org.hinteros.system.services.",
+      "description": "name: 1 to 64 characters after trimming, no control or format characters, none of /\\:*?\"<>| (invalid_params {field: name, reason: bad_length | bad_name}); a library with the same name (any case) is invalid_params {field: name, reason: exists} when Jellyfin answers in time, else the job fails. kind: movies, shows, music or mixed (Jellyfin's collection types movies, tvshows, music, and none for mixed). folder: a media.folders id, resolved again (no symlink followed) when the request comes and again in the job (not_found: no such folder). Jellyfin off: unavailable {service: jellyfin, reason: off}; its first-run setup not done: unavailable {service: jellyfin, reason: not_ready}. The job (stages preparing, configuring, finishing) waits up to 90 s for Jellyfin, makes missing profile users, adds the library and starts its scan; job_progress's subject then gains library.id. Failures: job_failed with reason unreachable, not_ready or refused.",
+      "since": "0.11",
+      "params": {
+        "type": "object",
+        "required": ["pin", "name", "kind", "folder"],
+        "additionalProperties": false,
+        "properties": {
+          "pin": { "$ref": "#/$defs/Pin" },
+          "name": { "$ref": "#/$defs/LibraryName" },
+          "kind": { "$ref": "#/$defs/LibraryKind" },
+          "folder": { "$ref": "#/$defs/FolderId" }
+        }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "not_found", "pin_required", "unavailable"],
+      "examples": [
+        { "name": "movies", "params": { "pin": "2468", "name": "Movies", "kind": "movies", "folder": "Movies" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "name taken", "params": { "pin": "2468", "name": "movies", "kind": "movies", "folder": "Films" }, "error": { "code": -32602, "message": "a library has this name", "data": { "field": "name", "reason": "exists" } } },
+        { "name": "setup not done", "params": { "pin": "2468", "name": "Shows", "kind": "shows", "folder": "TV" }, "error": { "code": 4001, "message": "the service is not ready", "data": { "service": "jellyfin", "reason": "not_ready" } } }
+      ]
+    },
+    "jellyfin.libraries.remove": {
+      "summary": "0.11: remove a Jellyfin library (job jellyfin_library_remove); the media files stay. Admin PIN. Action org.hinteros.system.services.",
+      "description": "library_id: a library id from services.list (not_found when Jellyfin answers in time and has no such library; else the job fails with reason refused). Jellyfin removes its own folder for the library (links, options), never the media. unavailable as for jellyfin.libraries.add.",
+      "since": "0.11",
+      "params": {
+        "type": "object",
+        "required": ["pin", "library_id"],
+        "additionalProperties": false,
+        "properties": { "pin": { "$ref": "#/$defs/Pin" }, "library_id": { "$ref": "#/$defs/JellyfinId" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "not_found", "pin_required", "unavailable"],
+      "examples": [
+        { "name": "remove", "params": { "pin": "2468", "library_id": "f137a2dd21bbc1b99aa5c0f6bf02a805" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "unknown", "params": { "pin": "2468", "library_id": "00000000000000000000000000000000" }, "error": { "code": 3010, "message": "no such library" } }
+      ]
+    },
+    "jellyfin.users.reveal": {
+      "summary": "0.11: the Jellyfin passwords, for other devices: the admin user's and each profile's (admin PIN; not a job). Action org.hinteros.system.services.",
+      "description": "Makes missing profile users first (one Jellyfin user per profile, not the guest; named after the profile: letters, digits, space and _-'.@+ kept, unique in any case with a number added; not an administrator, no media deletion; random 16-character password), when Jellyfin answers within 3 s. admin: null until HinterOS's first-run setup wrote it. users: every profile that has a user, with the profile's name now. The answer is never logged; the audit records only that it was asked. Jellyfin off: unavailable {service: jellyfin, reason: off}.",
+      "since": "0.11",
+      "params": {
+        "type": "object",
+        "required": ["pin"],
+        "additionalProperties": false,
+        "properties": { "pin": { "$ref": "#/$defs/Pin" } }
+      },
+      "result": {
+        "type": "object",
+        "required": ["admin", "users"],
+        "additionalProperties": false,
+        "properties": {
+          "admin": { "oneOf": [{ "$ref": "#/$defs/JellyfinAccount" }, { "type": "null" }] },
+          "users": { "type": "array", "items": { "$ref": "#/$defs/JellyfinProfileAccount" } }
+        }
+      },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "pin_required", "unavailable"],
+      "examples": [
+        {
+          "name": "passwords",
+          "params": { "pin": "2468" },
+          "result": {
+            "admin": { "name": "admin", "password": "k3v9q2m7x4p8w6t5" },
+            "users": [
+              { "profile_id": "p1", "profile_name": "Alex", "name": "Alex", "password": "h7d2n9r4c6w3m8q5" },
+              { "profile_id": "p2", "profile_name": "Sam 🎮", "name": "Sam", "password": "t5z8j3k6v2b9x4p7" }
+            ]
+          }
+        },
+        { "name": "off", "params": { "pin": "2468" }, "error": { "code": 4001, "message": "the service is off", "data": { "service": "jellyfin", "reason": "off" } } }
+      ]
+    },
+    "jellyfin.client_token": {
+      "summary": "0.11: a Jellyfin access token for the caller's own profile, so the Jellyfin app on the box signs in by itself (spike S1). No PIN; read-only for the caller (no seat check, no rate limit).",
+      "description": "The profile comes from the caller's uid (SO_PEERCRED): the guest, spare accounts and other users get permission_denied {reason: profile}. Jellyfin off or not set up: unavailable {service: jellyfin, reason: off | not_ready}; Jellyfin does not answer or refuses: unavailable {service: jellyfin, reason: unreachable}. The profile's Jellyfin user is made first if it has none. The token is made with POST /Users/AuthenticateByName as device hinteros-<profile id> (Jellyfin ends that device's older token, so a profile has one live token), kept in users.json (root only) and made again when Jellyfin answers 401 to it. Never logged.",
+      "since": "0.11",
+      "params": { "type": "object", "additionalProperties": false },
+      "result": {
+        "type": "object",
+        "required": ["server_id", "user_id", "device_id", "access_token"],
+        "additionalProperties": false,
+        "properties": {
+          "server_id": { "$ref": "#/$defs/JellyfinId" },
+          "user_id": { "$ref": "#/$defs/JellyfinId" },
+          "device_id": { "type": "string", "pattern": "^hinteros-p[1-9][0-9]{0,2}$" },
+          "access_token": { "type": "string", "pattern": "^[A-Za-z0-9]{1,128}$" }
+        }
+      },
+      "errors": ["permission_denied", "unavailable"],
+      "examples": [
+        { "name": "own profile", "params": {}, "result": { "server_id": "0f1e2d3c4b5a69788796a5b4c3d2e1f0", "user_id": "6f2c1f0e9d3b4a5c8e7f112233445566", "device_id": "hinteros-p2", "access_token": "4a7b9c2d1e3f5a6b8c0d2e4f6a8b0c1d" } },
+        { "name": "the guest", "params": {}, "error": { "code": 3002, "message": "only a profile can do this", "data": { "action": "org.hinteros.system.services", "reason": "profile" } } }
+      ]
+    },
+
+    "plex.claim": {
+      "summary": "0.11: link Plex Media Server to the owner's Plex account with a code from plex.tv/claim (job plex_claim). Admin PIN. Action org.hinteros.system.services.",
+      "description": "code: claim- and 20 letters, digits, _ or - (what plex.tv/claim gives; valid about 4 minutes; never logged). Plex off: unavailable {service: plex, reason: off}; already linked: job_id null. The job (stages preparing, configuring, finishing) waits up to 90 s for Plex on 127.0.0.1:32400, posts the code to Plex's own /myplex/claim (Plex exchanges it with plex.tv), and succeeds once Preferences.xml has the account token (at most 30 s). Failures: job_failed with reason unreachable (Plex does not answer) or refused (Plex refused the code, e.g. it expired). Plex libraries are added in Plex's own app afterwards.",
+      "since": "0.11",
+      "params": {
+        "type": "object",
+        "required": ["pin", "code"],
+        "additionalProperties": false,
+        "properties": { "pin": { "$ref": "#/$defs/Pin" }, "code": { "$ref": "#/$defs/PlexClaimCode" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required", "unavailable"],
+      "examples": [
+        { "name": "claim", "params": { "pin": "2468", "code": "claim-AbCdEfGhIjKlMnOpQrSt" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "linked already", "params": { "pin": "2468", "code": "claim-AbCdEfGhIjKlMnOpQrSt" }, "result": { "job_id": null } },
+        { "name": "bad code", "params": { "pin": "2468", "code": "claim-12345678901234567890" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }
+      ]
+    },
+    "tailscale.login": {
+      "summary": "0.11: sign the box in to Tailscale (job tailscale_login). Admin PIN. Action org.hinteros.system.services.",
+      "description": "Tailscale off: unavailable {service: tailscale, reason: off}; signed in already (Running): job_id null. The job runs tailscale up --reset --json --timeout=600s (the defaults: no exit node, no subnet routes, no Tailscale SSH; --force-reauth when an expired key needs a new sign-in). When Tailscale has the sign-in URL, job_progress has stage signing_in and detail.auth_url (https, at most 512 printable ASCII characters; the launcher shows it as a QR code; jobs.get's detail has it too); a newer URL comes in a new job_progress. The job succeeds when tailscaled is Running (the person signed in, and the tailnet approved the device if it must). jobs.cancel stops the wait. Failures: job_failed with reason timeout (nobody signed in within 10 minutes), refused (the CLI failed; log_hint says why) or unreachable (no tailscale CLI).",
+      "since": "0.11",
+      "params": {
+        "type": "object",
+        "required": ["pin"],
+        "additionalProperties": false,
+        "properties": { "pin": { "$ref": "#/$defs/Pin" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required", "unavailable"],
+      "examples": [
+        { "name": "sign in", "params": { "pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "signed in already", "params": { "pin": "2468" }, "result": { "job_id": null } }
+      ]
+    },
+    "tailscale.logout": {
+      "summary": "0.11: sign the box out of Tailscale (job tailscale_logout; tailscale logout). Admin PIN. Action org.hinteros.system.services.",
+      "description": "Tailscale off: unavailable {service: tailscale, reason: off}; signed out already (NeedsLogin): job_id null. Stages preparing, configuring, finishing.",
+      "since": "0.11",
+      "params": {
+        "type": "object",
+        "required": ["pin"],
+        "additionalProperties": false,
+        "properties": { "pin": { "$ref": "#/$defs/Pin" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required", "unavailable"],
+      "examples": [{ "name": "sign out", "params": { "pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
+    },
+    "cloudflare.set_token": {
+      "summary": "0.11: set the Cloudflare tunnel token and (re)start the tunnel (job cloudflare_set_token). Admin PIN. Action org.hinteros.system.services.",
+      "description": "token: the token of a remotely managed tunnel from the Zero Trust dashboard, checked strictly: at most 512 characters, standard padded base64 of a JSON object with exactly a (account tag, 32 hex digits), t (tunnel id, a UUID), s (secret: base64 of 32 to 256 bytes) and optionally e (endpoint, lower-case letters), each once; else invalid_params {field: token, reason: bad_length | not_base64 | not_a_token | bad_account | bad_tunnel_id | bad_secret | bad_endpoint}. Never logged. Cloudflare off: unavailable {service: cloudflare, reason: off}. The service writes it to /var/lib/hinteros/services/cloudflare-tunnel/token (0600 root, atomically); the job restarts hinteros-cloudflared.service and waits up to 30 s for a connection (stages configuring, finishing). Failures: job_failed with reason not_connected (the token is kept: check it, or clear it) or unreachable (systemd refused the restart).",
+      "since": "0.11",
+      "params": {
+        "type": "object",
+        "required": ["pin", "token"],
+        "additionalProperties": false,
+        "properties": { "pin": { "$ref": "#/$defs/Pin" }, "token": { "$ref": "#/$defs/TunnelToken" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required", "unavailable"],
+      "examples": [
+        { "name": "set", "params": { "pin": "2468", "token": "eyJhIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJ0IjoiNmYxYzhhMmUtM2I0ZC00ZTVmLThhOWItMGMxZDJlM2Y0YTViIiwicyI6IkJ3Y0hCd2NIQndjSEJ3Y0hCd2NIQndjSEJ3Y0hCd2NIQndjSEJ3Y0hCd2M9In0=" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "not a token", "params": { "pin": "2468", "token": "eyJhIjoiYiJ9" }, "error": { "code": -32602, "message": "not a tunnel token", "data": { "field": "token", "reason": "not_a_token" } } }
+      ]
+    },
+    "cloudflare.clear_token": {
+      "summary": "0.11: stop the Cloudflare tunnel and delete its token (job cloudflare_clear_token). Admin PIN. Action org.hinteros.system.services.",
+      "description": "No token: job_id null. Cloudflare off: unavailable {service: cloudflare, reason: off}. Stages configuring, finishing.",
+      "since": "0.11",
+      "params": {
+        "type": "object",
+        "required": ["pin"],
+        "additionalProperties": false,
+        "properties": { "pin": { "$ref": "#/$defs/Pin" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required", "unavailable"],
+      "examples": [{ "name": "clear", "params": { "pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
+    },
+
     "jobs.get": {
       "summary": "One job: running or among the last 10 finished. Read-only.",
       "since": "0.2",
@@ -2294,6 +2626,7 @@
             "last_activity_at": 1791300412
           }
         },
+        { "name": "Tailscale sign-in URL", "params": { "job_id": "3f9a0c2b7e4d1a65", "kind": "tailscale_login", "stage": "signing_in", "detail": { "auth_url": "https://login.tailscale.com/a/1a2b3c4d5e6f" }, "started_at": 1791300000, "last_activity_at": 1791300003 } },
         {
           "name": "channel switch target verified",
           "params": {
@@ -2442,14 +2775,15 @@
     "job_failed": {
       "code": 3003,
       "since": "0.2",
-      "summary": "Only in job_finished.error and jobs.get: the job failed (or was cancelled) at stage; log_hint is the last relevant log line.",
+      "summary": "Only in job_finished.error and jobs.get: the job failed (or was cancelled) at stage; log_hint is the last relevant log line. 0.11: reason says why a Server section job failed: unreachable (the service does not answer), not_ready (its setup is not done), refused (the service or tool said no; log_hint says why), timeout (nobody signed in in time), not_connected (the Cloudflare tunnel did not connect).",
       "data": {
         "type": "object",
         "required": ["stage", "log_hint"],
         "additionalProperties": false,
         "properties": {
           "stage": { "$ref": "#/$defs/Stage" },
-          "log_hint": { "type": "string", "maxLength": 1000 }
+          "log_hint": { "type": "string", "maxLength": 1000 },
+          "reason": { "enum": ["unreachable", "not_ready", "refused", "timeout", "not_connected"] }
         }
       }
     },
@@ -2550,13 +2884,13 @@
     "unavailable": {
       "code": 4001,
       "since": "0.4",
-      "summary": "0.4: the per-profile methods on a box that still has box-wide apps (state.json schema 1, before the migration job): service profiles, reason schema1.",
+      "summary": "0.4: the per-profile methods on a box that still has box-wide apps (state.json schema 1, before the migration job): service profiles, reason schema1. 0.11: the Server section: service jellyfin, plex, tailscale or cloudflare with reason off (the service is not on) or not_ready (Jellyfin's first-run setup is not done).",
       "data": {
         "type": "object",
         "required": ["service", "reason"],
         "additionalProperties": false,
         "properties": {
-          "service": { "enum": ["networkmanager", "bluez", "audio", "display", "logind", "catalog", "polkit", "profiles"] },
+          "service": { "enum": ["networkmanager", "bluez", "audio", "display", "logind", "catalog", "polkit", "profiles", "jellyfin", "plex", "tailscale", "cloudflare"] },
           "reason": { "type": "string", "maxLength": 300 }
         }
       }
@@ -2625,7 +2959,7 @@
     "PolkitAction": { "type": "string", "pattern": "^org\\.hinteros\\.system\\.[a-z.]+$" },
     "Channel": { "enum": ["stable", "beta"] },
     "Base": { "enum": ["stable", "unstable"] },
-    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "migrate_apps", "profiles_create", "profiles_remove", "guest_set", "guest_end", "storage_measure", "cleanup_system", "cleanup_profiles", "cleanup_set", "channel_check"] },
+    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "migrate_apps", "profiles_create", "profiles_remove", "guest_set", "guest_end", "storage_measure", "cleanup_system", "cleanup_profiles", "cleanup_set", "channel_check", "services_enable", "services_disable", "jellyfin_library_add", "jellyfin_library_remove", "plex_claim", "tailscale_login", "tailscale_logout", "cloudflare_set_token", "cloudflare_clear_token"] },
     "ProfileId": { "description": "A profile id.", "type": "string", "pattern": "^p[1-9][0-9]{0,2}$" },
     "ProfileName": { "description": "A display name: 1 to 32 characters, trimmed, no control or format characters.", "type": "string", "minLength": 1, "maxLength": 128 },
     "ProfileColor": { "enum": ["teal", "blue", "purple", "pink", "red", "orange", "yellow", "green"] },
@@ -2656,7 +2990,7 @@
       }
     },
     "JobState": { "enum": ["running", "succeeded", "failed", "cancelled"] },
-    "Stage": { "enum": ["preparing", "fetching", "verifying", "box", "measuring", "evaluating", "downloading", "building", "activating", "cleaning", "collecting", "apps", "finishing"] },
+    "Stage": { "enum": ["preparing", "fetching", "verifying", "box", "measuring", "evaluating", "downloading", "building", "activating", "cleaning", "collecting", "apps", "configuring", "signing_in", "finishing"] },
     "Severity": { "enum": ["low", "medium", "high", "critical"] },
     "JobRef": {
       "description": "A started job, or null when there was nothing to do.",
@@ -2926,7 +3260,8 @@
         "builds_done": { "description": "0.7: derivations built so far in this nix run.", "type": "integer", "minimum": 0 },
         "builds_total": { "description": "0.7: derivations nix expects to build (may grow while nix discovers more).", "type": "integer", "minimum": 0 },
         "builds_running": { "description": "0.7: derivations building at once.", "type": "integer", "minimum": 0 },
-        "building": { "$ref": "#/$defs/Building" }
+        "building": { "$ref": "#/$defs/Building" },
+        "auth_url": { "description": "0.11: tailscale_login, stage signing_in: the URL to sign in at (https, printable ASCII; shown as a QR code).", "type": "string", "maxLength": 512, "pattern": "^https://[!-~]+$" }
       }
     },
     "Building": {
@@ -2975,9 +3310,162 @@
         "keep": { "description": "Clean-ups: generations kept.", "type": "integer", "minimum": 0 },
         "frequency": { "$ref": "#/$defs/CleanupFrequency" },
         "keep_system": { "type": "integer", "minimum": 0 },
-        "keep_profiles": { "type": "integer", "minimum": 0 }
+        "keep_profiles": { "type": "integer", "minimum": 0 },
+        "services": { "description": "0.11: services turned on or off (services_enable, services_disable).", "type": "array", "items": { "$ref": "#/$defs/CatalogApp" } },
+        "library": { "$ref": "#/$defs/SubjectLibrary" }
       }
     },
+    "Setup": { "description": "0.11: a service's setup flow in the Server section (catalog setup).", "enum": ["jellyfin", "plex", "tailscale", "cloudflare"] },
+    "UnitState": { "description": "0.11: systemd's ActiveState of a service's unit (unknown: a value this daemon does not know).", "enum": ["active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance", "refreshing", "unknown"] },
+    "ServiceTerms": {
+      "description": "0.11: a service's vendor terms; file is the absolute path of the text on the box.",
+      "type": "object",
+      "required": ["title", "version", "url", "file"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string" },
+        "version": { "$ref": "#/$defs/TermsVersion" },
+        "url": { "type": "string" },
+        "file": { "type": "string" }
+      }
+    },
+    "ServiceInfo": {
+      "description": "0.11: one service of the Server section.",
+      "type": "object",
+      "required": ["id", "name", "available", "enabled", "status", "setup", "terms", "detail"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/CatalogId" },
+        "name": { "type": "string" },
+        "available": { "description": "The catalog offers it (an enabled service the catalog dropped is listed with false).", "type": "boolean" },
+        "enabled": { "description": "In state.json services.", "type": "boolean" },
+        "status": { "oneOf": [{ "$ref": "#/$defs/UnitState" }, { "type": "null" }] },
+        "setup": { "oneOf": [{ "$ref": "#/$defs/Setup" }, { "type": "null" }] },
+        "terms": { "oneOf": [{ "$ref": "#/$defs/ServiceTerms" }, { "type": "null" }] },
+        "detail": {
+          "description": "The detail of the setup flow named by setup; null when off or without setup.",
+          "oneOf": [
+            { "$ref": "#/$defs/JellyfinDetail" },
+            { "$ref": "#/$defs/PlexDetail" },
+            { "$ref": "#/$defs/TailscaleDetail" },
+            { "$ref": "#/$defs/CloudflareDetail" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "JellyfinDetail": {
+      "type": "object",
+      "required": ["setup_done", "url", "libraries", "users"],
+      "additionalProperties": false,
+      "properties": {
+        "setup_done": { "description": "HinterOS made Jellyfin's first-run setup (admin user, API key).", "type": "boolean" },
+        "url": { "description": "http://<local IP>:<port>, for other devices; null without a local network address.", "oneOf": [{ "type": "string" }, { "type": "null" }] },
+        "libraries": { "type": "array", "items": { "$ref": "#/$defs/JellyfinLibrary" } },
+        "users": {
+          "description": "Each profile's Jellyfin user name (passwords: jellyfin.users.reveal).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["profile_id", "jellyfin_user"],
+            "additionalProperties": false,
+            "properties": { "profile_id": { "$ref": "#/$defs/ProfileId" }, "jellyfin_user": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "JellyfinLibrary": {
+      "type": "object",
+      "required": ["id", "name", "kind", "folder"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/JellyfinId" },
+        "name": { "type": "string", "maxLength": 512 },
+        "kind": { "$ref": "#/$defs/LibraryKindShown" },
+        "folder": { "description": "The media.folders id of its first folder; null when that is not in /srv/media.", "oneOf": [{ "$ref": "#/$defs/FolderId" }, { "type": "null" }] }
+      }
+    },
+    "LibraryKind": { "description": "0.11: what a new Jellyfin library holds (mixed: movies and shows).", "enum": ["movies", "shows", "music", "mixed"] },
+    "LibraryKindShown": { "description": "0.11: what a Jellyfin library holds; other: a type made in Jellyfin's dashboard (books, photos, music videos, ...).", "enum": ["movies", "shows", "music", "mixed", "other"] },
+    "JellyfinId": { "description": "A Jellyfin item id.", "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "LibraryName": { "description": "1 to 64 characters after trimming, without control or format characters or /\\:*?\"<>|.", "type": "string", "minLength": 1, "maxLength": 256 },
+    "FolderId": { "description": "A folder below /srv/media, as its path relative to it (media.folders).", "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^/.\\u0000-\\u001f\\u007f][^/\\u0000-\\u001f\\u007f]*(/[^/.\\u0000-\\u001f\\u007f][^/\\u0000-\\u001f\\u007f]*)*$" },
+    "MediaFolder": {
+      "type": "object",
+      "required": ["id", "name", "has_children"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/FolderId" },
+        "name": { "type": "string", "maxLength": 255 },
+        "has_children": { "type": "boolean" }
+      }
+    },
+    "JellyfinAccount": {
+      "type": "object",
+      "required": ["name", "password"],
+      "additionalProperties": false,
+      "properties": { "name": { "type": "string" }, "password": { "type": "string" } }
+    },
+    "JellyfinProfileAccount": {
+      "type": "object",
+      "required": ["profile_id", "profile_name", "name", "password"],
+      "additionalProperties": false,
+      "properties": {
+        "profile_id": { "$ref": "#/$defs/ProfileId" },
+        "profile_name": { "type": "string" },
+        "name": { "description": "The Jellyfin user name.", "type": "string" },
+        "password": { "type": "string" }
+      }
+    },
+    "PlexDetail": {
+      "type": "object",
+      "required": ["claimed", "server_name", "url"],
+      "additionalProperties": false,
+      "properties": {
+        "claimed": { "description": "Linked to a Plex account.", "type": "boolean" },
+        "server_name": { "oneOf": [{ "type": "string", "maxLength": 512 }, { "type": "null" }] },
+        "url": { "oneOf": [{ "type": "string" }, { "type": "null" }] }
+      }
+    },
+    "TailscaleState": { "description": "0.11: needs_login: not signed in; needs_approval: the tailnet's admin must approve the device; unavailable: tailscaled does not answer.", "enum": ["needs_login", "needs_approval", "starting", "running", "stopped", "unavailable"] },
+    "TailscaleDetail": {
+      "type": "object",
+      "required": ["state", "name", "ip4", "dns_name", "tailnet", "key_expiry"],
+      "additionalProperties": false,
+      "properties": {
+        "state": { "$ref": "#/$defs/TailscaleState" },
+        "name": { "oneOf": [{ "type": "string", "maxLength": 256 }, { "type": "null" }] },
+        "ip4": { "oneOf": [{ "type": "string", "maxLength": 15 }, { "type": "null" }] },
+        "dns_name": { "description": "The MagicDNS name, without the trailing dot.", "oneOf": [{ "type": "string", "maxLength": 1012 }, { "type": "null" }] },
+        "tailnet": { "oneOf": [{ "type": "string", "maxLength": 512 }, { "type": "null" }] },
+        "key_expiry": { "description": "Unix seconds; null: the key never expires, or unknown.", "oneOf": [{ "type": "integer" }, { "type": "null" }] }
+      }
+    },
+    "CloudflareDetail": {
+      "type": "object",
+      "required": ["token_set", "connected", "local_ip"],
+      "additionalProperties": false,
+      "properties": {
+        "token_set": { "type": "boolean" },
+        "connected": { "description": "cloudflared reports a connection to Cloudflare (its /ready).", "type": "boolean" },
+        "local_ip": { "description": "The box's IPv4 address on its local network (the subnet of the default route), for the tunnel's private-network route.", "oneOf": [{ "type": "string", "maxLength": 15 }, { "type": "null" }] }
+      }
+    },
+    "PlexClaimCode": { "description": "A plex.tv/claim code. Never logged.", "type": "string", "pattern": "^claim-[A-Za-z0-9_-]{20}$" },
+    "TunnelToken": { "description": "A Cloudflare tunnel token (standard padded base64). Never logged.", "type": "string", "minLength": 4, "maxLength": 512, "pattern": "^[A-Za-z0-9+/]+={0,2}$" },
+    "SubjectLibrary": {
+      "description": "0.11: the library a Jellyfin job is about (id: known for a removal, and for an addition once Jellyfin made it).",
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/JellyfinId" },
+        "name": { "type": "string", "maxLength": 512 },
+        "kind": { "$ref": "#/$defs/LibraryKind" },
+        "folder": { "$ref": "#/$defs/FolderId" }
+      }
+    },
+
     "ErrorObject": {
       "description": "A JSON-RPC error object (codes from this document's errors).",
       "type": "object",

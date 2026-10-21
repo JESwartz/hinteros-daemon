@@ -358,7 +358,7 @@ async fn logging_in(conn: &zbus::Connection, uid: u32, user: &OwnedObjectPath) -
 }
 
 /// A property of a loaded systemd unit (`None`: not loaded).
-async fn unit_property(
+pub(crate) async fn unit_property(
     conn: &zbus::Connection,
     unit: &str,
     name: &str,

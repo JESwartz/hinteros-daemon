@@ -212,6 +212,7 @@ mod tests {
             proc_dir: "/proc".into(),
             zoneinfo_dir: root.join("zoneinfo"),
             localtime: root.join("localtime"),
+            server: Default::default(),
         }
     }
 

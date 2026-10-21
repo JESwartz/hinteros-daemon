@@ -46,6 +46,7 @@ use crate::store;
 mod apps;
 mod lan;
 mod profiles;
+mod servers;
 mod storage;
 mod subject;
 mod timezone;
@@ -570,6 +571,18 @@ async fn dispatch(
             decode::<system::TimeZoneList>(params)?;
             encode::<system::TimeZoneList>(svc.time_zone_list().await?)
         }
+        system::ServicesList::NAME => {
+            decode::<system::ServicesList>(params)?;
+            encode::<system::ServicesList>(svc.services_list().await?)
+        }
+        system::JellyfinClientToken::NAME => {
+            decode::<system::JellyfinClientToken>(params)?;
+            encode::<system::JellyfinClientToken>(svc.jellyfin_client_token(peer).await?)
+        }
+        system::MediaFolders::NAME => {
+            let p = decode::<system::MediaFolders>(params)?;
+            encode::<system::MediaFolders>(svc.media_folders(p)?)
+        }
         _ => Err(method_not_found(method)),
     }
 }
@@ -591,7 +604,7 @@ fn summarize(params: &Option<Value>) -> String {
     let text = match params {
         Some(Value::Object(map)) => {
             let mut map = map.clone();
-            for f in system::PIN_FIELDS {
+            for f in system::PIN_FIELDS.iter().chain(system::SECRET_FIELDS) {
                 if let Some(v) = map.get_mut(*f) {
                     *v = Value::String("***".into());
                 }
@@ -684,11 +697,16 @@ pub(crate) enum Request {
     Profiles(profiles::ProfilesRequest),
     Storage(storage::StorageRequest),
     TimeZoneSet(system::TimeZoneSetParams),
+    /// 0.11: the Server section.
+    Servers(servers::ServersRequest),
     JobsCancel(JobIdParams),
 }
 
 impl Request {
     pub(crate) fn decode(method: &str, params: Option<Value>) -> Result<Self, ErrorObject> {
+        if let Some(r) = servers::ServersRequest::decode(method, params.clone()) {
+            return r.map(Self::Servers);
+        }
         Ok(match method {
             SettingsSet::NAME => {
                 // Name the offending field of `changes` before the typed decode.
@@ -1677,6 +1695,7 @@ impl Service {
                 job_ref(Some(id))
             }
             Request::Storage(r) => self.storage_request(peer, r).await,
+            Request::Servers(r) => self.servers_request(peer, r).await,
             Request::TimeZoneSet(p) => self.time_zone_set(peer, p).await,
             Request::AppsRollback(p) => self.apps_rollback(peer, p).await,
             Request::AppsAcceptTerms(p) => self.apps_accept_terms(peer, p),

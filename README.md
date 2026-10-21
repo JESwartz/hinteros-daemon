@@ -824,7 +824,7 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.10 (0.10: a build's own percent, `building.percent`, see "Job progress" below, and `lan_filter.set`/`lan_filter.clear`, see "Local network filter" below; 0.9: `keyboard_home`, see "Keyboard Home" below; channel switches to a verified, confirmed revision, see "Channel switches" below, and the admin PIN is refused until a reboot after 10 wrong tries, `pin_required {reboot_required}`, see "Admin PIN limit" below; 0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.11 (0.11: the Server section, see "Server section" below; 0.10: a build's own percent, `building.percent`, see "Job progress" below, and `lan_filter.set`/`lan_filter.clear`, see "Local network filter" below; 0.9: `keyboard_home`, see "Keyboard Home" below; channel switches to a verified, confirmed revision, see "Channel switches" below, and the admin PIN is refused until a reboot after 10 wrong tries, `pin_required {reboot_required}`, see "Admin PIN limit" below; 0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
 box-wide actions, `guest.end`, rollback re-adds box features; see "Profiles and per-profile apps" below)
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
@@ -1581,6 +1581,11 @@ whole new `subject`, which `jobs.get` and `job_finished` keep). Fields, each opt
 | `guest_end` | `owner: guest` |
 | `cleanup_system`, `cleanup_profiles` | `keep` |
 | `cleanup_set` | `enabled`, `frequency`, `keep_system`, `keep_profiles` |
+| `services_enable` (0.11) | `services` |
+| `services_disable` (0.11) | `services`, `delete_data` |
+| `jellyfin_library_add` (0.11) | `library {name, kind, folder}`; `library.id` once Jellyfin made it (in `job_progress`) |
+| `jellyfin_library_remove` (0.11) | `library {id, name}` |
+| `plex_claim`, `tailscale_login`, `tailscale_logout`, `cloudflare_set_token`, `cloudflare_clear_token` (0.11) | none (the kind says it) |
 
 `Job` also has `started_at` (equals `created_at`) and, for a running job, the latest `percent`,
 `detail` and `last_activity_at` (null once finished); `job_finished` has `started_at` and
@@ -1904,6 +1909,122 @@ userspace copy of every packet (video streams) on a small box, pasta forwards to
 anyway (it filters ports, not destinations), and multicast, IPv6 and DNS need their own handling.
 nftables matches every protocol in the kernel, on any firewall backend (its own table), with
 `nft` doing the work in a small unit of its own.
+
+## Server section (system API 0.11, session API 0.19; M10)
+
+Design: `hinteros-docs/design/server.md` (the owner's design calls this "system API 0.5"; 0.5 to
+0.10 were taken, so it ships as 0.11). Box-wide catalog services (`kind = service`) and their
+setup flows. Code: `servers/` (HTTP client, Jellyfin, Plex, Tailscale, Cloudflare, media folders,
+the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relayed as
+`system.<method>`.
+
+- **Catalog:** service entries' `ports`, `setup` (`jellyfin|plex|tailscale|cloudflare`; another
+  value is on/off only) and `stateDirs` (checked like `dataPaths`: relative to `/var/lib`, no
+  `.`/`..`, `[A-Za-z0-9._-]` parts); all optional, so older indexes still parse.
+- **`services.list`** (read-only, open): `{revision, services: [{id, name, available, enabled,
+  status, setup, terms, detail}]}` for every available service and every enabled one. `status`:
+  the unit's `ActiveState` (`jellyfin.service`, `plex.service`, `tailscaled.service`,
+  `hinteros-cloudflared.service`). `detail` (enabled services with a setup, no secrets): Jellyfin
+  `{setup_done, url, libraries, users}` (libraries live from Jellyfin, else the last list a job or
+  read cached in `libraries.json`: Jellyfin restarts during updates, and the dashboard can change
+  libraries, so a cache alone would go stale), Plex `{claimed, server_name, url}` from
+  `Preferences.xml` (the token never leaves `servers/plex.rs`), Tailscale `{state, name, ip4,
+  dns_name, tailnet, key_expiry}` from the LocalAPI socket, Cloudflare `{token_set, connected,
+  local_ip}` (cloudflared's `/ready`). `url`/`local_ip`: the box's IPv4 in the default route's
+  subnet, from `/proc/net/route` and `/proc/net/fib_trie` (no socket, no netlink). Each service is
+  asked once with a 1 s timeout on the blocking pool (the service's runtime is single-threaded);
+  when the service has no loopback socket (the system repo allows `AF_INET` only while Jellyfin,
+  Plex or Cloudflare is on) the fields fall back to false/null/cache.
+- **`services.enable {ids, pin, revision, accepted_terms?}` / `services.disable {ids, pin,
+  revision, delete_data}`** (jobs `services_enable`, `services_disable`): admin PIN, schema 2,
+  `state.json` `services` through the apply flow. Plex's terms as for apps (recorded by the
+  caller's user with the admin profile's id). `delete_data`, after the switch: each `stateDirs`
+  entry below `/var/lib`, for Jellyfin also `/var/cache/jellyfin` and
+  `/var/lib/hinteros/services/jellyfin-server` (so `users.json` goes with Jellyfin's users), with
+  `datadel::delete_under` (no symlink followed, the base included; one filesystem); the job
+  refuses a base outside `/var/lib`/`/var/cache`. Enabling Jellyfin then waits up to 3 min for
+  the setup unit's marker (stage `configuring`) and makes the profiles' users.
+- **`media.folders {folder_id?}`** (read-only): one level below `/srv/media`. A folder id is the
+  path relative to it (no empty, `.`, `..` or hidden part, no control characters), opened part
+  by part with `O_NOFOLLOW | O_DIRECTORY` every time it is used (the request, and again in the
+  job): symlinks are neither listed nor entered.
+- **Jellyfin** (`servers/jellyfin.rs`): HTTP on loopback with `Authorization: MediaBrowser
+  Token="<api-key>"` (Jellyfin 10.11+/12 refuse the legacy `X-Emby-Token` unless legacy
+  authorization is on; an API key counts as administrator). `jellyfin.libraries.add {pin, name,
+  kind, folder}` (job: `POST /Library/VirtualFolders` with the path in
+  `LibraryOptions.PathInfos`, since one `paths=` value is split at commas; `collectionType`
+  movies/tvshows/music, none for mixed; a duplicate name is refused first, as Jellyfin would
+  rename it `Name2`), `jellyfin.libraries.remove {pin, library_id}` (job: by the library's name;
+  the media stay). Profile users: `users.json` (0600, under `users.lock`) maps a profile id to
+  `{jellyfin_user_id, name, password, access_token?}`; `sync` makes one user per profile (not the
+  guest), named after the profile (letters, digits, space, `_-'.@+`; unique in any case with
+  " 2"… added; `Profile <n>` when nothing is left), not an administrator and without media
+  deletion (the policy is posted back whole), renames it with the profile (the whole user with its
+  `Configuration` is posted back), deletes it with the profile; dashboard-made users are left
+  alone. It runs after profile create/remove jobs, after a rename (in the background), at the end
+  of `services_enable`, in every Jellyfin job and in `jellyfin.users.reveal {pin}` (no job; the
+  admin's and each profile's password; never logged). `jellyfin.client_token` (no PIN, read-only
+  for the caller): the caller's own profile only (from its uid; guest and spare accounts get
+  `permission_denied {reason: profile}`): `{server_id, user_id, device_id: "hinteros-<id>",
+  access_token}`, minted with `AuthenticateByName` as that device (Jellyfin ends the device's older
+  token), kept in `users.json`, minted again when `GET /System/Info` answers 401. For the session
+  daemon's seeding of the Jellyfin app (spike S1, a later step).
+- **`plex.claim {pin, code}`** (job): `claim-` and 20 of `[A-Za-z0-9_-]` (what plex.tv/claim gives;
+  Plex documents no exact format, so a change shows as `invalid_params`). The job posts it to
+  Plex's own `POST /myplex/claim?token=` on 127.0.0.1:32400 with `X-Plex-Client-Identifier` (the
+  server's `ProcessedMachineIdentifier`) and succeeds once `PlexOnlineToken` is set (30 s).
+- **`tailscale.login {pin}`** (job): `tailscale up --reset --json --timeout=600s` (defaults: no
+  exit node, routes or Tailscale SSH; `--force-reauth` for an expired key); its pretty-printed
+  JSON objects are decoded as a stream; each new `AuthURL` (https, printable ASCII, ≤ 512) is
+  `job_progress {stage: signing_in, detail: {auth_url}}`; done at `{"BackendState":"Running"}`
+  and exit 0. `jobs.cancel` kills the CLI. `tailscale.logout {pin}` (job) runs `tailscale
+  logout`. Both answer `job_id: null` when the state is already the asked one.
+- **`cloudflare.set_token {pin, token}`**: checked strictly (cloudflared's `ParseToken`: padded
+  standard base64 of `{"a": 32 hex, "t": UUID, "s": base64 of 32..256 bytes, "e"?: endpoint}`,
+  no other or repeated key, ≤ 512); the service writes it 0600 atomically (the directory 0700) so
+  it is never in a job spec; the job restarts `hinteros-cloudflared.service` (D-Bus) and waits 30 s
+  for `/ready`. `cloudflare.clear_token {pin}` (job) stops the unit and deletes the file.
+- polkit action `org.hinteros.system.services` for every write (the admin PIN is the service's
+  check); `services.list`, `media.folders`, `jellyfin.client_token` are reads. PINs, claim codes
+  and tokens are `***` in `HINTEROS_PARAMS`. Job failures carry `job_failed.data.reason`
+  (`unreachable`, `not_ready`, `refused`, `timeout`, `not_connected`); methods on a service that
+  is off or not set up: `unavailable {service: jellyfin|plex|tailscale|cloudflare, reason: off |
+  not_ready}`.
+
+Flags (all paths default to the box's; tests point them at a temporary root and fakes):
+`--media-dir` (`/srv/media`), `--var-lib-dir`, `--var-cache-dir`, `--jellyfin-addr`
+(`127.0.0.1:8096`), `--plex-addr` (`127.0.0.1:32400`), `--plex-preferences`,
+`--tailscale-socket` (`/run/tailscale/tailscaled.sock`), `--tailscale` (the CLI, for jobs),
+`--cloudflared-metrics` (`127.0.0.1:20241`), `--tailscale-login-timeout-s` (600). Every address
+must be loopback (the HTTP client refuses anything else).
+
+### What the system repo must provide (0.11)
+
+As agreed (system repo `m10-server`): `/var/lib/hinteros/services/<id>/` while a service is on;
+Jellyfin's `setup-done`, `admin-password`, `api-key` (no trailing newline needed: they are
+trimmed); Plex on 127.0.0.1:32400 and its `Preferences.xml`; `hinteros-cloudflared.service`
+reading `/var/lib/hinteros/services/cloudflare-tunnel/token` with metrics on 127.0.0.1:20241;
+`tailscale` on the `PATH` of `hinteros-job@` and the socket `/run/tailscale/tailscaled.sock`;
+`/srv/media`; `AF_INET` + `IPAddressAllow=localhost` for `hinteros-system` while Jellyfin, Plex or
+Cloudflare is on. Also: the polkit action `org.hinteros.system.services` in the policy file
+(granted to `hinteros` by the existing rule); `hinteros-system` (not only the job unit) must
+reach `/run/tailscale/tailscaled.sock` (`services.list`, `tailscale.*`'s pre-check: `AF_UNIX`,
+read access) and read `/var/lib/plex/Plex Media Server/Preferences.xml` and `/proc/net/route`,
+`/proc/net/fib_trie`; `hinteros-job@` needs `systemd` D-Bus `RestartUnit`/`StopUnit` on
+`hinteros-cloudflared.service` (root: allowed), loopback to Jellyfin/Plex/cloudflared, and
+writes under `/var/lib`, `/var/cache` (delete_data). VM test to add: `server-api` (enable
+Jellyfin with the PIN, add a library from `/srv/media`, per-profile users, disable with delete).
+
+### What the launcher must do (session API 0.19)
+
+Hello with 0.19. Server tab: `system.services.list` (re-query on `job_finished` of the new kinds
+and after reconnecting); "Turn on" with the admin PIN (`terms` shown in full, then
+`accepted_terms`); job pages from `job_progress` (the new stages `configuring` and `signing_in`;
+for `tailscale_login` the QR of `detail.auth_url`, also in `system.jobs.get`); Jellyfin libraries
+(`system.media.folders` to pick a folder, `system.jellyfin.libraries.add/remove`), Accounts
+(`system.jellyfin.users.reveal`), Plex claim code (`claim-` prefilled), Cloudflare token, Turn
+off (+ delete data, second confirmation); `job_failed.data.reason` and `unavailable {service,
+reason}` for the messages.
 
 ## Development
 

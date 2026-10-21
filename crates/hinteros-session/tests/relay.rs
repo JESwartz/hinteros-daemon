@@ -79,6 +79,13 @@ fn fake_system(
                                     "a PIN is needed",
                                     json!({"pin": "admin"}),
                                 )),
+                                // The Jellyfin app's sign-in (system API 0.11).
+                                "jellyfin.client_token" => Ok(json!({
+                                    "server_id": "0123456789abcdef0123456789abcdef",
+                                    "user_id": "fedcba9876543210fedcba9876543210",
+                                    "device_id": "hinteros-p1",
+                                    "access_token": "5ecre7t0ken5ecre7t0ken5ecre7t0ke"
+                                })),
                                 m => Err(hinteros_api::server::method_not_found(m)),
                             };
                             write_message(&mut w, &jsonrpc::response(&id, outcome)).await.unwrap();
@@ -255,5 +262,90 @@ async fn relays_methods_errors_and_job_events() {
     })
     .await;
     assert_eq!(e["code"], ErrorCode::SystemUnavailable.code());
+    task.abort();
+}
+
+/// Launching the Jellyfin app: its settings point at the box's sign-in page first (the token
+/// from `jellyfin.client_token`), and the token is not logged; without the system service it
+/// starts unchanged.
+#[tokio::test]
+async fn the_jellyfin_app_is_signed_in_before_it_starts() {
+    let d = Daemon::start_with(|dir| {
+        // The app copies what it finds, as jellyfin-desktop would read it.
+        script(
+            &dir.join("jellyfin-desktop"),
+            &format!(
+                "cat \"$HOME\"/.local/share/jellyfin-desktop/profiles/*/jellyfin-desktop.conf > {}/seen 2>&1; sleep 30",
+                dir.display()
+            ),
+        );
+        let config = dir.join("session.toml");
+        std::fs::write(
+            &config,
+            format!(
+                r#"
+                [[apps]]
+                id = "jellyfin"
+                name = "Jellyfin"
+                command = ["{}"]
+                sandbox = false
+                "#,
+                dir.join("jellyfin-desktop").display()
+            ),
+        )
+        .unwrap();
+        vec!["--config".into(), config.into()]
+    });
+    let dir = d.dir.path().to_owned();
+    let mut c = d.client().await;
+
+    // No system service: the app starts unchanged.
+    call(&mut c, "apps.launch", json!({"id": "jellyfin"}))
+        .await
+        .unwrap();
+    let seen = eventually("the app to start", async || {
+        std::fs::read_to_string(dir.join("seen"))
+            .ok()
+            .filter(|s| s.ends_with('\n'))
+    })
+    .await;
+    assert!(seen.contains("No such file"), "{seen}");
+    call(&mut c, "apps.close", json!({"id": "jellyfin"}))
+        .await
+        .unwrap();
+    eventually("the app to end", async || {
+        let r = call(&mut c, "apps.running", json!({})).await.ok()?;
+        (r["apps"] == json!([])).then_some(())
+    })
+    .await;
+    std::fs::remove_file(dir.join("seen")).unwrap();
+
+    let (task, _seen) = fake_system(&dir.join("system.sock"), system::VERSION);
+    eventually("the relay to connect", async || {
+        call(&mut c, "system.info", json!({})).await.ok()
+    })
+    .await;
+    call(&mut c, "apps.launch", json!({"id": "jellyfin"}))
+        .await
+        .unwrap();
+    let seen = eventually("the app to start", async || {
+        std::fs::read_to_string(dir.join("seen"))
+            .ok()
+            .filter(|s| s.ends_with('\n'))
+    })
+    .await;
+    let conf: Value = serde_json::from_str(&seen).unwrap();
+    assert_eq!(
+        conf["sections"]["path"]["startupurl_desktop"],
+        "http://127.0.0.1:8096/web/hinteros/signin.html#s=0123456789abcdef0123456789abcdef\
+         &u=fedcba9876543210fedcba9876543210&d=hinteros-p1\
+         &AccessToken=5ecre7t0ken5ecre7t0ken5ecre7t0ke"
+    );
+    assert_eq!(
+        conf["sections"]["main"]["userWebClient"],
+        "http://127.0.0.1:8096"
+    );
+    assert_eq!(conf["version"], 7);
+    assert!(!d.log().contains("5ecre7t0ken"), "the token is in the log");
     task.abort();
 }

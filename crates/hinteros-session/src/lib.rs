@@ -7,6 +7,7 @@
 //! through traits, so its behaviour is unit-tested with mocks.
 
 pub mod apps;
+pub mod appseed;
 pub mod auth;
 pub mod config;
 pub mod displays;

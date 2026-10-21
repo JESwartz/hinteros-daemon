@@ -99,7 +99,17 @@ pub async fn handle(
                     Step::Ignore => debug!("ignoring client notification"),
                     Step::Dispatch(req) => {
                         let id = req.id.expect("dispatched requests have an id");
-                        if concurrent(&req.method) {
+                        if crate::appseed::wants(&req.method, req.params.as_ref()) {
+                            // The Jellyfin app: its sign-in seed first (a system call), then the
+                            // launch, without holding up the connection.
+                            let (shell, relay, tx) =
+                                (shell.clone(), services.relay.clone(), answers_tx.clone());
+                            tokio::spawn(async move {
+                                crate::appseed::before_launch(&shell, &relay).await;
+                                let outcome = shell_call(&shell, &req.method, req.params).await;
+                                let _ = tx.send(jsonrpc::response(&id, outcome));
+                            });
+                        } else if concurrent(&req.method) {
                             let client = conn.negotiated().map(|(_, c)| c.name.clone());
                             let (services, tx) = (services.clone(), answers_tx.clone());
                             tokio::spawn(async move {
@@ -187,21 +197,28 @@ async fn dispatch(
                 events: subscriptions.iter().copied().collect(),
             })
         }),
-        m if METHODS.contains(&m) => {
-            let (reply, result) = oneshot::channel();
-            let unavailable =
-                || ErrorObject::new(ErrorCode::InternalError, "session daemon is shutting down");
-            shell
-                .send(Msg::Request {
-                    method: m.into(),
-                    params,
-                    reply,
-                })
-                .map_err(|_| unavailable())?;
-            result.await.map_err(|_| unavailable())?
-        }
+        m if METHODS.contains(&m) => shell_call(shell, m, params).await,
         _ => Err(method_not_found(method)),
     }
+}
+
+/// A method the shell answers ([`METHODS`]).
+async fn shell_call(
+    shell: &mpsc::UnboundedSender<Msg>,
+    method: &str,
+    params: Option<Value>,
+) -> Result<Value, ErrorObject> {
+    let (reply, result) = oneshot::channel();
+    let unavailable =
+        || ErrorObject::new(ErrorCode::InternalError, "session daemon is shutting down");
+    shell
+        .send(Msg::Request {
+            method: method.into(),
+            params,
+            reply,
+        })
+        .map_err(|_| unavailable())?;
+    result.await.map_err(|_| unavailable())?
 }
 
 /// The display mode and the audio output are the box's, not the profile's (profiles.md): a kept

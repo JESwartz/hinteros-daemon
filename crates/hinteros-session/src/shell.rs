@@ -115,6 +115,11 @@ pub enum Msg {
     ForceClose {
         id: String,
     },
+    /// Where app `id` keeps its data, for the sign-in seed before its launch ([`crate::appseed`]).
+    SeedHome {
+        id: String,
+        reply: oneshot::Sender<Option<PathBuf>>,
+    },
     /// A text field in a web app gained or lost focus (see [`crate::textfocus`]); `pid` is the
     /// reporting process (Firefox's native-messaging host, or Firefox itself for its own
     /// toolbar fields), `reporter` the connection it came on (one Firefox has two: page fields
@@ -605,6 +610,9 @@ impl Shell {
                 );
             }
             Msg::ForceClose { id } => self.force_close(&id, now),
+            Msg::SeedHome { id, reply } => {
+                let _ = reply.send(self.seed_home(&id));
+            }
             Msg::TextFocus {
                 pid,
                 reporter,
@@ -858,6 +866,29 @@ impl Shell {
         }
         self.set_focus(p.id);
         Ok(AppsFocusResult {})
+    }
+
+    /// Where app `id` keeps its data (its sandbox home, else the profile's home), for the
+    /// sign-in seed before its launch: `None` when it is no configured command app, runs
+    /// already, or may not reach the local network (the box's own server).
+    fn seed_home(&self, id: &str) -> Option<PathBuf> {
+        if self.apps.contains_key(id) {
+            return None;
+        }
+        let app = self
+            .cfg
+            .apps
+            .iter()
+            .find(|a| a.id == id && a.command.is_some())?;
+        if !self.cfg.permissions.grants(&app.id, &app.permissions).lan {
+            return None;
+        }
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        Some(if self.cfg.sandbox && app.sandbox {
+            crate::sandbox::home_of(&home, id)
+        } else {
+            home
+        })
     }
 
     fn launch(

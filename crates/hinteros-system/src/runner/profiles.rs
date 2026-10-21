@@ -51,7 +51,7 @@ impl Runner {
         }
         public::publish(&paths, &j.state, &file, job::now());
         // Its Jellyfin user (best effort; reveal and Jellyfin jobs sync again).
-        crate::servers::jellyfin::sync_if_ready(&paths, &paths.server);
+        self.jellyfin_sync_users();
         info!(profile = %j.id, user = %j.user, "profile created");
         Ok(outcome)
     }
@@ -113,7 +113,7 @@ impl Runner {
         }
         Registry::reconcile(&paths, &j.state);
         appreg::publish(&paths, &j.state);
-        crate::servers::jellyfin::sync_if_ready(&paths, &paths.server);
+        self.jellyfin_sync_users();
         info!(profile = %j.id, user = %j.user, freed_bytes = freed, "profile removed");
         Ok(outcome)
     }

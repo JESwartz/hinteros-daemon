@@ -887,13 +887,16 @@ impl Runner {
             .map(PathBuf::from)
             .ok_or_else(|| self.fail("nix build printed no output path"))?;
 
-        // Activate.
+        // Activate. A new Jellyfin version: its data backed up first (server.md).
         self.check_cancel()?;
         self.enter_activation()?;
-        if let Err(e) = self.activate(&toplevel) {
+        let jellyfin_stopped = self.jellyfin_backup(old_toplevel.as_deref(), &toplevel)?;
+        let activated = self.activate(&toplevel);
+        if activated.is_err() {
             self.restore(old_toplevel.as_deref());
-            return Err(e);
         }
+        self.jellyfin_start(jellyfin_stopped);
+        activated?;
 
         // Finish: /etc/hinteros now describes the running system. The time zone is set in
         // place, without a job (time_zone.set): the live one wins over the staged copy's.
@@ -967,6 +970,45 @@ impl Runner {
         }
     }
 
+    /// A rollback's switch: the profile to `generation`, then its `switch-to-configuration
+    /// switch`; when the switch fails, the profile back to `old_generation` and its system the
+    /// boot default again (best effort; the failure is reported either way).
+    fn switch_generation(
+        &mut self,
+        generation: u32,
+        old_generation: Option<u32>,
+        old_toplevel: Option<&Path>,
+        target: &Path,
+    ) -> Result<(), Failure> {
+        let profile = self.spec.paths.profile.clone();
+        let mut cmd = Command::new(&self.spec.tools.nix_env);
+        cmd.arg("-p")
+            .arg(&profile)
+            .arg("--switch-generation")
+            .arg(generation.to_string());
+        self.exec(cmd, false, &mut |_, _| {})?;
+        let mut cmd = Command::new(target.join("bin/switch-to-configuration"));
+        cmd.arg("switch");
+        if let Err(e) = self.exec(cmd, false, &mut |_, _| {}) {
+            if let Some(old) = old_generation {
+                let mut cmd = Command::new(&self.spec.tools.nix_env);
+                cmd.arg("-p")
+                    .arg(&profile)
+                    .arg("--switch-generation")
+                    .arg(old.to_string());
+                if self.exec(cmd, false, &mut |_, _| {}).is_ok()
+                    && let Some(old) = old_toplevel
+                {
+                    let mut cmd = Command::new(old.join("bin/switch-to-configuration"));
+                    cmd.arg("boot");
+                    let _ = self.exec(cmd, false, &mut |_, _| {});
+                }
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
     fn rollback(&mut self, generation: u32) -> Outcome {
         self.set_stage(Stage::Preparing);
         self.inhibit("delay");
@@ -985,31 +1027,11 @@ impl Runner {
             })?;
         self.check_cancel()?;
         self.enter_activation()?;
-        let mut cmd = Command::new(&self.spec.tools.nix_env);
-        cmd.arg("-p")
-            .arg(&paths.profile)
-            .arg("--switch-generation")
-            .arg(generation.to_string());
-        self.exec(cmd, false, &mut |_, _| {})?;
-        let mut cmd = Command::new(target.join("bin/switch-to-configuration"));
-        cmd.arg("switch");
-        if let Err(e) = self.exec(cmd, false, &mut |_, _| {}) {
-            if let Some(old) = old_generation {
-                let mut cmd = Command::new(&self.spec.tools.nix_env);
-                cmd.arg("-p")
-                    .arg(&paths.profile)
-                    .arg("--switch-generation")
-                    .arg(old.to_string());
-                if self.exec(cmd, false, &mut |_, _| {}).is_ok()
-                    && let Some(old) = &old_toplevel
-                {
-                    let mut cmd = Command::new(old.join("bin/switch-to-configuration"));
-                    cmd.arg("boot");
-                    let _ = self.exec(cmd, false, &mut |_, _| {});
-                }
-            }
-            return Err(e);
-        }
+        let jellyfin_stopped = self.jellyfin_backup(old_toplevel.as_deref(), &target)?;
+        let switched =
+            self.switch_generation(generation, old_generation, old_toplevel.as_deref(), &target);
+        self.jellyfin_start(jellyfin_stopped);
+        switched?;
         self.set_stage(Stage::Finishing);
         {
             let _lock = crate::state::lock(&paths.state_lock())

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use hinteros_api::catalog::{Entry, is_state_dir};
 
+pub mod backup;
 pub mod cloudflare;
 pub mod http;
 pub mod jellyfin;

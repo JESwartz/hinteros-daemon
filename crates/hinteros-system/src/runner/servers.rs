@@ -4,7 +4,9 @@
 //! the `tailscale` CLI.
 
 use std::io::{BufRead, BufReader};
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -18,7 +20,7 @@ use super::{Failure, Outcome, Runner};
 use crate::job::{
     self, CloudflareJob, JellyfinJob, JellyfinOp, PlexJob, ProgressLine, ServicesJob, TailscaleJob,
 };
-use crate::servers::{self, cloudflare, jellyfin, media, plex, tailscale};
+use crate::servers::{self, backup, cloudflare, jellyfin, media, plex, tailscale};
 
 /// How long a job waits for Jellyfin or Plex to answer (they start slowly).
 const SERVICE_WAIT: Duration = Duration::from_secs(90);
@@ -434,5 +436,117 @@ impl Runner {
         }
         self.set_stage(Stage::Finishing);
         Ok((None, false))
+    }
+}
+
+/// How long a job waits for Jellyfin to stop before its backup.
+const JELLYFIN_STOP_WAIT: Duration = Duration::from_secs(90);
+
+impl Runner {
+    /// A unit's `ActiveState` (`None`: not loaded, or systemd cannot be asked).
+    fn unit_state(bus: Option<String>, unit: &str) -> Option<String> {
+        let unit = unit.to_owned();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?
+            .block_on(async move {
+                let conn = match &bus {
+                    Some(a) => zbus::connection::Builder::address(a.as_str())
+                        .ok()?
+                        .build()
+                        .await
+                        .ok()?,
+                    None => zbus::Connection::system().await.ok()?,
+                };
+                crate::freeze::unit_property(&conn, &unit, "ActiveState")
+                    .await
+                    .ok()
+                    .flatten()
+            })
+    }
+
+    /// Before a switch from `old` to `new` (an update, a rollback, any apply): when both run
+    /// Jellyfin and its version changes, stop it and replace the backup of its data
+    /// ([`backup`]). Returns whether Jellyfin was stopped here: the caller starts it again
+    /// ([`Self::jellyfin_start`]) whatever the switch did. A failure fails the job before the
+    /// switch (the box stays as it was, Jellyfin running).
+    pub(super) fn jellyfin_backup(
+        &mut self,
+        old: Option<&Path>,
+        new: &Path,
+    ) -> Result<bool, Failure> {
+        let Some((from, to)) = backup::changes(old, new) else {
+            return Ok(false);
+        };
+        let paths = self.spec.paths.clone();
+        let data = paths.server.var_lib.join(backup::DATA);
+        if !data.is_dir() {
+            return Ok(false);
+        }
+        info!(from, to, "Jellyfin changes version: backing up its data");
+        self.unit_call("StopUnit", backup::UNIT)
+            .map_err(|e| self.failed(format!("stopping Jellyfin: {e}"), "refused"))?;
+        let bus = self.spec.bus.clone();
+        let stopped = self.wait_for(JELLYFIN_STOP_WAIT, || {
+            !matches!(
+                Self::unit_state(bus.clone(), backup::UNIT).as_deref(),
+                Some("active" | "activating" | "deactivating" | "reloading")
+            )
+        });
+        if !matches!(stopped, Ok(true)) {
+            self.jellyfin_start(true);
+            stopped?;
+            return Err(self.failed("Jellyfin did not stop", "timeout"));
+        }
+        let dir = paths.services_dir().join(jellyfin::ID);
+        let made = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .and_then(|()| backup::replace(&data, &dir.join(backup::BACKUP)));
+        match made {
+            Ok(n) => {
+                info!(entries = n, "Jellyfin data backed up");
+                Ok(true)
+            }
+            Err(e) => {
+                self.jellyfin_start(true);
+                Err(self.failed(format!("backing up Jellyfin's data: {e}"), "refused"))
+            }
+        }
+    }
+
+    /// Start Jellyfin again after [`Self::jellyfin_backup`] stopped it (best effort; when the
+    /// running system has no Jellyfin there is nothing to start).
+    pub(super) fn jellyfin_start(&self, stopped: bool) {
+        if stopped && let Err(e) = self.unit_call("StartUnit", backup::UNIT) {
+            warn!("starting Jellyfin again: {e}");
+        }
+    }
+}
+
+impl Runner {
+    /// After a profile job's switch: the profiles' Jellyfin users, once Jellyfin answers (the
+    /// switch may have restarted it, e.g. for a new version; up to [`SERVICE_WAIT`]). Best
+    /// effort: `jellyfin.users.reveal` and every Jellyfin job sync again.
+    pub(super) fn jellyfin_sync_users(&mut self) {
+        let paths = self.spec.paths.clone();
+        let files = jellyfin::Files::new(&paths.services_dir());
+        if !jellyfin::enabled(&paths) || !files.setup_done() {
+            return;
+        }
+        let addr = paths.server.jellyfin;
+        if !matches!(
+            self.wait_for(SERVICE_WAIT, || jellyfin::Client::ping(
+                addr,
+                Duration::from_secs(2)
+            )),
+            Ok(true)
+        ) {
+            warn!("Jellyfin does not answer; its users come later");
+            return;
+        }
+        jellyfin::sync_if_ready(&paths, &paths.server);
     }
 }

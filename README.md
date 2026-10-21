@@ -1967,8 +1967,28 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   for the caller): the caller's own profile only (from its uid; guest and spare accounts get
   `permission_denied {reason: profile}`): `{server_id, user_id, device_id: "hinteros-<id>",
   access_token}`, minted with `AuthenticateByName` as that device (Jellyfin ends the device's older
-  token), kept in `users.json`, minted again when `GET /System/Info` answers 401. For the session
-  daemon's seeding of the Jellyfin app (spike S1, a later step).
+  token), kept in `users.json`, minted again when `GET /System/Info` answers 401. The session
+  daemon signs the Jellyfin app in with it (below).
+- **The Jellyfin app signs in by itself** (spike S1, session side, `appseed.rs`): before
+  `apps.launch {id: "jellyfin"}` (not while it runs, not without `lan`) the session daemon calls
+  `jellyfin.client_token` (10 s at most; `unavailable` = the server is off or not set up: nothing
+  to do) and writes the client's settings in the app's data home (its sandbox home): in
+  `~/.local/share/jellyfin-desktop/`, `profiles.json`'s `defaultProfile` (else the first
+  `profiles/<32 hex>`, else one it makes, with `profile.json`) names
+  `profiles/<id>/jellyfin-desktop.conf`, where it sets only `path.startupurl_desktop` (the server's
+  seed page `http://127.0.0.1:8096/web/hinteros/signin.html#s=<server id>&u=<user id>&d=<device
+  id>&AccessToken=<token>`), `main.userWebClient` (`http://127.0.0.1:8096`) and `main.layout`
+  (`tv`); the `version` the app wrote stays (7 in a new file: another version makes the client
+  move the file to `.broken`). Files 0600, directories 0700, written atomically. Any failure
+  launches the app unchanged; the token is never logged. The launch is answered after the seed
+  (out of order, like the relayed methods).
+- **Jellyfin backup** (`servers/backup.rs`): an apply job (update, rebuild, any state change) or a
+  rollback that switches between two systems that both run Jellyfin, in different versions
+  (`jellyfin-<version>` in their `etc/systemd/system/jellyfin.service`), first stops
+  `jellyfin.service` (D-Bus, waits 90 s), copies `/var/lib/jellyfin/data` with modes, owners and
+  links to `/var/lib/hinteros/services/jellyfin-server/backup` (through `backup.new`: one copy,
+  replaced each time) and starts Jellyfin again after the switch (also when the switch failed). A
+  failed stop or copy fails the job before the switch. Restoring is by hand.
 - **`plex.claim {pin, code}`** (job): `claim-` and 20 of `[A-Za-z0-9_-]` (what plex.tv/claim gives;
   Plex documents no exact format, so a change shows as `invalid_params`). The job posts it to
   Plex's own `POST /myplex/claim?token=` on 127.0.0.1:32400 with `X-Plex-Client-Identifier` (the
@@ -2012,8 +2032,11 @@ reach `/run/tailscale/tailscaled.sock` (`services.list`, `tailscale.*`'s pre-che
 read access) and read `/var/lib/plex/Plex Media Server/Preferences.xml` and `/proc/net/route`,
 `/proc/net/fib_trie`; `hinteros-job@` needs `systemd` D-Bus `RestartUnit`/`StopUnit` on
 `hinteros-cloudflared.service` (root: allowed), loopback to Jellyfin/Plex/cloudflared, and
-writes under `/var/lib`, `/var/cache` (delete_data). VM test to add: `server-api` (enable
-Jellyfin with the PIN, add a library from `/srv/media`, per-profile users, disable with delete).
+writes under `/var/lib`, `/var/cache` (delete_data). For the Jellyfin app: Jellyfin serves
+`/web/hinteros/signin.html` (the seed page, which stores `jellyfin_credentials` and `_deviceId2`
+from the fragment and opens `/web/index.html`). For the backup: `jellyfin.service`'s `ExecStart`
+names the server's store path (`<hash>-jellyfin-<version>`). VM tests (system repo):
+`server-api` (every method through the session relay) and `server-jellyfin-signin`.
 
 ### What the launcher must do (session API 0.19)
 

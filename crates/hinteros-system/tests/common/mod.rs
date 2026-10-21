@@ -349,11 +349,20 @@ impl Systemd {
         _mode: String,
         #[zbus(connection)] conn: &zbus::Connection,
     ) -> zbus::fdo::Result<OwnedObjectPath> {
+        if name == "hinteros-cloudflared.service" {
+            self.0.lock().unwrap().units.push(format!("restart {name}"));
+            return Ok(OwnedObjectPath::try_from("/org/freedesktop/systemd1/job/7").unwrap());
+        }
         if name != "hinteros-lan-filter.service" {
             return Err(zbus::fdo::Error::Failed(format!("unexpected unit {name}")));
         }
         let cmd = self.0.lock().unwrap().lan_cmd.clone();
         Ok(self.run_helper(name, cmd, None, conn.clone()))
+    }
+
+    fn stop_unit(&self, name: String, _mode: String) -> zbus::fdo::Result<OwnedObjectPath> {
+        self.0.lock().unwrap().units.push(format!("stop {name}"));
+        Ok(OwnedObjectPath::try_from("/org/freedesktop/systemd1/job/8").unwrap())
     }
 
     async fn start_unit(
@@ -501,6 +510,18 @@ pub async fn serve_fakes(address: &str, state: Shared) -> zbus::Connection {
                 .await
                 .unwrap();
         }
+    }
+    // The Server section's units (GetUnit finds one once a test lists it in `slices`).
+    for unit in [
+        "jellyfin.service",
+        "plex.service",
+        "tailscaled.service",
+        "hinteros-cloudflared.service",
+    ] {
+        server
+            .at(unit_path(unit), Unit(state.clone(), unit.to_owned()))
+            .await
+            .unwrap();
     }
     server
         .at(
@@ -1004,6 +1025,27 @@ impl System {
             "--localtime".into(),
             r("etc/localtime"),
         ];
+        // The Server section never reaches this machine's services or /var: a temporary root, and
+        // loopback ports nothing listens on, unless the test points them at its fakes.
+        let defaults = [
+            ("--media-dir", r("media")),
+            ("--var-lib-dir", r("var/lib")),
+            ("--var-cache-dir", r("var/cache")),
+            ("--jellyfin-addr", "127.0.0.1:9".to_owned()),
+            ("--plex-addr", "127.0.0.1:9".to_owned()),
+            (
+                "--plex-preferences",
+                r("var/lib/plex/Plex Media Server/Preferences.xml"),
+            ),
+            ("--tailscale-socket", r("run/tailscaled.sock")),
+            ("--tailscale", r("bin/tailscale")),
+            ("--cloudflared-metrics", "127.0.0.1:9".to_owned()),
+        ];
+        for (flag, value) in defaults {
+            if !extra.contains(&flag) {
+                args.extend([flag.to_string(), value]);
+            }
+        }
         // Generous rate limits unless the test sets its own (clap refuses a flag given twice).
         for (flag, value) in [("--rate-per-minute", "1000"), ("--rate-burst", "1000")] {
             if !extra.contains(&flag) {

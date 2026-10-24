@@ -1154,7 +1154,7 @@ async fn guide_tap_for_steam_reaches_the_pad_not_us() {
             initial: InterceptMode::Pass,
             swap: LabelSwap::Off,
             profile: PointerProfile {
-                yaml: pointer::profile_yaml(600, 0.1),
+                yaml: pointer::profile_yaml(600, 2.5, 0.1),
             },
             call_timeout: std::time::Duration::from_secs(5),
             // No watchdog in the way: the tap itself must set the mode.
@@ -1239,7 +1239,7 @@ async fn watchdog_leaves_inputplumbers_guide_switch_alone() {
             initial: InterceptMode::Pass,
             swap: LabelSwap::Off,
             profile: PointerProfile {
-                yaml: pointer::profile_yaml(600, 0.1),
+                yaml: pointer::profile_yaml(600, 2.5, 0.1),
             },
             call_timeout: Duration::from_secs(5),
             watchdog: Duration::from_millis(100),

@@ -152,7 +152,9 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   keyboard-profile app the right stick moves a mouse pointer, the left stick and D-pad stay
   arrow keys. InputPlumber does the motion: the daemon loads a device profile
   (`LoadProfileFromYaml`; InputPlumber's default mappings plus `RightStick → Mouse:Motion`,
-  `speed_pps`, linear with InputPlumber's fixed 0.20 deadzone) and uses intercept mode
+  `speed_pps` and `curve`: HinterOS patches InputPlumber so that a mapping can ask for a response
+  curve, speed_pps * m^curve past a 0.20 radial deadzone; only this profile does, so games keep
+  the stick as it is) and uses intercept mode
   GAMEPAD_ONLY (3), where the profile's mouse events still reach InputPlumber's virtual mouse
   while every gamepad event comes to the daemon over D-Bus (ALL would swallow them). The D-Bus
   target never reports the right stick, so the profile also maps any deflection beyond
@@ -365,6 +367,7 @@ auto_show = false              # show it as soon as a text field gets focus in a
 [pointer]                      # right stick = mouse pointer in keyboard-profile apps
 enable = true
 speed_pps = 1000               # pixels per second at full deflection (InputPlumber profile)
+curve = 2.5                    # speed = speed_pps * m^curve, m = deflection past the deadzone; 1 = linear
 activity_deadzone = 0.25       # right stick movement that counts as using the pointer
 # idle_ms                      # ignored, still accepted (older configs): A never clicks, no idle hiding
 hide_command = ["gamescopectl", "paint_cursor_plane", "0"]  # D-pad/left stick used: hide at once

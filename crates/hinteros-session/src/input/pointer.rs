@@ -125,11 +125,11 @@ pub fn default_profile_yaml() -> String {
 }
 
 /// The pointer profile: the default mappings, the right stick as mouse motion at `speed_pps`
-/// pixels per second at full deflection (InputPlumber applies a fixed 0.20 deadzone, then a
-/// response curve speed = speed_pps * m^k on the rescaled deflection m; k is the system's
-/// `hinteros.input.pointerCurve`, default 2.5, so full speed is unchanged),
-/// and right-stick activity as [`ACTIVITY_EVENT`] beyond `activity_deadzone`.
-pub fn profile_yaml(speed_pps: u32, activity_deadzone: f64) -> String {
+/// pixels per second at full deflection with response curve `curve` (InputPlumber, patched:
+/// a 0.20 radial deadzone, then speed_pps * m^curve on the rescaled deflection m, so full
+/// speed is unchanged; only this profile has it, games get no curve), and right-stick
+/// activity as [`ACTIVITY_EVENT`] beyond `activity_deadzone`.
+pub fn profile_yaml(speed_pps: u32, curve: f64, activity_deadzone: f64) -> String {
     let mut y = format!(
         "version: 1\nkind: DeviceProfile\nname: {PROFILE_NAME}\nmapping:\n{DEFAULT_MAPPINGS}"
     );
@@ -143,6 +143,7 @@ pub fn profile_yaml(speed_pps: u32, activity_deadzone: f64) -> String {
       - mouse:
           motion:
             speed_pps: {speed_pps}
+            curve: {curve}
 "#
     ));
     for direction in ["left", "right", "up", "down"] {
@@ -288,9 +289,14 @@ mod tests {
 
     #[test]
     fn profile_maps_the_right_stick() {
-        let y = profile_yaml(1200, 0.25);
+        let y = profile_yaml(1200, 2.5, 0.25);
         assert!(y.contains("name: HinterOS pointer"));
-        assert!(y.contains("speed_pps: 1200"));
+        assert!(y.contains("speed_pps: 1200\n            curve: 2.5\n"));
+        assert_eq!(
+            y.matches("curve:").count(),
+            1,
+            "only the pointer gets a curve"
+        );
         assert_eq!(y.matches("button: QuickAccess2\n").count(), 5); // 1 default + 4 ours
         assert!(y.contains("deadzone: 0.25"));
         assert!(y.contains("keyboard: KeyVolumeUp"), "default mappings kept");

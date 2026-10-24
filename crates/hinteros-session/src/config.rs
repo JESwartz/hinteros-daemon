@@ -61,6 +61,7 @@
 //! [pointer]                    # right stick = mouse pointer in keyboard-profile apps
 //! enable = true
 //! speed_pps = 1000             # pixels per second at full deflection
+//! curve = 2.5                  # speed = speed_pps * m^curve (m: deflection past the deadzone); 1 = linear
 //! activity_deadzone = 0.25     # stick movement that counts as using the pointer
 //! # idle_ms                    # ignored (older configs): A never clicks, the pointer never idles out
 //! hide_command = ["gamescopectl", "paint_cursor_plane", "0"]  # on D-pad/left stick use
@@ -883,10 +884,13 @@ impl Default for OskConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct PointerConfig {
     pub enable: bool,
-    /// Pointer speed at full deflection, pixels per second (InputPlumber: fixed 0.20 deadzone,
-    /// then speed_pps * m^k on the rescaled deflection m; k is the NixOS option
-    /// `hinteros.input.pointerCurve`, so slow movements are slower, full speed is unchanged).
+    /// Pointer speed at full deflection, pixels per second.
     pub speed_pps: u32,
+    /// Response curve exponent k, written into the pointer profile only (games never get it):
+    /// InputPlumber (patched) applies a 0.20 radial deadzone, then speed_pps * m^k on the
+    /// rescaled deflection m, so small movements are slower and full speed is unchanged.
+    /// 1.0 is linear.
+    pub curve: f64,
     /// How far the right stick must move to count as "using the pointer" (0..1).
     pub activity_deadzone: f64,
     /// Ignored, accepted so that older configs still load. (A clicked while the right stick
@@ -903,6 +907,7 @@ impl Default for PointerConfig {
         Self {
             enable: true,
             speed_pps: 1000,
+            curve: 2.5,
             activity_deadzone: 0.25,
             idle_ms: None,
             hide_command: ["gamescopectl", "paint_cursor_plane", "0"]
@@ -1316,6 +1321,10 @@ impl Config {
         ensure!(
             self.pointer.speed_pps > 0,
             "pointer.speed_pps must be positive"
+        );
+        ensure!(
+            self.pointer.curve.is_finite() && (0.1..=10.0).contains(&self.pointer.curve),
+            "pointer.curve must be in [0.1, 10]"
         );
         for (key, p) in [
             ("pulse_socket", &self.sandbox.pulse_socket),
@@ -1953,6 +1962,7 @@ mod tests {
             [pointer]
             enable = false
             speed_pps = 1500
+            curve = 1.5
             idle_ms = 1500
             hide_command = []
             [input]
@@ -1972,6 +1982,7 @@ mod tests {
         assert!(c.osk.auto_show && !c.pointer.enable);
         assert!(!c.input.keyboard_home);
         assert_eq!((c.pointer.speed_pps, c.pointer.idle_ms), (1500, Some(1500)));
+        assert_eq!(c.pointer.curve, 1.5);
         assert!(c.pointer.hide_command.is_empty());
         assert!(c.apps[0].address_bar);
         assert_eq!(c.apps[0].pointer, Some(false));
@@ -1985,6 +1996,7 @@ mod tests {
         for bad in [
             "[osk]\nfield_summon = \"focus\"\n",
             "[pointer]\nactivity_deadzone = 1.5\n",
+            "[pointer]\ncurve = 0\n",
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"a\"]\naddress_bar = true\n",
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"a\"]\npointer = true\n",
         ] {

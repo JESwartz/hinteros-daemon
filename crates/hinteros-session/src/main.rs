@@ -252,6 +252,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
                 profile: inputplumber::PointerProfile {
                     yaml: pointer::profile_yaml(
                         config.pointer.speed_pps,
+                        config.pointer.curve,
                         config.pointer.activity_deadzone,
                     ),
                 },

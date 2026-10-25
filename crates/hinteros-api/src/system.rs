@@ -132,6 +132,8 @@ pub enum JobKind {
     CloudflareSetToken,
     /// 0.11: the Cloudflare tunnel stopped and its token deleted.
     CloudflareClearToken,
+    /// 0.11: an app's data deleted in the caller's home (`apps.clear_data`).
+    AppsClearData,
 }
 
 impl JobKind {
@@ -168,6 +170,7 @@ impl JobKind {
         JobKind::TailscaleLogout,
         JobKind::CloudflareSetToken,
         JobKind::CloudflareClearToken,
+        JobKind::AppsClearData,
     ];
 }
 
@@ -811,6 +814,21 @@ impl Method for AppsAcceptTerms {
     const NAME: &'static str = "apps.accept_terms";
     type Params = AppsAcceptTermsParams;
     type Result = Empty;
+}
+
+/// 0.11 `apps.clear_data`: delete a catalog app's `dataPaths` in the caller's home, installed
+/// or not (data a remove left behind).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppsClearDataParams {
+    pub id: String,
+}
+
+pub struct AppsClearData;
+impl Method for AppsClearData {
+    const NAME: &'static str = "apps.clear_data";
+    type Params = AppsClearDataParams;
+    type Result = JobRef;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2484,6 +2502,7 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<AppsGenerations>(),
         MethodInfo::of::<AppsRollback>(),
         MethodInfo::of::<AppsAcceptTerms>(),
+        MethodInfo::of::<AppsClearData>(),
         MethodInfo::of::<ProfilesList>(),
         MethodInfo::of::<ProfilesCreate>(),
         MethodInfo::of::<ProfilesSetupAdmin>(),
@@ -2559,6 +2578,7 @@ pub const MUTATING: &[&str] = &[
     AppsRemove::NAME,
     AppsRollback::NAME,
     AppsAcceptTerms::NAME,
+    AppsClearData::NAME,
     ProfilesCreate::NAME,
     ProfilesSetupAdmin::NAME,
     ProfilesRename::NAME,
@@ -2623,9 +2643,11 @@ pub fn polkit_action(method: &str) -> Option<&'static str> {
         Rollback::NAME => "org.hinteros.system.rollback",
         ChannelSet::NAME | BaseSet::NAME => "org.hinteros.system.channel",
         JobsCancel::NAME => "org.hinteros.system.jobs.cancel",
-        AppsInstall::NAME | AppsRemove::NAME | AppsRollback::NAME | AppsAcceptTerms::NAME => {
-            "org.hinteros.system.apps"
-        }
+        AppsInstall::NAME
+        | AppsRemove::NAME
+        | AppsRollback::NAME
+        | AppsAcceptTerms::NAME
+        | AppsClearData::NAME => "org.hinteros.system.apps",
         ProfilesCreate::NAME => "org.hinteros.system.profiles.create",
         ProfilesSetupAdmin::NAME
         | ProfilesRename::NAME

@@ -1,13 +1,14 @@
 //! Per-profile apps on schema-2 boxes (system API 0.4, apps.md "Install, remove, rollback"):
 //! `apps.list`, `apps.generations`, `apps.install`, `apps.remove`, `apps.rollback`,
-//! `apps.accept_terms`, the box-feature bookkeeping of system jobs, and queueing the v1 → v2
+//! `apps.accept_terms`, `apps.clear_data`, the box-feature bookkeeping of system jobs, and queueing the v1 → v2
 //! migration.
 
 use std::collections::BTreeSet;
 
 use hinteros_api::system::{
-    AppGeneration, AppsAcceptTermsParams, AppsGenerationsResult, AppsInstallParams, AppsListResult,
-    AppsRemoveParams, AppsRollbackParams, Empty, JobKind, JobSubject,
+    AppGeneration, AppsAcceptTermsParams, AppsClearDataParams, AppsGenerationsResult,
+    AppsInstallParams, AppsListResult, AppsRemoveParams, AppsRollbackParams, Empty, JobKind,
+    JobSubject,
 };
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde_json::Value;
@@ -249,33 +250,10 @@ impl Service {
             .collect();
         // Only the caller's own home (other profiles' data is never touched).
         let delete_data = match (&index, p.delete_data) {
-            (Some(index), true) => {
-                let homes = match &self.args.test_profile_home {
-                    Some(dir) => vec![Home {
-                        user: "test".into(),
-                        uid: peer.uid,
-                        dir: dir.clone(),
-                    }],
-                    None => caller
-                        .user
-                        .iter()
-                        .filter(|u| {
-                            u.uid != 0
-                                && u.home.is_absolute()
-                                && u.home != std::path::Path::new("/")
-                        })
-                        .map(|u| Home {
-                            user: u.name.clone(),
-                            uid: u.uid,
-                            dir: u.home.clone(),
-                        })
-                        .collect(),
-                };
-                Some(DeleteData {
-                    homes,
-                    paths: store::data_paths(index, &removing),
-                })
-            }
+            (Some(index), true) => Some(DeleteData {
+                homes: self.own_homes(peer, &caller),
+                paths: store::data_paths(index, &removing),
+            }),
             _ => None,
         };
         let subject = JobSubject {
@@ -299,6 +277,66 @@ impl Service {
             .about(subject);
         let id = self.start(spec).await?;
         info!(job = %id, owner = %owner.key(), apps = ?removing, delete_data = p.delete_data, "removing apps");
+        job_ref(Some(id))
+    }
+
+    /// The caller's own home, the only one whose app data it may delete.
+    fn own_homes(&self, peer: &Peer, caller: &Caller) -> Vec<Home> {
+        match &self.args.test_profile_home {
+            Some(dir) => vec![Home {
+                user: "test".into(),
+                uid: peer.uid,
+                dir: dir.clone(),
+            }],
+            None => caller
+                .user
+                .iter()
+                .filter(|u| {
+                    u.uid != 0 && u.home.is_absolute() && u.home != std::path::Path::new("/")
+                })
+                .map(|u| Home {
+                    user: u.name.clone(),
+                    uid: u.uid,
+                    dir: u.home.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// 0.11 `apps.clear_data`: a job that deletes one app's `dataPaths` in the caller's home,
+    /// whether the app is installed or not.
+    pub(super) async fn apps_clear_data(
+        &self,
+        peer: &Peer,
+        p: AppsClearDataParams,
+    ) -> Result<Value, ErrorObject> {
+        let (state, _) = self.load_state()?;
+        if !state.is_schema2() {
+            return Err(profiles::schema1());
+        }
+        let (caller, owner) = self.app_owner(peer.uid, &state)?;
+        let index = self.catalog()?;
+        if index.app(&p.id).is_none() {
+            return Err(ErrorObject::new(
+                ErrorCode::NotFound,
+                format!("{} is not in the catalog", p.id),
+            ));
+        }
+        let ids = vec![p.id.clone()];
+        let delete = DeleteData {
+            homes: self.own_homes(peer, &caller),
+            paths: store::data_paths(&index, &ids),
+        };
+        let subject = JobSubject {
+            apps: Some(self.subject_apps(&ids)),
+            delete_data: Some(true),
+            ..self.owner_subject(&owner)
+        };
+        let spec = self
+            .spec(JobKind::AppsClearData, peer.uid, Action::ClearData(delete))
+            .about(subject);
+        let id = self.start(spec).await?;
+        info!(job = %id, owner = %owner.key(), app = %p.id, "clearing app data");
         job_ref(Some(id))
     }
 

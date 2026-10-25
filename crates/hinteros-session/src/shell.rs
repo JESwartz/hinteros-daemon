@@ -588,7 +588,13 @@ impl Shell {
             Msg::CloseAll { reply } => {
                 let ids: Vec<String> = self.apps.keys().cloned().collect();
                 for id in ids {
-                    let _ = self.close(AppsCloseParams { id: id.clone() }, now);
+                    let _ = self.close(
+                        AppsCloseParams {
+                            id: id.clone(),
+                            force: false,
+                        },
+                        now,
+                    );
                     // No silent force-close: the user decides (switch_blocked).
                     if let Some(app) = self.apps.get_mut(&id)
                         && let Some(c) = app.closing.as_mut()
@@ -1181,6 +1187,13 @@ impl Shell {
         let Some(app) = self.apps.get(&p.id) else {
             return Err(Self::not_running(&p.id));
         };
+        if p.force {
+            // Also when a close is under way: Force Stop does not wait for it.
+            if !app.closing.is_some_and(|c| c.killed) {
+                self.kill_now(&p.id, now);
+            }
+            return Ok(AppsCloseResult {});
+        }
         if app.closing.is_some() {
             return Ok(AppsCloseResult {});
         }
@@ -1549,6 +1562,41 @@ impl Shell {
             .into_iter()
             .flat_map(|r| self.procs.descendants(r))
             .collect()
+    }
+
+    /// `apps.close {force}`: SIGKILL now. A command app or a Steam game: its processes, as
+    /// when the close deadline passes. Steam: every `steam` process of this user and all below
+    /// it (its helpers and games). Then, as after a timed-out close, tracking ends when its
+    /// windows or reaper go, or after the close timeout.
+    fn kill_now(&mut self, id: &str, now: Instant) {
+        let Some(app) = self.apps.get(id) else { return };
+        info!(app = id, "force stop");
+        if app.info.source != AppSource::SteamClient {
+            self.force_close(id, now);
+            return;
+        }
+        self.steam_action_at = Some(now);
+        let mut pids = Vec::new();
+        for pid in self.procs.steam_clients() {
+            pids.push(pid);
+            pids.extend(self.procs.descendants(pid));
+        }
+        pids.sort_unstable();
+        pids.dedup();
+        info!(app = id, processes = pids.len(), "killing Steam");
+        for pid in pids {
+            self.procs.signal(pid, Sig::Kill);
+        }
+        if !self.cfg.gamescope {
+            self.exited(id, ExitReason::Closed, None);
+            return;
+        }
+        if let Some(app) = self.apps.get_mut(id) {
+            app.closing = Some(Closing {
+                killed: true,
+                deadline: now + self.cfg.close_timeout,
+            });
+        }
     }
 
     /// The close deadline passed: SIGKILL what is left; the second time, stop tracking it.
@@ -3053,6 +3101,7 @@ mod tests {
         trees: BTreeMap<u32, Vec<u32>>,
         steam_reapers: BTreeMap<u32, Vec<u32>>,
         steam_running: bool,
+        steam_clients: Vec<u32>,
         /// Reapers left on an X display (by display).
         display_users: BTreeMap<String, Vec<u32>>,
     }
@@ -3088,6 +3137,9 @@ mod tests {
         }
         fn steam_running(&mut self) -> bool {
             self.table.lock().unwrap().steam_running
+        }
+        fn steam_clients(&mut self) -> Vec<u32> {
+            self.table.lock().unwrap().steam_clients.clone()
         }
         fn display_users(&mut self, display: &str) -> Vec<u32> {
             let t = self.table.lock().unwrap();
@@ -3867,6 +3919,44 @@ mod tests {
             .collect();
         t.shell
             .handle(Msg::Gamescope(GamescopeEvent::SteamWindows(windows)), t.now);
+    }
+
+    #[test]
+    fn force_close_kills_at_once() {
+        let mut t = T::new();
+        let app = t.launch(json!({"command": ["stubborn"]}));
+        let reaper = app.pid.unwrap();
+        t.procs
+            .lock()
+            .unwrap()
+            .trees
+            .insert(reaper, vec![reaper + 1, reaper + 2]);
+        t.events();
+        t.log.take();
+        // A close under way does not hold up Force Stop.
+        t.call("apps.close", json!({"id": "cmd-1"})).unwrap();
+        assert_eq!(t.log.take(), [Call::Signal(reaper, Sig::Term)]);
+        t.call("apps.close", json!({"id": "cmd-1", "force": true}))
+            .unwrap();
+        assert_eq!(
+            t.log.take(),
+            [
+                Call::Signal(reaper + 1, Sig::Kill),
+                Call::Signal(reaper + 2, Sig::Kill)
+            ]
+        );
+        // Once killed, a second Force Stop does nothing.
+        t.call("apps.close", json!({"id": "cmd-1", "force": true}))
+            .unwrap();
+        assert!(t.log.take().is_empty());
+        exit(&mut t, "cmd-1", reaper, 137);
+        assert_eq!(
+            t.events()[0],
+            ev(
+                EventName::AppExited,
+                json!({"id": "cmd-1", "reason": "closed", "exit_code": 137})
+            )
+        );
     }
 
     #[test]

@@ -12,16 +12,16 @@ use hinteros_api::common::{Peer as ApiPeer, Ping};
 use hinteros_api::jsonrpc;
 use hinteros_api::server::{self, Connection, Step, method_not_found};
 use hinteros_api::system::{
-    self, AppsAcceptTerms, AppsAcceptTermsParams, AppsGenerations, AppsInstall, AppsInstallParams,
-    AppsList, AppsRemove, AppsRemoveParams, AppsRollback, AppsRollbackParams, BaseSet,
-    BaseSetParams, ChannelCheck, ChannelCheckParams, ChannelCheckResult, ChannelSet,
-    ChannelSetParams, EventName, GenerationsList, GenerationsListResult, HardwareRedetect,
-    HardwareRedetectParams, JobIdParams, JobKind, JobRef, JobsCancel, JobsGet, JobsGetResult,
-    JobsList, JobsListResult, Rebuild, Rollback, RollbackParams, Settings, SettingsGet,
-    SettingsGetResult, SettingsSet, SettingsSetParams, SshInfo, SshSet, SshSetParams, SshSettings,
-    Subscribe, SubscriptionParams, SubscriptionResult, SystemInfo, SystemInfoResult, Unsubscribe,
-    UpdateApply, UpdateApplyParams, UpdateCheck, UpdateCheckReply, UpdateCheckResult, is_job_id,
-    is_rev,
+    self, AppsAcceptTerms, AppsAcceptTermsParams, AppsClearData, AppsClearDataParams,
+    AppsGenerations, AppsInstall, AppsInstallParams, AppsList, AppsRemove, AppsRemoveParams,
+    AppsRollback, AppsRollbackParams, BaseSet, BaseSetParams, ChannelCheck, ChannelCheckParams,
+    ChannelCheckResult, ChannelSet, ChannelSetParams, EventName, GenerationsList,
+    GenerationsListResult, HardwareRedetect, HardwareRedetectParams, JobIdParams, JobKind, JobRef,
+    JobsCancel, JobsGet, JobsGetResult, JobsList, JobsListResult, Rebuild, Rollback,
+    RollbackParams, Settings, SettingsGet, SettingsGetResult, SettingsSet, SettingsSetParams,
+    SshInfo, SshSet, SshSetParams, SshSettings, Subscribe, SubscriptionParams, SubscriptionResult,
+    SystemInfo, SystemInfoResult, Unsubscribe, UpdateApply, UpdateApplyParams, UpdateCheck,
+    UpdateCheckReply, UpdateCheckResult, is_job_id, is_rev,
 };
 use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde::de::DeserializeOwned;
@@ -694,6 +694,7 @@ pub(crate) enum Request {
     AppsRemove(AppsRemoveParams),
     AppsRollback(AppsRollbackParams),
     AppsAcceptTerms(AppsAcceptTermsParams),
+    AppsClearData(AppsClearDataParams),
     Profiles(profiles::ProfilesRequest),
     Storage(storage::StorageRequest),
     TimeZoneSet(system::TimeZoneSetParams),
@@ -814,6 +815,17 @@ impl Request {
                     ));
                 }
                 Self::AppsAcceptTerms(p)
+            }
+            AppsClearData::NAME => {
+                let p: AppsClearDataParams = decode::<AppsClearData>(params)?;
+                if !hinteros_api::catalog::is_app_id(&p.id) {
+                    return Err(ErrorObject::invalid_field(
+                        "id",
+                        "bad_format",
+                        "id must be a catalog id",
+                    ));
+                }
+                Self::AppsClearData(p)
             }
             JobsCancel::NAME => {
                 let p: JobIdParams = decode::<JobsCancel>(params)?;
@@ -1699,6 +1711,7 @@ impl Service {
             Request::TimeZoneSet(p) => self.time_zone_set(peer, p).await,
             Request::AppsRollback(p) => self.apps_rollback(peer, p).await,
             Request::AppsAcceptTerms(p) => self.apps_accept_terms(peer, p),
+            Request::AppsClearData(p) => self.apps_clear_data(peer, p).await,
             Request::JobsCancel(p) => {
                 self.jobs.lock().unwrap().cancel(&p.job_id)?;
                 info!(job = %p.job_id, uid, "cancel requested");

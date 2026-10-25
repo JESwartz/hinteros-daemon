@@ -614,6 +614,23 @@
         { "name": "an older version", "params": { "id": "steam", "version": "2025-01-01" }, "error": { "code": -32602, "message": "the current terms version of steam is 2026-09-10", "data": { "field": "version", "reason": "not_current" } } }
       ]
     },
+    "apps.clear_data": {
+      "summary": "Delete a Store app's data in the caller's profile (job apps_clear_data, 0.11). Action org.hinteros.system.apps.",
+      "description": "id must be a catalog app (installed or not: data a remove left behind). The job deletes the app's dataPaths in the caller's own home, as apps.remove {delete_data} does (no symlink followed, nothing on another filesystem); other profiles' data is never touched. The app is not closed first: the launcher stops it before. Schema-1 boxes: unavailable.",
+      "since": "0.11",
+      "params": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": { "id": { "$ref": "#/$defs/CatalogId" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "not_found", "unavailable"],
+      "examples": [
+        { "name": "VacuumTube's data", "params": { "id": "vacuum-tube" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "not in the catalog", "params": { "id": "nope" }, "error": { "code": 3010, "message": "nope is not in the catalog" } }
+      ]
+    },
     "profiles.list": {
       "summary": "The profiles (0.4). Read-only; starts a usage scan when the data is older than an hour.",
       "description": "Every account of the running state.json that has metadata, with the caller (spares are not listed; first_boot: no admin profile exists). On a schema-1 box, p1 as an implicit profile after the migration created profiles.json.",
@@ -2963,7 +2980,7 @@
     "PolkitAction": { "type": "string", "pattern": "^org\\.hinteros\\.system\\.[a-z.]+$" },
     "Channel": { "enum": ["stable", "beta"] },
     "Base": { "enum": ["stable", "unstable"] },
-    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "migrate_apps", "profiles_create", "profiles_remove", "guest_set", "guest_end", "storage_measure", "cleanup_system", "cleanup_profiles", "cleanup_set", "channel_check", "services_enable", "services_disable", "jellyfin_library_add", "jellyfin_library_remove", "plex_claim", "tailscale_login", "tailscale_logout", "cloudflare_set_token", "cloudflare_clear_token"] },
+    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "migrate_apps", "profiles_create", "profiles_remove", "guest_set", "guest_end", "storage_measure", "cleanup_system", "cleanup_profiles", "cleanup_set", "channel_check", "services_enable", "services_disable", "jellyfin_library_add", "jellyfin_library_remove", "plex_claim", "tailscale_login", "tailscale_logout", "cloudflare_set_token", "cloudflare_clear_token", "apps_clear_data"] },
     "ProfileId": { "description": "A profile id.", "type": "string", "pattern": "^p[1-9][0-9]{0,2}$" },
     "ProfileName": { "description": "A display name: 1 to 32 characters, trimmed, no control or format characters.", "type": "string", "minLength": 1, "maxLength": 128 },
     "ProfileColor": { "enum": ["teal", "blue", "purple", "pink", "red", "orange", "yellow", "green"] },

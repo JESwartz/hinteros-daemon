@@ -112,6 +112,11 @@ fn run(dir: &Path) -> anyhow::Result<()> {
         Action::Plex(j) => r.plex_job(&j),
         Action::Tailscale(j) => r.tailscale_job(&j),
         Action::Cloudflare(j) => r.cloudflare_job(&j),
+        Action::ClearData(d) => {
+            r.set_stage(Stage::Finishing);
+            delete_data(&d);
+            Ok((None, false))
+        }
     };
     let subject = (r.subject != r.spec.subject).then(|| r.subject.clone());
     let staging = r.spec.paths.staging();

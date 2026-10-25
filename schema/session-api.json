@@ -456,7 +456,8 @@
         "required": ["id"],
         "additionalProperties": false,
         "properties": {
-          "id": { "$ref": "#/$defs/AppId" }
+          "id": { "$ref": "#/$defs/AppId" },
+          "force": { "description": "0.19: Force Stop: SIGKILL now, no request to quit first (also while a close is under way). Steam ('steam_client'): every process of the Steam client and all below it, not just Big Picture.", "type": "boolean", "default": false }
         }
       },
       "result": {
@@ -468,6 +469,7 @@
       "examples": [
         { "name": "command app", "params": { "id": "cmd-1" }, "result": {} },
         { "name": "steam game", "params": { "id": "steam-620" }, "result": {} },
+        { "name": "force stop", "params": { "id": "cmd-1", "force": true }, "result": {} },
         { "name": "not running", "params": { "id": "cmd-7" }, "error": { "code": 2001, "message": "no running app with id 'cmd-7'" } }
       ]
     },
@@ -1584,6 +1586,23 @@
       "examples": [
         { "name": "Steam on first launch", "params": { "id": "steam", "version": "2026-09-10" }, "result": {} },
         { "name": "an older version", "params": { "id": "steam", "version": "2025-01-01" }, "error": { "code": -32602, "message": "the current terms version of steam is 2026-09-10", "data": { "field": "version", "reason": "not_current" } } }
+      ],
+      "relay": true
+    },
+    "system.apps.clear_data": {
+      "summary": "Relayed to the system service's apps.clear_data. Delete a Store app's data in the caller's profile (job apps_clear_data, 0.19). Action org.hinteros.system.apps.",
+      "description": "id must be a catalog app (installed or not: data a remove left behind). The job deletes the app's dataPaths in the caller's own home, as system.apps.remove {delete_data} does; other profiles' data is never touched. Stop the app first (apps.close {force}). store_changed follows when the job ends (has_data).",
+      "since": "0.19",
+      "params": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": { "id": { "$ref": "#/$defs/CatalogId" } }
+      },
+      "result": { "$ref": "#/$defs/JobRef", "type": "object" },
+      "errors": ["system_unavailable", "permission_denied", "authentication_required", "rate_limited", "job_busy", "not_found", "unavailable"],
+      "examples": [
+        { "name": "VacuumTube's data", "params": { "id": "vacuum-tube" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }
       ],
       "relay": true
     },
@@ -4795,7 +4814,7 @@
                 "data_paths": [".config/Moonlight Game Streaming Project"], "terms": null, "builds_on_device": false,
                 "free": true, "redistributable": true, "status": "available", "status_reason": null, "state": "installed",
                 "permissions": [{ "name": "gamepad", "required": true, "granted": true }, { "name": "mic", "required": false, "granted": false }],
-                "full_access": false
+                "full_access": false, "has_data": true
               },
               {
                 "id": "steam", "name": "Steam", "summary": "Play your Steam library on the TV.",
@@ -4807,7 +4826,7 @@
                 "terms": { "title": "Steam Subscriber Agreement", "version": "2026-09-10", "url": "https://store.steampowered.com/subscriber_agreement/", "retrieved": "2026-10-06", "file": "/run/current-system/sw/share/hinteros/terms/steam-2026-09-10.txt" },
                 "builds_on_device": false, "free": false, "redistributable": true, "status": "available", "status_reason": null, "state": "available",
                 "permissions": [],
-                "full_access": true
+                "full_access": true, "has_data": false
               }
             ],
             "more_after_update": false
@@ -6081,7 +6100,8 @@
         "tailscale_login",
         "tailscale_logout",
         "cloudflare_set_token",
-        "cloudflare_clear_token"
+        "cloudflare_clear_token",
+        "apps_clear_data"
       ]
     },
     "ProfileId": { "description": "A profile id.", "type": "string", "pattern": "^p[1-9][0-9]{0,2}$" },
@@ -6128,7 +6148,7 @@
       "required": [
         "id", "name", "summary", "description", "category", "homepage", "kind", "size_mib", "icon", "requires", "depends",
         "conflicts", "installer", "on_iso", "installer_default", "data_paths", "terms", "builds_on_device", "free",
-        "redistributable", "status", "status_reason", "state", "permissions", "full_access"
+        "redistributable", "status", "status_reason", "state", "permissions", "full_access", "has_data"
       ],
       "additionalProperties": false,
       "properties": {
@@ -6196,6 +6216,7 @@
         "status_reason": { "oneOf": [{ "type": "string", "maxLength": 200 }, { "type": "null" }] },
         "state": { "$ref": "#/$defs/StoreState" },
         "permissions": { "description": "0.18: what the app may use in its sandbox, in catalog order. Not installed: the stored choice for its install (default granted). Empty for Steam, apps without a sandbox and tombstones.", "type": "array", "items": { "$ref": "#/$defs/AppPermission" } },
+        "has_data": { "description": "0.19: one of the app's dataPaths exists in this profile's home, installed or not (a remove can leave data behind): system.apps.clear_data has something to delete.", "type": "boolean" },
         "full_access": { "description": "0.18: runs without the app sandbox (Steam, apps with sandbox = false, or every app while the sandbox is off on this box): it can use everything the profile can. The install sheet warns. False for tombstones.", "type": "boolean" }
       }
     },

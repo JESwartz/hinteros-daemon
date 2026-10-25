@@ -514,6 +514,10 @@ pub const STEAM_CLIENT_GAMESCOPE_APP_ID: u32 = 769;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppsCloseParams {
     pub id: String,
+    /// 0.19: kill it now (SIGKILL), no request to quit first. For Steam (`steam_client`): the
+    /// whole Steam client, not just Big Picture.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -919,6 +923,7 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<RelayAppsGenerations>(),
         MethodInfo::of::<RelayAppsRollback>(),
         MethodInfo::of::<RelayAppsAcceptTerms>(),
+        MethodInfo::of::<RelayAppsClearData>(),
         MethodInfo::of::<RelayProfilesList>(),
         MethodInfo::of::<RelayProfilesCreate>(),
         MethodInfo::of::<RelayProfilesSetupAdmin>(),
@@ -1094,6 +1099,7 @@ relay! {
     RelayAppsGenerations = "system.apps.generations" => crate::system::AppsGenerations;
     RelayAppsRollback = "system.apps.rollback" => crate::system::AppsRollback;
     RelayAppsAcceptTerms = "system.apps.accept_terms" => crate::system::AppsAcceptTerms;
+    RelayAppsClearData = "system.apps.clear_data" => crate::system::AppsClearData;
     RelayProfilesList = "system.profiles.list" => crate::system::ProfilesList;
     RelayProfilesCreate = "system.profiles.create" => crate::system::ProfilesCreate;
     RelayProfilesSetupAdmin = "system.profiles.setup_admin" => crate::system::ProfilesSetupAdmin;
@@ -1740,6 +1746,10 @@ pub struct StoreApp {
     /// this box): it can use everything the profile can.
     #[serde(default)]
     pub full_access: bool,
+    /// 0.19: one of its `dataPaths` exists in this profile's home (installed or not: a remove
+    /// can leave data behind).
+    #[serde(default)]
+    pub has_data: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

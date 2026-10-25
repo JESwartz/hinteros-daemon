@@ -30,6 +30,10 @@ pub trait ProcessControl: Send {
     }
     /// Whether the Steam client (a process named `steam`) is running.
     fn steam_running(&mut self) -> bool;
+    /// The Steam client's processes (named `steam`), for Force Stop.
+    fn steam_clients(&mut self) -> Vec<u32> {
+        Vec::new()
+    }
     /// Reapers started on X display `display` (`DISPLAY` in their environment) that are still
     /// alive: an app display is not free while one is (an app the daemon gave up on, or one
     /// from before a daemon restart). A reaper lives until every process below it has ended.
@@ -221,6 +225,14 @@ impl ProcessControl for Procs {
 
     fn steam_running(&mut self) -> bool {
         list().iter().any(|p| p.comm == "steam")
+    }
+
+    fn steam_clients(&mut self) -> Vec<u32> {
+        list()
+            .into_iter()
+            .filter(|p| p.comm == "steam")
+            .map(|p| p.pid)
+            .collect()
     }
 
     fn display_users(&mut self, display: &str) -> Vec<u32> {

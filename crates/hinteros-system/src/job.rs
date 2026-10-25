@@ -119,6 +119,8 @@ pub enum Action {
     Tailscale(TailscaleJob),
     /// 0.11: the Cloudflare tunnel restarted on a new token, or stopped and its token deleted.
     Cloudflare(CloudflareJob),
+    /// 0.11: one app's data deleted in the caller's home (`apps.clear_data`); nothing rebuilt.
+    ClearData(DeleteData),
 }
 
 /// 0.11: `services.enable` / `services.disable`.

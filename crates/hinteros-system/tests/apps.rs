@@ -227,6 +227,30 @@ async fn profile_apps_install_remove_rollback() {
     );
     assert_eq!(root.read("switch.log"), switches);
 
+    // Clear data of an app that is not installed (left behind): deleted, nothing rebuilt.
+    std::fs::create_dir_all(root.p("home/.config/Moonlight Game Streaming Project")).unwrap();
+    std::fs::write(
+        root.p("home/.config/Moonlight Game Streaming Project/y.conf"),
+        "y",
+    )
+    .unwrap();
+    let r = run_job(&sys, &mut c, "apps.clear_data", json!({"id": "moonlight"})).await;
+    assert_eq!(r["finished"]["kind"], "apps_clear_data");
+    assert_eq!(
+        r["subject"]["apps"],
+        json!([{"id": "moonlight", "name": "Moonlight"}])
+    );
+    assert!(
+        !root
+            .p("home/.config/Moonlight Game Streaming Project")
+            .exists()
+    );
+    assert_eq!(root.read("switch.log"), switches);
+    let e = call(&mut c, "apps.clear_data", json!({"id": "nope"}))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), ErrorCode::NotFound.code());
+
     // Generations and rollback.
     let g = call(&mut c, "apps.generations", json!({})).await.unwrap();
     let gens = g["generations"].as_array().unwrap();

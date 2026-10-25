@@ -7,7 +7,7 @@
 //! `store_changed`. `more_after_update` comes from the last update check's `new_apps`.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use hinteros_api::catalog::{Entry, Index, IndexError, Status};
@@ -44,6 +44,8 @@ struct Inner {
     state: Mutex<State>,
     /// Look at the profile's unaccepted terms again (an `apps.accept_terms` went through).
     terms_wake: tokio::sync::Notify,
+    /// The profile's home (`$HOME`), where `has_data` looks for each app's `dataPaths`.
+    home: Option<PathBuf>,
 }
 
 /// Unaccepted vendor terms of the profile's apps, by app id.
@@ -74,6 +76,9 @@ impl Store {
                 events: events.clone(),
                 state: Mutex::new(State::default()),
                 terms_wake: tokio::sync::Notify::new(),
+                home: std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .filter(|h| h.is_absolute() && h != Path::new("/")),
             }),
         };
         let rx = events.subscribe();
@@ -281,7 +286,7 @@ impl Store {
             }
             (ins, rem, s.more_after_update)
         };
-        let apps = merge(
+        let mut apps = merge(
             &index,
             &installed,
             &installing,
@@ -289,6 +294,9 @@ impl Store {
             &self.inner.icons,
             &self.inner.permissions,
         );
+        if let Some(home) = &self.inner.home {
+            mark_data(&mut apps, &index, home);
+        }
         encode_result::<StoreList>(StoreListResult {
             index_version: index.version,
             apps,
@@ -389,6 +397,19 @@ pub fn merge(
     out
 }
 
+/// Set `has_data` on each app with one of its `dataPaths` in `home` (a symlink counts: it is
+/// what clearing would remove).
+pub fn mark_data(apps: &mut [StoreApp], index: &Index, home: &Path) {
+    for a in apps {
+        a.has_data = index.get(&a.id).is_some_and(|e| {
+            e.data_paths
+                .iter()
+                .filter(|p| hinteros_api::catalog::is_data_path(p))
+                .any(|p| home.join(p).symlink_metadata().is_ok())
+        });
+    }
+}
+
 fn empty(id: &str) -> StoreApp {
     StoreApp {
         id: id.to_owned(),
@@ -417,6 +438,7 @@ fn empty(id: &str) -> StoreApp {
         state: StoreState::Unavailable,
         permissions: Vec::new(),
         full_access: false,
+        has_data: false,
     }
 }
 
@@ -475,6 +497,7 @@ fn app(index: &Index, e: &Entry, state: StoreState, icon: Option<PathBuf>) -> St
         state,
         permissions: Vec::new(),
         full_access: false,
+        has_data: false,
     }
 }
 
@@ -548,6 +571,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn has_data_when_a_data_path_is_left() {
+        let index = Index::parse(
+            br#"{"indexVersion":2,"apps":[
+              {"id":"moonlight","name":"M","status":"available","dataPaths":[".config/Moonlight"]},
+              {"id":"youtube","name":"Y","status":"available","dataPaths":[".local/share/y"]}]}"#,
+            "/idx".into(),
+        )
+        .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".config/Moonlight")).unwrap();
+        let mut apps = merge(
+            &index,
+            &[],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &IconStore::default(),
+            &Permissions::new(None, vec!["gamepad"]),
+        );
+        mark_data(&mut apps, &index, home.path());
+        let view: Vec<(&str, bool)> = apps.iter().map(|a| (a.id.as_str(), a.has_data)).collect();
+        assert_eq!(view, [("moonlight", true), ("youtube", false)]);
+    }
 
     #[test]
     fn merges_index_and_install_state() {

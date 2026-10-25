@@ -1692,6 +1692,15 @@ pub struct StoreTerms {
     pub file: String,
 }
 
+/// 0.19: the upstream project's README, shown on the app's Store page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreReadme {
+    pub url: String,
+    pub retrieved: String,
+    /// Absolute path of the Markdown file on this box, readable offline.
+    pub file: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreApp {
     pub id: String,
@@ -1714,6 +1723,9 @@ pub struct StoreApp {
     pub data_paths: Vec<String>,
     #[serde(deserialize_with = "nullable_terms")]
     pub terms: Option<StoreTerms>,
+    /// 0.19: absent when the app has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readme: Option<StoreReadme>,
     pub builds_on_device: bool,
     pub free: bool,
     pub redistributable: bool,

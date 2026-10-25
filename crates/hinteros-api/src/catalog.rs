@@ -139,6 +139,15 @@ pub struct Terms {
     pub file: String,
 }
 
+/// The upstream README (index field `readme`), shown on the Store page.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Readme {
+    pub url: String,
+    pub retrieved: String,
+    /// `readme/<name>.md`, relative to the index file.
+    pub file: String,
+}
+
 /// One entry. Tombstones (`status: removed`) only have `id`, `name`, `status` and
 /// `statusReason`; everything else then has its default.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -193,6 +202,8 @@ pub struct Entry {
     pub data_paths: Vec<String>,
     #[serde(default)]
     pub terms: Option<Terms>,
+    #[serde(default)]
+    pub readme: Option<Readme>,
     pub status: Status,
     #[serde(default)]
     pub status_reason: Option<String>,
@@ -429,6 +440,11 @@ impl Index {
         self.dir.join(&terms.file)
     }
 
+    /// The absolute path of an entry's README (checked to stay in `readme/`).
+    pub fn readme_file(&self, readme: &Readme) -> PathBuf {
+        self.dir.join(&readme.file)
+    }
+
     /// Every app `ids` needs, `ids` first, then their dependencies (transitively), each once.
     /// `Err(id)`: an id (or a dependency) that is not in the index.
     pub fn with_dependencies(&self, ids: &[String]) -> Result<Vec<String>, String> {
@@ -453,6 +469,17 @@ pub enum ParseError {
     Version(u32),
     #[error("{0}")]
     Invalid(String),
+}
+
+/// `<dir><name><ext>` with a plain file name (no `/`, no leading `.`).
+fn is_file_in(file: &str, dir: &str, ext: &str) -> bool {
+    file.strip_prefix(dir).is_some_and(|n| {
+        n.ends_with(ext)
+            && n.len() > ext.len()
+            && n.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            && !n.starts_with('.')
+    })
 }
 
 fn check_entry(e: &Entry) -> Result<(), String> {
@@ -484,17 +511,15 @@ fn check_entry(e: &Entry) -> Result<(), String> {
             return Err(format!("{}: bad state dir {d:?}", e.id));
         }
     }
-    if let Some(t) = &e.terms {
-        let name_ok = t.file.strip_prefix("terms/").is_some_and(|n| {
-            n.ends_with(".txt")
-                && n.len() > 4
-                && n.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-                && !n.starts_with('.')
-        });
-        if !name_ok || !is_terms_version(&t.version) {
-            return Err(format!("{}: bad terms", e.id));
-        }
+    if let Some(t) = &e.terms
+        && (!is_file_in(&t.file, "terms/", ".txt") || !is_terms_version(&t.version))
+    {
+        return Err(format!("{}: bad terms", e.id));
+    }
+    if let Some(r) = &e.readme
+        && !is_file_in(&r.file, "readme/", ".md")
+    {
+        return Err(format!("{}: bad readme", e.id));
     }
     Ok(())
 }
@@ -514,6 +539,8 @@ mod tests {
           "terms": { "title": "Steam Subscriber Agreement", "version": "2026-09-10",
                      "url": "https://store.steampowered.com/subscriber_agreement/",
                      "retrieved": "2026-10-06", "file": "terms/steam-2026-09-10.txt" },
+          "readme": { "url": "https://github.com/x/y/blob/0/README.md", "retrieved": "2026-10-25",
+                      "file": "readme/steam.md" },
           "status": "available", "statusReason": null, "buildsOnDevice": false, "free": false,
           "redistributable": true, "futureField": 1 },
         { "id": "old-app", "name": "Old app", "status": "removed", "statusReason": "gone" }
@@ -531,6 +558,11 @@ mod tests {
             i.terms_file(s.terms.as_ref().unwrap()),
             Path::new("/idx/terms/steam-2026-09-10.txt")
         );
+        assert_eq!(
+            i.readme_file(s.readme.as_ref().unwrap()),
+            Path::new("/idx/readme/steam.md")
+        );
+        assert!(i.get("old-app").unwrap().readme.is_none());
         assert_eq!(i.get("old-app").unwrap().status, Status::Removed);
         assert!(i.get("old-app").unwrap().data_paths.is_empty());
     }
@@ -554,6 +586,8 @@ mod tests {
             r#"{"indexVersion":2,"apps":[{"id":"a","name":"x","status":"available","dataPaths":["/etc"]}]}"#,
             r#"{"indexVersion":2,"apps":[{"id":"a","name":"x","status":"available","depends":["A"]}]}"#,
             r#"{"indexVersion":2,"apps":[{"id":"a","name":"x","status":"available","terms":{"title":"t","version":"1","url":"u","retrieved":"r","file":"../x.txt"}}]}"#,
+            r#"{"indexVersion":2,"apps":[{"id":"a","name":"x","status":"available","readme":{"url":"u","retrieved":"r","file":"readme/../x.md"}}]}"#,
+            r#"{"indexVersion":2,"apps":[{"id":"a","name":"x","status":"available","readme":{"url":"u","retrieved":"r","file":"terms/a.md"}}]}"#,
             r#"{"indexVersion":2,"apps":[{"id":"a","name":"x","status":"available"},{"id":"a","name":"y","status":"available"}]}"#,
             r#"{"apps":[]}"#,
         ] {

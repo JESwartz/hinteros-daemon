@@ -14,7 +14,7 @@ use hinteros_api::catalog::{Entry, Index, IndexError, Status};
 use hinteros_api::server::encode_result;
 use hinteros_api::session::{
     AppKind, CatalogStatus, EventName, Service, StoreApp, StoreIcon, StoreList, StoreListResult,
-    StoreState, StoreTerms,
+    StoreReadme, StoreState, StoreTerms,
 };
 use hinteros_api::system::{self, JobFinishedParams, JobKind, JobResult, UpdateCheckResult};
 use hinteros_api::{ErrorCode, ErrorObject, Method};
@@ -408,6 +408,7 @@ fn empty(id: &str) -> StoreApp {
         installer_default: false,
         data_paths: vec![],
         terms: None,
+        readme: None,
         builds_on_device: false,
         free: false,
         redistributable: false,
@@ -453,6 +454,11 @@ fn app(index: &Index, e: &Entry, state: StoreState, icon: Option<PathBuf>) -> St
             url: t.url.clone(),
             retrieved: t.retrieved.clone(),
             file: index.terms_file(t).display().to_string(),
+        }),
+        readme: e.readme.as_ref().map(|r| StoreReadme {
+            url: r.url.clone(),
+            retrieved: r.retrieved.clone(),
+            file: index.readme_file(r).display().to_string(),
         }),
         builds_on_device: e.builds_on_device,
         free: e.free,
@@ -551,7 +557,8 @@ mod tests {
                "terms":{"title":"SSA","version":"2026-09-10","url":"https://x","retrieved":"2026-10-06","file":"terms/steam-2026-09-10.txt"}},
               {"id":"youtube","name":"YouTube","status":"available","kind":"web",
                "permissions":{"mic":"optional","gamepad":"required"}},
-              {"id":"moonlight","name":"moonlight","status":"available"},
+              {"id":"moonlight","name":"moonlight","status":"available",
+               "readme":{"url":"https://x","retrieved":"2026-10-25","file":"readme/moonlight.md"}},
               {"id":"retired-in","name":"R1","status":"retired","statusReason":"old"},
               {"id":"retired-out","name":"R2","status":"retired","statusReason":"old"},
               {"id":"gone","name":"Gone","status":"removed","statusReason":"bye"}]}"#,
@@ -588,7 +595,13 @@ mod tests {
                 ("youtube", StoreState::Installed),
             ]
         );
+        let moonlight = apps.iter().find(|a| a.id == "moonlight").unwrap();
+        assert_eq!(
+            moonlight.readme.as_ref().unwrap().file,
+            "/run/current-system/sw/share/hinteros/readme/moonlight.md"
+        );
         let steam = apps.iter().find(|a| a.id == "steam").unwrap();
+        assert!(steam.readme.is_none());
         assert_eq!(
             steam.terms.as_ref().unwrap().file,
             "/run/current-system/sw/share/hinteros/terms/steam-2026-09-10.txt"

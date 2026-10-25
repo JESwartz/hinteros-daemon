@@ -6178,6 +6178,17 @@
             { "type": "null" }
           ]
         },
+        "readme": {
+          "description": "0.19: the upstream project's README (Markdown, at most 64 KiB), shown on the app's Store page. Absent when the app has none.",
+          "type": "object",
+          "required": ["url", "retrieved", "file"],
+          "additionalProperties": false,
+          "properties": {
+            "url": { "description": "The upstream file at the commit it was copied from.", "type": "string" },
+            "retrieved": { "type": "string" },
+            "file": { "description": "Absolute path of the Markdown file on this box.", "type": "string" }
+          }
+        },
         "builds_on_device": { "description": "Fetched from the vendor and prepared on this box during install (a few minutes, needs internet).", "type": "boolean" },
         "free": { "type": "boolean" },
         "redistributable": { "type": "boolean" },

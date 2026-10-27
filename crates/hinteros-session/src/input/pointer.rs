@@ -14,7 +14,11 @@
 //! default profile (`load_device_profile` clears the map), so [`profile_yaml`] repeats the
 //! mappings of InputPlumber's `default.yaml`.
 //!
-//! Clicks (RT left, LT right; A is Enter, or the on-screen keyboard on a text field):
+//! The profile's controller settings (session API 0.20, [`crate::controller`]) set the speed (a
+//! percentage of `[pointer] speed_pps`), which buttons click, and can swap the sticks: the left
+//! stick is then the pointer and the right stick's directions are mapped to the D-pad buttons.
+//!
+//! Clicks (RT left, LT right by default; A is Enter, or the on-screen keyboard on a text field):
 //! `CompositeDevice.SendEvent("Mouse:Button:Left" or "Mouse:Button:Right", <bool>)`, which in `GAMEPAD_ONLY` also goes
 //! to the mouse target. InputPlumber 0.81 panics in `SendEvent` and never answers (HinterOS
 //! patches it); the call is made off the input path with a timeout (`super::inputplumber`).
@@ -124,21 +128,58 @@ pub fn default_profile_yaml() -> String {
     format!("version: 1\nkind: DeviceProfile\nname: Default\nmapping:\n{DEFAULT_MAPPINGS}")
 }
 
-/// The pointer profile: the default mappings, the right stick as mouse motion at `speed_pps`
-/// pixels per second at full deflection with response curve `curve` (InputPlumber, patched:
-/// a 0.20 radial deadzone, then speed_pps * m^curve on the rescaled deflection m, so full
-/// speed is unchanged; only this profile has it, games get no curve), and right-stick
-/// activity as [`ACTIVITY_EVENT`] beyond `activity_deadzone`.
-pub fn profile_yaml(speed_pps: u32, curve: f64, activity_deadzone: f64) -> String {
+/// The profile's pointer settings (session API 0.20, [`crate::controller`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerTuning {
+    /// Percent of `[pointer] speed_pps`.
+    pub speed: u32,
+    /// The left stick moves the pointer and the right stick gives the directions.
+    pub swap_sticks: bool,
+}
+
+impl Default for PointerTuning {
+    fn default() -> Self {
+        Self {
+            speed: hinteros_api::session::POINTER_SPEED_DEFAULT,
+            swap_sticks: false,
+        }
+    }
+}
+
+/// Stick deflection that counts as a direction when the right stick gives them (swapped
+/// sticks): InputPlumber's own threshold for the left stick on D-Bus (0.60), so both feel the
+/// same.
+pub const DIRECTION_DEADZONE: f64 = 0.6;
+
+/// The pointer profile: the default mappings, the pointer stick (the right one, the left one
+/// with `tuning.swap_sticks`) as mouse motion at `speed_pps` * `tuning.speed` % pixels per
+/// second at full deflection with response curve `curve` (InputPlumber, patched: a 0.20 radial
+/// deadzone, then speed * m^curve on the rescaled deflection m, so full speed is unchanged;
+/// only this profile has it, games get no curve), and pointer stick activity as
+/// [`ACTIVITY_EVENT`] beyond `activity_deadzone`. With swapped sticks the right stick's
+/// directions are the D-pad buttons, which reach us as `ui_up` etc. like the left stick's
+/// would (the profile maps the left stick, so it no longer gives directions).
+pub fn profile_yaml(
+    speed_pps: u32,
+    curve: f64,
+    activity_deadzone: f64,
+    tuning: PointerTuning,
+) -> String {
+    let speed_pps = u64::from(speed_pps) * u64::from(tuning.speed) / 100;
+    let (stick, other) = if tuning.swap_sticks {
+        ("LeftStick", "RightStick")
+    } else {
+        ("RightStick", "LeftStick")
+    };
     let mut y = format!(
         "version: 1\nkind: DeviceProfile\nname: {PROFILE_NAME}\nmapping:\n{DEFAULT_MAPPINGS}"
     );
     y.push_str(&format!(
-        r#"  - name: Right stick pointer
+        r#"  - name: Pointer
     source_event:
       gamepad:
         axis:
-          name: RightStick
+          name: {stick}
     target_events:
       - mouse:
           motion:
@@ -148,11 +189,11 @@ pub fn profile_yaml(speed_pps: u32, curve: f64, activity_deadzone: f64) -> Strin
     ));
     for direction in ["left", "right", "up", "down"] {
         y.push_str(&format!(
-            r#"  - name: Right stick activity {direction}
+            r#"  - name: Pointer activity {direction}
     source_event:
       gamepad:
         axis:
-          name: RightStick
+          name: {stick}
           direction: {direction}
           deadzone: {activity_deadzone}
     target_events:
@@ -160,6 +201,28 @@ pub fn profile_yaml(speed_pps: u32, curve: f64, activity_deadzone: f64) -> Strin
           button: QuickAccess2
 "#
         ));
+    }
+    if tuning.swap_sticks {
+        for (direction, button) in [
+            ("left", "DPadLeft"),
+            ("right", "DPadRight"),
+            ("up", "DPadUp"),
+            ("down", "DPadDown"),
+        ] {
+            y.push_str(&format!(
+                r#"  - name: Directions {direction}
+    source_event:
+      gamepad:
+        axis:
+          name: {other}
+          direction: {direction}
+          deadzone: {DIRECTION_DEADZONE}
+    target_events:
+      - gamepad:
+          button: {button}
+"#
+            ));
+        }
     }
     y
 }
@@ -289,8 +352,9 @@ mod tests {
 
     #[test]
     fn profile_maps_the_right_stick() {
-        let y = profile_yaml(1200, 2.5, 0.25);
+        let y = profile_yaml(1200, 2.5, 0.25, PointerTuning::default());
         assert!(y.contains("name: HinterOS pointer"));
+        assert!(y.contains("name: RightStick\n    target_events:\n      - mouse:"));
         assert!(y.contains("speed_pps: 1200\n            curve: 2.5\n"));
         assert_eq!(
             y.matches("curve:").count(),
@@ -299,9 +363,54 @@ mod tests {
         );
         assert_eq!(y.matches("button: QuickAccess2\n").count(), 5); // 1 default + 4 ours
         assert!(y.contains("deadzone: 0.25"));
+        assert!(!y.contains("LeftStick\n"), "the left stick is left alone");
+        assert!(!y.contains("DPad"));
         assert!(y.contains("keyboard: KeyVolumeUp"), "default mappings kept");
         assert!(default_profile_yaml().contains("name: Default"));
         assert!(!default_profile_yaml().contains("RightStick\n"));
+    }
+
+    #[test]
+    fn profile_speed_and_swapped_sticks() {
+        let slow = PointerTuning {
+            speed: 25,
+            swap_sticks: false,
+        };
+        assert!(profile_yaml(1000, 2.5, 0.25, slow).contains("speed_pps: 250\n"));
+        let fast = PointerTuning {
+            speed: 400,
+            swap_sticks: false,
+        };
+        assert!(profile_yaml(1000, 2.5, 0.25, fast).contains("speed_pps: 4000\n"));
+
+        let swapped = PointerTuning {
+            speed: 150,
+            swap_sticks: true,
+        };
+        let y = profile_yaml(1000, 2.5, 0.25, swapped);
+        // The left stick is the pointer (motion and activity)...
+        assert!(y.contains("name: LeftStick\n    target_events:\n      - mouse:"));
+        assert!(y.contains("speed_pps: 1500\n            curve: 2.5\n"));
+        assert_eq!(
+            y.matches("name: LeftStick\n          direction:").count(),
+            4
+        );
+        assert_eq!(y.matches("button: QuickAccess2\n").count(), 5);
+        // ...and the right stick gives the D-pad directions.
+        for (direction, button) in [
+            ("left", "DPadLeft"),
+            ("right", "DPadRight"),
+            ("up", "DPadUp"),
+            ("down", "DPadDown"),
+        ] {
+            assert!(
+                y.contains(&format!(
+                    "name: RightStick\n          direction: {direction}\n          deadzone: 0.6\n    target_events:\n      - gamepad:\n          button: {button}\n"
+                )),
+                "{direction}"
+            );
+        }
+        assert!(!y.contains("RightStick\n    target_events"), "no motion");
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub mod apps;
 pub mod appseed;
 pub mod auth;
 pub mod config;
+pub mod controller;
 pub mod displays;
 pub mod focus;
 pub mod greetd;

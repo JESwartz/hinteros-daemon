@@ -56,7 +56,7 @@ use zbus::proxy::CacheProperties;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, Value};
 use zbus::{Connection, MatchRule, MessageStream, Proxy};
 
-use super::pointer::{self, MouseButton};
+use super::pointer::{self, MouseButton, PointerTuning};
 use super::{
     GUIDE_CAPABILITY, GUIDE_TAP_HOLD, InputControl, InterceptMode, LabelSwap, RawInput,
     swap_xbox_label, xbox_layout,
@@ -80,18 +80,29 @@ pub const DBUS_DEVICES_PROPERTY: &str = "DbusDevices";
 /// a short press for a hold. The session's answer (Home, the Guide tap for Steam) sets the mode.
 pub const GUIDE_SWITCH_GRACE: Duration = Duration::from_secs(2);
 
-/// Where input should go: the intercept mode, and whether the pointer profile is loaded.
+/// Where input should go: the intercept mode, whether the pointer profile is loaded, and the
+/// profile's pointer settings it is made with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Routing {
     pub mode: InterceptMode,
     pub pointer: bool,
+    pub tuning: PointerTuning,
 }
 
-/// The pointer profile settings.
+/// The pointer profile settings (`[pointer]`); the profile's own settings ([`PointerTuning`])
+/// come with the routing.
 #[derive(Debug, Clone)]
 pub struct PointerProfile {
+    pub speed_pps: u32,
+    pub curve: f64,
+    pub activity_deadzone: f64,
+}
+
+impl PointerProfile {
     /// The profile YAML ([`pointer::profile_yaml`]).
-    pub yaml: String,
+    pub fn yaml(&self, tuning: PointerTuning) -> String {
+        pointer::profile_yaml(self.speed_pps, self.curve, self.activity_deadzone, tuning)
+    }
 }
 
 /// How the InputPlumber task runs.
@@ -144,6 +155,14 @@ impl InputControl for InputPlumber {
         });
     }
 
+    fn set_pointer_tuning(&mut self, tuning: PointerTuning) {
+        self.routing.send_if_modified(|r| {
+            let changed = r.tuning != tuning;
+            r.tuning = tuning;
+            changed
+        });
+    }
+
     fn mouse_button(&mut self, source: &str, button: MouseButton, pressed: bool) {
         let _ = self.commands.send(Command::Button {
             source: source.into(),
@@ -165,6 +184,7 @@ pub fn spawn(settings: Settings, events: mpsc::UnboundedSender<RawInput>) -> Inp
     let (tx, rx) = watch::channel(Routing {
         mode: settings.initial,
         pointer: false,
+        tuning: PointerTuning::default(),
     });
     let (ctx, crx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
@@ -516,6 +536,7 @@ impl Task {
             swap: swap.clone(),
             guide_at: guide_at.clone(),
             pointer: false,
+            loaded: None,
             previous_profile: None,
             dirty: true,
             answering: true,
@@ -632,6 +653,9 @@ struct Worker {
     guide_at: GuideAt,
     /// Our pointer profile is loaded (as far as we know).
     pointer: bool,
+    /// The settings our loaded pointer profile was made with (`None`: not loaded by this worker,
+    /// or not known).
+    loaded: Option<PointerTuning>,
     /// The profile that was loaded before ours (YAML), to put back.
     previous_profile: Option<String>,
     /// Something we asked for may not have happened: re-apply at the next check.
@@ -730,6 +754,7 @@ impl Worker {
         self.swap.store(swapped, Ordering::Relaxed);
         // Ours from before a restart: restore the default when the pointer is off.
         self.pointer = profile == pointer::PROFILE_NAME;
+        self.loaded = None;
     }
 
     /// Load the wanted profile, then set the mode (a mouse mapping must be in place before
@@ -747,18 +772,19 @@ impl Worker {
             }
         };
         let mut ok = true;
-        if routing.pointer != self.pointer {
+        // Ours with other settings (or settings we do not know) is loaded again.
+        let reload = routing.pointer && self.pointer && self.loaded != Some(routing.tuning);
+        if routing.pointer != self.pointer || reload {
             let result: zbus::Result<()> = async {
                 if routing.pointer {
-                    if self.previous_profile.is_none() {
+                    // Not ours: the profile to put back afterwards.
+                    if !self.pointer && self.previous_profile.is_none() {
                         self.previous_profile =
                             proxy.call::<_, _, String>("GetProfileYaml", &()).await.ok();
                     }
+                    let yaml = self.settings.profile.yaml(routing.tuning);
                     proxy
-                        .call::<_, _, ()>(
-                            "LoadProfileFromYaml",
-                            &(self.settings.profile.yaml.as_str(),),
-                        )
+                        .call::<_, _, ()>("LoadProfileFromYaml", &(yaml.as_str(),))
                         .await
                 } else {
                     let previous = self
@@ -773,8 +799,9 @@ impl Worker {
             .await;
             match result {
                 Ok(()) => {
-                    info!(device = %self.path, pointer = routing.pointer, "pointer profile");
+                    info!(device = %self.path, pointer = routing.pointer, speed = routing.tuning.speed, swap_sticks = routing.tuning.swap_sticks, "pointer profile");
                     self.pointer = routing.pointer;
+                    self.loaded = routing.pointer.then_some(routing.tuning);
                     if !routing.pointer {
                         self.previous_profile = None;
                     }
@@ -815,6 +842,7 @@ impl Worker {
                     // Somebody else loaded a profile (or InputPlumber dropped ours).
                     warn!(device = %self.path, %profile, want_pointer = want.pointer, "unexpected device profile; re-applying");
                     self.pointer = ours;
+                    self.loaded = None;
                     self.dirty = true;
                 }
                 let guide_switch = want.mode == InterceptMode::Pass

@@ -407,6 +407,38 @@ pub fn default_keymap(back: KeyCombo) -> Keymap {
     ])
 }
 
+/// Changes to a [`Keymap`]: action -> key, or `None` to unmap.
+pub type KeyLayer = BTreeMap<NavAction, Option<KeyCombo>>;
+
+/// Put `layer` over `map`.
+pub fn apply_layer(map: &mut Keymap, layer: &KeyLayer) {
+    for (action, key) in layer {
+        match key {
+            Some(key) => map.insert(*action, key.clone()),
+            None => map.remove(action),
+        };
+    }
+}
+
+/// A key setting: a [`KeyCombo`], or `none` (unmapped).
+pub fn parse_binding(s: &str) -> Result<Option<KeyCombo>, String> {
+    if s.trim()
+        .eq_ignore_ascii_case(hinteros_api::session::KEY_NONE)
+    {
+        Ok(None)
+    } else {
+        s.parse().map(Some)
+    }
+}
+
+/// How a key setting is written (`none` for unmapped).
+pub fn binding_name(key: Option<&KeyCombo>) -> String {
+    key.map_or_else(
+        || hinteros_api::session::KEY_NONE.to_string(),
+        KeyCombo::to_string,
+    )
+}
+
 /// Performs [`KeyOp`]s, in order, without blocking the caller.
 pub trait KeyInjector: Send {
     fn caps(&self) -> KeyCaps;

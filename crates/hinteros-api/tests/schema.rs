@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hinteros_api::conformance::ApiSchema;
 use hinteros_api::session::{
-    AppKind, AppSource, EventName, ExitReason, InstallState, Key, KeyAction, Modifier, NavAction,
-    NavPhase,
+    AppKind, AppSource, ControllerButton, EventName, ExitReason, InstallState, Key, KeyAction,
+    Modifier, NavAction, NavPhase,
 };
 use hinteros_api::{ApiInfo, ApiVersion, ErrorCode, session, system};
 use serde_json::Value;
@@ -264,6 +264,10 @@ fn enums_match() {
     assert_eq!(schema_enum(&schema, "Key"), rust_enum(Key::ALL));
     assert_eq!(schema_enum(&schema, "Modifier"), rust_enum(Modifier::ALL));
     assert_eq!(schema_enum(&schema, "KeyAction"), rust_enum(KeyAction::ALL));
+    for b in ControllerButton::ALL {
+        assert_eq!(rust_enum(&[*b]).pop_first().unwrap(), b.name());
+        assert_eq!(ControllerButton::from_name(b.name()), Some(*b));
+    }
     for k in Key::ALL {
         assert_eq!(rust_enum(&[*k]).pop_first().unwrap(), k.name());
         assert_eq!(Key::from_name(k.name()), Some(*k));
@@ -392,6 +396,33 @@ fn schema_rejects_what_it_should() {
             "/methods/apps.displays.get/result",
             r#"{"count":4,"active":0,"min":1,"max":8}"#,
         ),
+        ("/methods/input.settings.set/params", r#"{}"#),
+        (
+            "/methods/input.settings.set/params",
+            r#"{"settings":{"general":{"accept":"A"}}}"#,
+        ),
+        (
+            "/methods/input.settings.set/params",
+            r#"{"settings":{"keyboard":{"back":"alt++left"}}}"#,
+        ),
+        (
+            "/methods/input.settings.set/params",
+            r#"{"settings":{"pointer":{"speed":110}}}"#,
+        ),
+        (
+            "/methods/input.settings.set/params",
+            r#"{"settings":{"pointer":{"speed":500}}}"#,
+        ),
+        (
+            "/methods/input.settings.set/params",
+            r#"{"settings":{"apps":{"Bad Id":{}}}}"#,
+        ),
+        (
+            "/methods/input.settings.set/params",
+            r#"{"settings":{"mouse":{}}}"#,
+        ),
+        ("/methods/input.capture/params", r#"{"timeout":5}"#),
+        ("/events/input_captured/params", r#"{}"#),
     ];
     for (pointer, instance) in bad {
         let v: Value = serde_json::from_str(instance).unwrap();

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 19);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 20);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -48,6 +48,7 @@ pub enum EventName {
     GreeterPrompt,
     GreeterResult,
     TimeZoneChanged,
+    InputCaptured,
 }
 
 impl EventName {
@@ -79,6 +80,7 @@ impl EventName {
         EventName::GreeterPrompt,
         EventName::GreeterResult,
         EventName::TimeZoneChanged,
+        EventName::InputCaptured,
     ];
 
     /// The event's wire name (its JSON-RPC notification method).
@@ -111,6 +113,7 @@ impl EventName {
             EventName::GreeterPrompt => GreeterPrompt::NAME,
             EventName::GreeterResult => GreeterResult::NAME,
             EventName::TimeZoneChanged => TimeZoneChanged::NAME,
+            EventName::InputCaptured => InputCaptured::NAME,
         }
     }
 }
@@ -880,6 +883,248 @@ impl Method for KeysAction {
     type Result = KeysActionResult;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Controller settings (0.20)
+
+/// 0.20: a controller button that can be remapped: the physical button (after the Xbox label
+/// swap), named by its Xbox label. Guide and the directions are never remapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControllerButton {
+    A,
+    B,
+    X,
+    Y,
+    Lb,
+    Rb,
+    Lt,
+    Rt,
+    View,
+    Menu,
+}
+
+impl ControllerButton {
+    /// In display order.
+    pub const ALL: &[ControllerButton] = &[
+        ControllerButton::A,
+        ControllerButton::B,
+        ControllerButton::X,
+        ControllerButton::Y,
+        ControllerButton::Lb,
+        ControllerButton::Rb,
+        ControllerButton::Lt,
+        ControllerButton::Rt,
+        ControllerButton::View,
+        ControllerButton::Menu,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            ControllerButton::A => "a",
+            ControllerButton::B => "b",
+            ControllerButton::X => "x",
+            ControllerButton::Y => "y",
+            ControllerButton::Lb => "lb",
+            ControllerButton::Rb => "rb",
+            ControllerButton::Lt => "lt",
+            ControllerButton::Rt => "rt",
+            ControllerButton::View => "view",
+            ControllerButton::Menu => "menu",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<ControllerButton> {
+        Self::ALL.iter().copied().find(|b| b.name() == name)
+    }
+
+    /// The action the button has by default (`general` empty).
+    pub const fn default_action(self) -> NavAction {
+        match self {
+            ControllerButton::A => NavAction::Accept,
+            ControllerButton::B => NavAction::Back,
+            ControllerButton::X => NavAction::Secondary,
+            ControllerButton::Y => NavAction::Context,
+            ControllerButton::Lb => NavAction::PageLeft,
+            ControllerButton::Rb => NavAction::PageRight,
+            ControllerButton::Lt => NavAction::TriggerLeft,
+            ControllerButton::Rt => NavAction::TriggerRight,
+            ControllerButton::View => NavAction::View,
+            ControllerButton::Menu => NavAction::Menu,
+        }
+    }
+}
+
+/// 0.20: the actions `general` gives to buttons.
+pub const CONTROLLER_ACTIONS: &[NavAction] = &[
+    NavAction::Accept,
+    NavAction::Back,
+    NavAction::Context,
+    NavAction::Secondary,
+    NavAction::Menu,
+    NavAction::View,
+    NavAction::PageLeft,
+    NavAction::PageRight,
+    NavAction::TriggerLeft,
+    NavAction::TriggerRight,
+];
+
+/// 0.20: the actions a keyboard-mode app maps to keys: the directions and
+/// [`CONTROLLER_ACTIONS`].
+pub const KEY_ACTIONS: &[NavAction] = &[
+    NavAction::Up,
+    NavAction::Down,
+    NavAction::Left,
+    NavAction::Right,
+    NavAction::Accept,
+    NavAction::Back,
+    NavAction::Context,
+    NavAction::Secondary,
+    NavAction::Menu,
+    NavAction::View,
+    NavAction::PageLeft,
+    NavAction::PageRight,
+    NavAction::TriggerLeft,
+    NavAction::TriggerRight,
+];
+
+/// 0.20: a key action mapped to this sends nothing.
+pub const KEY_NONE: &str = "none";
+
+/// 0.20: the pointer speed, in percent of the configured speed.
+pub const POINTER_SPEED_MIN: u32 = 25;
+pub const POINTER_SPEED_MAX: u32 = 400;
+pub const POINTER_SPEED_STEP: u32 = 25;
+pub const POINTER_SPEED_DEFAULT: u32 = 100;
+
+/// 0.20: the profile's controller settings, only what the user changed (the stored form,
+/// `$XDG_STATE_HOME/hinteros/controller.json`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControllerSettings {
+    /// Action -> button, over the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub general: Option<std::collections::BTreeMap<String, String>>,
+    /// Keyboard-mode apps, all of them: key action -> key (or [`KEY_NONE`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyboard: Option<std::collections::BTreeMap<String, String>>,
+    /// Per keyboard-mode app (by id): key action -> key (or [`KEY_NONE`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps:
+        Option<std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer: Option<PointerSettings>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PointerSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_sticks: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_click: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_click: Option<String>,
+}
+
+/// 0.20: the pointer settings with nothing left out (`defaults.pointer`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PointerDefaults {
+    pub speed: u32,
+    pub swap_sticks: bool,
+    pub left_click: ControllerButton,
+    pub right_click: ControllerButton,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerDefaults {
+    /// All ten actions.
+    pub general: std::collections::BTreeMap<NavAction, ControllerButton>,
+    /// The built-in keymap of every keyboard-mode app.
+    pub keyboard: std::collections::BTreeMap<NavAction, String>,
+    pub pointer: PointerDefaults,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeedRange {
+    pub min: u32,
+    pub max: u32,
+    pub step: u32,
+}
+
+/// 0.20: a keyboard-mode app and its own keymap (catalog/config: back_key, keymap, the
+/// address bar's keys).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyboardApp {
+    pub id: String,
+    pub name: String,
+    pub keymap: std::collections::BTreeMap<NavAction, String>,
+}
+
+/// 0.20: result of `input.settings.get` / `input.settings.set`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputSettings {
+    pub settings: ControllerSettings,
+    pub defaults: ControllerDefaults,
+    pub buttons: Vec<ControllerButton>,
+    pub actions: Vec<NavAction>,
+    pub key_actions: Vec<NavAction>,
+    pub keys: Vec<Key>,
+    pub modifiers: Vec<Modifier>,
+    pub speed: SpeedRange,
+    pub apps: Vec<KeyboardApp>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputSettingsGetParams {}
+
+pub struct InputSettingsGet;
+impl Method for InputSettingsGet {
+    const NAME: &'static str = "input.settings.get";
+    type Params = InputSettingsGetParams;
+    type Result = InputSettings;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputSettingsSetParams {
+    pub settings: ControllerSettings,
+}
+
+pub struct InputSettingsSet;
+impl Method for InputSettingsSet {
+    const NAME: &'static str = "input.settings.set";
+    type Params = InputSettingsSetParams;
+    type Result = InputSettings;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputCaptureParams {}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputCaptureResult {}
+
+pub struct InputCapture;
+impl Method for InputCapture {
+    const NAME: &'static str = "input.capture";
+    type Params = InputCaptureParams;
+    type Result = InputCaptureResult;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputCapturedParams {
+    /// A [`ControllerButton`] name or a direction (`up`, `down`, `left`, `right`); `None`
+    /// (JSON `null`): Guide, or no press in time.
+    #[serde(deserialize_with = "nullable")]
+    pub button: Option<String>,
+}
+
+pub struct InputCaptured;
+impl Event for InputCaptured {
+    const NAME: &'static str = "input_captured";
+    type Params = InputCapturedParams;
+}
+
 pub static API: ApiInfo = ApiInfo {
     api: "session",
     version: VERSION,
@@ -904,6 +1149,9 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<KeysType>(),
         MethodInfo::of::<KeysKey>(),
         MethodInfo::of::<KeysAction>(),
+        MethodInfo::of::<InputSettingsGet>(),
+        MethodInfo::of::<InputSettingsSet>(),
+        MethodInfo::of::<InputCapture>(),
         MethodInfo::of::<RelaySystemInfo>(),
         MethodInfo::of::<RelaySettingsGet>(),
         MethodInfo::of::<RelaySettingsSet>(),
@@ -1041,6 +1289,7 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<GreeterPrompt>(),
         EventInfo::of::<GreeterResult>(),
         EventInfo::of::<TimeZoneChanged>(),
+        EventInfo::of::<InputCaptured>(),
     ],
     errors: ErrorCode::ALL,
 };

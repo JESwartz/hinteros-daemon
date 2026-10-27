@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.19",
+  "version": "0.20",
   "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). Responses to system.*, auth.*, store.list and session.restart may arrive out of order relative to other calls on the same connection (match them by id): a relayed call can wait minutes for an admin password. See hinteros-docs/design/api.md for the protocol rules.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -37,16 +37,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.19", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
-          "result": { "api_version": "0.19", "server": { "name": "hinteros-session", "version": "0.1.0" } }
+          "params": { "api_version": "0.20", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
+          "result": { "api_version": "0.20", "server": { "name": "hinteros-session", "version": "0.1.0" } }
         },
         {
           "name": "major mismatch",
           "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 1.0, server 0.19",
-            "data": { "client_api_version": "1.0", "server_api_version": "0.19" }
+            "message": "API version mismatch: client 1.0, server 0.20",
+            "data": { "client_api_version": "1.0", "server_api_version": "0.20" }
           }
         }
       ]
@@ -4834,6 +4834,84 @@
         },
         { "name": "no catalog", "params": {}, "error": { "code": 4001, "message": "no catalog index on this system", "data": { "service": "catalog", "reason": "missing" } } }
       ]
+    },
+    "input.settings.get": {
+      "summary": "0.20: this profile's controller settings: the button map, the keys of keyboard-mode apps, the pointer.",
+      "description": "settings: what the user changed, exactly as stored ($XDG_STATE_HOME/hinteros/controller.json; missing or unreadable = {}). defaults: the built-in values. The effective button map is defaults.general with settings.general over it. An app's effective keymap is, lowest to highest: defaults.keyboard, settings.keyboard, the app's own keymap (apps[].keymap), settings.apps[id]. buttons, actions, key_actions, keys, modifiers and speed list what set accepts. apps: the profile's keyboard-mode apps. Guide and the directions are never remappable.",
+      "since": "0.20",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "$ref": "#/$defs/InputSettings" },
+      "errors": [],
+      "examples": [
+        {
+          "name": "A and B swapped",
+          "params": {},
+          "result": {
+            "settings": { "general": { "accept": "b", "back": "a" }, "pointer": { "speed": 150 } },
+            "defaults": {
+              "general": { "accept": "a", "back": "b", "secondary": "x", "context": "y", "page_left": "lb", "page_right": "rb", "trigger_left": "lt", "trigger_right": "rt", "view": "view", "menu": "menu" },
+              "keyboard": { "up": "up", "down": "down", "left": "left", "right": "right", "accept": "enter", "back": "escape" },
+              "pointer": { "speed": 100, "swap_sticks": false, "left_click": "rt", "right_click": "lt" }
+            },
+            "buttons": ["a", "b", "x", "y", "lb", "rb", "lt", "rt", "view", "menu"],
+            "actions": ["accept", "back", "context", "secondary", "menu", "view", "page_left", "page_right", "trigger_left", "trigger_right"],
+            "key_actions": ["up", "down", "left", "right", "accept", "back", "context", "secondary", "menu", "view", "page_left", "page_right", "trigger_left", "trigger_right"],
+            "keys": ["enter", "escape", "backspace", "space", "tab", "up", "down", "left", "right", "page_up", "page_down", "home", "end", "f5", "f11", "a", "l"],
+            "modifiers": ["ctrl", "alt", "shift", "meta"],
+            "speed": { "min": 25, "max": 400, "step": 25 },
+            "apps": [{ "id": "firefox", "name": "Firefox", "keymap": { "page_left": "alt+left", "page_right": "alt+right" } }]
+          }
+        }
+      ]
+    },
+    "input.settings.set": {
+      "summary": "0.20: replace this profile's controller settings (the stored form of input.settings.get) and apply them at once.",
+      "description": "Answers with input.settings.get's result. invalid_params (data.field names the part) for unknown buttons, actions or app ids, keys that do not parse, a general map that is not one button per action and one action per button, equal click buttons, or a speed outside speed.min..max or off speed.step. Written atomically; the running session uses it at once.",
+      "since": "0.20",
+      "params": {
+        "type": "object",
+        "required": ["settings"],
+        "additionalProperties": false,
+        "properties": {
+          "settings": { "$ref": "#/$defs/ControllerSettings" }
+        }
+      },
+      "result": { "type": "object", "$ref": "#/$defs/InputSettings" },
+      "errors": [],
+      "examples": [
+        {
+          "name": "swap A and B",
+          "params": { "settings": { "general": { "accept": "b", "back": "a" } } },
+          "result": {
+            "settings": { "general": { "accept": "b", "back": "a" } },
+            "defaults": {
+              "general": { "accept": "a", "back": "b", "secondary": "x", "context": "y", "page_left": "lb", "page_right": "rb", "trigger_left": "lt", "trigger_right": "rt", "view": "view", "menu": "menu" },
+              "keyboard": { "up": "up", "down": "down", "left": "left", "right": "right", "accept": "enter", "back": "escape" },
+              "pointer": { "speed": 100, "swap_sticks": false, "left_click": "rt", "right_click": "lt" }
+            },
+            "buttons": ["a", "b", "x", "y", "lb", "rb", "lt", "rt", "view", "menu"],
+            "actions": ["accept", "back", "context", "secondary", "menu", "view", "page_left", "page_right", "trigger_left", "trigger_right"],
+            "key_actions": ["up", "down", "left", "right", "accept", "back", "context", "secondary", "menu", "view", "page_left", "page_right", "trigger_left", "trigger_right"],
+            "keys": ["enter", "escape", "backspace", "space"],
+            "modifiers": ["ctrl", "alt", "shift", "meta"],
+            "speed": { "min": 25, "max": 400, "step": 25 },
+            "apps": []
+          }
+        },
+        { "name": "two actions on B", "params": { "settings": { "general": { "accept": "b" } } }, "error": { "code": -32602, "message": "general: b has two actions (accept, back)", "data": { "field": "settings.general", "reason": "not_bijective" } } },
+        { "name": "same click buttons", "params": { "settings": { "pointer": { "left_click": "lt" } } }, "error": { "code": -32602, "message": "pointer: left and right click are both lt", "data": { "field": "settings.pointer", "reason": "same_buttons" } } },
+        { "name": "not a keyboard app", "params": { "settings": { "apps": { "nope": { "back": "escape" } } } }, "error": { "code": -32602, "message": "no keyboard app 'nope'", "data": { "field": "settings.apps", "reason": "unknown_app" } } },
+        { "name": "unknown key", "params": { "settings": { "keyboard": { "back": "hyper+q" } } }, "error": { "code": -32602, "message": "keyboard: unknown modifier 'hyper' in 'hyper+q'", "data": { "field": "settings.keyboard.back", "reason": "unknown_key" } } }
+      ]
+    },
+    "input.capture": {
+      "summary": "0.20: the next button press goes to the launcher as input_captured instead of being acted on (press to assign).",
+      "description": "The next press of one of the ten buttons or a direction (up, down, left, right) is not acted on: it is sent as input_captured {button} (the physical button, before the general map) and capture ends. Guide during capture ends it with {button: null} and goes Home as usual; so does 10 s without a press. A second call while one runs restarts the 10 s. Launcher only.",
+      "since": "0.20",
+      "params": { "type": "object", "additionalProperties": false, "properties": {} },
+      "result": { "type": "object", "additionalProperties": false, "properties": {} },
+      "errors": [],
+      "examples": [{ "name": "start", "params": {}, "result": {} }]
     }
 
   },
@@ -5494,6 +5572,23 @@
           }
         }
       ]
+    },
+    "input_captured": {
+      "summary": "0.20: the button pressed during input.capture (the physical button: a, b, x, y, lb, rb, lt, rt, view, menu, or a direction up, down, left, right), or null when capture ended without one (Guide, 10 s).",
+      "since": "0.20",
+      "params": {
+        "type": "object",
+        "required": ["button"],
+        "additionalProperties": false,
+        "properties": {
+          "button": { "oneOf": [{ "$ref": "#/$defs/CapturedButton" }, { "type": "null" }] }
+        }
+      },
+      "examples": [
+        { "name": "X", "params": { "button": "x" } },
+        { "name": "a direction", "params": { "button": "up" } },
+        { "name": "timed out", "params": { "button": null } }
+      ]
     }
 
   },
@@ -5863,7 +5958,7 @@
     },
     "EventName": {
       "type": "string",
-      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_visibility", "job_started", "job_progress", "job_finished", "network_changed", "wifi_list_changed", "bluetooth_changed", "bluetooth_confirm", "audio_changed", "authentication_requested", "authentication_finished", "store_changed", "switch_progress", "switch_blocked", "lock_state", "profiles_changed", "greeter_prompt", "greeter_result", "time_zone_changed"]
+      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_visibility", "job_started", "job_progress", "job_finished", "network_changed", "wifi_list_changed", "bluetooth_changed", "bluetooth_confirm", "audio_changed", "authentication_requested", "authentication_finished", "store_changed", "switch_progress", "switch_blocked", "lock_state", "profiles_changed", "greeter_prompt", "greeter_result", "time_zone_changed", "input_captured"]
     },
     "AppId": {
       "description": "App identifier: an apps.list id, or for running apps started by command or Steam URL 'cmd-<n>' / 'steam-<appid>'. 'steam' is Steam itself (Big Picture and its other windows).",
@@ -5961,6 +6056,112 @@
         "name": { "$ref": "#/$defs/PermissionName" },
         "required": { "description": "Cannot be switched off (no switch).", "type": "boolean" },
         "granted": { "description": "The app gets it the next time it starts. Always true when required.", "type": "boolean" }
+      }
+    },
+    "ControllerButton": {
+      "description": "0.20: a remappable controller button, by its Xbox label: a, b, x, y, lb, rb, lt, rt, view, menu (input.settings.get buttons). Guide and the directions are not remappable.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$"
+    },
+    "CapturedButton": {
+      "description": "0.20: a button pressed during input.capture: a ControllerButton or a direction (up, down, left, right).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$"
+    },
+    "ControllerAction": {
+      "description": "0.20: an action a button or key can do: the remappable NavActions (accept, back, context, secondary, menu, view, page_left, page_right, trigger_left, trigger_right); for keyboard-mode apps also up, down, left, right.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$"
+    },
+    "KeyComboName": {
+      "description": "0.20: a key with optional modifiers, modifiers first: 'enter', 'alt+left', 'ctrl+shift+t'; or 'none' (the action sends nothing).",
+      "type": "string",
+      "pattern": "^[a-z0-9_]+(\\+[a-z0-9_]+)*$"
+    },
+    "ButtonMap": {
+      "description": "0.20: action to button.",
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/ControllerAction" },
+      "additionalProperties": { "$ref": "#/$defs/ControllerButton" }
+    },
+    "Keymap": {
+      "description": "0.20: action to key of a keyboard-mode app.",
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/ControllerAction" },
+      "additionalProperties": { "$ref": "#/$defs/KeyComboName" }
+    },
+    "PointerSettings": {
+      "description": "0.20: the pointer of pointer apps. speed: percent of the configured pointer speed. swap_sticks: the left stick moves the pointer, the right stick gives the directions. left_click, right_click: physical buttons (before the general map), never the same.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "speed": { "type": "integer", "minimum": 25, "maximum": 400, "multipleOf": 25 },
+        "swap_sticks": { "type": "boolean" },
+        "left_click": { "$ref": "#/$defs/ControllerButton" },
+        "right_click": { "$ref": "#/$defs/ControllerButton" }
+      }
+    },
+    "ControllerSettings": {
+      "description": "0.20: the stored controller settings of a profile: only what the user changed. general: over defaults.general, the result one button per action and one action per button. keyboard: the keys of every keyboard-mode app. apps: per app id, over everything else for that app.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "general": { "$ref": "#/$defs/ButtonMap" },
+        "keyboard": { "$ref": "#/$defs/Keymap" },
+        "apps": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/AppId" },
+          "additionalProperties": { "$ref": "#/$defs/Keymap" }
+        },
+        "pointer": { "$ref": "#/$defs/PointerSettings" }
+      }
+    },
+    "ControllerDefaults": {
+      "description": "0.20: the built-in controller settings. pointer has all four fields.",
+      "type": "object",
+      "required": ["general", "keyboard", "pointer"],
+      "additionalProperties": false,
+      "properties": {
+        "general": { "$ref": "#/$defs/ButtonMap" },
+        "keyboard": { "$ref": "#/$defs/Keymap" },
+        "pointer": { "$ref": "#/$defs/PointerSettings" }
+      }
+    },
+    "KeyboardApp": {
+      "description": "0.20: a keyboard-mode app of the profile. keymap: only the app's own catalog or config entries (back key, keymap, address bar keys).",
+      "type": "object",
+      "required": ["id", "name", "keymap"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/AppId" },
+        "name": { "type": "string" },
+        "keymap": { "$ref": "#/$defs/Keymap" }
+      }
+    },
+    "InputSettings": {
+      "description": "0.20: the controller settings of this profile (input.settings.get).",
+      "type": "object",
+      "required": ["settings", "defaults", "buttons", "actions", "key_actions", "keys", "modifiers", "speed", "apps"],
+      "additionalProperties": false,
+      "properties": {
+        "settings": { "$ref": "#/$defs/ControllerSettings" },
+        "defaults": { "$ref": "#/$defs/ControllerDefaults" },
+        "buttons": { "type": "array", "items": { "$ref": "#/$defs/ControllerButton" } },
+        "actions": { "description": "The actions of general, in display order.", "type": "array", "items": { "$ref": "#/$defs/ControllerAction" } },
+        "key_actions": { "description": "The actions of a keymap, in display order.", "type": "array", "items": { "$ref": "#/$defs/ControllerAction" } },
+        "keys": { "description": "Key names a KeyComboName may end with.", "type": "array", "items": { "type": "string" } },
+        "modifiers": { "type": "array", "items": { "type": "string" } },
+        "speed": {
+          "type": "object",
+          "required": ["min", "max", "step"],
+          "additionalProperties": false,
+          "properties": {
+            "min": { "type": "integer", "minimum": 1 },
+            "max": { "type": "integer", "minimum": 1 },
+            "step": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "apps": { "type": "array", "items": { "$ref": "#/$defs/KeyboardApp" } }
       }
     },
     "InstallState": {

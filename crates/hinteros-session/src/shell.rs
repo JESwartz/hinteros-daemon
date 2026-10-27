@@ -48,12 +48,13 @@ use hinteros_api::session::{
     AppsCloseResult, AppsDisplaysGet, AppsDisplaysSet, AppsFocus, AppsFocusParams, AppsFocusResult,
     AppsLaunch, AppsLaunchParams, AppsLaunchResult, AppsList, AppsListResult, AppsRunning,
     AppsRunningResult, AppsSetPermission, AppsSetPermissionParams, AppsSetPermissionResult,
-    EventName, ExitReason, FocusChangedParams, GamesList, GamesListResult, HomePressedParams,
-    InputNavParams, KEYS_TYPE_MAX_CHARS, KeysAction, KeysActionParams, KeysActionResult, KeysKey,
-    KeysKeyParams, KeysKeyResult, KeysType, KeysTypeParams, KeysTypeResult, LaunchRequest,
-    NavAction, NavPhase, OskHide, OskShow, OskState, RunningApp, STEAM_CLIENT_APP_ID,
-    STEAM_CLIENT_GAMESCOPE_APP_ID, STEAM_RUNGAMEID, SteamAttentionParams, SteamAttentionQuery,
-    SteamFocus, SteamFocusResult, SteamWindow,
+    ControllerButton, EventName, ExitReason, FocusChangedParams, GamesList, GamesListResult,
+    HomePressedParams, InputCapture, InputCaptureResult, InputCapturedParams, InputNavParams,
+    InputSettings, InputSettingsGet, InputSettingsSet, KEYS_TYPE_MAX_CHARS, KeysAction,
+    KeysActionParams, KeysActionResult, KeysKey, KeysKeyParams, KeysKeyResult, KeysType,
+    KeysTypeParams, KeysTypeResult, LaunchRequest, NavAction, NavPhase, OskHide, OskShow, OskState,
+    RunningApp, STEAM_CLIENT_APP_ID, STEAM_CLIENT_GAMESCOPE_APP_ID, STEAM_RUNGAMEID,
+    SteamAttentionParams, SteamAttentionQuery, SteamFocus, SteamFocusResult, SteamWindow,
 };
 use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde::Serialize;
@@ -63,6 +64,7 @@ use tracing::{debug, info, warn};
 
 use crate::apps::{ChildExit, Spawner};
 use crate::config::{AppConfig, Config, FieldSummon};
+use crate::controller::{ControllerStore, SetError};
 use crate::displays::DisplayPool;
 use crate::focus::{
     FocusControl, GamescopeEvent, GamescopeState, baselayer_for, baselayer_for_steam_client,
@@ -151,10 +153,16 @@ pub const METHODS: &[&str] = &[
     KeysType::NAME,
     KeysKey::NAME,
     KeysAction::NAME,
+    InputSettingsGet::NAME,
+    InputSettingsSet::NAME,
+    InputCapture::NAME,
 ];
 
 /// Steam windows that appear this soon after our own Steam request are Steam's answer to it.
 pub const STEAM_ANSWER_WINDOW: Duration = Duration::from_secs(10);
+
+/// `input.capture` ends with no button when nothing is pressed for this long.
+pub const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How many gamescope app ids above the launcher's are our command apps' (see
 /// `Shell::own_app_id`): far more apps than ever run at once.
@@ -367,6 +375,9 @@ struct Running {
     pointer: bool,
     /// The keyboard input profile's keymap (`None`: gamepad).
     keymap: Option<Keymap>,
+    /// Actions the app's own `keymap` or the user's keys for it map: their buttons never
+    /// click.
+    own_keys: BTreeSet<NavAction>,
     /// The app display it was started on (resolved), if it has one of its own.
     display: Option<String>,
 }
@@ -375,6 +386,7 @@ struct Running {
 #[derive(Debug, Default)]
 struct AppInput {
     keymap: Option<Keymap>,
+    own_keys: BTreeSet<NavAction>,
     address_bar: bool,
     pointer: bool,
 }
@@ -476,6 +488,15 @@ pub struct Shell {
     left_click: Option<(String, Instant)>,
     /// The app displays (one per app we start) and their setting.
     displays: DisplayPool,
+    /// The profile's controller settings (`input.settings.*`).
+    controller: ControllerStore,
+    /// `input.capture` runs until this time.
+    capture: Option<Instant>,
+    /// Captured presses (pad, `ui_*` name): their releases are dropped too.
+    captured: BTreeSet<(String, String)>,
+    /// The action each held button (pad, `ui_*` name) was pressed as: its release goes with it,
+    /// also when the settings changed meanwhile.
+    pressed_as: BTreeMap<(String, String), NavAction>,
 }
 
 impl Shell {
@@ -500,6 +521,10 @@ impl Shell {
             clicking: BTreeMap::new(),
             left_click: None,
             displays: DisplayPool::new(None, 4).with_files(None, None),
+            controller: ControllerStore::default(),
+            capture: None,
+            captured: BTreeSet::new(),
+            pressed_as: BTreeMap::new(),
             cfg,
             focus,
             input,
@@ -541,6 +566,13 @@ impl Shell {
     /// daemon's display).
     pub fn with_displays(mut self, pool: DisplayPool) -> Self {
         self.displays = pool;
+        self
+    }
+
+    /// Use the profile's controller settings from `store` (default: the defaults, not saved).
+    pub fn with_controller(mut self, store: ControllerStore) -> Self {
+        self.controller = store;
+        self.input.set_pointer_tuning(self.controller.get().tuning);
         self
     }
 
@@ -722,6 +754,39 @@ impl Shell {
             KeysAction::NAME => {
                 let p = decode_params::<KeysAction>(params)?;
                 encode_result::<KeysAction>(self.keys_action(p)?)
+            }
+            InputSettingsGet::NAME => {
+                decode_params::<InputSettingsGet>(params)?;
+                encode_result::<InputSettingsGet>(self.input_settings())
+            }
+            InputSettingsSet::NAME => {
+                let p = decode_params::<InputSettingsSet>(params)?;
+                let keyboard_apps: Vec<String> = crate::controller::keyboard_apps(&self.cfg.apps)
+                    .into_iter()
+                    .map(|a| a.id)
+                    .collect();
+                self.controller
+                    .set(p.settings, &keyboard_apps)
+                    .map_err(|e| match e {
+                        SetError::Invalid(e) => ErrorObject::with_data(
+                            ErrorCode::InvalidParams,
+                            e.message,
+                            serde_json::json!({ "field": e.field, "reason": e.reason }),
+                        ),
+                        SetError::Io(e) => ErrorObject::new(
+                            ErrorCode::InternalError,
+                            format!("cannot save the controller settings: {e}"),
+                        ),
+                    })?;
+                info!("controller settings set");
+                self.apply_controller();
+                encode_result::<InputSettingsSet>(self.input_settings())
+            }
+            InputCapture::NAME => {
+                decode_params::<InputCapture>(params)?;
+                info!("capture: next button press");
+                self.capture = Some(now + CAPTURE_TIMEOUT);
+                encode_result::<InputCapture>(InputCaptureResult {})
             }
             _ => Err(hinteros_api::server::method_not_found(method)),
         }
@@ -927,12 +992,7 @@ impl Shell {
                 grants: self.cfg.permissions.grants(&a.id, &a.permissions),
                 kiosk: a.kind == AppKind::Web || a.input == crate::config::InputProfile::Keyboard,
             });
-        let keymap = configured.and_then(|a| a.keymap().ok().flatten());
-        let input = AppInput {
-            address_bar: configured.is_some_and(|a| a.address_bar),
-            pointer: keymap.is_some() && configured.is_some_and(|a| a.pointer.unwrap_or(true)),
-            keymap,
-        };
+        let input = configured.map(|a| self.app_input(a)).unwrap_or_default();
         if input.keymap.is_some() && !self.keys.caps().keys {
             warn!("no virtual keyboard: this app gets the gamepad instead of key presses");
         }
@@ -1114,12 +1174,72 @@ impl Shell {
                 gone_since: None,
                 closing: None,
                 keymap: input.keymap,
+                own_keys: input.own_keys,
                 address_bar: input.address_bar,
                 pointer: input.pointer,
                 display: None,
             },
         );
         self.emit(EventName::AppStarted, AppStartedParams { app: info });
+    }
+
+    /// How a configured app takes controller input: its config and the profile's controller
+    /// settings.
+    fn app_input(&self, app: &AppConfig) -> AppInput {
+        let controller = self.controller.get();
+        let keymap = controller.keymap(app);
+        let mut own_keys: BTreeSet<NavAction> = app
+            .keymap
+            .iter()
+            .filter(|(_, key)| crate::keys::parse_binding(key).is_ok_and(|k| k.is_some()))
+            .filter_map(|(action, _)| crate::config::nav_action(action))
+            .collect();
+        own_keys.extend(controller.app_mapped(&app.id));
+        AppInput {
+            address_bar: app.address_bar,
+            pointer: keymap.is_some() && app.pointer.unwrap_or(true),
+            keymap,
+            own_keys,
+        }
+    }
+
+    /// The controller settings changed: the running keyboard-mode apps get their new keys, the
+    /// pointer profile its new settings (InputPlumber reloads it if it is loaded).
+    fn apply_controller(&mut self) {
+        let updates: Vec<(String, AppInput)> = self
+            .apps
+            .iter()
+            .filter(|(_, r)| r.keymap.is_some())
+            .filter_map(|(id, _)| {
+                let app = self.cfg.apps.iter().find(|a| &a.id == id)?;
+                Some((id.clone(), self.app_input(app)))
+            })
+            .collect();
+        for (id, input) in updates {
+            if let Some(r) = self.apps.get_mut(&id)
+                && input.keymap.is_some()
+            {
+                r.keymap = input.keymap;
+                r.own_keys = input.own_keys;
+            }
+        }
+        self.input.set_pointer_tuning(self.controller.get().tuning);
+    }
+
+    /// `input.settings.get`.
+    fn input_settings(&self) -> InputSettings {
+        use hinteros_api::session::{CONTROLLER_ACTIONS, KEY_ACTIONS};
+        InputSettings {
+            settings: self.controller.saved().clone(),
+            defaults: crate::controller::defaults(),
+            buttons: ControllerButton::ALL.to_vec(),
+            actions: CONTROLLER_ACTIONS.to_vec(),
+            key_actions: KEY_ACTIONS.to_vec(),
+            keys: crate::controller::key_list(),
+            modifiers: crate::controller::MODIFIERS.to_vec(),
+            speed: crate::controller::speed_range(),
+            apps: crate::controller::keyboard_apps(&self.cfg.apps),
+        }
     }
 
     /// A free app display for an app about to start (`None`: apps share the daemon's display):
@@ -2308,7 +2428,64 @@ impl Shell {
         self.guide_others.push(raw.to_string());
     }
 
+    /// `input.capture` while it runs: a press of one of the ten buttons or a direction ends it
+    /// as `input_captured` and is not acted on (its release is dropped too); Guide ends it with
+    /// no button and still goes Home. Returns whether the event is used up.
+    fn capture_input(&mut self, input: &RawInput, now: Instant) -> bool {
+        let key = (input.source.clone(), input.event.clone());
+        if !input.pressed() {
+            return self.captured.remove(&key);
+        }
+        if self.capture.is_none_or(|until| now >= until) {
+            return false;
+        }
+        if input.event == "ui_guide" {
+            info!("capture: guide → no button");
+            self.end_capture(None);
+            return false;
+        }
+        let name = crate::input::button(&input.event)
+            .map(ControllerButton::name)
+            .or_else(|| crate::input::direction(&input.event));
+        let Some(name) = name else {
+            return false;
+        };
+        info!(button = name, raw = %input.event, "capture: button");
+        self.captured.insert(key);
+        self.end_capture(Some(name.to_string()));
+        true
+    }
+
+    fn end_capture(&mut self, button: Option<String>) {
+        self.capture = None;
+        self.emit_to(
+            EventName::InputCaptured,
+            InputCapturedParams { button },
+            Audience::Launcher,
+        );
+    }
+
+    /// The action of a navigation event: for the ten buttons the profile's `general` setting
+    /// gives it (a release goes with the action of its press, also when the settings changed
+    /// meanwhile); other events keep `default`.
+    fn remap(&mut self, input: &RawInput, default: NavAction) -> NavAction {
+        let Some(button) = crate::input::button(&input.event) else {
+            return default;
+        };
+        let key = (input.source.clone(), input.event.clone());
+        let now_action = self.controller.get().action(button);
+        if input.pressed() {
+            self.pressed_as.insert(key, now_action);
+            now_action
+        } else {
+            self.pressed_as.remove(&key).unwrap_or(now_action)
+        }
+    }
+
     fn input(&mut self, input: RawInput, now: Instant) {
+        if self.capture_input(&input, now) {
+            return;
+        }
         let Some(intent) = translate(&input.event) else {
             debug!(event = %input.event, "unmapped input");
             if input.pressed() {
@@ -2326,7 +2503,7 @@ impl Shell {
                 }
                 return;
             }
-            Intent::Nav(action) => action,
+            Intent::Nav(action) => self.remap(&input, action),
         };
         if self
             .debounce
@@ -2377,7 +2554,8 @@ impl Shell {
             }
             return;
         }
-        if route == Route::Keys && pressed && self.keys_button(action, &input.source, now) {
+        let button = crate::input::button(&input.event);
+        if route == Route::Keys && pressed && self.keys_button(action, button, &input.source, now) {
             if !self.clicking.contains_key(&action) {
                 self.swallow.insert(action);
             }
@@ -2413,11 +2591,18 @@ impl Shell {
         }
     }
 
-    /// A button pressed in a keyboard-profile app that means more than its key: a click (RT left,
-    /// LT right) with
-    /// the pointer, the on-screen keyboard for a text field, the address bar. Returns whether
-    /// it was handled (its release is then dropped, or ends the click).
-    fn keys_button(&mut self, action: NavAction, source: &str, now: Instant) -> bool {
+    /// A button pressed in a keyboard-profile app that means more than its key: a click (the
+    /// profile's click buttons, RT left and LT right by default) with the pointer, the
+    /// on-screen keyboard for a text field, the address bar. `button` is the physical button,
+    /// `action` what the profile's `general` makes of it. Returns whether it was handled (its
+    /// release is then dropped, or ends the click).
+    fn keys_button(
+        &mut self,
+        action: NavAction,
+        button: Option<ControllerButton>,
+        source: &str,
+        now: Instant,
+    ) -> bool {
         let pointer = self.pointer_app();
         if pointer && action.is_direction() {
             // D-pad or left stick: the pointer is done.
@@ -2432,14 +2617,12 @@ impl Shell {
         let view_mapped = mapped(NavAction::View);
         let address_bar = app.address_bar;
         let app_id = app.info.id.clone();
-        // RT is the left click and LT the right click whenever there is a pointer (unless the
-        // app maps them); A never clicks (it is Enter, or the on-screen keyboard on a text field).
-        let click = match action {
-            NavAction::TriggerRight => Some(MouseButton::Left),
-            NavAction::TriggerLeft => Some(MouseButton::Right),
-            _ => None,
-        }
-        .filter(|_| pointer && !mapped(action));
+        // The click buttons click whenever there is a pointer, checked before the `general`
+        // remap (unless the app's own keymap, or the user's keys for it, map their action); A
+        // does not by default (it is Enter, or the on-screen keyboard on a text field).
+        let click = button
+            .and_then(|b| self.controller.get().click(b))
+            .filter(|_| pointer && !app.own_keys.contains(&action));
         if let Some(button) = click {
             debug!(?action, ?button, "click");
             let change = self.pointer.motion();
@@ -2791,10 +2974,15 @@ impl Shell {
             .chain(self.order.at)
             .chain(self.osk_auto_hide_at)
             .chain(self.guide.as_ref().and_then(|hold| hold.steam_at))
+            .chain(self.capture)
             .min()
     }
 
     pub fn tick(&mut self, now: Instant) {
+        if self.capture.is_some_and(|until| now >= until) {
+            info!("capture: no press in time → no button");
+            self.end_capture(None);
+        }
         if self
             .guide
             .as_ref()
@@ -2949,6 +3137,7 @@ mod tests {
 
     use super::*;
     use crate::config::InputProfile;
+    use crate::input::PointerTuning;
     use crate::keys::KeyCaps;
 
     /// Everything the shell did to the outside world, in order.
@@ -2977,6 +3166,8 @@ mod tests {
         Click(bool),
         RightClick(bool),
         Cursor(bool),
+        /// The pointer profile's settings: speed (percent), swapped sticks.
+        Tuning(u32, bool),
         /// A Guide tap to Steam, the pad first in this mode.
         GuideTap(InterceptMode),
     }
@@ -3043,6 +3234,9 @@ mod tests {
         }
         fn set_pointer(&mut self, on: bool) {
             self.0.push(Call::Pointer(on));
+        }
+        fn set_pointer_tuning(&mut self, t: PointerTuning) {
+            self.0.push(Call::Tuning(t.speed, t.swap_sticks));
         }
         fn mouse_button(&mut self, _source: &str, button: MouseButton, pressed: bool) {
             self.0.push(match button {
@@ -6350,6 +6544,288 @@ mod tests {
         t.input("ui_quick2", 1.0);
         t.input("ui_accept", 1.0);
         assert_eq!(t.log.take(), [keys(&["enter"])]);
+    }
+
+    fn nav_events(t: &mut T) -> Vec<Value> {
+        t.events()
+            .into_iter()
+            .filter(|(n, _)| *n == EventName::InputNav)
+            .map(|(_, p)| p)
+            .collect()
+    }
+
+    #[test]
+    fn controller_settings_remap_and_apply_at_once() {
+        let mut t = T::new();
+        let r = t.call("input.settings.get", json!({})).unwrap();
+        assert_eq!(r["settings"], json!({}));
+        assert_eq!(r["defaults"]["general"]["accept"], "a");
+        assert_eq!(r["buttons"].as_array().unwrap().len(), 10);
+        assert_eq!(r["modifiers"], json!(["ctrl", "alt", "shift", "meta"]));
+        assert_eq!(r["speed"], json!({"min": 25, "max": 400, "step": 25}));
+        // Only the keyboard-mode apps, each with its own keys.
+        assert_eq!(
+            r["apps"],
+            json!([{"id": "youtube", "name": "YOUTUBE", "keymap": {"back": "backspace", "context": "f"}}])
+        );
+
+        t.launch(json!({"id": "youtube"}));
+        t.log.take();
+        t.events();
+        let settings = json!({
+            "general": {"accept": "b", "back": "a"},
+            "keyboard": {"menu": "m", "context": "space"},
+            "apps": {"youtube": {"back": "tab"}},
+            "pointer": {"speed": 200, "swap_sticks": true}
+        });
+        let r = t
+            .call("input.settings.set", json!({ "settings": settings }))
+            .unwrap();
+        assert_eq!(r["settings"], settings);
+        assert_eq!(t.log.take(), [Call::Tuning(200, true)]);
+        assert_eq!(
+            t.call("input.settings.get", json!({})).unwrap()["settings"],
+            settings
+        );
+
+        // The running app has its new keys at once: A is back (the user's tab for this app),
+        // B is accept (Enter), Y keeps the app's own f over the shared space, Start is m.
+        for button in ["ui_accept", "ui_back", "ui_context", "ui_option"] {
+            t.input(button, 1.0);
+            t.input(button, 0.0);
+        }
+        assert_eq!(
+            t.log.take(),
+            [keys(&["tab"]), keys(&["enter"]), keys(&["f"]), keys(&["m"])]
+        );
+
+        // Refused settings change nothing.
+        for (bad, message) in [
+            (
+                json!({"general": {"accept": "b"}}),
+                "general: b has two actions (accept, back)",
+            ),
+            (
+                json!({"apps": {"jellyfin": {"back": "escape"}}}),
+                "no keyboard app 'jellyfin'",
+            ),
+            (
+                json!({"pointer": {"left_click": "lt"}}),
+                "pointer: left and right click are both lt",
+            ),
+        ] {
+            let e = t
+                .call("input.settings.set", json!({ "settings": bad }))
+                .unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidParams.code());
+            assert_eq!(e.message, message);
+            assert!(
+                e.data
+                    .as_ref()
+                    .is_some_and(|d| d["field"].is_string() && d["reason"].is_string())
+            );
+        }
+        let e = t
+            .call("input.settings.set", json!({"settings": {"x": 1}}))
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidParams.code());
+        assert!(t.log.take().is_empty());
+        t.input("ui_accept", 1.0);
+        t.input("ui_accept", 0.0);
+        assert_eq!(t.log.take(), [keys(&["tab"])]);
+
+        // The launcher gets the remapped action.
+        t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
+        t.events();
+        t.log.take();
+        t.input("ui_accept", 1.0);
+        assert_eq!(
+            nav_events(&mut t),
+            [json!({"action": "back", "phase": "press"})]
+        );
+        // Back to the defaults while A is held: its release is still back's.
+        t.call("input.settings.set", json!({"settings": {}}))
+            .unwrap();
+        t.input("ui_accept", 0.0);
+        t.input("ui_accept", 1.0);
+        assert_eq!(
+            nav_events(&mut t),
+            [
+                json!({"action": "back", "phase": "release"}),
+                json!({"action": "accept", "phase": "press"})
+            ]
+        );
+        assert_eq!(t.log.take(), [Call::Tuning(100, false)]);
+    }
+
+    #[test]
+    fn guide_chords_and_the_keyboard_follow_the_remap() {
+        // Guide + Y (context) shows the on-screen keyboard; with Y and X swapped it is Guide + X.
+        let mut t = T::with(|c| c.osk_summon = Some(NavAction::Context));
+        t.call(
+            "input.settings.set",
+            json!({"settings": {"general": {"context": "x", "secondary": "y"}}}),
+        )
+        .unwrap();
+        t.input("ui_guide", 1.0);
+        t.input("ui_context", 1.0); // Y: secondary now, no chord
+        t.input("ui_context", 0.0);
+        assert!(!t.shell.osk_visible());
+        t.input("ui_guide", 0.0);
+        t.input("ui_guide", 1.0);
+        t.input("ui_action", 1.0); // X: context
+        assert!(t.shell.osk_visible());
+        t.input("ui_action", 0.0);
+        t.input("ui_guide", 0.0);
+        t.events();
+        // The on-screen keyboard gets the remapped actions too.
+        t.input("ui_context", 1.0);
+        assert_eq!(
+            t.events_to(),
+            [(
+                EventName::InputNav,
+                json!({"action": "secondary", "phase": "press"}),
+                Audience::Osk
+            )]
+        );
+    }
+
+    #[test]
+    fn click_buttons_are_physical() {
+        let mut t = T::new();
+        t.launch(json!({"id": "youtube"}));
+        t.call(
+            "input.settings.set",
+            json!({"settings": {
+                "general": {"accept": "b", "back": "a"},
+                "pointer": {"left_click": "a", "right_click": "rb"}
+            }}),
+        )
+        .unwrap();
+        t.log.take();
+        // A clicks (before the remap makes it back), RB right-clicks; RT and LT no longer do.
+        t.input("ui_accept", 1.0);
+        t.input("ui_accept", 0.0);
+        t.input("ui_r1", 1.0);
+        t.input("ui_r1", 0.0);
+        t.input("ui_r2", 1.0);
+        t.input("ui_r2", 0.0);
+        assert_eq!(
+            t.log.take(),
+            [
+                Call::Click(true),
+                Call::Click(false),
+                Call::RightClick(true),
+                Call::RightClick(false)
+            ]
+        );
+        // B is accept: Enter.
+        t.input("ui_back", 1.0);
+        assert_eq!(t.log.take(), [keys(&["enter"])]);
+
+        // The user's keys for this app win over the click: A (back) sends Delete.
+        t.call(
+            "input.settings.set",
+            json!({"settings": {
+                "general": {"accept": "b", "back": "a"},
+                "apps": {"youtube": {"back": "delete"}},
+                "pointer": {"left_click": "a", "right_click": "rb"}
+            }}),
+        )
+        .unwrap();
+        t.log.take();
+        t.input("ui_accept", 1.0);
+        t.input("ui_accept", 0.0);
+        assert_eq!(t.log.take(), [keys(&["delete"])]);
+    }
+
+    #[test]
+    fn capture_takes_the_next_press() {
+        let mut t = T::new();
+        let captured = |t: &mut T| -> Vec<(Value, Audience)> {
+            t.events_to()
+                .into_iter()
+                .filter(|(n, _, _)| *n == EventName::InputCaptured)
+                .map(|(_, p, a)| (p["button"].clone(), a))
+                .collect()
+        };
+        // The press is captured, not acted on; its release is dropped too.
+        assert_eq!(t.call("input.capture", json!({})).unwrap(), json!({}));
+        t.input("ui_back", 1.0);
+        t.input("ui_back", 0.0);
+        let events = t.events_to();
+        assert_eq!(
+            events,
+            [(
+                EventName::InputCaptured,
+                json!({"button": "b"}),
+                Audience::Launcher
+            )]
+        );
+        // Over: the next press is navigation again.
+        t.input("ui_back", 1.0);
+        assert_eq!(
+            nav_events(&mut t),
+            [json!({"action": "back", "phase": "press"})]
+        );
+        t.input("ui_back", 0.0);
+        t.events();
+
+        // Physical ids, before the remap; directions too.
+        t.call(
+            "input.settings.set",
+            json!({"settings": {"general": {"accept": "b", "back": "a"}}}),
+        )
+        .unwrap();
+        t.call("input.capture", json!({})).unwrap();
+        t.input("ui_accept", 1.0);
+        assert_eq!(captured(&mut t), [(json!("a"), Audience::Launcher)]);
+        t.input("ui_accept", 0.0);
+        t.advance(MS(100));
+        t.call("input.capture", json!({})).unwrap();
+        t.input("ui_left", 1.0);
+        t.input("ui_left", 0.0);
+        assert_eq!(captured(&mut t), [(json!("left"), Audience::Launcher)]);
+        assert!(t.events().is_empty(), "no input_nav");
+
+        // Other buttons are not captured; nothing in 10 s ends it.
+        t.call("input.capture", json!({})).unwrap();
+        t.input("ui_quick", 1.0);
+        t.input("ui_quick", 0.0);
+        assert_eq!(nav_events(&mut t).len(), 2);
+        t.advance(MS(9_999));
+        assert!(captured(&mut t).is_empty());
+        t.advance(MS(1));
+        assert_eq!(captured(&mut t), [(Value::Null, Audience::Launcher)]);
+        t.input("ui_back", 1.0);
+        t.input("ui_back", 0.0);
+        assert!(captured(&mut t).is_empty());
+
+        // A second capture restarts the 10 s.
+        t.call("input.capture", json!({})).unwrap();
+        t.advance(MS(6_000));
+        t.call("input.capture", json!({})).unwrap();
+        t.advance(MS(6_000));
+        assert!(captured(&mut t).is_empty());
+        t.advance(MS(4_000));
+        assert_eq!(captured(&mut t), [(Value::Null, Audience::Launcher)]);
+
+        // Guide ends it with no button and still goes Home.
+        t.launch(json!({"id": "jellyfin"}));
+        t.call("input.capture", json!({})).unwrap();
+        t.events();
+        t.input("ui_guide", 1.0);
+        t.input("ui_guide", 0.0);
+        let events = t.events();
+        assert_eq!(
+            events[..2],
+            [
+                ev(EventName::InputCaptured, json!({"button": null})),
+                ev(EventName::HomePressed, json!({})),
+            ]
+        );
+        assert_eq!(t.shell.focused(), None);
     }
 
     #[test]

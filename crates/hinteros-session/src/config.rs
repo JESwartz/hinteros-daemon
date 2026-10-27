@@ -122,7 +122,7 @@ use clap::Parser;
 use hinteros_api::session::{AppKind, Key, NavAction, STEAM_CLIENT_APP_ID};
 use serde::Deserialize;
 
-use crate::keys::{KeyCombo, Keymap, default_keymap};
+use crate::keys::{KeyCombo, KeyLayer, Keymap, apply_layer, default_keymap, parse_binding};
 
 /// Default gamescope app id of the launcher. Steam app ids are far below this, and Steam's
 /// non-Steam shortcuts use random ids with the top bit set, so collisions are unlikely.
@@ -1035,35 +1035,42 @@ pub fn expand_home(path: &Path) -> PathBuf {
 }
 
 impl AppConfig {
-    /// The keymap for the keyboard profile (`None` for gamepad apps).
+    /// The keymap for the keyboard profile (`None` for gamepad apps): the default keymap with
+    /// [`Self::own_keymap`] over it. The profile's controller settings come on top of that in
+    /// the session ([`crate::controller`]).
     pub fn keymap(&self) -> Result<Option<Keymap>> {
         if self.input != InputProfile::Keyboard {
             return Ok(None);
         }
-        let back = match &self.back_key {
-            Some(k) => k.parse::<KeyCombo>().map_err(anyhow::Error::msg)?,
-            None => Key::Escape.into(),
-        };
-        let mut map = default_keymap(back);
+        let mut map = default_keymap(Key::Escape.into());
+        apply_layer(&mut map, &self.own_keymap()?);
+        Ok(Some(map))
+    }
+
+    /// What the app itself changes in the default keymap: `back_key`, the address bar's keys,
+    /// then `keymap` (`None`: unmapped).
+    pub fn own_keymap(&self) -> Result<KeyLayer> {
+        let mut layer = KeyLayer::new();
+        if let Some(k) = &self.back_key {
+            let back = k.parse::<KeyCombo>().map_err(anyhow::Error::msg)?;
+            layer.insert(NavAction::Back, Some(back));
+        }
         if self.address_bar {
             // A browser: LB / RB are history back / forward.
             for (action, key) in [
                 (NavAction::PageLeft, "alt+left"),
                 (NavAction::PageRight, "alt+right"),
             ] {
-                map.insert(action, key.parse::<KeyCombo>().map_err(anyhow::Error::msg)?);
+                let key = key.parse::<KeyCombo>().map_err(anyhow::Error::msg)?;
+                layer.insert(action, Some(key));
             }
         }
         for (action, key) in &self.keymap {
             let action = nav_action(action)
                 .with_context(|| format!("unknown controller action '{action}'"))?;
-            if key.trim().eq_ignore_ascii_case("none") {
-                map.remove(&action);
-            } else {
-                map.insert(action, key.parse::<KeyCombo>().map_err(anyhow::Error::msg)?);
-            }
+            layer.insert(action, parse_binding(key).map_err(anyhow::Error::msg)?);
         }
-        Ok(Some(map))
+        Ok(layer)
     }
 }
 

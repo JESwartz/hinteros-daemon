@@ -37,11 +37,12 @@ impl Manager {
 }
 
 /// What a fake composite device was asked to do: profiles loaded (their `name:`), mouse
-/// button events, and how often its `DbusDevices` property was read.
+/// button events, and how often its `DbusDevices` property was read; the profiles themselves.
 #[derive(Clone, Default)]
 struct Calls {
     log: Arc<std::sync::Mutex<Vec<String>>>,
     dbus_reads: Arc<AtomicU32>,
+    yamls: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Calls {
@@ -175,6 +176,7 @@ impl Composite {
     }
     async fn load_profile_from_yaml(&self, yaml: String) {
         self.faults.gate().await;
+        self.calls.yamls.lock().unwrap().push(yaml.clone());
         let name = yaml
             .lines()
             .find_map(|l| l.strip_prefix("name: "))
@@ -1143,7 +1145,7 @@ async fn inputplumber_name_before_its_manager() {
 #[tokio::test(flavor = "multi_thread")]
 async fn guide_tap_for_steam_reaches_the_pad_not_us() {
     use hinteros_session::input::inputplumber::{self, PointerProfile, Settings};
-    use hinteros_session::input::{InputControl, InterceptMode, LabelSwap, pointer};
+    use hinteros_session::input::{InputControl, InterceptMode, LabelSwap};
 
     let Some(bus) = Bus::start() else { return };
     let fake = Fake::start(&bus.address).await;
@@ -1154,7 +1156,9 @@ async fn guide_tap_for_steam_reaches_the_pad_not_us() {
             initial: InterceptMode::Pass,
             swap: LabelSwap::Off,
             profile: PointerProfile {
-                yaml: pointer::profile_yaml(600, 2.5, 0.1),
+                speed_pps: 600,
+                curve: 2.5,
+                activity_deadzone: 0.1,
             },
             call_timeout: std::time::Duration::from_secs(5),
             // No watchdog in the way: the tap itself must set the mode.
@@ -1227,7 +1231,7 @@ async fn watchdog_leaves_inputplumbers_guide_switch_alone() {
     use hinteros_session::input::inputplumber::{
         self, GUIDE_SWITCH_GRACE, PointerProfile, Settings,
     };
-    use hinteros_session::input::{InterceptMode, LabelSwap, pointer};
+    use hinteros_session::input::{InterceptMode, LabelSwap};
     use std::time::{Duration, Instant};
 
     let Some(bus) = Bus::start() else { return };
@@ -1239,7 +1243,9 @@ async fn watchdog_leaves_inputplumbers_guide_switch_alone() {
             initial: InterceptMode::Pass,
             swap: LabelSwap::Off,
             profile: PointerProfile {
-                yaml: pointer::profile_yaml(600, 2.5, 0.1),
+                speed_pps: 600,
+                curve: 2.5,
+                activity_deadzone: 0.1,
             },
             call_timeout: Duration::from_secs(5),
             watchdog: Duration::from_millis(100),
@@ -1281,4 +1287,79 @@ async fn watchdog_leaves_inputplumbers_guide_switch_alone() {
         "{:?}",
         pressed.elapsed()
     );
+}
+
+/// The profile's pointer settings (session API 0.20): a change while the pointer profile is
+/// loaded loads it again with the new speed and sticks; a change while it is not waits for the
+/// next load. Unloading puts the profile from before ours back.
+#[tokio::test(flavor = "multi_thread")]
+async fn pointer_settings_reload_the_loaded_profile() {
+    use hinteros_session::input::inputplumber::{self, PointerProfile, Settings};
+    use hinteros_session::input::{InputControl, InterceptMode, LabelSwap, PointerTuning};
+
+    let Some(bus) = Bus::start() else { return };
+    let fake = Fake::start(&bus.address).await;
+    let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+    let mut input = inputplumber::spawn(
+        Settings {
+            bus: Some(bus.address.clone()),
+            initial: InterceptMode::All,
+            swap: LabelSwap::Off,
+            profile: PointerProfile {
+                speed_pps: 600,
+                curve: 2.5,
+                activity_deadzone: 0.1,
+            },
+            call_timeout: std::time::Duration::from_secs(5),
+            watchdog: std::time::Duration::from_secs(600),
+        },
+        tx,
+    );
+    ready(&fake, 0, 2).await;
+    let loads = |n: usize| {
+        let yamls = fake.calls.yamls.clone();
+        async move {
+            eventually(&format!("{n} profile loads"), async || {
+                let y = yamls.lock().unwrap().clone();
+                (y.len() >= n).then_some(y)
+            })
+            .await
+        }
+    };
+
+    // Not loaded: a change is only remembered.
+    let fast = PointerTuning {
+        speed: 200,
+        swap_sticks: false,
+    };
+    input.set_pointer_tuning(fast);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(fake.calls.yamls.lock().unwrap().is_empty());
+    input.set_pointer(true);
+    input.set_mode(InterceptMode::GamepadOnly);
+    let y = loads(1).await;
+    assert!(y[0].contains("speed_pps: 1200\n"), "{}", y[0]);
+    assert_eq!(fake.profile(), "HinterOS pointer");
+
+    // Loaded: the new settings load at once.
+    input.set_pointer_tuning(PointerTuning {
+        speed: 50,
+        swap_sticks: true,
+    });
+    let y = loads(2).await;
+    assert!(y[1].contains("speed_pps: 300\n"), "{}", y[1]);
+    assert!(y[1].contains("button: DPadUp"), "{}", y[1]);
+    // The same settings again: nothing to do.
+    input.set_pointer_tuning(PointerTuning {
+        speed: 50,
+        swap_sticks: true,
+    });
+    input.set_pointer(false);
+    let y = loads(3).await;
+    assert_eq!(y.len(), 3);
+    assert!(
+        y[2].contains("name: Default"),
+        "the profile from before ours"
+    );
+    assert_eq!(fake.profile(), "Default");
 }

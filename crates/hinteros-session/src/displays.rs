@@ -183,7 +183,7 @@ fn read_count(path: &Path) -> Option<u32> {
 }
 
 /// `$XDG_STATE_HOME`, else `~/.local/state`.
-fn state_dir() -> Option<PathBuf> {
+pub(crate) fn state_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_STATE_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)

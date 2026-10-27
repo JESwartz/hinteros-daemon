@@ -14,9 +14,9 @@ pub mod pointer;
 
 use std::time::{Duration, Instant};
 
-use hinteros_api::session::NavAction;
+use hinteros_api::session::{ControllerButton, NavAction};
 
-pub use pointer::MouseButton;
+pub use pointer::{MouseButton, PointerTuning};
 
 /// InputPlumber's `InterceptMode` property values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +39,9 @@ pub trait InputControl: Send {
     /// Load the right-stick pointer profile on every pad (or put the previous profile back).
     /// Applied before the next mode.
     fn set_pointer(&mut self, _on: bool) {}
+    /// The profile's pointer settings: the pointer profile loaded from now on (at once if it is
+    /// loaded).
+    fn set_pointer_tuning(&mut self, _tuning: PointerTuning) {}
     /// Press or release a mouse button on the pointer of the pad `source` (a D-Bus target).
     fn mouse_button(&mut self, _source: &str, _button: MouseButton, _pressed: bool) {}
     /// Tap Guide (press, [`GUIDE_TAP_HOLD`], release) on the virtual pad of the pad `source`,
@@ -126,6 +129,37 @@ pub fn translate(event: &str) -> Option<Intent> {
         _ => return None,
     };
     Some(Intent::Nav(nav))
+}
+
+/// The physical button behind an InputPlumber D-Bus event (after the Xbox label swap), for the
+/// ten buttons the profile can remap (session API 0.20). Guide, the directions and the rest:
+/// `None`.
+pub fn button(event: &str) -> Option<ControllerButton> {
+    use ControllerButton::*;
+    Some(match event {
+        "ui_accept" => A,
+        "ui_back" => B,
+        "ui_action" => X,
+        "ui_context" => Y,
+        "ui_l1" => Lb,
+        "ui_r1" => Rb,
+        "ui_l2" => Lt,
+        "ui_r2" => Rt,
+        "ui_select" => View,
+        "ui_option" => Menu,
+        _ => return None,
+    })
+}
+
+/// The direction of a D-Bus event (D-pad and left stick alike), by its API name.
+pub fn direction(event: &str) -> Option<&'static str> {
+    Some(match event {
+        "ui_up" => "up",
+        "ui_down" => "down",
+        "ui_left" => "left",
+        "ui_right" => "right",
+        _ => return None,
+    })
 }
 
 /// `[input] xbox_label_swap`: whether to swap `ui_action` and `ui_context` for Xbox pads.
@@ -330,6 +364,36 @@ mod tests {
         for a in NavAction::ALL {
             assert!(reachable.contains(a), "{a:?}");
         }
+    }
+
+    #[test]
+    fn buttons_behind_events() {
+        // Each of the ten buttons arrives as one event, whose own action is the button's
+        // default action.
+        let events = [
+            "ui_accept",
+            "ui_back",
+            "ui_action",
+            "ui_context",
+            "ui_l1",
+            "ui_r1",
+            "ui_l2",
+            "ui_r2",
+            "ui_select",
+            "ui_option",
+        ];
+        let buttons: Vec<ControllerButton> = events.iter().filter_map(|e| button(e)).collect();
+        assert_eq!(buttons, ControllerButton::ALL);
+        for e in events {
+            let b = button(e).unwrap();
+            assert_eq!(translate(e), Some(Intent::Nav(b.default_action())), "{e}");
+        }
+        for e in ["ui_guide", "ui_up", "ui_quick", "ui_osk", "ui_quick2", "x"] {
+            assert_eq!(button(e), None, "{e}");
+        }
+        assert_eq!(direction("ui_up"), Some("up"));
+        assert_eq!(direction("ui_right"), Some("right"));
+        assert_eq!(direction("ui_accept"), None);
     }
 
     #[test]

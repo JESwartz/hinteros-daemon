@@ -250,11 +250,9 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
                 initial: InterceptMode::All,
                 swap: config.input.xbox_label_swap,
                 profile: inputplumber::PointerProfile {
-                    yaml: pointer::profile_yaml(
-                        config.pointer.speed_pps,
-                        config.pointer.curve,
-                        config.pointer.activity_deadzone,
-                    ),
+                    speed_pps: config.pointer.speed_pps,
+                    curve: config.pointer.curve,
+                    activity_deadzone: config.pointer.activity_deadzone,
                 },
                 call_timeout: config.inputplumber.call_timeout(),
                 watchdog: config.inputplumber.watchdog(),
@@ -313,7 +311,8 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         Box::new(Procs),
         events.clone(),
     )
-    .with_displays(displays);
+    .with_displays(displays)
+    .with_controller(hinteros_session::controller::ControllerStore::load_default());
     // gamescope's pointer is only ours to hide under gamescope.
     let shell = if config.gamescope.enable {
         shell.with_cursor(Box::new(pointer::CommandCursor {

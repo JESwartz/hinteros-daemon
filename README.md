@@ -2058,6 +2058,69 @@ for `tailscale_login` the QR of `detail.auth_url`, also in `system.jobs.get`); J
 off (+ delete data when `has_data`, second confirmation); `job_failed.data.reason` and
 `unavailable {service, reason}` for the messages.
 
+## Controller settings (session API 0.20)
+
+Per profile (`controller.rs`), in `$XDG_STATE_HOME/hinteros/controller.json`: only what the user
+changed, exactly as `input.settings.set` got it (written atomically). A missing file is the
+defaults; an unreadable or wrong one too, with a warning (the session never fails on it).
+
+```json
+{
+  "general":  { "accept": "b", "back": "a" },
+  "keyboard": { "back": "backspace" },
+  "apps":     { "youtube": { "context": "space" } },
+  "pointer":  { "speed": 150, "swap_sticks": true, "left_click": "rt", "right_click": "lt" }
+}
+```
+
+- **Buttons** are physical, by Xbox label (after the Xbox label swap): `a b x y lb rb lt rt view
+  menu`. Guide (Home and its chords) and the directions (D-pad and left stick arrive as the
+  same `ui_*` events) are never remapped.
+- **`general`** (action -> button over the defaults `accept=a back=b secondary=x context=y
+  page_left=lb page_right=rb trigger_left=lt trigger_right=rt view=view menu=menu`): the result
+  must give each of the ten buttons exactly one action. The shell maps the ten buttons through
+  it before anything reads them: launcher navigation (`input_nav` carries the remapped action),
+  keyboard-mode apps, the on-screen keyboard, the Guide chords (`[osk] summon` names an
+  action). Apps that get the pad (Steam, games, InputPlumber `Pass`) are not affected. A release
+  goes with the action of its press, also when the settings changed in between.
+- **Keys of a keyboard-mode app**, lowest to highest: the default keymap (arrows, Enter,
+  Escape), `keyboard` (all apps), the app's own (`back_key`, the address bar's Alt+Left/Right,
+  `[apps.keymap]`), `apps.<id>`. `none` unmaps. Keys are `KeyCombo` names (`enter`,
+  `alt+left`, `ctrl+l`).
+- **`pointer`**: `speed` is a percentage of `[pointer] speed_pps` (25 to 400 in steps of 25,
+  default 100); `swap_sticks` makes the left stick the pointer (mouse motion and the activity
+  event) and maps the right stick's directions to the D-pad buttons (deadzone 0.6, InputPlumber's
+  own D-Bus threshold), so they arrive as `ui_up` etc.; both go into the InputPlumber profile.
+  `left_click` / `right_click` (default `rt` / `lt`, never the same) are physical buttons, checked
+  before `general`; they click unless the app's own `[apps.keymap]` or `apps.<id>` maps their
+  action.
+- **Live**: `input.settings.set` updates the keymaps of running apps at once; a pointer change
+  reloads the pointer profile if it is loaded (a pointer app has focus), else it is used at the
+  next load.
+
+Methods (launcher only):
+
+- `input.settings.get {}` -> `{settings, defaults, buttons, actions, key_actions, keys,
+  modifiers, speed, apps}`: `apps` are the profile's keyboard-mode apps, each with only its own
+  keymap; the launcher computes an app's keys as `defaults.keyboard` + `settings.keyboard` +
+  `apps[].keymap` + `settings.apps[id]`, like the session.
+- `input.settings.set {settings}` (the whole stored form) -> the same result. `invalid_params`
+  with `data {field, reason}` (`unknown_action`, `unknown_button`, `unknown_key`,
+  `unknown_app`, `not_bijective`, `same_buttons`, `bad_speed`); nothing is saved then. `apps`
+  takes the keyboard-mode apps, and an entry already saved for an app that is gone, sent back
+  unchanged (so the launcher can send the whole form back).
+- `input.capture {}` -> `{}`: the next press of one of the ten buttons or a direction is not
+  acted on; it goes out as `input_captured {button}` (physical, before `general`; its release
+  is dropped too) and capture ends. Guide ends it with `{button: null}` and goes Home as usual;
+  so does 10 s without a press. A second call restarts the 10 s.
+
+### What the launcher must do (session API 0.20)
+
+Hello with 0.20. Controller page: `input.settings.get`, edit the stored form, send all of it
+with `input.settings.set`; press to assign with `input.capture` and `input_captured` (when the
+pressed button already has another action, swap the two); "Reset to defaults" sends `{}` (or
+drops one part).
+
 ## Development
 
 ```sh

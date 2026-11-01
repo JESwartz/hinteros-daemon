@@ -1321,7 +1321,7 @@ impl Shell {
         let info = app.info.clone();
         info!(app = %id, "closing");
         match info.source {
-            AppSource::Command => {
+            AppSource::Command | AppSource::Unknown => {
                 let Some(pid) = info.pid else {
                     self.exited(&id, ExitReason::Closed, None);
                     return Ok(AppsCloseResult {});
@@ -1732,7 +1732,7 @@ impl Shell {
             return;
         }
         match info.source {
-            AppSource::Command => {
+            AppSource::Command | AppSource::Unknown => {
                 if let Some(pid) = info.pid {
                     let tree = self.procs.descendants(pid);
                     info!(app = id, processes = tree.len(), "did not quit; killing");
@@ -2699,7 +2699,7 @@ impl Shell {
             AppSource::Command if app.info.pid == Some(exit.pid) => {
                 self.exited(&exit.key, reason, exit.code);
             }
-            AppSource::Command => {}
+            AppSource::Command | AppSource::Unknown => {}
             // The steam command only hands the URL to the running client. Without gamescope
             // there is no way to see the game, so its end stands in for the game's.
             AppSource::Steam | AppSource::SteamClient if !self.cfg.gamescope => {

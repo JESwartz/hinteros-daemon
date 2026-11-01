@@ -355,7 +355,7 @@ fn schema_rejects_what_it_should() {
         ("/methods/keys.action/params", r#"{"action":"jump"}"#),
         ("/methods/osk.show/result", r#"{}"#),
         ("/events/osk_changed/params", r#"{"visible":"yes"}"#),
-        // 0.18: permissions.
+        // Permissions.
         (
             "/methods/apps.list/result",
             r#"{"apps":[{"id":"a","name":"x","kind":"native"}]}"#,
@@ -579,7 +579,7 @@ fn system_schema_rejects_what_it_should() {
             "/methods/channel.set/params",
             r#"{"channel":"beta","url":"https://x"}"#,
         ),
-        // 0.9: the confirmed revision, not an acknowledgement of whatever the tip is.
+        // The confirmed revision, not an acknowledgement of whatever the tip is.
         (
             "/methods/channel.set/params",
             r#"{"channel":"stable","acknowledge_downgrade":true}"#,
@@ -613,7 +613,7 @@ fn system_schema_rejects_what_it_should() {
             "/events/job_progress/params",
             r#"{"job_id":"3f9a0c2b7e4d1a65","stage":"downloading","percent":101}"#,
         ),
-        // 0.10: a build's percent stays below 100 and is a whole number.
+        // A build's percent stays below 100 and is a whole number.
         (
             "/events/job_progress/params",
             r#"{"job_id":"3f9a0c2b7e4d1a65","kind":"rebuild","stage":"building","detail":{"building":{"name":"x","percent":100}}}"#,
@@ -656,7 +656,7 @@ fn system_schema_rejects_what_it_should() {
     );
 }
 
-/// System API 0.11 (session API 0.19): the Server section's inputs are closed and strict in both
+/// The Server section's inputs are closed and strict in both
 /// documents, and its secrets stay out of debug output.
 #[test]
 fn server_section() {
@@ -813,7 +813,7 @@ fn server_section() {
     );
 }
 
-/// System API 0.10 (session API 0.18): `Building.percent`, in both documents, relayed unchanged.
+/// `Building.percent`, in both documents, relayed unchanged.
 #[test]
 fn building_percent() {
     let ok = r#"{"job_id":"3f9a0c2b7e4d1a65","kind":"rebuild","stage":"building","started_at":1,"last_activity_at":1,"detail":{"building":{"name":"x","phase":"build","percent":20}}}"#;
@@ -828,7 +828,7 @@ fn building_percent() {
     assert_eq!(p.detail.unwrap().building.unwrap().percent, Some(20));
 }
 
-/// 0.8: the schema's ZoneName and `is_zone_name` agree; nothing path-like gets through.
+/// The schema's ZoneName and `is_zone_name` agree; nothing path-like gets through.
 #[test]
 fn zone_names() {
     let schema = ApiSchema::system();

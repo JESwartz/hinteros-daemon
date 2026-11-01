@@ -14,7 +14,7 @@
 //! default profile (`load_device_profile` clears the map), so [`profile_yaml`] repeats the
 //! mappings of InputPlumber's `default.yaml`.
 //!
-//! The profile's controller settings (session API 0.20, [`crate::controller`]) set the speed (a
+//! The profile's controller settings ([`crate::controller`]) set the speed (a
 //! percentage of `[pointer] speed_pps`), which buttons click, and can swap the sticks: the left
 //! stick is then the pointer and the right stick's directions are mapped to the D-pad buttons.
 //!
@@ -128,7 +128,7 @@ pub fn default_profile_yaml() -> String {
     format!("version: 1\nkind: DeviceProfile\nname: Default\nmapping:\n{DEFAULT_MAPPINGS}")
 }
 
-/// The profile's pointer settings (session API 0.20, [`crate::controller`]).
+/// The profile's pointer settings ([`crate::controller`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PointerTuning {
     /// Percent of `[pointer] speed_pps`.

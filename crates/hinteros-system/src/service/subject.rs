@@ -1,4 +1,4 @@
-//! What a job is about (`Job.subject`, API 0.7), from the service's own state when the job is
+//! What a job is about (`Job.subject`), from the service's own state when the job is
 //! created: catalog names, profile names, the running release.
 
 use hinteros_api::system::{CatalogApp, JobSubject, SubjectProfile};

@@ -939,7 +939,9 @@ impl OskConfig {
 
 /// Parse a [`NavAction`] by its API name (`accept`, `page_left`, ...).
 pub fn nav_action(name: &str) -> Option<NavAction> {
-    serde_json::from_value(serde_json::Value::String(name.into())).ok()
+    serde_json::from_value(serde_json::Value::String(name.into()))
+        .ok()
+        .filter(|a| *a != NavAction::Unknown)
 }
 
 /// How an app takes controller input.
@@ -971,7 +973,7 @@ impl InputConfig {
 pub struct AppConfig {
     pub id: String,
     pub name: String,
-    #[serde(default = "native")]
+    #[serde(default = "native", deserialize_with = "known_kind")]
     pub kind: AppKind,
     /// An absolute path to an image, or an icon theme name.
     pub icon: Option<String>,
@@ -1010,6 +1012,14 @@ pub struct AppConfig {
     /// `false`: the app runs without the sandbox (from the catalog) [default: true].
     #[serde(default = "yes")]
     pub sandbox: bool,
+}
+
+/// The config is not a message from a newer server: an unknown kind is an error.
+fn known_kind<'de, D: serde::Deserializer<'de>>(d: D) -> Result<AppKind, D::Error> {
+    match AppKind::deserialize(d)? {
+        AppKind::Unknown => Err(serde::de::Error::custom("kind must be native or web")),
+        kind => Ok(kind),
+    }
 }
 
 fn native() -> AppKind {

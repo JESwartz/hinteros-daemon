@@ -674,7 +674,7 @@ async fn build_progress_heartbeat_and_reconnect() {
     root.touch("compile-hold");
     let r = call(&mut c, "rebuild", json!({})).await.unwrap();
     let id = r["job_id"].as_str().unwrap().to_owned();
-    // 0.10: the build's own percent from its phase.
+    // The build's own percent from its phase.
     let building =
         json!({"name": "hinteros-daemon", "version": "0.7.1", "phase": "build", "percent": 20});
     // The compile starts.

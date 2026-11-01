@@ -1,4 +1,4 @@
-//! The session's side of profiles (session API 0.12): `profile.current`, the profile switch
+//! The session's side of profiles: `profile.current`, the profile switch
 //! against a fake system service (no silent force-close: a TERM-ignoring app produces
 //! `switch_blocked` and lives until `switch_force_close`; `switch_cancel` keeps the session),
 //! `session.unlock`, and `profiles_changed` from the system's event.
@@ -304,7 +304,7 @@ const GUEST_LIST: &str = r#"{"profiles": [
   "caller": {"id": null, "user": "hinteros-guest", "guest": true, "spare": false}}"#;
 
 /// End guest session: the apps close as on a switch, then the daemon asks the system service
-/// to end the session and wipe the guest now (system.guest.end, session API 0.13).
+/// to end the session and wipe the guest now (system.guest.end).
 #[tokio::test(flavor = "multi_thread")]
 async fn end_guest_session_asks_for_the_wipe() {
     let d = daemon();

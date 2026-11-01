@@ -364,7 +364,7 @@ pub enum Field {
     Object(&'static str, &'static [Field]),
 }
 
-/// What `settings.set` may change. Empty in API 0.2; each new `state.json` setting adds an
+/// What `settings.set` may change. Empty; each new `state.json` setting adds an
 /// entry here, a field in `hinteros_api::system::SettingsChanges` and in the schema.
 pub const SETTABLE: &[Field] = &[];
 

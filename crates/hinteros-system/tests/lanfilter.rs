@@ -1,4 +1,4 @@
-//! The local network filter (system API 0.10, `lanfilter.rs`) against the real binary: the
+//! The local network filter (`lanfilter.rs`) against the real binary: the
 //! caller's cgroup is checked, kept in `<run-dir>/lan-filter.json`, and the helper unit
 //! (`hinteros-lan-filter.service`, the real `lan-filter-apply` with a fake `nft` that records
 //! its input) is restarted; its failure is the call's; `lan_filter.clear`; no filter without

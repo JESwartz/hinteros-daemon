@@ -22,8 +22,7 @@ impl Peer {
     }
 }
 
-/// `hello`'s params. Closed like every params object: unknown fields (here or in `client`) are
-/// `invalid_params`.
+/// `hello`'s params. Closed: unknown fields (here or in `client`) are `invalid_params`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "StrictHello")]
 pub struct HelloParams {

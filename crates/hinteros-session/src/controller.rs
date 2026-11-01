@@ -1,4 +1,4 @@
-//! The profile's controller settings (session API 0.20, `input.settings.*`): which button does
+//! The profile's controller settings (`input.settings.*`): which button does
 //! which action, the keys of keyboard-mode apps, and the right-stick pointer.
 //!
 //! Kept in `$XDG_STATE_HOME/hinteros/controller.json` (`{"version": 1, "settings": ...}`) as the

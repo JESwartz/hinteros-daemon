@@ -1,8 +1,8 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "session",
-  "version": "0.21",
-  "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). Responses to system.*, auth.*, store.list and session.restart may arrive out of order relative to other calls on the same connection (match them by id): a relayed call can wait minutes for an admin password. See hinteros-docs/design/api.md for the protocol rules.",
+  "version": "1.0",
+  "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). Responses to system.*, auth.*, store.list and session.restart may arrive out of order relative to other calls on the same connection (match them by id): a relayed call can wait minutes for an admin password. See hinteros-docs/design/api.md for the protocol rules. Compatibility: a client works with a server of the same major and an equal or higher minor. Clients ignore fields, enum values and events they do not know; the document lists exactly what this version sends. Enums that a client also sends are closed: a new value there is a new major.",
   "transport": {
     "protocol": "jsonrpc-2.0",
     "framing": "ndjson",
@@ -12,8 +12,7 @@
   "methods": {
     "hello": {
       "summary": "Version handshake. Must be the first request on a connection.",
-      "description": "The client sends the API version it was built against. Majors must match (during 0.x the minor must match too). The result carries the negotiated version: min(client, server). On a mismatch the server answers with version_mismatch and closes the connection. The client name 'hinteros-osk' is reserved for the on-screen keyboard: such connections receive input_nav while the keyboard is visible, and only then.",
-      "since": "0.1",
+      "description": "The client sends the API version it was built against. The server takes the same major and an equal or lower minor. The result carries the negotiated version: the client's. On a mismatch the server answers with version_mismatch and closes the connection. The client name 'hinteros-osk' is reserved for the on-screen keyboard: such connections receive input_nav while the keyboard is visible, and only then.",
       "handshake": true,
       "params": {
         "type": "object",
@@ -37,23 +36,22 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.21", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
-          "result": { "api_version": "0.21", "server": { "name": "hinteros-session", "version": "0.1.0" } }
+          "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "0.1.0" } },
+          "result": { "api_version": "1.0", "server": { "name": "hinteros-session", "version": "0.1.0" } }
         },
         {
           "name": "major mismatch",
-          "params": { "api_version": "1.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
+          "params": { "api_version": "2.0", "client": { "name": "hinteros-launcher", "version": "2.0.0" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 1.0, server 0.21",
-            "data": { "client_api_version": "1.0", "server_api_version": "0.21" }
+            "message": "API version mismatch: client 2.0, server 1.0",
+            "data": { "client_api_version": "2.0", "server_api_version": "1.0" }
           }
         }
       ]
     },
     "ping": {
       "summary": "Liveness check. Echoes the optional nonce.",
-      "since": "0.1",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -76,7 +74,6 @@
     },
     "subscribe": {
       "summary": "Start receiving the given events on this connection. Returns the full subscription set.",
-      "since": "0.1",
       "params": {
         "type": "object",
         "required": ["events"],
@@ -100,7 +97,6 @@
     },
     "unsubscribe": {
       "summary": "Stop receiving the given events. Returns the remaining subscription set.",
-      "since": "0.1",
       "params": {
         "type": "object",
         "required": ["events"],
@@ -123,9 +119,8 @@
       ]
     },
     "apps.list": {
-      "summary": "Apps the launcher can show and launch: the built-in 'steam' entry (Steam's Big Picture mode, since 0.3), then the apps from the daemon's config, or a fixed stub list when none are configured.",
+      "summary": "Apps the launcher can show and launch: the built-in 'steam' entry (Steam's Big Picture mode), then the apps from the daemon's config, or a fixed stub list when none are configured.",
       "description": "Installed Steam games are listed by games.list, not here.",
-      "since": "0.1",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -158,9 +153,8 @@
       ]
     },
     "apps.set_permission": {
-      "summary": "0.18: grant or deny one optional permission of an app, for this profile. Applies the next time the app starts.",
+      "summary": "Grant or deny one optional permission of an app, for this profile. Applies the next time the app starts.",
       "description": "id: an installed app (apps.list) or a catalog app that is not installed yet (store.list): the launcher calls this for each permission switched off on the install sheet, then system.apps.install. The choice is kept per profile ($XDG_STATE_HOME/hinteros/permissions.json); only denials are stored, so an app without a stored choice has every permission. Emits apps_changed and store_changed. Errors: app_not_found (not installed and not in the catalog), unknown_permission (the app does not declare it, or it is not enforced on this box), permission_required (granted false for a required one). Granting a required one is accepted and changes nothing.",
-      "since": "0.18",
       "params": {
         "type": "object",
         "required": ["id", "permission", "granted"],
@@ -182,9 +176,8 @@
       ]
     },
     "apps.displays.get": {
-      "summary": "0.18: how many apps can run at once. Each app the daemon starts gets an X display of its own, from a fixed set.",
+      "summary": "How many apps can run at once. Each app the daemon starts gets an X display of its own, from a fixed set.",
       "description": "count: the setting, which the next session starts with (kept per profile in $XDG_STATE_HOME/hinteros/app-displays; default 4). active: the number this session started with (gamescope makes its Xwaylands at start only), null when apps do not get displays of their own (no gamescope; then nothing limits them). Steam and its games never use one. A display is free again once every process of its app has ended. apps.launch answers no_app_display while all are in use.",
-      "since": "0.18",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "$ref": "#/$defs/AppDisplays" },
       "errors": [],
@@ -195,9 +188,8 @@
       ]
     },
     "apps.displays.set": {
-      "summary": "0.18: set how many apps can run at once. Applies at the next session start (session.restart).",
+      "summary": "Set how many apps can run at once. Applies at the next session start (session.restart).",
       "description": "Saves count for this profile and answers with apps.displays.get's result: active stays what this session started with, so count != active means a session restart is needed. invalid_params for a count outside min..max.",
-      "since": "0.18",
       "params": {
         "type": "object",
         "required": ["count"],
@@ -215,7 +207,6 @@
     "games.list": {
       "summary": "Installed Steam games of the session user, read from Steam's library on disk.",
       "description": "Read from the Steam directory (~/.local/share/Steam, else ~/.steam/steam; configurable): every library in steamapps/libraryfolders.vdf and its steamapps/appmanifest_<appid>.acf files. Steam tools (Proton, Steam Linux Runtime, Steamworks Common Redistributables, ...) are left out. Empty when Steam is not installed. Sorted by name. Launch a game with apps.launch {url: 'steam://rungameid/<appid>'}. games_changed says when to query again.",
-      "since": "0.3",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -267,7 +258,6 @@
     "steam.attention": {
       "summary": "Steam's own windows that appeared while something else had focus and still wait to be seen (Steam Guard, update prompts, cloud-save conflicts, sign-in, ...).",
       "description": "The same list steam_attention sends. A window stops needing attention when it closes or once Steam has had focus while it was open (steam.focus, apps.launch/apps.focus 'steam'). Always empty without gamescope.",
-      "since": "0.3",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -290,7 +280,6 @@
     "steam.focus": {
       "summary": "Bring Steam's own windows to the front (e.g. after steam_attention). Controller input goes to Steam.",
       "description": "Steam then runs as the app 'steam' (source 'steam_client'; app_started if it was not running) and has focus; its pending windows no longer need attention. When Steam's windows close, focus returns to the app that had it before (or the launcher). Home brings the launcher back as usual.",
-      "since": "0.3",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -312,8 +301,7 @@
     },
     "apps.launch": {
       "summary": "Start an app and give it focus. Returns once it is spawned, before it shows a window.",
-      "description": "Exactly one of: 'id' (an app from apps.list), 'command' (argv, run as the session user), or 'url' (a Steam game, handed to the running Steam client; use it for games.list entries). If the app is already running it is focused instead and the result describes the running instance. Its windows are shown as soon as they appear; until then the launcher stays visible. Progress is reported through app_started, focus_changed and app_exited. The built-in id 'steam' opens Steam's Big Picture mode (steam://open/bigpicture, or 'steam -gamepadui' when Steam is not running) and shows Steam's own windows; it runs as the app 'steam' with source 'steam_client'. A Steam game's name comes from its Steam library manifest when it is installed. 0.18: an app the daemon starts itself (from apps.list, or a command) gets an X display of its own (apps.displays.get); while all are in use it is not started: no_app_display names the running apps that hold one (close one with apps.close, wait for its app_exited, then launch again).",
-      "since": "0.2",
+      "description": "Exactly one of: 'id' (an app from apps.list), 'command' (argv, run as the session user), or 'url' (a Steam game, handed to the running Steam client; use it for games.list entries). If the app is already running it is focused instead and the result describes the running instance. Its windows are shown as soon as they appear; until then the launcher stays visible. Progress is reported through app_started, focus_changed and app_exited. The built-in id 'steam' opens Steam's Big Picture mode (steam://open/bigpicture, or 'steam -gamepadui' when Steam is not running) and shows Steam's own windows; it runs as the app 'steam' with source 'steam_client'. A Steam game's name comes from its Steam library manifest when it is installed. An app the daemon starts itself (from apps.list, or a command) gets an X display of its own (apps.displays.get); while all are in use it is not started: no_app_display names the running apps that hold one (close one with apps.close, wait for its app_exited, then launch again).",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -396,7 +384,6 @@
     "apps.running": {
       "summary": "Apps started through apps.launch that are still running, and which one has focus.",
       "description": "Re-query this after reconnecting: app_started, app_exited and focus_changed are not replayed.",
-      "since": "0.2",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -426,7 +413,6 @@
     "apps.focus": {
       "summary": "Bring a running app, or the launcher (null), to the front.",
       "description": "Focusing the launcher does not stop the app that had focus. Controller input goes to whatever has focus; while the launcher has focus it arrives as input_nav events.",
-      "since": "0.2",
       "params": {
         "type": "object",
         "required": ["id"],
@@ -450,14 +436,13 @@
     "apps.close": {
       "summary": "Ask a running app to quit; force it after a timeout. Returns at once, app_exited (reason 'closed') follows.",
       "description": "A 'command' app gets SIGTERM (through its reaper, to its process group), and after the close timeout (default 5 s) everything still running under its reaper gets SIGKILL. A Steam game: every process under Steam's reaper for that app id gets SIGTERM, then SIGKILL after the timeout; Steam itself keeps running. A Steam game that has no processes yet (still being prepared by Steam) just stops being tracked. Steam ('steam_client'): Big Picture is asked to close (steam://close/bigpicture); Steam keeps running in the background. Closing an app that is already closing does nothing. If the app had focus, the launcher gets it back when it exits.",
-      "since": "0.3",
       "params": {
         "type": "object",
         "required": ["id"],
         "additionalProperties": false,
         "properties": {
           "id": { "$ref": "#/$defs/AppId" },
-          "force": { "description": "0.19: Force Stop: SIGKILL now, no request to quit first (also while a close is under way). Steam ('steam_client'): every process of the Steam client and all below it, not just Big Picture.", "type": "boolean", "default": false }
+          "force": { "description": "Force Stop: SIGKILL now, no request to quit first (also while a close is under way). Steam ('steam_client'): every process of the Steam client and all below it, not just Big Picture.", "type": "boolean", "default": false }
         }
       },
       "result": {
@@ -476,7 +461,6 @@
     "osk.show": {
       "summary": "Show the on-screen keyboard over whatever has focus.",
       "description": "The on-screen keyboard is a separate client (hinteros-osk) whose window the daemon shows as a gamescope overlay; it never takes focus, so typed keys reach the focused app. While it is visible, InputPlumber is in intercept mode ALL and input_nav goes only to the connection whose hello client name is 'hinteros-osk' (not to the launcher). osk_changed follows if the visibility changed. Showing it again does nothing. The user can also summon it with the controller (Guide + Y by default, or A on a focused text field in a keyboard-profile Firefox app), and B hides it whatever has focus (the keyboard client never receives back while visible).",
-      "since": "0.4",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -488,7 +472,7 @@
         "additionalProperties": false,
         "properties": {
           "visible": { "description": "Whether the on-screen keyboard is now visible.", "type": "boolean" },
-          "password": { "description": "(0.10) The keyboard is up for a password field (see osk_changed). Absent when false.", "type": "boolean" }
+          "password": { "description": "The keyboard is up for a password field (see osk_changed). Absent when false.", "type": "boolean" }
         }
       },
       "errors": ["osk_unavailable"],
@@ -500,7 +484,6 @@
     "osk.hide": {
       "summary": "Hide the on-screen keyboard.",
       "description": "Restores the previous input routing: InputPlumber's mode for whatever has focus, input_nav to the launcher while it has focus. osk_changed follows if the visibility changed. Home and focus changes also hide it.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -512,7 +495,7 @@
         "additionalProperties": false,
         "properties": {
           "visible": { "description": "Whether the on-screen keyboard is now visible.", "type": "boolean" },
-          "password": { "description": "(0.10) The keyboard is up for a password field (see osk_changed). Absent when false.", "type": "boolean" }
+          "password": { "description": "The keyboard is up for a password field (see osk_changed). Absent when false.", "type": "boolean" }
         }
       },
       "errors": [],
@@ -521,7 +504,6 @@
     "keys.type": {
       "summary": "Type text into the focused app (never into the on-screen keyboard).",
       "description": "Characters on the US keyboard layout are typed through the daemon's virtual keyboard (uinput, with Shift for capitals and symbols; newline = Enter, tab = Tab); others go through gamescope's input method, one character at a time. Returns at once; typing happens in the background in order with other keys.* calls. Characters neither path can type are skipped and listed in 'untypeable'.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": ["text"],
@@ -548,7 +530,6 @@
     "keys.key": {
       "summary": "Press and release one key, optionally with modifiers, in the focused app.",
       "description": "For keys that are not text (function keys, shortcuts such as ctrl+l). Needs the virtual keyboard (uinput). Returns at once; the key is sent in order with other keys.* calls.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": ["key"],
@@ -573,7 +554,6 @@
     "keys.action": {
       "summary": "An editing action in the focused app: backspace, enter, cursor movement, ...",
       "description": "Sent as the matching key through the virtual keyboard; without it, backspace, delete, enter and the arrows fall back to gamescope's input method. Returns at once.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": ["action"],
@@ -596,7 +576,6 @@
     },
     "system.info": {
       "summary": "Relayed to the system service's system.info. What is running: release, channel, base, locked revision, generation, hostname, dev build, SSH state and host key fingerprints. Read-only.",
-      "since": "0.6",
       "params": {
         "type": "object",
         "additionalProperties": false
@@ -717,7 +696,6 @@
     },
     "system.settings.get": {
       "summary": "Relayed to the system service's settings.get. The user-settable view of state.json and its revision (a hash of the file). Read-only.",
-      "since": "0.6",
       "params": {
         "type": "object",
         "additionalProperties": false
@@ -740,7 +718,7 @@
             "properties": {
               "base": { "$ref": "#/$defs/Base" },
               "requirements": {
-                "description": "0.4: the box features that are on (read-only).",
+                "description": "The box features that are on (read-only).",
                 "type": "array",
                 "items": { "$ref": "#/$defs/BoxFeature" }
               },
@@ -784,8 +762,7 @@
     },
     "system.settings.set": {
       "summary": "Relayed to the system service's settings.set. Change state.json settings (job). Action org.hinteros.system.settings.",
-      "description": "changes is a closed, typed object: each settable state.json field is a property here (bool, enum, bounded integer), never free-form. It has no properties in 0.2 (SSH, base and channel have their own methods), so any field is invalid_params with data {field, reason: unknown_field}, and an empty changes object returns job_id null. revision must equal settings.get's, else state_conflict. The service writes state.json from its own typed state, never the caller's bytes.",
-      "since": "0.6",
+      "description": "changes is a closed, typed object: each settable state.json field is a property here (bool, enum, bounded integer), never free-form. It has no properties (SSH, base and channel have their own methods), so any field is invalid_params with data {field, reason: unknown_field}, and an empty changes object returns job_id null. revision must equal settings.get's, else state_conflict. The service writes state.json from its own typed state, never the caller's bytes.",
       "params": {
         "type": "object",
         "required": [
@@ -847,8 +824,7 @@
     },
     "system.ssh.set": {
       "summary": "Relayed to the system service's ssh.set. Turn SSH (sshd) on or off (job). Action org.hinteros.system.ssh, which needs the admin password (auth_admin).",
-      "description": "Login over SSH is the admin account with its password; the system repo configures sshd. polkit's default for this action is auth_admin. The service checks it with AllowUserInteraction (since 0.3): polkit asks the authentication agent registered for the calling process (the session daemon's, which shows the launcher a password prompt) and the call waits until the user answered (at most 5 minutes). Without an agent the call gets authentication_required; a cancelled or timed-out prompt also gives authentication_required, too many wrong passwords permission_denied (reason polkit). Returns job_id null if SSH already is in that state.",
-      "since": "0.6",
+      "description": "Login over SSH is the admin account with its password; the system repo configures sshd. polkit's default for this action is auth_admin. The service checks it with AllowUserInteraction: polkit asks the authentication agent registered for the calling process (the session daemon's, which shows the launcher a password prompt) and the call waits until the user answered (at most 5 minutes). Without an agent the call gets authentication_required; a cancelled or timed-out prompt also gives authentication_required, too many wrong passwords permission_denied (reason polkit). Returns job_id null if SSH already is in that state.",
       "params": {
         "type": "object",
         "required": [
@@ -915,7 +891,6 @@
     },
     "system.generations.list": {
       "summary": "Relayed to the system service's generations.list. System generations on disk (newest first). Read-only.",
-      "since": "0.6",
       "params": {
         "type": "object",
         "additionalProperties": false
@@ -966,7 +941,6 @@
     },
     "system.rebuild": {
       "summary": "Relayed to the system service's rebuild. Re-apply the current /etc/hinteros (job): repair after a failed switch. Action org.hinteros.system.rebuild.",
-      "since": "0.6",
       "params": {
         "type": "object",
         "additionalProperties": false
@@ -1032,7 +1006,6 @@
     "system.hardware.redetect": {
       "summary": "Relayed to the system service's hardware.redetect. Regenerate facter.json with nixos-facter and apply it (job). Action org.hinteros.system.rebuild.",
       "description": "The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root.",
-      "since": "0.6",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -1082,7 +1055,6 @@
     "system.rollback": {
       "summary": "Relayed to the system service's rollback. Switch to an earlier generation (default: the one before the current), then restore /etc/hinteros from its snapshot (job). Action org.hinteros.system.rollback.",
       "description": "The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root. After the switch and the apps stage, box features that the owners' current app envs need and the restored generation lacks are turned back on in a box stage: the apply flow on the restored configuration with requirements = what the envs need (a second, mostly cached build; a new generation). The result then lists them in features_readded; generations.list names them beforehand per generation (readds_features). If that build fails the job fails at stage box (the rollback itself stays).",
-      "since": "0.6",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -1149,8 +1121,7 @@
     },
     "system.update.check": {
       "summary": "Relayed to the system service's update.check. Look for a newer signed revision of the channel (job), or, within 60 s of the last check, return that result without a job. Action org.hinteros.system.update.check.",
-      "description": "The job lists the channel branch (git ls-remote of the URL from the running generation's channel table), fetches it into a root-owned bare repo, verifies the tip's SSH signature against the allowed signers shipped in the running generation, requires it to descend from the locked revision, and reads the highest Security: <low|medium|high|critical> trailer among the new commits. (0.9) It also requires the tip to descend from the newest verified tip this box saw on the branch (older_than_seen), and fetches and verifies the other channels' branches of the table to record their newest verified tips (root-only state that rollbacks and channel switches never lower; their failures do not fail the check). The job's result is an UpdateCheckResult; failures are job_failed, update_unreachable or update_verification_failed in job_finished.error.",
-      "since": "0.6",
+      "description": "The job lists the channel branch (git ls-remote of the URL from the running generation's channel table), fetches it into a root-owned bare repo, verifies the tip's SSH signature against the allowed signers shipped in the running generation, requires it to descend from the locked revision, and reads the highest Security: <low|medium|high|critical> trailer among the new commits. It also requires the tip to descend from the newest verified tip this box saw on the branch (older_than_seen), and fetches and verifies the other channels' branches of the table to record their newest verified tips (root-only state that rollbacks and channel switches never lower; their failures do not fail the check). The job's result is an UpdateCheckResult; failures are job_failed, update_unreachable or update_verification_failed in job_finished.error.",
       "params": {
         "type": "object",
         "additionalProperties": false
@@ -1231,7 +1202,6 @@
     "system.update.apply": {
       "summary": "Relayed to the system service's update.apply. Install the revision found by the last update.check (job). Action org.hinteros.system.update.apply.",
       "description": "rev must equal the last verified check result's available.rev for the current channel and locked revision, else state_conflict. The job re-verifies it, locks the hinteros input to ?rev=<rev> (never re-fetching the branch) and runs the apply flow. The admin profile's PIN is needed in admin_pin, from every profile (the guest's included): pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet; an admin profile without a PIN yet passes. Not needed from root. The PIN is checked before rev is compared with the last check. system.update.check needs no PIN.",
-      "since": "0.6",
       "params": {
         "type": "object",
         "required": [
@@ -1303,9 +1273,8 @@
       "relay": true
     },
     "system.channel.check": {
-      "summary": "0.17: relayed to the system service's channel.check (system API 0.9). Verify the tip of another channel before switching to it (job). Action org.hinteros.system.update.check (no PIN).",
+      "summary": "Relayed to the system service's channel.check. Verify the tip of another channel before switching to it (job). Action org.hinteros.system.update.check (no PIN).",
       "description": "The job fetches the target channel's branch (URL from the running generation's channel table), verifies the tip's SSH signature against the allowed signers shipped in the running generation, and requires it to descend from (or equal) the newest verified tip this box saw on that branch (update_verification_failed {reason: older_than_seen} otherwise). It does not need to descend from the locked revision: older is true when it does not (the switch may go back to an older version). The job's result is a ChannelCheckResult; the launcher shows target.version and target.date and asks the owner to confirm, then calls channel.set with target.rev. Returns job_id null if the channel is already the current one. Failures are job_failed, update_unreachable or update_verification_failed in job_finished.error.",
-      "since": "0.17",
       "params": {
         "type": "object",
         "required": ["channel"],
@@ -1322,8 +1291,7 @@
     },
     "system.channel.set": {
       "summary": "Relayed to the system service's channel.set. Follow another channel (job), at the revision channel.check verified. Action org.hinteros.system.channel.",
-      "description": "The URL comes from the running generation's channel table, never from params. Returns job_id null if the channel is already the current one. Otherwise (0.17) rev is needed and must equal the last channel.check result's target.rev for this channel and the locked revision, else state_conflict {reason: channel_rev}: the owner confirmed that version. The job re-verifies rev (an allowed signer; it must descend from the newest verified tip this box saw on the target branch, else update_verification_failed {reason: older_than_seen}), locks the hinteros input to it on the target branch and runs the apply flow. rev may be older than the locked revision (beta to stable). Before 0.17 the target was the branch tip and acknowledge_downgrade allowed any older signed tip. The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root. The PIN is checked first.",
-      "since": "0.6",
+      "description": "The URL comes from the running generation's channel table, never from params. Returns job_id null if the channel is already the current one. Otherwise rev is needed and must equal the last channel.check result's target.rev for this channel and the locked revision, else state_conflict {reason: channel_rev}: the owner confirmed that version. The job re-verifies rev (an allowed signer; it must descend from the newest verified tip this box saw on the target branch, else update_verification_failed {reason: older_than_seen}), locks the hinteros input to it on the target branch and runs the apply flow. rev may be older than the locked revision (beta to stable). The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root. The PIN is checked first.",
       "params": {
         "type": "object",
         "required": ["channel"],
@@ -1350,7 +1318,6 @@
     "system.base.set": {
       "summary": "Relayed to the system service's base.set. Switch the nixpkgs base (job). Action org.hinteros.system.channel. A base that is not built is refused: unavailable {service: base, reason: not_built} (only unstable today). unstable to stable needs acknowledge_downgrade: true.",
       "description": "The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root. The PIN is checked before anything else, also when the base is already the requested one.",
-      "since": "0.6",
       "params": {
         "type": "object",
         "required": [
@@ -1421,7 +1388,6 @@
     "system.apps.install": {
       "summary": "Relayed to the system service's apps.install. Install Store apps (job). Action org.hinteros.system.apps.",
       "description": "ids (1 to 8 catalog ids) must be in the running generation's catalog index (/run/current-system/sw/share/hinteros/catalog.json, never the caller's copy) with status available; their depends are added (transitively). Ids already installed are skipped; if nothing is left the result is job_id null. A conflict between a new app and an installed or requested one is app_conflict. Every new app with vendor terms needs accepted_terms[id] equal to the catalog's terms.version, else terms_required (the box records the acceptance: id, version, time, uid and profile, in the audit log and /var/lib/hinteros/terms-accepted.json). revision is the app revision from apps.list (state_conflict otherwise), and the apps are installed into the caller's own profile (a new generation of its Nix profile, no system rebuild unless a box feature must be turned on first: stage box). Free disk space must cover the new apps' sizeMiB plus the usual rebuild margin (insufficient_resources). The job writes state.json's apps from the service's typed state and runs the apply flow.",
-      "since": "0.3",
       "params": {
         "type": "object",
         "required": ["ids", "revision"],
@@ -1465,7 +1431,6 @@
     "system.apps.remove": {
       "summary": "Relayed to the system service's apps.remove. Remove installed Store apps (job), optionally with their data. Action org.hinteros.system.apps.",
       "description": "ids (1 to 8) must be installed (not_found otherwise). An app that another installed app depends on cannot be removed alone (app_conflict, conflicts_with names the dependent). The job writes state.json without them and runs the apply flow. With delete_data, after a successful switch the job deletes each removed app's dataPaths (from the running generation's catalog) in every profile's home, as root without following symlinks (each path component is opened with O_NOFOLLOW relative to the home; nothing outside the home and no other filesystem is touched) and logs what it deleted. The launcher closes running apps first.",
-      "since": "0.3",
       "params": {
         "type": "object",
         "required": ["ids", "revision", "delete_data"],
@@ -1491,9 +1456,8 @@
       "relay": true
     },
     "system.apps.list": {
-      "summary": "Relayed to the system service's apps.list. The caller's own apps (0.4): its current app env.",
+      "summary": "Relayed to the system service's apps.list. The caller's own apps: its current app env.",
       "description": "Read-only. The caller is resolved from its uid: a profile (or the guest). revision stands for the current app generation; pass it to apps.install/apps.remove as revision. needs_terms: ids whose vendor terms this profile has not accepted at the catalog's current version (apps that came with the starter set); the launcher shows the terms on first launch and calls apps.accept_terms. A spare account gets an empty list.",
-      "since": "0.4",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": {
         "type": "object",
@@ -1514,9 +1478,8 @@
       "relay": true
     },
     "system.apps.generations": {
-      "summary": "Relayed to the system service's apps.generations. The caller's app generations (0.4), newest first.",
+      "summary": "Relayed to the system service's apps.generations. The caller's app generations, newest first.",
       "description": "Read-only. Every generation of the caller's Nix profile of apps (the newest 3 plus the current one are kept), with the ids of its env and the system revision it was built against. apps.rollback takes one of them.",
-      "since": "0.4",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": {
         "type": "object",
@@ -1549,9 +1512,8 @@
       "relay": true
     },
     "system.apps.rollback": {
-      "summary": "Relayed to the system service's apps.rollback. Switch the caller's apps back to an earlier generation (job, 0.4). Action org.hinteros.system.apps.",
+      "summary": "Relayed to the system service's apps.rollback. Switch the caller's apps back to an earlier generation (job). Action org.hinteros.system.apps.",
       "description": "generation must be one of apps.generations and not the current one (not_found otherwise). If its env needs box features that are off, the job first runs the box stage (a system rebuild). Job kind apps_rollback.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": ["generation"],
@@ -1567,9 +1529,8 @@
       "relay": true
     },
     "system.apps.accept_terms": {
-      "summary": "Relayed to the system service's apps.accept_terms. Accept an installed app's vendor terms for the caller's profile (0.4). Action org.hinteros.system.apps.",
+      "summary": "Relayed to the system service's apps.accept_terms. Accept an installed app's vendor terms for the caller's profile. Action org.hinteros.system.apps.",
       "description": "For apps that reached the profile without an acceptance (the starter set): id must be in the caller's env and have terms, version must be the running catalog's terms.version (invalid_params otherwise). Records {version, accepted_at, by: <user>, profile: <id>} in terms-accepted.json and the audit log; then the id leaves apps.list's needs_terms. Accepting what is already accepted is a no-op.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": ["id", "version"],
@@ -1585,9 +1546,8 @@
       "relay": true
     },
     "system.apps.clear_data": {
-      "summary": "Relayed to the system service's apps.clear_data. Delete a Store app's data in the caller's profile (job apps_clear_data, 0.19). Action org.hinteros.system.apps.",
+      "summary": "Relayed to the system service's apps.clear_data. Delete a Store app's data in the caller's profile (job apps_clear_data). Action org.hinteros.system.apps.",
       "description": "id must be a catalog app (installed or not: data a remove left behind). The job deletes the app's dataPaths in the caller's own home, as system.apps.remove {delete_data} does; other profiles' data is never touched. Stop the app first (apps.close {force}). store_changed follows when the job ends (has_data).",
-      "since": "0.19",
       "params": {
         "type": "object",
         "required": ["id"],
@@ -1602,9 +1562,8 @@
       "relay": true
     },
     "system.profiles.list": {
-      "summary": "Relayed to the system service's profiles.list. The profiles (0.4). Read-only; starts a usage scan when the data is older than an hour.",
+      "summary": "Relayed to the system service's profiles.list. The profiles. Read-only; starts a usage scan when the data is older than an hour.",
       "description": "Every account of the running state.json that has metadata, with the caller (spares are not listed; first_boot: no admin profile exists).",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [],
@@ -1826,7 +1785,6 @@
     "system.profiles.create": {
       "summary": "Relayed to the system service's profiles.create. Create a profile (job, a rebuild that adds the account). Action org.hinteros.system.profiles.create; also on greeter.sock.",
       "description": "name 1 to 32 characters (trimmed, no control or format characters; duplicates allowed), color one of ProfileColor (default teal), pin 4 to 8 digits, locked as chosen, revision = settings.get's. At 8 profiles: profile_limit. The id is taken from the counter at once (never reused, even if the job fails). On success the job writes the metadata and the PIN hash, gives the account the starter env, and (from the greeter) a one-time token so the greeter enters it without the PIN. Job kind profiles_create.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -1915,9 +1873,8 @@
       "relay": true
     },
     "system.profiles.setup_admin": {
-      "summary": "Relayed to the system service's profiles.setup_admin. First-boot mode: make the caller's spare account the admin profile (0.4). No job, no rebuild, no network.",
+      "summary": "Relayed to the system service's profiles.setup_admin. First-boot mode: make the caller's spare account the admin profile. No job, no rebuild, no network.",
       "description": "Only a spare caller, only while no admin profile exists (else permission_denied {reason: profile}). Writes the metadata (admin) and the PIN hash; the account's app profile is set to the starter env right after (a short apps job when the box is idle).",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -1976,9 +1933,8 @@
       "relay": true
     },
     "system.profiles.rename": {
-      "summary": "Relayed to the system service's profiles.rename. Rename a profile (0.4). Own: no PIN; another: the admin PIN.",
+      "summary": "Relayed to the system service's profiles.rename. Rename a profile. Own: no PIN; another: the admin PIN.",
       "description": "pin_required {pin: admin} (with retry_after_ms during the backoff lock) when renaming another profile without the right admin PIN.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -2039,9 +1995,8 @@
       "relay": true
     },
     "system.profiles.set_appearance": {
-      "summary": "Relayed to the system service's profiles.set_appearance. The caller's colour and the appearance mirrored for the picker (0.4).",
+      "summary": "Relayed to the system service's profiles.set_appearance. The caller's colour and the appearance mirrored for the picker.",
       "description": "text_scale 0.5 to 3.0. The picker uses the most accessible combination of all profiles' values.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [],
@@ -2087,9 +2042,8 @@
       "relay": true
     },
     "system.profiles.set_pin": {
-      "summary": "Relayed to the system service's profiles.set_pin. Change the caller's PIN (0.4). current_pin is required once a PIN is set (a profile without one sets its first PIN without it).",
+      "summary": "Relayed to the system service's profiles.set_pin. Change the caller's PIN. current_pin is required once a PIN is set (a profile without one sets its first PIN without it).",
       "description": "pin_required {pin: self} for a missing or wrong current_pin (with the backoff).",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -2144,8 +2098,7 @@
       "relay": true
     },
     "system.profiles.set_locked": {
-      "summary": "Relayed to the system service's profiles.set_locked. Whether the caller's profile asks for its PIN to enter (0.4). Own PIN.",
-      "since": "0.12",
+      "summary": "Relayed to the system service's profiles.set_locked. Whether the caller's profile asks for its PIN to enter. Own PIN.",
       "params": {
         "type": "object",
         "required": [
@@ -2188,9 +2141,8 @@
       "relay": true
     },
     "system.profiles.reset_pin": {
-      "summary": "Relayed to the system service's profiles.reset_pin. Set another profile's PIN with the admin PIN (0.4). The admin profile's own: the admin account's password (polkit org.hinteros.system.profiles.recover, interactive) instead.",
+      "summary": "Relayed to the system service's profiles.reset_pin. Set another profile's PIN with the admin PIN. The admin profile's own: the admin account's password (polkit org.hinteros.system.profiles.recover, interactive) instead.",
       "description": "For the admin profile admin_pin is not used; the service asks polkit for org.hinteros.system.profiles.recover with the session daemon's agent (authentication_required when dismissed). The target's backoff is reset.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -2254,7 +2206,6 @@
     "system.profiles.remove": {
       "summary": "Relayed to the system service's profiles.remove. Remove a profile, its home and its apps (job, a rebuild). Own PIN for yourself, the admin PIN for others; never the admin profile.",
       "description": "confirm_id must equal id. The job kills every process of the account, rebuilds without it, then deletes the home (no symlink is followed, one filesystem), the PIN, the metadata, the app profile links and the registry entry. A failed or cancelled job deletes nothing. Removing your own profile: end the session first (the launcher switches to the picker). invalid_params {field: id, reason: admin} for the admin profile. Job kind profiles_remove.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -2328,9 +2279,8 @@
       "relay": true
     },
     "system.profiles.unlock": {
-      "summary": "Relayed to the system service's profiles.unlock. The caller's PIN after sleep (0.4): the lock screen of a locked profile.",
+      "summary": "Relayed to the system service's profiles.unlock. The caller's PIN after sleep: the lock screen of a locked profile.",
       "description": "pin_required {pin: self, retry_after_ms?} when wrong or during the backoff lock.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -2384,7 +2334,6 @@
     "system.guest.set": {
       "summary": "Relayed to the system service's guest.set. Turn the guest account on or off (job, a rebuild). Admin PIN. Action org.hinteros.system.starter.",
       "description": "job_id null when it is already so. Job kind guest_set.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -2429,8 +2378,7 @@
       "relay": true
     },
     "system.display.save_mode": {
-      "summary": "Relayed to the system service's display.save_mode. Make a display mode the box's (0.4): stored in runtime.json, published as /run/hinteros/gamescope-modes for every profile's session. Action org.hinteros.system.settings.",
-      "since": "0.12",
+      "summary": "Relayed to the system service's display.save_mode. Make a display mode the box's: stored in runtime.json, published as /run/hinteros/gamescope-modes for every profile's session. Action org.hinteros.system.settings.",
       "params": {
         "type": "object",
         "required": [
@@ -2490,9 +2438,8 @@
       "relay": true
     },
     "system.audio.save_output": {
-      "summary": "Relayed to the system service's audio.save_output. Make an audio output the box's (0.4): stored in runtime.json, published as /run/hinteros/audio-output. Action org.hinteros.system.settings.",
+      "summary": "Relayed to the system service's audio.save_output. Make an audio output the box's: stored in runtime.json, published as /run/hinteros/audio-output. Action org.hinteros.system.settings.",
       "description": "node is a PipeWire node name.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -2530,8 +2477,7 @@
       "relay": true
     },
     "system.starter_set.get": {
-      "summary": "Relayed to the system service's starter_set.get. The starter set: the apps every new profile and guest session starts with (0.4). Read-only.",
-      "since": "0.12",
+      "summary": "Relayed to the system service's starter_set.get. The starter set: the apps every new profile and guest session starts with. Read-only.",
       "params": {
         "type": "object",
         "required": [],
@@ -2585,7 +2531,6 @@
     "system.starter_set.set": {
       "summary": "Relayed to the system service's starter_set.set. Change the starter set (job). Admin PIN; ids must be apps the admin profile has now. Action org.hinteros.system.starter.",
       "description": "0 to 16 ids, each in the admin profile's current env, else invalid_params {field: ids, reason: not_in_admin_profile}. The job builds the new starter env (an evaluation only), with the box stage when a feature is off. Only profiles and guest sessions created afterwards get it. Job kind starter_set.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -2640,7 +2585,6 @@
     "system.storage.get": {
       "summary": "Relayed to the system service's storage.get. the last storage measurement (storage.md): the disk, the top level of the ring, every profile's total, the system and apps breakdown, garbage and the clean-up estimates. Read-only, open to every caller.",
       "description": "Null until the first storage_measure job has finished. Kept in /var/lib/hinteros/storage.json (root, 0600) with its time. Never contains a file, folder or Steam game name or an app id: profile and guest nodes have no children here (storage.tree gives a home's detailed tree). estimates.system[keep-1] and estimates.profiles[keep-1] (keep 1 to 10) say how many generations storage.cleanup_system / storage.cleanup_profiles with that keep would remove now and about how many bytes it frees (garbage_bytes included; NAR sizes), from this measurement.",
-      "since": "0.14",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -2731,7 +2675,6 @@
     "system.storage.measure": {
       "summary": "Relayed to the system service's storage.measure. measure what uses the disk (job storage_measure). Any profile or the guest; no PIN. Action org.hinteros.system.settings.",
       "description": "A storage_measure job that is already running is the answer (its job_id, no new job); another job running is job_busy. Stages preparing, measuring (with percent), finishing; cancellable at any time (the last measurement stays). Measures: statvfs of the store's filesystem; nix path-info --all -s (NAR sizes) and nix-store --gc --print-live (garbage = all minus live); nix-store -qR of every system and app generation; every home with a walk that never follows a symlink, never leaves the home's filesystem and never reads a file (only Steam's libraryfolders.vdf and appmanifest_*.acf, for the games' names). The result is {measured_at}; then call storage.get. Nothing a caller can read (events, results, the job's log) names a file of a home.",
-      "since": "0.14",
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["system_unavailable", "permission_denied", "authentication_required", "rate_limited", "job_busy"],
@@ -2741,7 +2684,6 @@
     "system.storage.tree": {
       "summary": "Relayed to the system service's storage.tree. one home's detailed tree from the last measurement: its folders and its Steam games. The caller's own home: open; another profile's or the guest's: the admin PIN. Action org.hinteros.system.settings.",
       "description": "id: a profile id or guest (else invalid_params {field: id, reason: bad_format}). The caller's own account (or the guest asking for guest) needs no PIN; anything else needs admin_pin, checked like every box-wide action (pin_required {pin: admin} when missing or wrong, or without an admin profile; an admin profile without a PIN yet passes; root is exempt). not_found: nothing measured yet, or that home was not measured (measure again). The root is kind profile (with id) or guest; its bytes equal the top level's. Children: steam (its children: steam_game, one per installed game, named from appmanifest_<appid>.acf in each Steam library folder inside the home; the game folders are not counted again among the folders), dir (recursively) and files (files directly in a folder, and folders too small or deep to show). At most 6 folder levels, folders of at least max(1 MiB, 0.5 % of the home), at most 16 per folder, at most 400 nodes; names at most 128 characters, control characters replaced by U+FFFD.",
-      "since": "0.14",
       "params": {
         "type": "object",
         "required": ["id"],
@@ -2803,7 +2745,6 @@
     "system.storage.cleanup_system": {
       "summary": "Relayed to the system service's storage.cleanup_system. clean up the system (job cleanup_system): remove the system generations older than the newest keep (never the running or the booted one), rewrite the boot menu, collect garbage. Admin PIN every time. Action org.hinteros.system.rebuild.",
       "description": "keep: 1 to 10 (else invalid_params {field: keep, reason: out_of_range}). admin_pin as for every box-wide action. Always a job (garbage is collected even when no generation goes). Stages preparing, cleaning (removing generations with nix-env --delete-generations, then switch-to-configuration boot of the default generation so no boot entry points at a removed one; not cancellable from here), collecting (nix-store --gc), finishing. Result {freed_bytes, generations_removed}: freed_bytes is the store filesystem's free space after minus before. The estimate comes from storage.get's estimates.system. Below 2 the launcher warns that there is no older version to roll back to.",
-      "since": "0.14",
       "params": { "$ref": "#/$defs/CleanupParams", "type": "object" },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["system_unavailable", "permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required"],
@@ -2815,7 +2756,6 @@
     "system.storage.cleanup_profiles": {
       "summary": "Relayed to the system service's storage.cleanup_profiles. clean up profiles (job cleanup_profiles): in every profile's app env and the starter set's, remove the generations older than the newest keep (never the current one), then collect garbage. Admin PIN every time. Action org.hinteros.system.rebuild.",
       "description": "keep: 1 to 10. The guest's env (a single link) is not touched. Stages preparing, cleaning, collecting, finishing; result {freed_bytes, generations_removed}. The estimate comes from storage.get's estimates.profiles. Below 2 the launcher warns that app rollback in those profiles is gone.",
-      "since": "0.14",
       "params": { "$ref": "#/$defs/CleanupParams", "type": "object" },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["system_unavailable", "permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required"],
@@ -2824,7 +2764,6 @@
     },
     "system.cleanup.get": {
       "summary": "Relayed to the system service's cleanup.get. the automatic clean-up setting (state.json settings.cleanup; defaults when absent: on, weekly, keep 5 and 5). Read-only.",
-      "since": "0.14",
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/CleanupSettings", "type": "object" },
       "errors": ["system_unavailable"],
@@ -2834,7 +2773,6 @@
     "system.cleanup.set": {
       "summary": "Relayed to the system service's cleanup.set. change the automatic clean-up (job cleanup_set, a rebuild like ssh.set). Admin PIN. Action org.hinteros.system.settings.",
       "description": "All four fields; keep_system and keep_profiles 1 to 10 (else invalid_params {field, reason: out_of_range}). Writes settings.cleanup {enable, frequency, keepSystem, keepProfiles} to state.json through the apply flow; job_id null when nothing changes (also when it was absent and the defaults are asked for). The system's nix-gc timer and the boot menu limit follow it.",
-      "since": "0.14",
       "params": {
         "type": "object",
         "required": ["enabled", "frequency", "keep_system", "keep_profiles"],
@@ -2861,7 +2799,6 @@
     "system.time_zone.get": {
       "summary": "Relayed to the system service's time_zone.get. the box's time zone (state.json settings.timeZone; UTC when absent) and its offsets now. Read-only.",
       "description": "Offsets come from the system's tzdata (/etc/zoneinfo), the same files /etc/localtime points into. offset_s: seconds east of UTC now (DST included). standard_offset_s: the zone's standard offset now: the lower of its two offsets while it observes DST (so tzdata's negative DST, e.g. Europe/Dublin, gives its winter offset, as the map's bands do), otherwise offset_s. offset_valid_until: Unix time of the next change of offset_s (the next DST change), null when the zone has none. The launcher's clock shows UTC plus offset_s and gets the zone again at offset_valid_until and on time_zone_changed. A zone in state.json that tzdata does not have (or a bad one) reads as UTC.",
-      "since": "0.16",
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
       "errors": ["system_unavailable"],
@@ -2874,7 +2811,6 @@
     "system.time_zone.list": {
       "summary": "Relayed to the system service's time_zone.list. every zone the picker offers: tzdata's zone1970.tab zones plus UTC, sorted by name, each with its offsets now. Read-only.",
       "description": "Offsets as in time_zone.get. A zone1970.tab entry whose file is missing or unreadable is left out (and logged).",
-      "since": "0.16",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -2902,7 +2838,6 @@
     "system.time_zone.set": {
       "summary": "Relayed to the system service's time_zone.set. set the box's time zone at once (no job, no rebuild). Admin PIN, except in first-boot mode. Action org.hinteros.system.settings.",
       "description": "zone: an IANA name that the system's tzdata has (a TZif file under /etc/zoneinfo; UTC always). A badly formed name is invalid_params {field: zone, reason: bad_format}; a well-formed name tzdata does not have is invalid_params {field: zone, reason: unknown}. The admin PIN is needed (pin_required {pin: admin} when it is missing or wrong) except in first-boot mode (no admin profile yet, the rule of profiles.setup_admin). Writes settings.timeZone to state.json (atomically; a running job's own state.json keeps the new zone) and points /etc/localtime at /etc/zoneinfo/<zone> (a new link renamed over the old one), through the oneshot hinteros-time-zone-apply.service (the service waits for it, up to 30 s; else internal_error). Processes started later see the new zone. Then time_zone_changed. The result is the new zone and its offsets; setting the current zone again changes nothing and sends no event.",
-      "since": "0.16",
       "params": {
         "type": "object",
         "required": ["zone"],
@@ -2933,7 +2868,6 @@
     "system.services.list": {
       "summary": "Relayed to the system service's services.list. the Server section: every service the catalog offers (kind service, status available) and every enabled one, with its unit's state and its setup flow's detail. Read-only, open to every caller.",
       "description": "revision is the hash of state.json (pass it to services.enable/services.disable). status: systemd's ActiveState of the service's unit (jellyfin.service, plex.service, tailscaled.service, hinteros-cloudflared.service; inactive when not loaded), null when the service is off or has no known unit. setup: the catalog's setup flow (null: none, or one this daemon does not know: show only on/off). terms: the vendor terms to show before services.enable (file: the absolute path of the text next to the running catalog). detail: null unless the service is on and has a setup flow; no secrets. Jellyfin: setup_done (the first-run setup by HinterOS is done), url (http://<local IP>:<port>), libraries (from Jellyfin's API on loopback, or the last list a job or read saw while Jellyfin does not answer), users (each profile's Jellyfin user name). Plex: claimed (linked to a Plex account), server_name, url. Tailscale: state from tailscaled (unavailable: it does not answer), name, tailnet IPv4, MagicDNS name, tailnet, key_expiry (Unix seconds; null: never or unknown); all null unless signed in. Cloudflare: token_set, connected (cloudflared has a connection), local_ip (the box's address on its local network, for the private-network route). Each service is asked with a 1 s timeout.",
-      "since": "0.19",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -3007,7 +2941,6 @@
     "system.services.enable": {
       "summary": "Relayed to the system service's services.enable. turn services on (job services_enable, a rebuild). Admin PIN. Action org.hinteros.system.services.",
       "description": "ids: 1 to 8 different catalog ids, each kind service with status available in the running generation's catalog (not_found: not in the catalog; invalid_params {field: ids, reason: not_a_service | not_available}). Ids already on are skipped; job_id null when nothing is left. revision: services.list's (state_conflict otherwise). A service with vendor terms (Plex) needs accepted_terms[id] equal to the catalog's terms.version (terms_required {id, version}; terms for ids not being turned on: invalid_params {field: accepted_terms, reason: not_requested}); the acceptance is audited and recorded in /var/lib/hinteros/terms-accepted.json by the caller's user, with the admin profile's id. The job writes state.json's services and runs the apply flow (stages preparing, evaluating, downloading, building, activating, finishing); for jellyfin-server it then waits up to 3 minutes for HinterOS's first-run setup (stage configuring) and makes each profile's Jellyfin user (best effort: jellyfin.users.reveal and every Jellyfin job make missing users too). Result: the applied generation.",
-      "since": "0.19",
       "params": {
         "type": "object",
         "required": ["ids", "pin", "revision"],
@@ -3044,7 +2977,6 @@
     "system.services.disable": {
       "summary": "Relayed to the system service's services.disable. turn services off (job services_disable, a rebuild), their data deleted on request. Admin PIN. Action org.hinteros.system.services.",
       "description": "ids: 1 to 8 different ids, each on (not_found otherwise). revision: services.list's. The job writes state.json without them and runs the apply flow. With delete_data (the launcher confirms twice), after a successful switch it deletes each service's catalog stateDirs below /var/lib, and for jellyfin-server also /var/cache/jellyfin and /var/lib/hinteros/services/jellyfin-server (admin password, API key, profile users), as root without following a symlink anywhere and without entering another filesystem; anything outside /var/lib and /var/cache is refused. Media files in /srv/media are never deleted. Without delete_data the data stays and turning the service on again finds it.",
-      "since": "0.19",
       "params": {
         "type": "object",
         "required": ["ids", "pin", "revision", "delete_data"],
@@ -3068,7 +3000,6 @@
     "system.media.folders": {
       "summary": "Relayed to the system service's media.folders. one level of folders under /srv/media, for a Jellyfin library. Read-only, open to every caller.",
       "description": "Without folder_id: the folders directly in /srv/media (an empty list when it does not exist); with it: the folders in that folder. An id is the folder's path relative to /srv/media (no empty, . or .. component, no component starting with a dot, no control characters, at most 1024 bytes; else invalid_params {field: folder_id}). Every component is opened without following symlinks: a symlink is neither listed nor entered (not_found), so no id leads out of /srv/media. Hidden folders, files, symlinks and names that are not UTF-8 are left out. Sorted by name, at most 500. has_children: the folder has folders of its own.",
-      "since": "0.19",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -3094,7 +3025,6 @@
     "system.jellyfin.libraries.add": {
       "summary": "Relayed to the system service's jellyfin.libraries.add. add a Jellyfin library on a folder in /srv/media (job jellyfin_library_add). Admin PIN. Action org.hinteros.system.services.",
       "description": "name: 1 to 64 characters after trimming, no control or format characters, none of /\\:*?\"<>| (invalid_params {field: name, reason: bad_length | bad_name}); a library with the same name (any case) is invalid_params {field: name, reason: exists} when Jellyfin answers in time, else the job fails. kind: movies, shows, music or mixed (Jellyfin's collection types movies, tvshows, music, and none for mixed). folder: a media.folders id, resolved again (no symlink followed) when the request comes and again in the job (not_found: no such folder). Jellyfin off: unavailable {service: jellyfin, reason: off}; its first-run setup not done: unavailable {service: jellyfin, reason: not_ready}. The job (stages preparing, configuring, finishing) waits up to 90 s for Jellyfin, makes missing profile users, adds the library and starts its scan; job_progress's subject then gains library.id. Failures: job_failed with reason unreachable, not_ready or refused.",
-      "since": "0.19",
       "params": {
         "type": "object",
         "required": ["pin", "name", "kind", "folder"],
@@ -3118,7 +3048,6 @@
     "system.jellyfin.libraries.remove": {
       "summary": "Relayed to the system service's jellyfin.libraries.remove. remove a Jellyfin library (job jellyfin_library_remove); the media files stay. Admin PIN. Action org.hinteros.system.services.",
       "description": "library_id: a library id from services.list (not_found when Jellyfin answers in time and has no such library; else the job fails with reason refused). Jellyfin removes its own folder for the library (links, options), never the media. unavailable as for jellyfin.libraries.add.",
-      "since": "0.19",
       "params": {
         "type": "object",
         "required": ["pin", "library_id"],
@@ -3136,7 +3065,6 @@
     "system.jellyfin.users.reveal": {
       "summary": "Relayed to the system service's jellyfin.users.reveal. the Jellyfin passwords, for other devices: the admin user's and each profile's (admin PIN; not a job). Action org.hinteros.system.services.",
       "description": "Makes missing profile users first (one Jellyfin user per profile, not the guest; named after the profile: letters, digits, space and _-'.@+ kept, unique in any case with a number added; not an administrator, no media deletion; random 16-character password), when Jellyfin answers within 3 s. admin: null until HinterOS's first-run setup wrote it. users: every profile that has a user, with the profile's name now. The answer is never logged; the audit records only that it was asked. Jellyfin off: unavailable {service: jellyfin, reason: off}.",
-      "since": "0.19",
       "params": {
         "type": "object",
         "required": ["pin"],
@@ -3172,7 +3100,6 @@
     "system.jellyfin.client_token": {
       "summary": "Relayed to the system service's jellyfin.client_token. a Jellyfin access token for the caller's own profile, so the Jellyfin app on the box signs in by itself (spike S1). No PIN; read-only for the caller (no seat check, no rate limit).",
       "description": "The profile comes from the caller's uid (SO_PEERCRED): the guest, spare accounts and other users get permission_denied {reason: profile}. Jellyfin off or not set up: unavailable {service: jellyfin, reason: off | not_ready}; Jellyfin does not answer or refuses: unavailable {service: jellyfin, reason: unreachable}. The profile's Jellyfin user is made first if it has none. The token is made with POST /Users/AuthenticateByName as device hinteros-<profile id> (Jellyfin ends that device's older token, so a profile has one live token), kept in users.json (root only) and made again when Jellyfin answers 401 to it. Never logged.",
-      "since": "0.19",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -3196,7 +3123,6 @@
     "system.plex.claim": {
       "summary": "Relayed to the system service's plex.claim. link Plex Media Server to the owner's Plex account with a code from plex.tv/claim (job plex_claim). Admin PIN. Action org.hinteros.system.services.",
       "description": "code: claim- and 20 letters, digits, _ or - (what plex.tv/claim gives; valid about 4 minutes; never logged). Plex off: unavailable {service: plex, reason: off}; already linked: job_id null. The job (stages preparing, configuring, finishing) waits up to 90 s for Plex on 127.0.0.1:32400, posts the code to Plex's own /myplex/claim (Plex exchanges it with plex.tv), and succeeds once Preferences.xml has the account token (at most 30 s). Failures: job_failed with reason unreachable (Plex does not answer) or refused (Plex refused the code, e.g. it expired). Plex libraries are added in Plex's own app afterwards.",
-      "since": "0.19",
       "params": {
         "type": "object",
         "required": ["pin", "code"],
@@ -3215,7 +3141,6 @@
     "system.tailscale.login": {
       "summary": "Relayed to the system service's tailscale.login. sign the box in to Tailscale (job tailscale_login). Admin PIN. Action org.hinteros.system.services.",
       "description": "Tailscale off: unavailable {service: tailscale, reason: off}; signed in already (Running): job_id null. The job runs tailscale up --reset --json --timeout=600s (the defaults: no exit node, no subnet routes, no Tailscale SSH; --force-reauth when an expired key needs a new sign-in). When Tailscale has the sign-in URL, job_progress has stage signing_in and detail.auth_url (https, at most 512 printable ASCII characters; the launcher shows it as a QR code; jobs.get's detail has it too); a newer URL comes in a new job_progress. The job succeeds when tailscaled is Running (the person signed in, and the tailnet approved the device if it must). jobs.cancel stops the wait. Failures: job_failed with reason timeout (nobody signed in within 10 minutes), refused (the CLI failed; log_hint says why) or unreachable (no tailscale CLI).",
-      "since": "0.19",
       "params": {
         "type": "object",
         "required": ["pin"],
@@ -3233,7 +3158,6 @@
     "system.tailscale.logout": {
       "summary": "Relayed to the system service's tailscale.logout. sign the box out of Tailscale (job tailscale_logout; tailscale logout). Admin PIN. Action org.hinteros.system.services.",
       "description": "Tailscale off: unavailable {service: tailscale, reason: off}; signed out already (NeedsLogin): job_id null. Stages preparing, configuring, finishing.",
-      "since": "0.19",
       "params": {
         "type": "object",
         "required": ["pin"],
@@ -3248,7 +3172,6 @@
     "system.cloudflare.set_token": {
       "summary": "Relayed to the system service's cloudflare.set_token. set the Cloudflare tunnel token and (re)start the tunnel (job cloudflare_set_token). Admin PIN. Action org.hinteros.system.services.",
       "description": "token: the token of a remotely managed tunnel from the Zero Trust dashboard, checked strictly: at most 512 characters, standard padded base64 of a JSON object with exactly a (account tag, 32 hex digits), t (tunnel id, a UUID), s (secret: base64 of 32 to 256 bytes) and optionally e (endpoint, lower-case letters), each once; else invalid_params {field: token, reason: bad_length | not_base64 | not_a_token | bad_account | bad_tunnel_id | bad_secret | bad_endpoint}. Never logged. Cloudflare off: unavailable {service: cloudflare, reason: off}. The service writes it to /var/lib/hinteros/services/cloudflare-tunnel/token (0600 root, atomically); the job restarts hinteros-cloudflared.service and waits up to 30 s for a connection (stages configuring, finishing). Failures: job_failed with reason not_connected (the token is kept: check it, or clear it) or unreachable (systemd refused the restart).",
-      "since": "0.19",
       "params": {
         "type": "object",
         "required": ["pin", "token"],
@@ -3266,7 +3189,6 @@
     "system.cloudflare.clear_token": {
       "summary": "Relayed to the system service's cloudflare.clear_token. stop the Cloudflare tunnel and delete its token (job cloudflare_clear_token). Admin PIN. Action org.hinteros.system.services.",
       "description": "No token: job_id null. Cloudflare off: unavailable {service: cloudflare, reason: off}. Stages configuring, finishing.",
-      "since": "0.19",
       "params": {
         "type": "object",
         "required": ["pin"],
@@ -3281,7 +3203,6 @@
 
     "system.jobs.get": {
       "summary": "Relayed to the system service's jobs.get. One job: running or among the last 10 finished. Read-only.",
-      "since": "0.6",
       "params": {
         "type": "object",
         "required": [
@@ -3358,7 +3279,6 @@
     },
     "system.jobs.list": {
       "summary": "Relayed to the system service's jobs.list. The running job, if any, and the last 10 finished jobs, newest first. Read-only.",
-      "since": "0.6",
       "params": {
         "type": "object",
         "additionalProperties": false
@@ -3419,7 +3339,6 @@
     },
     "system.jobs.cancel": {
       "summary": "Relayed to the system service's jobs.cancel. Cancel a running job before its activation stage; the box stays unchanged. Action org.hinteros.system.jobs.cancel.",
-      "since": "0.6",
       "params": {
         "type": "object",
         "required": [
@@ -3473,7 +3392,6 @@
     "network.status": {
       "summary": "Wired and Wi-Fi state, the SSID joined and the IP address.",
       "description": "Runtime settings (NetworkManager over D-Bus, as the session user). The same object comes with every network_changed event.",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "$ref": "#/$defs/NetworkStatus" },
       "errors": ["unavailable", "not_authorized"],
@@ -3486,7 +3404,6 @@
     "wifi.scan": {
       "summary": "Ask for a fresh scan and return the networks it finds.",
       "description": "Returns when the scan has finished (at most a few seconds); NetworkManager refuses scans right after another one, in which case the current list comes back. wifi_list_changed follows.",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "$ref": "#/$defs/WifiList" },
       "errors": ["unavailable", "not_authorized", "device_failed"],
@@ -3500,7 +3417,6 @@
     },
     "wifi.list": {
       "summary": "The networks NetworkManager knows now, strongest first (no scan).",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "$ref": "#/$defs/WifiList" },
       "errors": ["unavailable"],
@@ -3511,7 +3427,6 @@
     "wifi.connect": {
       "summary": "Join a network, creating a system-wide connection for it.",
       "description": "The password is needed unless the network is open or already known; it is stored in NetworkManager's system connection (readable by the session user, as accepted in the threat model) and is never logged by the daemon. Returns when the connection is up (or has failed, at most about 45 s). A failed new connection is removed again. 802.1X (enterprise) networks are refused with invalid_params.",
-      "since": "0.7",
       "params": {
         "type": "object",
         "required": ["ssid"],
@@ -3532,7 +3447,6 @@
     },
     "wifi.disconnect": {
       "summary": "Leave the current Wi-Fi network (it will not rejoin until connected again).",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "$ref": "#/$defs/NetworkStatus" },
       "errors": ["unavailable", "not_authorized", "device_failed"],
@@ -3543,7 +3457,6 @@
     "wifi.forget": {
       "summary": "Delete the stored connections of a network.",
       "description": "Disconnects if it is the network in use. Forgetting a network that is not stored is not an error.",
-      "since": "0.7",
       "params": { "type": "object", "required": ["ssid"], "additionalProperties": false, "properties": { "ssid": { "type": "string", "minLength": 1, "maxLength": 32 } } },
       "result": { "type": "object", "additionalProperties": false, "properties": {} },
       "errors": ["unavailable", "not_authorized"],
@@ -3553,7 +3466,6 @@
     },
     "wifi.enable": {
       "summary": "Switch Wi-Fi on or off.",
-      "since": "0.7",
       "params": { "type": "object", "required": ["enabled"], "additionalProperties": false, "properties": { "enabled": { "type": "boolean" } } },
       "result": { "type": "object", "$ref": "#/$defs/NetworkStatus" },
       "errors": ["unavailable", "not_authorized"],
@@ -3564,7 +3476,6 @@
     "bluetooth.status": {
       "summary": "Whether there is an adapter, whether it is on and whether it is scanning.",
       "description": "Runtime settings (BlueZ over D-Bus, as the session user).",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "$ref": "#/$defs/BtStatus" },
       "errors": ["unavailable", "not_authorized"],
@@ -3576,7 +3487,6 @@
     "bluetooth.scan": {
       "summary": "Start or stop looking for devices.",
       "description": "Discovery stops by itself after timeout_s (default 30, at most 300). Found devices arrive as bluetooth_changed. While scanning (and while a bluetooth.pair is running) the daemon's pairing agent answers pairing requests; at other times it refuses them.",
-      "since": "0.7",
       "params": {
         "type": "object",
         "required": ["enabled"],
@@ -3596,7 +3506,6 @@
     "bluetooth.devices": {
       "summary": "Known and discovered devices: paired ones first, then by name.",
       "description": "Devices BlueZ has seen but that never reported a name are left out.",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "required": ["devices"], "additionalProperties": false, "properties": { "devices": { "type": "array", "items": { "$ref": "#/$defs/BtDevice" } } } },
       "errors": ["unavailable"],
@@ -3610,7 +3519,6 @@
     "bluetooth.pair": {
       "summary": "Pair with a device, trust it so that it reconnects by itself, and connect.",
       "description": "The daemon registers a BlueZ agent (DisplayYesNo): devices without input or output (controllers, most headsets) pair without a prompt. If the device asks for a numeric comparison the daemon sends bluetooth_confirm {mode: confirm} and waits up to 30 s for bluetooth.confirm; devices that show a passkey to be typed on them get bluetooth_confirm {mode: display}. Legacy PIN requests are answered with 0000. Gives up after 45 s. Pairing an already paired device just trusts and connects it. Returns the device.",
-      "since": "0.7",
       "params": { "type": "object", "required": ["address"], "additionalProperties": false, "properties": { "address": { "$ref": "#/$defs/BtAddress" } } },
       "result": { "type": "object", "$ref": "#/$defs/BtDevice" },
       "errors": ["unavailable", "not_authorized", "not_found", "device_failed"],
@@ -3622,7 +3530,6 @@
     },
     "bluetooth.confirm": {
       "summary": "Answer a bluetooth_confirm request (numeric comparison).",
-      "since": "0.7",
       "params": { "type": "object", "required": ["address", "accept"], "additionalProperties": false, "properties": { "address": { "$ref": "#/$defs/BtAddress" }, "accept": { "type": "boolean" } } },
       "result": { "type": "object", "additionalProperties": false, "properties": {} },
       "errors": ["not_found"],
@@ -3633,7 +3540,6 @@
     },
     "bluetooth.connect": {
       "summary": "Connect a paired device.",
-      "since": "0.7",
       "params": { "type": "object", "required": ["address"], "additionalProperties": false, "properties": { "address": { "$ref": "#/$defs/BtAddress" } } },
       "result": { "type": "object", "$ref": "#/$defs/BtDevice" },
       "errors": ["unavailable", "not_authorized", "not_found", "device_failed"],
@@ -3643,7 +3549,6 @@
     },
     "bluetooth.disconnect": {
       "summary": "Disconnect a device (it stays paired).",
-      "since": "0.7",
       "params": { "type": "object", "required": ["address"], "additionalProperties": false, "properties": { "address": { "$ref": "#/$defs/BtAddress" } } },
       "result": { "type": "object", "$ref": "#/$defs/BtDevice" },
       "errors": ["unavailable", "not_authorized", "not_found", "device_failed"],
@@ -3653,7 +3558,6 @@
     },
     "bluetooth.forget": {
       "summary": "Unpair a device and remove it.",
-      "since": "0.7",
       "params": { "type": "object", "required": ["address"], "additionalProperties": false, "properties": { "address": { "$ref": "#/$defs/BtAddress" } } },
       "result": { "type": "object", "additionalProperties": false, "properties": {} },
       "errors": ["unavailable", "not_authorized", "not_found", "device_failed"],
@@ -3664,7 +3568,6 @@
     "audio.outputs": {
       "summary": "Audio outputs, which one is the default, and its volume and mute state.",
       "description": "Runtime settings through PipeWire's PulseAudio interface (pactl). Every audio.* method returns this same state. An output is a sink; its id is the sink's name, stable across restarts.",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "$ref": "#/$defs/AudioState" },
       "errors": ["unavailable"],
@@ -3678,7 +3581,6 @@
     },
     "audio.set_output": {
       "summary": "Make an output the default: sound goes there.",
-      "since": "0.7",
       "params": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 256 } } },
       "result": { "type": "object", "$ref": "#/$defs/AudioState" },
       "errors": ["unavailable", "not_found", "device_failed"],
@@ -3692,7 +3594,6 @@
     },
     "audio.volume": {
       "summary": "Set the default output's volume (0 to 100 percent, never above), or just report it.",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": { "percent": { "type": "integer", "minimum": 0, "maximum": 100 } } },
       "result": { "type": "object", "$ref": "#/$defs/AudioState" },
       "errors": ["unavailable", "device_failed"],
@@ -3703,7 +3604,6 @@
     },
     "audio.mute": {
       "summary": "Mute or unmute the default output.",
-      "since": "0.7",
       "params": { "type": "object", "required": ["muted"], "additionalProperties": false, "properties": { "muted": { "type": "boolean" } } },
       "result": { "type": "object", "$ref": "#/$defs/AudioState" },
       "errors": ["unavailable", "device_failed"],
@@ -3714,7 +3614,6 @@
     "display.modes": {
       "summary": "The display's modes (resolution and refresh rate), and the one in use.",
       "description": "Under gamescope. The list is gamescope's own (the .modes file next to GAMESCOPE_PATCHED_EDID_FILE); the current mode comes from its Xwayland root window. can_set says whether display.set_mode can work (gamescope's mode save file is configured and the display is external). See the README for how modes are changed at runtime.",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "$ref": "#/$defs/DisplayModes" },
       "errors": ["unavailable"],
@@ -3729,7 +3628,6 @@
     "display.set_mode": {
       "summary": "Change the display's resolution and refresh rate, until reverted or kept.",
       "description": "The mode must be in display.modes. gamescope has no runtime mode request, so the daemon records the mode in gamescope's mode save file (GAMESCOPE_MODE_SAVE_FILE, keyed by the display's name) and nudges gamescope to pick the display's mode again (GAMESCOPE_DISPLAY_MODE_NUDGE). That also makes it the mode used at the next start. Returns once gamescope runs the new mode (about a second); if it does not switch, the old mode is restored and device_failed {reason: not_applied} is returned. The previous mode is remembered for display.revert. A launcher's keep-or-revert dialog calls display.keep when the user keeps it and display.revert when the time runs out.",
-      "since": "0.7",
       "params": { "type": "object", "$ref": "#/$defs/Mode" },
       "result": { "type": "object", "required": ["previous", "current"], "additionalProperties": false, "properties": { "previous": { "$ref": "#/$defs/Mode" }, "current": { "$ref": "#/$defs/Mode" } } },
       "errors": ["unavailable", "not_found", "device_failed"],
@@ -3741,7 +3639,6 @@
     },
     "display.keep": {
       "summary": "Accept the mode set by display.set_mode: there is nothing to revert to any more.",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "additionalProperties": false, "properties": {} },
       "errors": [],
@@ -3751,7 +3648,6 @@
     },
     "display.revert": {
       "summary": "Go back to the mode from before the last display.set_mode (unless kept).",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "required": ["current"], "additionalProperties": false, "properties": { "current": { "$ref": "#/$defs/Mode" } } },
       "errors": ["unavailable", "device_failed"],
@@ -3763,7 +3659,6 @@
     "power.capabilities": {
       "summary": "What logind says about suspend, reboot and power off for this user.",
       "description": "Power goes from the session daemon straight to logind (system-api.md, Power), authorised by the polkit rules for the active local session user.",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "$ref": "#/$defs/PowerCapabilities" },
       "errors": ["unavailable"],
@@ -3775,7 +3670,6 @@
     "power.suspend": {
       "summary": "Suspend the machine.",
       "description": "Returns once logind accepted the request. A system job (update, rebuild) holds a block inhibitor while it switches over: logind then refuses and the error is power_inhibited with its own text.",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "additionalProperties": false, "properties": {} },
       "errors": ["unavailable", "not_authorized", "power_inhibited", "device_failed"],
@@ -3787,7 +3681,6 @@
     "power.reboot": {
       "summary": "Restart the machine.",
       "description": "Same rules as power.suspend.",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "additionalProperties": false, "properties": {} },
       "errors": ["unavailable", "not_authorized", "power_inhibited", "device_failed"],
@@ -3798,7 +3691,6 @@
     "power.poweroff": {
       "summary": "Shut the machine down.",
       "description": "Same rules as power.suspend.",
-      "since": "0.7",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "additionalProperties": false, "properties": {} },
       "errors": ["unavailable", "not_authorized", "power_inhibited", "device_failed"],
@@ -3810,7 +3702,6 @@
     "auth.respond": {
       "summary": "Answer an authentication_requested prompt with the password. Only the launcher (hello client name hinteros-launcher) may call it.",
       "description": "The daemon runs polkit's agent helper (polkit-agent-helper-1, or polkit's helper socket) for the request's first identity with this password; the helper checks it with PAM and tells polkit. ok true: polkit authorizes the action, and the call that needed it (for example system.ssh.set) goes on; authentication_finished {outcome: authorized} follows. ok false: wrong password; the prompt stays open while attempts_left > 0 (3 tries), then the request fails (authentication_finished {outcome: failed}) and the waiting call gets permission_denied. The password is only passed to the helper: never logged, never stored, wiped from the daemon's memory after use. At most 511 bytes, no newline or NUL (invalid_params).",
-      "since": "0.8",
       "params": {
         "type": "object",
         "required": ["cookie", "password"],
@@ -3840,7 +3731,6 @@
     "auth.cancel": {
       "summary": "Dismiss an authentication_requested prompt. Only the launcher may call it.",
       "description": "polkit then refuses the action; the waiting call gets authentication_required. authentication_finished {outcome: cancelled} follows.",
-      "since": "0.8",
       "params": {
         "type": "object",
         "required": ["cookie"],
@@ -3855,8 +3745,7 @@
       ]
     },
     "profile.current": {
-      "summary": "Who this session is (0.12). The launcher asks at start: setup_required starts the first-boot wizard; pin_set false shows the unskippable 'Set your PIN' screen; screen_locked shows the lock screen.",
-      "since": "0.12",
+      "summary": "Who this session is. The launcher asks at start: setup_required starts the first-boot wizard; pin_set false shows the unskippable 'Set your PIN' screen; screen_locked shows the lock screen.",
       "params": {
         "type": "object",
         "required": [],
@@ -3965,9 +3854,8 @@
       ]
     },
     "session.switch_profile": {
-      "summary": "Switch to another profile (0.12): writes the switch hint (system.profiles.switch with the PIN of a locked target; a wrong or missing PIN is pin_required {pin: target} and nothing closes), then closes every app (SIGTERM, no silent force-close) and Steam (steam -shutdown), and ends this session; the greeter takes over. Answers once the hint is written; progress comes as switch_progress, a stuck app as switch_blocked.",
+      "summary": "Switch to another profile: writes the switch hint (system.profiles.switch with the PIN of a locked target; a wrong or missing PIN is pin_required {pin: target} and nothing closes), then closes every app (SIGTERM, no silent force-close) and Steam (steam -shutdown), and ends this session; the greeter takes over. Answers once the hint is written; progress comes as switch_progress, a stuck app as switch_blocked.",
       "description": "invalid_params {field: id, reason: same} for the own profile. While a switch runs a second one is invalid_params {reason: busy}. pin: the target's PIN, needed for a locked profile (asked in the session before anything closes); the hint then carries a one-time token, so the greeter enters the target with no UI. While closing takes long the daemon extends the token; switch_cancel drops it.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -4053,7 +3941,6 @@
     },
     "session.switch_wait": {
       "summary": "Keep waiting for the blocked app (another switch.wait_s, 10 s).",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [],
@@ -4077,7 +3964,6 @@
     },
     "session.switch_force_close": {
       "summary": "Force-close the blocked app (SIGKILL of its process group; for Steam, its processes). Unsaved data may be lost.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -4111,7 +3997,6 @@
     },
     "session.switch_cancel": {
       "summary": "Stop the switch: this profile stays (what already closed is gone). switch_progress {stage: cancelled} follows.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [],
@@ -4134,8 +4019,7 @@
       ]
     },
     "session.lock_state": {
-      "summary": "Whether the sleep lock is up (0.12).",
-      "since": "0.12",
+      "summary": "Whether the sleep lock is up.",
       "params": {
         "type": "object",
         "required": [],
@@ -4167,7 +4051,6 @@
     },
     "session.unlock": {
       "summary": "The PIN on the sleep lock screen (relays system.profiles.unlock); lock_changed {locked: false} follows.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -4218,8 +4101,7 @@
     },
     "session.end_guest": {
       "summary": "Guest only: end the guest session now (like a switch, to the picker) and wipe the guest now.",
-      "description": "Answers {} at once; switch_progress events follow as on a switch (closing_apps, closing_steam, ending; switch_wait, switch_force_close and switch_cancel work the same). Once every app is closed the daemon calls system.guest.end (0.13): that job ends this session itself and wipes the guest's home, app env (back to the starter set), terms acceptances and usage; the boot-time wipe stays. While another job runs the daemon retries for 15 s; if the wipe cannot start it ends the session anyway and the guest is wiped at the next boot.",
-      "since": "0.12",
+      "description": "Answers {} at once; switch_progress events follow as on a switch (closing_apps, closing_steam, ending; switch_wait, switch_force_close and switch_cancel work the same). Once every app is closed the daemon calls system.guest.end: that job ends this session itself and wipes the guest's home, app env (back to the starter set), terms acceptances and usage; the boot-time wipe stays. While another job runs the daemon retries for 15 s; if the wipe cannot start it ends the session anyway and the guest is wiped at the next boot.",
       "params": {
         "type": "object",
         "required": [],
@@ -4245,7 +4127,6 @@
     },
     "greeter.list": {
       "summary": "The picker's profiles (the service's public view). Greeter mode only (hinteros-session --greeter); only the hinteros-launcher connection may call it (else not_authorized).",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [],
@@ -4426,7 +4307,6 @@
     },
     "greeter.login": {
       "summary": "Enter a profile (or the guest) through greetd. An unlocked one starts at once (greeter_result {ok: true}); a locked one asks for its PIN (greeter_prompt {kind: pin}). Greeter mode only (hinteros-session --greeter); only the hinteros-launcher connection may call it (else not_authorized).",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -4469,7 +4349,6 @@
     },
     "greeter.pin": {
       "summary": "Answer the PIN prompt. greeter_result follows: ok, or not ok with locked_s during the backoff (the greetd conversation is then over; log in again). Greeter mode only (hinteros-session --greeter); only the hinteros-launcher connection may call it (else not_authorized).",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -4504,7 +4383,6 @@
     },
     "greeter.cancel": {
       "summary": "Back from the PIN pad: cancel the greetd conversation. Greeter mode only (hinteros-session --greeter); only the hinteros-launcher connection may call it (else not_authorized).",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [],
@@ -4530,7 +4408,6 @@
     },
     "greeter.create": {
       "summary": "Add profile from the picker (system profiles.create over greeter.sock; a rebuild of about a minute). Job events follow; on success call greeter.login {id} (a one-time token: no PIN prompt). Greeter mode only (hinteros-session --greeter); only the hinteros-launcher connection may call it (else not_authorized).",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -4600,7 +4477,6 @@
     "session.restart": {
       "summary": "Restart the TV session: the compositor, the launcher and everything started in it, and the session daemon itself.",
       "description": "For job_finished {session_restart_required: true} (and system_unavailable {reason: version_mismatch}). The daemon answers first, then asks logind to terminate the user's graphical session on seat0 (a greetd session: greetd's default_session starts it again at once, with the new generation's programs), then asks the user's systemd to restart the session daemon's own unit. Apps the daemon started end with it. Only a session started by greetd is ever terminated (never a desktop session). unavailable {service: logind}: no such session, or logind cannot be reached.",
-      "since": "0.8",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "additionalProperties": false, "properties": {} },
       "errors": ["unavailable"],
@@ -4612,7 +4488,6 @@
     "store.list": {
       "summary": "The App Store: the running generation's catalog, merged with what is installed.",
       "description": "From the catalog index of the running generation (/run/current-system/sw/share/hinteros/catalog.json) and system.settings.get's installed apps. Lists available apps and installed ones whatever their catalog status (retired: still works, can be removed; removed: the next update takes it away), sorted by name; apps being installed or removed through this daemon have state installing/removing. Terms carry the full text's path on this box, so the launcher can show it offline before system.apps.install. more_after_update: the last update check found apps that the next update makes installable. unavailable {service: catalog}: no index, or an index version this daemon does not read.",
-      "since": "0.8",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": {
         "type": "object",
@@ -4663,9 +4538,8 @@
       ]
     },
     "input.settings.get": {
-      "summary": "0.20: this profile's controller settings: the button map, the keys of keyboard-mode apps, the pointer.",
+      "summary": "This profile's controller settings: the button map, the keys of keyboard-mode apps, the pointer.",
       "description": "settings: what the user changed, exactly as stored ($XDG_STATE_HOME/hinteros/controller.json; missing or unreadable = {}). defaults: the built-in values. The effective button map is defaults.general with settings.general over it. An app's effective keymap is, lowest to highest: defaults.keyboard, settings.keyboard, the app's own keymap (apps[].keymap), settings.apps[id]. buttons, actions, key_actions, keys, modifiers and speed list what set accepts. apps: the profile's keyboard-mode apps. Guide and the directions are never remappable.",
-      "since": "0.20",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "$ref": "#/$defs/InputSettings" },
       "errors": [],
@@ -4692,9 +4566,8 @@
       ]
     },
     "input.settings.set": {
-      "summary": "0.20: replace this profile's controller settings (the stored form of input.settings.get) and apply them at once.",
+      "summary": "Replace this profile's controller settings (the stored form of input.settings.get) and apply them at once.",
       "description": "Answers with input.settings.get's result. invalid_params (data.field names the part) for unknown buttons, actions or app ids, keys that do not parse, a general map that is not one button per action and one action per button, equal click buttons, or a speed outside speed.min..max or off speed.step. Written atomically; the running session uses it at once.",
-      "since": "0.20",
       "params": {
         "type": "object",
         "required": ["settings"],
@@ -4732,9 +4605,8 @@
       ]
     },
     "input.capture": {
-      "summary": "0.20: the next button press goes to the launcher as input_captured instead of being acted on (press to assign).",
+      "summary": "The next button press goes to the launcher as input_captured instead of being acted on (press to assign).",
       "description": "The next press of one of the ten buttons or a direction (up, down, left, right) is not acted on: it is sent as input_captured {button} (the physical button, before the general map) and capture ends. Guide during capture ends it with {button: null} and goes Home as usual; so does 10 s without a press. A second call while one runs restarts the 10 s. Launcher only.",
-      "since": "0.20",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "additionalProperties": false, "properties": {} },
       "errors": [],
@@ -4746,7 +4618,6 @@
     "home_pressed": {
       "summary": "The global Home button was pressed. The launcher brings itself to the front.",
       "description": "Sent to subscribers whichever app has focus. The daemon brings the launcher to the front itself (and sends focus_changed if focus moved); this event lets the launcher reset to its Home screen.",
-      "since": "0.1",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -4756,7 +4627,6 @@
     },
     "app_started": {
       "summary": "An app was started through apps.launch.",
-      "since": "0.2",
       "params": {
         "type": "object",
         "required": ["app"],
@@ -4772,7 +4642,6 @@
     "app_exited": {
       "summary": "A running app ended. If it had focus, the launcher is back in front (see focus_changed).",
       "description": "A 'command' app has exited when its process and everything it started have exited. A Steam game has exited when its windows are gone.",
-      "since": "0.2",
       "params": {
         "type": "object",
         "required": ["id", "reason"],
@@ -4793,7 +4662,6 @@
     },
     "focus_changed": {
       "summary": "Another app, or the launcher (null), now has focus.",
-      "since": "0.2",
       "params": {
         "type": "object",
         "required": ["app"],
@@ -4809,8 +4677,7 @@
     },
     "input_nav": {
       "summary": "A controller navigation intent, sent to the launcher while it has focus, or only to the on-screen keyboard while it is visible.",
-      "description": "Directions repeat while held (phase 'repeat', key repeat done by the daemon; one repeating direction at a time, a new direction or a release ends it at once, events are sent immediately and never queued); other actions only press and release. While the on-screen keyboard is visible, back is not sent: B hides the keyboard. Recipients (0.4): while the on-screen keyboard is visible, only connections whose hello client name is 'hinteros-osk'; otherwise, while the launcher has focus, every other subscribed connection. Apps get the pad itself (InputPlumber PASS) or, with a keyboard input profile, key presses from the daemon; no input_nav is sent then. The launcher should map arrow keys, Enter and Escape to the same intents so it works without a controller. Clients must ignore unknown actions.",
-      "since": "0.2",
+      "description": "Directions repeat while held (phase 'repeat', key repeat done by the daemon; one repeating direction at a time, a new direction or a release ends it at once, events are sent immediately and never queued); other actions only press and release. While the on-screen keyboard is visible, back is not sent: B hides the keyboard. Recipients: while the on-screen keyboard is visible, only connections whose hello client name is 'hinteros-osk'; otherwise, while the launcher has focus, every other subscribed connection. Apps get the pad itself (InputPlumber PASS) or, with a keyboard input profile, key presses from the daemon; no input_nav is sent then. The launcher should map arrow keys, Enter and Escape to the same intents so it works without a controller. Clients must ignore unknown actions.",
       "params": {
         "type": "object",
         "required": ["action", "phase"],
@@ -4829,7 +4696,6 @@
     "games_changed": {
       "summary": "The Steam library changed (a game was installed, removed or updated, or its artwork arrived). Call games.list again.",
       "description": "Debounced; sent only when the games.list result actually changed. Found by watching Steam's library directories (inotify), with a periodic rescan as a fallback.",
-      "since": "0.3",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -4838,9 +4704,8 @@
       "examples": [{ "name": "changed", "params": {} }]
     },
     "apps_changed": {
-      "summary": "The apps.list result changed: an app's resolved icon became available or changed (for example a web app's icon finished downloading), or (0.9) the daemon reloaded its app list after a switch installed or removed apps, or (0.18) apps.set_permission changed a permission. Call apps.list again.",
-      "description": "Sent only when the apps.list result actually changed. Since 0.9 the daemon also reloads its app list (the generated session.toml) when it changes on disk or an apps job finished, so newly installed apps appear without a restart; apps that are running and were removed keep running until they exit. The daemon resolves icons at runtime from the box (desktop files and icon themes) or fetches and caches them (web apps), never from files it ships; fetching happens in the background after startup, so apps.list may first return apps without an icon.",
-      "since": "0.5",
+      "summary": "The apps.list result changed: an app's resolved icon became available or changed (for example a web app's icon finished downloading), or the daemon reloaded its app list after a switch installed or removed apps, or apps.set_permission changed a permission. Call apps.list again.",
+      "description": "Sent only when the apps.list result actually changed. The daemon also reloads its app list (the generated session.toml) when it changes on disk or an apps job finished, so newly installed apps appear without a restart; apps that are running and were removed keep running until they exit. The daemon resolves icons at runtime from the box (desktop files and icon themes) or fetches and caches them (web apps), never from files it ships; fetching happens in the background after startup, so apps.list may first return apps without an icon.",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -4851,7 +4716,6 @@
     "steam_attention": {
       "summary": "The list of Steam windows waiting to be seen changed (see steam.attention). An empty list means nothing needs attention any more.",
       "description": "Sent when one of Steam's own windows (Steam Guard, an update prompt, a cloud-save conflict, sign-in, ...) appears while the launcher or another app has focus, and again when such windows close or are seen. The launcher can offer 'Steam needs your attention' with an action that calls steam.focus.",
-      "since": "0.3",
       "params": {
         "type": "object",
         "required": ["windows"],
@@ -4867,8 +4731,7 @@
     },
     "osk_changed": {
       "summary": "The on-screen keyboard was shown or hidden (osk.show/osk.hide, the controller chord, A on a focused text field, B while it is visible, Home, or a focus change).",
-      "description": "(0.10) password is true while the keyboard is up for a password field (reported by the Firefox extension or Firefox itself in a keyboard-profile app); the keyboard should mask what it shows of the typed text then, and show it plainly otherwise (also when nothing reported a field, e.g. the keyboard was opened with the controller chord). While visible, the event is sent again (visible true) when another field of the other kind gets focus; a field losing focus changes nothing.",
-      "since": "0.4",
+      "description": "Password is true while the keyboard is up for a password field (reported by the Firefox extension or Firefox itself in a keyboard-profile app); the keyboard should mask what it shows of the typed text then, and show it plainly otherwise (also when nothing reported a field, e.g. the keyboard was opened with the controller chord). While visible, the event is sent again (visible true) when another field of the other kind gets focus; a field losing focus changes nothing.",
       "params": {
         "type": "object",
         "required": ["visible"],
@@ -4886,13 +4749,11 @@
     },
     "time_zone_changed": {
       "summary": "Relayed from the system service. The box's time zone changed (time_zone.set, or a rollback restored another zone): the new zone and its offsets, as time_zone.get.",
-      "since": "0.16",
       "params": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
       "examples": [{ "name": "Chicago", "params": {"zone": "America/Chicago", "offset_s": -18000, "standard_offset_s": -21600, "offset_valid_until": 1793516400} }]
     },
     "job_started": {
-      "summary": "Relayed from the system service. A job was started (by any caller). 0.15 (system 0.7): subject (what the job is about) and started_at.",
-      "since": "0.6",
+      "summary": "Relayed from the system service. A job was started (by any caller). Subject (what the job is about) and started_at.",
       "params": {
         "type": "object",
         "required": ["job_id", "kind", "uid", "subject", "started_at"],
@@ -4920,8 +4781,7 @@
       ]
     },
     "job_progress": {
-      "summary": "Relayed from the system service. A job reached a stage or made progress (at most 4 per second), and 0.15 (system 0.7): at least every 2 s while the job runs (a heartbeat repeats the latest values). percent where meaningful: downloading and building (0.15; never goes back within a stage run, below 100 while nix runs), measuring. last_activity_at: the last time the job's process printed anything (nix log lines included). subject only when it changed during the job (it replaces the one from job_started).",
-      "since": "0.6",
+      "summary": "Relayed from the system service. A job reached a stage or made progress (at most 4 per second), and at least every 2 s while the job runs (a heartbeat repeats the latest values). percent where meaningful: downloading and building (never goes back within a stage run, below 100 while nix runs), measuring. last_activity_at: the last time the job's process printed anything (nix log lines included). subject only when it changed during the job (it replaces the one from job_started).",
       "params": {
         "type": "object",
         "required": ["job_id", "kind", "stage", "started_at"],
@@ -4992,8 +4852,7 @@
       ]
     },
     "job_finished": {
-      "summary": "Relayed from the system service. A job ended. session_restart_required: the switch replaced the system service's API or the session daemon, so the launcher should offer a session restart. 0.15 (system 0.7): subject (as the job last knew it), started_at, finished_at.",
-      "since": "0.6",
+      "summary": "Relayed from the system service. A job ended. session_restart_required: the switch replaced the system service's API or the session daemon, so the launcher should offer a session restart. Subject (as the job last knew it), started_at, finished_at.",
       "params": {
         "type": "object",
         "required": ["job_id", "kind", "ok", "session_restart_required", "subject", "started_at", "finished_at"],
@@ -5068,7 +4927,6 @@
     "network_changed": {
       "summary": "The network status changed (cable, Wi-Fi joined or lost, address, Wi-Fi switched).",
       "description": "Params are what network.status returns. Debounced.",
-      "since": "0.7",
       "params": { "type": "object", "$ref": "#/$defs/NetworkStatus" },
       "examples": [
         { "name": "joined", "params": { "wifi_available": true, "wifi_enabled": true, "ethernet": false, "wifi_ssid": "Home", "wifi_signal": 72, "address": "192.168.1.20", "connectivity": "full" } }
@@ -5077,7 +4935,6 @@
     "wifi_list_changed": {
       "summary": "The list of Wi-Fi networks in range changed (a scan finished, a network came or went, saved networks changed).",
       "description": "Params are what wifi.list returns. Signal changes below 5 points do not count; debounced.",
-      "since": "0.7",
       "params": { "type": "object", "$ref": "#/$defs/WifiList" },
       "examples": [
         { "name": "one network", "params": { "networks": [ { "ssid": "Home", "signal": 72, "security": "wpa", "known": true, "connected": true } ] } }
@@ -5086,7 +4943,6 @@
     "bluetooth_changed": {
       "summary": "The adapter's state or a device changed (found, paired, connected, battery, gone).",
       "description": "status is what bluetooth.status returns, devices what bluetooth.devices returns. Debounced.",
-      "since": "0.7",
       "params": { "type": "object", "required": ["status", "devices"], "additionalProperties": false, "properties": { "status": { "$ref": "#/$defs/BtStatus" }, "devices": { "type": "array", "items": { "$ref": "#/$defs/BtDevice" } } } },
       "examples": [
         { "name": "pad connected", "params": { "status": { "available": true, "powered": true, "scanning": false }, "devices": [ { "address": "AA:BB:CC:DD:EE:01", "name": "Xbox Wireless Controller", "kind": "gamepad", "paired": true, "connected": true, "trusted": true, "battery": 80 } ] } }
@@ -5095,7 +4951,6 @@
     "bluetooth_confirm": {
       "summary": "A device being paired wants the user to compare or read a passkey.",
       "description": "mode confirm: show the passkey and answer with bluetooth.confirm {address, accept}; the daemon rejects after 30 s. mode display: show the passkey so the user can type it on the device; no answer.",
-      "since": "0.7",
       "params": { "type": "object", "required": ["address", "name", "passkey", "mode"], "additionalProperties": false, "properties": { "address": { "$ref": "#/$defs/BtAddress" }, "name": { "type": "string", "maxLength": 256 }, "passkey": { "type": "string", "pattern": "^[0-9]{6}$" }, "mode": { "enum": ["confirm", "display"] } } },
       "examples": [
         { "name": "compare", "params": { "address": "AA:BB:CC:DD:EE:03", "name": "Phone", "passkey": "012345", "mode": "confirm" } }
@@ -5104,7 +4959,6 @@
     "audio_changed": {
       "summary": "The outputs, the default output, the volume or the mute state changed.",
       "description": "Params are what audio.outputs returns. Debounced.",
-      "since": "0.7",
       "params": { "type": "object", "$ref": "#/$defs/AudioState" },
       "examples": [
         { "name": "volume", "params": { "outputs": [ { "id": "alsa_output.pci-0000_01_00.1.hdmi-stereo", "name": "HDMI / DisplayPort", "kind": "hdmi", "default": true } ], "volume": 45, "muted": false } }
@@ -5113,7 +4967,6 @@
     "authentication_requested": {
       "summary": "polkit needs the admin password for an action the launcher asked for (for example system.ssh.set): show the password dialog. Sent only to the launcher (hello client name hinteros-launcher).",
       "description": "The session daemon is polkit's authentication agent for its own process, so this only happens for calls the daemon relays. Answer with auth.respond {cookie, password} (retry while attempts_left > 0) or auth.cancel {cookie}; the request is cancelled after 2 minutes without an answer. identities: whose password polkit accepts (the admin account); the daemon authenticates as the first. authentication_finished tells when the request is over.",
-      "since": "0.8",
       "params": {
         "type": "object",
         "required": ["cookie", "action", "message", "identities"],
@@ -5148,7 +5001,6 @@
     },
     "authentication_finished": {
       "summary": "An authentication request is over: authorized, failed (too many wrong passwords) or cancelled (auth.cancel, polkit, or 2 minutes without an answer). Sent only to the launcher.",
-      "since": "0.8",
       "params": {
         "type": "object",
         "required": ["cookie", "outcome"],
@@ -5161,14 +5013,12 @@
       "examples": [{ "name": "authorized", "params": { "cookie": "3-6f1c0e2a9b7d4c58-1-0a9f3e1d2c4b5a69", "outcome": "authorized" } }]
     },
     "store_changed": {
-      "summary": "What store.list returns may have changed: an apps job started or finished, any other job that switched the system finished, or an update check changed more_after_update, or (0.9) a catalog app's icon was resolved (icon.path), or (0.18) apps.set_permission changed a permission. Query store.list again.",
-      "since": "0.8",
+      "summary": "What store.list returns may have changed: an apps job started or finished, any other job that switched the system finished, or an update check changed more_after_update, or a catalog app's icon was resolved (icon.path), or apps.set_permission changed a permission. Query store.list again.",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "examples": [{ "name": "changed", "params": {} }]
     },
     "switch_progress": {
-      "summary": "0.12: a profile switch is closing apps, closing Steam, ending the session, or was cancelled. app: the app being closed.",
-      "since": "0.12",
+      "summary": "A profile switch is closing apps, closing Steam, ending the session, or was cancelled. app: the app being closed.",
       "params": {
         "type": "object",
         "required": [
@@ -5218,8 +5068,7 @@
       ]
     },
     "switch_blocked": {
-      "summary": "0.12: an app has not closed after waited_s seconds. Show 'X isn't responding (N s). Force-closing it may lose unsaved data.' with Keep waiting (session.switch_wait), Force close (session.switch_force_close) and Cancel switch (session.switch_cancel). Nothing is killed until Force close.",
-      "since": "0.12",
+      "summary": "An app has not closed after waited_s seconds. Show 'X isn't responding (N s). Force-closing it may lose unsaved data.' with Keep waiting (session.switch_wait), Force close (session.switch_force_close) and Cancel switch (session.switch_cancel). Nothing is killed until Force close.",
       "params": {
         "type": "object",
         "required": [
@@ -5265,8 +5114,7 @@
       ]
     },
     "lock_changed": {
-      "summary": "0.12: the sleep lock went up (before the box sleeps, for a locked profile) or down (session.unlock).",
-      "since": "0.12",
+      "summary": "The sleep lock went up (before the box sleeps, for a locked profile) or down (session.unlock).",
       "params": {
         "type": "object",
         "required": [
@@ -5290,7 +5138,6 @@
     },
     "greeter_prompt": {
       "summary": "Greeter mode: greetd asks for the profile's PIN; show the PIN pad.",
-      "since": "0.12",
       "params": {
         "type": "object",
         "required": [
@@ -5315,8 +5162,7 @@
       ]
     },
     "greeter_result": {
-      "summary": "Greeter mode: the login ended: ok (the session starts, the greeter goes away) or not (wrong PIN; locked_s during the backoff: 'Too many tries. Try again in N seconds'). 0.17: reboot_required: true when the admin profile's PIN is refused until the box restarts (10 wrong tries this boot).",
-      "since": "0.12",
+      "summary": "Greeter mode: the login ended: ok (the session starts, the greeter goes away) or not (wrong PIN; locked_s during the backoff: 'Too many tries. Try again in N seconds'). Reboot_required: true when the admin profile's PIN is refused until the box restarts (10 wrong tries this boot).",
       "params": {
         "type": "object",
         "required": [
@@ -5360,8 +5206,7 @@
       ]
     },
     "profiles_changed": {
-      "summary": "0.12: the profiles changed (a profile job, a rename, a PIN, lock or appearance change); profiles as system.profiles.list's.",
-      "since": "0.12",
+      "summary": "The profiles changed (a profile job, a rename, a PIN, lock or appearance change); profiles as system.profiles.list's.",
       "params": {
         "type": "object",
         "required": [
@@ -5401,8 +5246,7 @@
       ]
     },
     "input_captured": {
-      "summary": "0.20: the button pressed during input.capture (the physical button: a, b, x, y, lb, rb, lt, rt, view, menu, or a direction up, down, left, right), or null when capture ended without one (Guide, 10 s).",
-      "since": "0.20",
+      "summary": "The button pressed during input.capture (the physical button: a, b, x, y, lb, rb, lt, rt, view, menu, or a direction up, down, left, right), or null when capture ended without one (Guide, 10 s).",
       "params": {
         "type": "object",
         "required": ["button"],
@@ -5426,10 +5270,9 @@
     "invalid_params": {"code":-32602,"summary":"Params do not match the method's params schema (unknown fields included), or fail a semantic check. data names the field when known.","data_optional":true,"data":{"type":"object","required":["field","reason"],"additionalProperties":false,"properties":{"field":{"type":"string","maxLength":200},"reason":{"type":"string","pattern":"^[a-z_]{1,40}$"}}}}
 ,
     "internal_error": { "code": -32603, "summary": "Unexpected server-side failure." },
-    "handshake_required": { "code": 1001, "since": "0.1", "summary": "A method other than 'hello' was called before the handshake." },
+    "handshake_required": { "code": 1001, "summary": "A method other than 'hello' was called before the handshake." },
     "version_mismatch": {
       "code": 1002,
-      "since": "0.1",
       "summary": "Client and server API versions are incompatible.",
       "closes_connection": true,
       "data": {
@@ -5442,17 +5285,16 @@
         }
       }
     },
-    "already_handshaken": { "code": 1003, "since": "0.1", "summary": "'hello' was called twice on one connection." },
-    "app_not_found": { "code": 2001, "since": "0.2", "summary": "No such app (apps.launch: not in apps.list; apps.focus, apps.close: not running; apps.set_permission: not installed and not in the catalog)." },
-    "app_launch_failed": { "code": 2002, "since": "0.2", "summary": "The app could not be started (spawn failed, or it has nothing to launch)." },
-    "steam_no_windows": { "code": 2003, "since": "0.3", "summary": "steam.focus: Steam has no windows that could be shown (not running, or no gamescope)." },
-    "keyboard_unavailable": { "code": 2004, "since": "0.4", "summary": "keys.*: nothing can deliver the input (no virtual keyboard because /dev/uinput could not be opened, and, for text and some actions, no gamescope input method)." },
-    "osk_unavailable": { "code": 2005, "since": "0.4", "summary": "osk.show: the on-screen keyboard is disabled in the daemon's config." },
-    "unknown_permission": { "code": 2007, "since": "0.18", "summary": "apps.set_permission: the app does not declare this permission (or it is not enforced on this box)." },
-    "permission_required": { "code": 2008, "since": "0.18", "summary": "apps.set_permission: a required permission cannot be denied." },
+    "already_handshaken": { "code": 1003, "summary": "'hello' was called twice on one connection." },
+    "app_not_found": { "code": 2001, "summary": "No such app (apps.launch: not in apps.list; apps.focus, apps.close: not running; apps.set_permission: not installed and not in the catalog)." },
+    "app_launch_failed": { "code": 2002, "summary": "The app could not be started (spawn failed, or it has nothing to launch)." },
+    "steam_no_windows": { "code": 2003, "summary": "steam.focus: Steam has no windows that could be shown (not running, or no gamescope)." },
+    "keyboard_unavailable": { "code": 2004, "summary": "keys.*: nothing can deliver the input (no virtual keyboard because /dev/uinput could not be opened, and, for text and some actions, no gamescope input method)." },
+    "osk_unavailable": { "code": 2005, "summary": "osk.show: the on-screen keyboard is disabled in the daemon's config." },
+    "unknown_permission": { "code": 2007, "summary": "apps.set_permission: the app does not declare this permission (or it is not enforced on this box)." },
+    "permission_required": { "code": 2008, "summary": "apps.set_permission: a required permission cannot be denied." },
     "no_app_display": {
       "code": 2009,
-      "since": "0.18",
       "summary": "apps.launch: every app display is in use (apps.displays.get). apps: the running apps that hold one; closing one frees it once it has exited (app_exited).",
       "data": {
         "type": "object",
@@ -5465,7 +5307,6 @@
     },
     "permission_denied": {
       "code": 3002,
-      "since": "0.6",
       "summary": "Not allowed: the caller does not own seat0's active session (seat), polkit said no (polkit), or the peer cannot be identified safely (peer: no SO_PEERPIDFD, or the process is gone).",
       "data": {
         "type": "object",
@@ -5491,8 +5332,7 @@
     },
     "job_failed": {
       "code": 3003,
-      "since": "0.6",
-      "summary": "Only in job_finished.error and jobs.get: the job failed (or was cancelled) at stage; log_hint is the last relevant log line. 0.19: reason says why a Server section job failed: unreachable (the service does not answer), not_ready (its setup is not done), refused (the service or tool said no; log_hint says why), timeout (nobody signed in in time), not_connected (the Cloudflare tunnel did not connect).",
+      "summary": "Only in job_finished.error and jobs.get: the job failed (or was cancelled) at stage; log_hint is the last relevant log line. Reason says why a Server section job failed: unreachable (the service does not answer), not_ready (its setup is not done), refused (the service or tool said no; log_hint says why), timeout (nobody signed in in time), not_connected (the Cloudflare tunnel did not connect).",
       "data": {
         "type": "object",
         "required": [
@@ -5514,7 +5354,6 @@
     },
     "insufficient_resources": {
       "code": 3004,
-      "since": "0.6",
       "summary": "Not enough memory or free disk space for a rebuild.",
       "data": {
         "type": "object",
@@ -5544,7 +5383,6 @@
     },
     "job_busy": {
       "code": 3005,
-      "since": "0.6",
       "summary": "Another job runs (only one at a time), or the job is past the point of cancelling.",
       "data": {
         "type": "object",
@@ -5561,7 +5399,6 @@
     },
     "rate_limited": {
       "code": 3006,
-      "since": "0.6",
       "summary": "Too many mutating requests from this user (10 per minute, burst 3).",
       "data": {
         "type": "object",
@@ -5579,8 +5416,7 @@
     },
     "state_conflict": {
       "code": 3007,
-      "since": "0.6",
-      "summary": "Stale settings revision, update.apply's rev is not the last verified check result (update_rev), or (0.9) channel.set's rev is not the last verified channel.check result for that channel (channel_rev).",
+      "summary": "Stale settings revision, update.apply's rev is not the last verified check result (update_rev), or channel.set's rev is not the last verified channel.check result for that channel (channel_rev).",
       "data": {
         "type": "object",
         "required": [
@@ -5600,7 +5436,6 @@
     },
     "update_unreachable": {
       "code": 3008,
-      "since": "0.6",
       "summary": "The update server cannot be reached (the 'home lab unreachable' screen).",
       "data": {
         "type": "object",
@@ -5618,8 +5453,7 @@
     },
     "update_verification_failed": {
       "code": 3009,
-      "since": "0.6",
-      "summary": "The channel tip is unsigned, signed by an unknown signer, does not descend from the locked revision (not_fast_forward), or (0.9) does not descend from the newest verified tip this box saw on that channel branch (older_than_seen: an older signed release served again).",
+      "summary": "The channel tip is unsigned, signed by an unknown signer, does not descend from the locked revision (not_fast_forward), or does not descend from the newest verified tip this box saw on that channel branch (older_than_seen: an older signed release served again).",
       "data": {
         "type": "object",
         "required": [
@@ -5640,17 +5474,14 @@
     },
     "not_found": {
       "code": 3010,
-      "since": "0.6",
       "summary": "Unknown generation or job; for runtime settings: a Wi-Fi network not in range, a Bluetooth device, an audio output or a display mode that does not exist, or a bluetooth.confirm with nothing waiting; system.apps.install: an id not in the running generation's catalog; system.apps.remove: an id that is not installed; auth.respond, auth.cancel: no such authentication request (or it is over)."
     },
     "needs_acknowledgement": {
       "code": 3011,
-      "since": "0.6",
-      "summary": "A downgrading base switch without acknowledge_downgrade: true. (Before 0.9 also channel.set; since 0.9 channel.set takes the rev the owner confirmed after channel.check instead.)"
+      "summary": "A downgrading base switch without acknowledge_downgrade: true. (channel.set takes the rev the owner confirmed after channel.check instead.)"
     },
     "authentication_required": {
       "code": 3012,
-      "since": "0.6",
       "summary": "polkit would allow the action only after interactive authentication (auth_admin: the admin password), and it did not happen: no authentication agent is registered for the caller (no session daemon agent, or another client than the session daemon called), or the user cancelled the prompt or did not answer in time.",
       "data": {
         "type": "object",
@@ -5667,7 +5498,6 @@
     },
     "app_conflict": {
       "code": 3013,
-      "since": "0.3",
       "summary": "apps.install: id conflicts with conflicts_with (installed or also requested). apps.remove: conflicts_with, which stays installed, depends on id.",
       "data": {
         "type": "object",
@@ -5678,14 +5508,12 @@
     },
     "profile_limit": {
       "code": 3015,
-      "since": "0.12",
       "summary": "profiles.create with the most profiles there may be (8; the guest does not count).",
       "data": { "type": "object", "required": ["max"], "additionalProperties": false, "properties": { "max": { "type": "integer" } } }
     },
     "pin_required": {
       "code": 3016,
-      "since": "0.12",
-      "summary": "A PIN is missing or wrong: the caller's own (self), the admin profile's (admin) or the profile being entered (target). retry_after_ms while the backoff lock is on (3 free failures, then 1 s doubling to 5 min, per profile). The admin profile's PIN has no wait but 10 wrong tries a boot (counted from every path, the greeter's included): after them every check of it, also with the right PIN, is refused with reboot_required: true until the box restarts (since 0.17; a new PIN, the admin password's profiles.reset_pin or root's reset-pin clears it).",
+      "summary": "A PIN is missing or wrong: the caller's own (self), the admin profile's (admin) or the profile being entered (target). retry_after_ms while the backoff lock is on (3 free failures, then 1 s doubling to 5 min, per profile). The admin profile's PIN has no wait but 10 wrong tries a boot (counted from every path, the greeter's included): after them every check of it, also with the right PIN, is refused with reboot_required: true until the box restarts (a new PIN, the admin password's profiles.reset_pin or root's reset-pin clears it).",
       "data": {
         "type": "object",
         "required": ["pin"],
@@ -5695,7 +5523,6 @@
     },
     "terms_required": {
       "code": 3014,
-      "since": "0.3",
       "summary": "apps.install: app id has vendor terms and accepted_terms does not name their current version (show the terms, then retry with it).",
       "data": {
         "type": "object",
@@ -5706,7 +5533,6 @@
     },
     "system_unavailable": {
       "code": 3001,
-      "since": "0.6",
       "summary": "A relayed method could not reach the system service: it is down (reason down) or speaks another system API version (reason version_mismatch, e.g. after a switch until the session restarts). The session API keeps working.",
       "data": {
         "type": "object",
@@ -5726,8 +5552,7 @@
     },
     "unavailable": {
       "code": 4001,
-      "since": "0.7",
-      "summary": "A runtime-settings method needs a service that is not there (not installed, not running, no permission to reach it, or no such hardware). Also store.list without a readable catalog index (service catalog), session.restart without a greetd session on seat0 (service logind), and auth.respond when polkit's agent helper cannot be run (service polkit). 0.19: the relayed Server section methods: service jellyfin, plex, tailscale or cloudflare with reason off or not_ready. 0.21: system.base.set to a base that is not built: service base, reason not_built.",
+      "summary": "A runtime-settings method needs a service that is not there (not installed, not running, no permission to reach it, or no such hardware). Also store.list without a readable catalog index (service catalog), session.restart without a greetd session on seat0 (service logind), and auth.respond when polkit's agent helper cannot be run (service polkit). The relayed Server section methods: service jellyfin, plex, tailscale or cloudflare with reason off or not_ready. System.base.set to a base that is not built: service base, reason not_built.",
       "data": {
         "type": "object",
         "required": ["service", "reason"],
@@ -5740,7 +5565,6 @@
     },
     "device_failed": {
       "code": 4002,
-      "since": "0.7",
       "summary": "The service accepted the request but the operation failed (a connection or pairing attempt, a mode change). The message says why in words; reason is for code.",
       "data_optional": true,
       "data": {
@@ -5750,11 +5574,10 @@
         "properties": { "reason": { "type": "string", "pattern": "^[a-z_]{1,40}$" } }
       }
     },
-    "wrong_password": { "code": 4003, "since": "0.7", "summary": "wifi.connect: the network refused the password." },
-    "not_authorized": { "code": 4004, "since": "0.7", "summary": "The service's polkit policy refused the session user (not the active local session, or the system's polkit rules are missing); auth.respond and auth.cancel from a client other than the launcher." },
+    "wrong_password": { "code": 4003, "summary": "wifi.connect: the network refused the password." },
+    "not_authorized": { "code": 4004, "summary": "The service's polkit policy refused the session user (not the active local session, or the system's polkit rules are missing); auth.respond and auth.cancel from a client other than the launcher." },
     "power_inhibited": {
       "code": 4005,
-      "since": "0.7",
       "summary": "logind refused suspend, reboot or power off because an inhibitor lock blocks it (a system job is switching over). The message is logind's.",
       "data_optional": true,
       "data": {
@@ -5841,7 +5664,7 @@
         "kind": { "$ref": "#/$defs/AppKind" },
         "icon": { "description": "Absolute path to a local icon image file (PNG, SVG, ICO, JPEG, WebP), if any. Resolved by the daemon at runtime: an explicit path from the config, else the icon the app's .desktop file names, found in the installed icon themes, else (web apps) a cached download of the site's own icon. It may appear later (see apps_changed) or change. Absent: draw a placeholder, e.g. the first letter of the name.", "type": "string" },
         "needs_terms": {
-          "description": "0.12: the app came with the starter set and this profile has not accepted its vendor terms yet. Show the full text (file) on first launch; accept with system.apps.accept_terms {id, version}, decline leaves it installed and unlaunched (offer Remove). apps.launch refuses it with terms_required meanwhile.",
+          "description": "The app came with the starter set and this profile has not accepted its vendor terms yet. Show the full text (file) on first launch; accept with system.apps.accept_terms {id, version}, decline leaves it installed and unlaunched (offer Remove). apps.launch refuses it with terms_required meanwhile.",
           "type": "object",
           "required": ["title", "version", "url", "retrieved", "file"],
           "additionalProperties": false,
@@ -5853,11 +5676,11 @@
             "file": { "description": "Absolute path of the full text on this box.", "type": "string" }
           }
         },
-        "permissions": { "description": "0.18: what the app may use in its sandbox, in catalog order. Empty for Steam and for apps that run without a sandbox.", "type": "array", "items": { "$ref": "#/$defs/AppPermission" } }
+        "permissions": { "description": "What the app may use in its sandbox, in catalog order. Empty for Steam and for apps that run without a sandbox.", "type": "array", "items": { "$ref": "#/$defs/AppPermission" } }
       }
     },
     "AppDisplays": {
-      "description": "0.18: how many apps can run at once (apps.displays.get).",
+      "description": "How many apps can run at once (apps.displays.get).",
       "type": "object",
       "required": ["count", "active", "min", "max"],
       "additionalProperties": false,
@@ -5869,12 +5692,12 @@
       }
     },
     "PermissionName": {
-      "description": "0.18: a sandbox permission: gamepad (controllers), mic (a sound socket that may record), downloads (the profile's Downloads folder), lan (the local network: other devices at home and this box's own services). More may come; show unknown names as they are.",
+      "description": "A sandbox permission: gamepad (controllers), mic (a sound socket that may record), downloads (the profile's Downloads folder), lan (the local network: other devices at home and this box's own services). More may come; show unknown names as they are.",
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]{0,31}$"
     },
     "AppPermission": {
-      "description": "0.18: a permission the app declares in the catalog, and this profile's choice. Only permissions this box enforces are listed.",
+      "description": "A permission the app declares in the catalog, and this profile's choice. Only permissions this box enforces are listed.",
       "type": "object",
       "required": ["name", "required", "granted"],
       "additionalProperties": false,
@@ -5885,39 +5708,39 @@
       }
     },
     "ControllerButton": {
-      "description": "0.20: a remappable controller button, by its Xbox label: a, b, x, y, lb, rb, lt, rt, view, menu (input.settings.get buttons). Guide and the directions are not remappable.",
+      "description": "A remappable controller button, by its Xbox label: a, b, x, y, lb, rb, lt, rt, view, menu (input.settings.get buttons). Guide and the directions are not remappable.",
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]{0,31}$"
     },
     "CapturedButton": {
-      "description": "0.20: a button pressed during input.capture: a ControllerButton or a direction (up, down, left, right).",
+      "description": "A button pressed during input.capture: a ControllerButton or a direction (up, down, left, right).",
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]{0,31}$"
     },
     "ControllerAction": {
-      "description": "0.20: an action a button or key can do: the remappable NavActions (accept, back, context, secondary, menu, view, page_left, page_right, trigger_left, trigger_right); for keyboard-mode apps also up, down, left, right.",
+      "description": "An action a button or key can do: the remappable NavActions (accept, back, context, secondary, menu, view, page_left, page_right, trigger_left, trigger_right); for keyboard-mode apps also up, down, left, right.",
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]{0,31}$"
     },
     "KeyComboName": {
-      "description": "0.20: a key with optional modifiers, modifiers first: 'enter', 'alt+left', 'ctrl+shift+t'; or 'none' (the action sends nothing).",
+      "description": "A key with optional modifiers, modifiers first: 'enter', 'alt+left', 'ctrl+shift+t'; or 'none' (the action sends nothing).",
       "type": "string",
       "pattern": "^[a-z0-9_]+(\\+[a-z0-9_]+)*$"
     },
     "ButtonMap": {
-      "description": "0.20: action to button.",
+      "description": "Action to button.",
       "type": "object",
       "propertyNames": { "$ref": "#/$defs/ControllerAction" },
       "additionalProperties": { "$ref": "#/$defs/ControllerButton" }
     },
     "Keymap": {
-      "description": "0.20: action to key of a keyboard-mode app.",
+      "description": "Action to key of a keyboard-mode app.",
       "type": "object",
       "propertyNames": { "$ref": "#/$defs/ControllerAction" },
       "additionalProperties": { "$ref": "#/$defs/KeyComboName" }
     },
     "PointerSettings": {
-      "description": "0.20: the pointer of pointer apps. speed: percent of the configured pointer speed. swap_sticks: the left stick moves the pointer, the right stick gives the directions. left_click, right_click: physical buttons (before the general map), never the same.",
+      "description": "The pointer of pointer apps. speed: percent of the configured pointer speed. swap_sticks: the left stick moves the pointer, the right stick gives the directions. left_click, right_click: physical buttons (before the general map), never the same.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -5928,7 +5751,7 @@
       }
     },
     "ControllerSettings": {
-      "description": "0.20: the stored controller settings of a profile: only what the user changed. general: over defaults.general, the result one button per action and one action per button. keyboard: the keys of every keyboard-mode app. apps: per app id, over everything else for that app.",
+      "description": "The stored controller settings of a profile: only what the user changed. general: over defaults.general, the result one button per action and one action per button. keyboard: the keys of every keyboard-mode app. apps: per app id, over everything else for that app.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -5943,7 +5766,7 @@
       }
     },
     "ControllerDefaults": {
-      "description": "0.20: the built-in controller settings. pointer has all four fields.",
+      "description": "The built-in controller settings. pointer has all four fields.",
       "type": "object",
       "required": ["general", "keyboard", "pointer"],
       "additionalProperties": false,
@@ -5954,7 +5777,7 @@
       }
     },
     "KeyboardApp": {
-      "description": "0.20: a keyboard-mode app of the profile. keymap: only the app's own catalog or config entries (back key, keymap, address bar keys).",
+      "description": "A keyboard-mode app of the profile. keymap: only the app's own catalog or config entries (back key, keymap, address bar keys).",
       "type": "object",
       "required": ["id", "name", "keymap"],
       "additionalProperties": false,
@@ -5965,7 +5788,7 @@
       }
     },
     "InputSettings": {
-      "description": "0.20: the controller settings of this profile (input.settings.get).",
+      "description": "The controller settings of this profile (input.settings.get).",
       "type": "object",
       "required": ["settings", "defaults", "buttons", "actions", "key_actions", "keys", "modifiers", "speed", "apps"],
       "additionalProperties": false,
@@ -6196,7 +6019,7 @@
             "site_url": { "type": "string" },
             "icon_url": { "type": "string" },
             "firefox_profile": { "type": "boolean" },
-            "path": { "description": "0.9: the resolved icon on this box (absolute path to an image), when there is one: the installed app's desktop file and icon theme, or downloaded from icon_url / site_url and cached (https only; same cache, size limits and refresh as apps.list icons). Absent until resolved; store_changed is sent when it appears.", "type": "string" }
+            "path": { "description": "The resolved icon on this box (absolute path to an image), when there is one: the installed app's desktop file and icon theme, or downloaded from icon_url / site_url and cached (https only; same cache, size limits and refresh as apps.list icons). Absent until resolved; store_changed is sent when it appears.", "type": "string" }
           }
         },
         "requires": { "type": "array", "items": { "type": "string" } },
@@ -6225,7 +6048,7 @@
           ]
         },
         "readme": {
-          "description": "0.19: the upstream project's README (Markdown, at most 64 KiB), shown on the app's Store page. Absent when the app has none.",
+          "description": "The upstream project's README (Markdown, at most 64 KiB), shown on the app's Store page. Absent when the app has none.",
           "type": "object",
           "required": ["url", "retrieved", "file"],
           "additionalProperties": false,
@@ -6241,9 +6064,9 @@
         "status": { "$ref": "#/$defs/CatalogStatus" },
         "status_reason": { "oneOf": [{ "type": "string", "maxLength": 200 }, { "type": "null" }] },
         "state": { "$ref": "#/$defs/StoreState" },
-        "permissions": { "description": "0.18: what the app may use in its sandbox, in catalog order. Not installed: the stored choice for its install (default granted). Empty for Steam, apps without a sandbox and tombstones.", "type": "array", "items": { "$ref": "#/$defs/AppPermission" } },
-        "has_data": { "description": "0.19: one of the app's dataPaths exists in this profile's home, installed or not (a remove can leave data behind): system.apps.clear_data has something to delete.", "type": "boolean" },
-        "full_access": { "description": "0.18: runs without the app sandbox (Steam, apps with sandbox = false, or every app while the sandbox is off on this box): it can use everything the profile can. The install sheet warns. False for tombstones.", "type": "boolean" }
+        "permissions": { "description": "What the app may use in its sandbox, in catalog order. Not installed: the stored choice for its install (default granted). Empty for Steam, apps without a sandbox and tombstones.", "type": "array", "items": { "$ref": "#/$defs/AppPermission" } },
+        "has_data": { "description": "One of the app's dataPaths exists in this profile's home, installed or not (a remove can leave data behind): system.apps.clear_data has something to delete.", "type": "boolean" },
+        "full_access": { "description": "Runs without the app sandbox (Steam, apps with sandbox = false, or every app while the sandbox is off on this box): it can use everything the profile can. The install sheet warns. False for tombstones.", "type": "boolean" }
       }
     },
 
@@ -6339,12 +6162,12 @@
           "type": "boolean"
         },
         "profiles": {
-          "description": "The accounts in that generation's state.json with their current names (null: no longer a profile); absent if its state.json cannot be read (since 0.4). The rollback screen lists the profiles a rollback would drop or bring back empty.",
+          "description": "The accounts in that generation's state.json with their current names (null: no longer a profile); absent if its state.json cannot be read. The rollback screen lists the profiles a rollback would drop or bring back empty.",
           "type": "array",
           "items": { "$ref": "#/$defs/GenerationProfile" }
         },
         "readds_features": {
-          "description": "0.5: box features a rollback to this generation would turn back on: the profiles' apps need them and its state.json lacks them (the rollback job re-adds them in a box stage; the rollback screen says so). Absent when there are none or it is unknown (schema 1, unreadable state.json).",
+          "description": "Box features a rollback to this generation would turn back on: the profiles' apps need them and its state.json lacks them (the rollback job re-adds them in a box stage; the rollback screen says so). Absent when there are none or it is unknown (schema 1, unreadable state.json).",
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/$defs/BoxFeature" }
@@ -6407,11 +6230,11 @@
           "minimum": 1
         },
         "new_apps": {
-          "description": "Apps the update makes installable (in the target's catalog, not available in the running one), by id; null if the target's catalog could not be read (since 0.3). The Store says 'More apps are available after the next update'.",
+          "description": "Apps the update makes installable (in the target's catalog, not available in the running one), by id; null if the target's catalog could not be read. The Store says 'More apps are available after the next update'.",
           "oneOf": [{ "type": "array", "items": { "$ref": "#/$defs/CatalogApp" } }, { "type": "null" }]
         },
         "removed_apps": {
-          "description": "Installed apps the update takes away (removed from, or missing in, the target's catalog); null if unknown (since 0.3). The update screen names them with the reason.",
+          "description": "Installed apps the update takes away (removed from, or missing in, the target's catalog); null if unknown. The update screen names them with the reason.",
           "oneOf": [{ "type": "array", "items": { "$ref": "#/$defs/RemovedApp" } }, { "type": "null" }]
         },
         "version": {
@@ -6463,7 +6286,7 @@
       }
     },
     "ChannelCheckResult": {
-      "description": "0.9: a channel_check job's result: the verified tip of the target channel.",
+      "description": "A channel_check job's result: the verified tip of the target channel.",
       "type": "object",
       "required": ["channel", "current_rev", "target", "older", "checked_at"],
       "additionalProperties": false,
@@ -6505,7 +6328,7 @@
           ]
         },
         "apps_not_updated": {
-          "description": "0.4: app envs the final apps stage could not rebuild; each keeps its previous generation, which still works. Absent when there were none.",
+          "description": "App envs the final apps stage could not rebuild; each keeps its previous generation, which still works. Absent when there were none.",
           "type": "array",
           "items": {
             "type": "object",
@@ -6527,7 +6350,7 @@
       }
     },
     "JobResult": {
-      "description": "update_check jobs: an UpdateCheckResult; jobs that change the system: an AppliedResult; storage_measure (0.6): a MeasuredResult; cleanup_system and cleanup_profiles (0.6): a CleanedResult; channel_check (0.9): a ChannelCheckResult.",
+      "description": "update_check jobs: an UpdateCheckResult; jobs that change the system: an AppliedResult; storage_measure: a MeasuredResult; cleanup_system and cleanup_profiles: a CleanedResult; channel_check: a ChannelCheckResult.",
       "oneOf": [
         {
           "$ref": "#/$defs/UpdateCheckResult"
@@ -6677,15 +6500,15 @@
         "paths_total": { "type": "integer", "minimum": 0 },
         "bytes_done": { "type": "integer", "minimum": 0 },
         "bytes_total": { "type": "integer", "minimum": 0 },
-        "builds_done": { "description": "0.7: derivations built so far in this nix run.", "type": "integer", "minimum": 0 },
-        "builds_total": { "description": "0.7: derivations nix expects to build (may grow while nix discovers more).", "type": "integer", "minimum": 0 },
-        "builds_running": { "description": "0.7: derivations building at once.", "type": "integer", "minimum": 0 },
+        "builds_done": { "description": "Derivations built so far in this nix run.", "type": "integer", "minimum": 0 },
+        "builds_total": { "description": "Derivations nix expects to build (may grow while nix discovers more).", "type": "integer", "minimum": 0 },
+        "builds_running": { "description": "Derivations building at once.", "type": "integer", "minimum": 0 },
         "building": { "$ref": "#/$defs/Building" },
-        "auth_url": { "description": "0.11: tailscale_login, stage signing_in: the URL to sign in at (https, printable ASCII; shown as a QR code).", "type": "string", "maxLength": 512, "pattern": "^https://[!-~]+$" }
+        "auth_url": { "description": "Tailscale_login, stage signing_in: the URL to sign in at (https, printable ASCII; shown as a QR code).", "type": "string", "maxLength": 512, "pattern": "^https://[!-~]+$" }
       }
     },
     "Building": {
-      "description": "0.7: the most recently started derivation that is still building. name and version from the .drv name (nix's rule: the version starts at the first dash followed by a non-letter); phase is nix's build phase without the Phase suffix (unpack, patch, configure, build, check, install, fixup, ...), absent until nix reports one.",
+      "description": "The most recently started derivation that is still building. name and version from the .drv name (nix's rule: the version starts at the first dash followed by a non-letter); phase is nix's build phase without the Phase suffix (unpack, patch, configure, build, check, install, fixup, ...), absent until nix reports one.",
       "type": "object",
       "required": ["name"],
       "additionalProperties": false,
@@ -6693,11 +6516,11 @@
         "name": { "type": "string", "maxLength": 320 },
         "version": { "type": "string", "maxLength": 320 },
         "phase": { "type": "string", "maxLength": 160 },
-        "percent": { "description": "System API 0.10, session API 0.18: how far this derivation is, from the last standard stdenv phase it started (unpack 0, patch 5, updateAutotoolsGnuConfigScripts 8, configure 10, build 20, check 80, install 88, fixup 94, installCheck 98, dist 99; other phases keep the value); never goes back; below 100. Absent before the first standard phase and for builders without phases.", "type": "integer", "minimum": 0, "maximum": 99 }
+        "percent": { "description": "How far this derivation is, from the last standard stdenv phase it started (unpack 0, patch 5, updateAutotoolsGnuConfigScripts 8, configure 10, build 20, check 80, install 88, fixup 94, installCheck 98, dist 99; other phases keep the value); never goes back; below 100. Absent before the first standard phase and for builders without phases.", "type": "integer", "minimum": 0, "maximum": 99 }
       }
     },
     "SubjectProfile": {
-      "description": "0.7: a profile a job is for, with its display name when the job started (the id when it has none).",
+      "description": "A profile a job is for, with its display name when the job started (the id when it has none).",
       "type": "object",
       "required": ["id", "name"],
       "additionalProperties": false,
@@ -6707,7 +6530,7 @@
       }
     },
     "JobSubject": {
-      "description": "0.7: what a job is about. Every field optional; which ones each kind sets: README, What a job is about.",
+      "description": "What a job is about. Every field optional; which ones each kind sets: README, What a job is about.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -6731,14 +6554,14 @@
         "frequency": { "$ref": "#/$defs/CleanupFrequency" },
         "keep_system": { "type": "integer", "minimum": 0 },
         "keep_profiles": { "type": "integer", "minimum": 0 },
-        "services": { "description": "0.11: services turned on or off (services_enable, services_disable).", "type": "array", "items": { "$ref": "#/$defs/CatalogApp" } },
+        "services": { "description": "Services turned on or off (services_enable, services_disable).", "type": "array", "items": { "$ref": "#/$defs/CatalogApp" } },
         "library": { "$ref": "#/$defs/SubjectLibrary" }
       }
     },
-    "Setup": { "description": "0.11: a service's setup flow in the Server section (catalog setup).", "enum": ["jellyfin", "plex", "tailscale", "cloudflare"] },
-    "UnitState": { "description": "0.11: systemd's ActiveState of a service's unit (unknown: a value this daemon does not know).", "enum": ["active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance", "refreshing", "unknown"] },
+    "Setup": { "description": "A service's setup flow in the Server section (catalog setup).", "enum": ["jellyfin", "plex", "tailscale", "cloudflare"] },
+    "UnitState": { "description": "Systemd's ActiveState of a service's unit (unknown: a value this daemon does not know).", "enum": ["active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance", "refreshing", "unknown"] },
     "ServiceTerms": {
-      "description": "0.11: a service's vendor terms; file is the absolute path of the text on the box.",
+      "description": "A service's vendor terms; file is the absolute path of the text on the box.",
       "type": "object",
       "required": ["title", "version", "url", "file"],
       "additionalProperties": false,
@@ -6750,7 +6573,7 @@
       }
     },
     "ServiceInfo": {
-      "description": "0.11: one service of the Server section.",
+      "description": "One service of the Server section.",
       "type": "object",
       "required": ["id", "name", "available", "enabled", "status", "setup", "terms", "detail", "has_data"],
       "additionalProperties": false,
@@ -6777,7 +6600,7 @@
       }
     },
     "ServiceIcon": {
-      "description": "0.11: where a service's real icon is (HinterOS ships no logos): the catalog entry's desktopId, iconUrl (with sha256: a download with another SHA-256 is not kept) or siteUrl (discovery on the site).",
+      "description": "Where a service's real icon is (HinterOS ships no logos): the catalog entry's desktopId, iconUrl (with sha256: a download with another SHA-256 is not kept) or siteUrl (discovery on the site).",
       "type": "object",
       "required": ["firefox_profile"],
       "additionalProperties": false,
@@ -6821,8 +6644,8 @@
         "folder": { "description": "The media.folders id of its first folder; null when that is not in /srv/media.", "oneOf": [{ "$ref": "#/$defs/FolderId" }, { "type": "null" }] }
       }
     },
-    "LibraryKind": { "description": "0.11: what a new Jellyfin library holds (mixed: movies and shows).", "enum": ["movies", "shows", "music", "mixed"] },
-    "LibraryKindShown": { "description": "0.11: what a Jellyfin library holds; other: a type made in Jellyfin's dashboard (books, photos, music videos, ...).", "enum": ["movies", "shows", "music", "mixed", "other"] },
+    "LibraryKind": { "description": "What a new Jellyfin library holds (mixed: movies and shows).", "enum": ["movies", "shows", "music", "mixed"] },
+    "LibraryKindShown": { "description": "What a Jellyfin library holds; other: a type made in Jellyfin's dashboard (books, photos, music videos, ...).", "enum": ["movies", "shows", "music", "mixed", "other"] },
     "JellyfinId": { "description": "A Jellyfin item id.", "type": "string", "pattern": "^[0-9a-f]{32}$" },
     "LibraryName": { "description": "1 to 64 characters after trimming, without control or format characters or /\\:*?\"<>|.", "type": "string", "minLength": 1, "maxLength": 256 },
     "FolderId": { "description": "A folder below /srv/media, as its path relative to it (media.folders).", "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^/.\\u0000-\\u001f\\u007f][^/\\u0000-\\u001f\\u007f]*(/[^/.\\u0000-\\u001f\\u007f][^/\\u0000-\\u001f\\u007f]*)*$" },
@@ -6863,7 +6686,7 @@
         "url": { "oneOf": [{ "type": "string" }, { "type": "null" }] }
       }
     },
-    "TailscaleState": { "description": "0.11: needs_login: not signed in; needs_approval: the tailnet's admin must approve the device; unavailable: tailscaled does not answer.", "enum": ["needs_login", "needs_approval", "starting", "running", "stopped", "unavailable"] },
+    "TailscaleState": { "description": "Needs_login: not signed in; needs_approval: the tailnet's admin must approve the device; unavailable: tailscaled does not answer.", "enum": ["needs_login", "needs_approval", "starting", "running", "stopped", "unavailable"] },
     "TailscaleDetail": {
       "type": "object",
       "required": ["state", "name", "ip4", "dns_name", "tailnet", "key_expiry"],
@@ -6890,7 +6713,7 @@
     "PlexClaimCode": { "description": "A plex.tv/claim code. Never logged.", "type": "string", "pattern": "^claim-[A-Za-z0-9_-]{20}$" },
     "TunnelToken": { "description": "A Cloudflare tunnel token (standard padded base64). Never logged.", "type": "string", "minLength": 4, "maxLength": 512, "pattern": "^[A-Za-z0-9+/]+={0,2}$" },
     "SubjectLibrary": {
-      "description": "0.11: the library a Jellyfin job is about (id: known for a removal, and for an addition once Jellyfin made it).",
+      "description": "The library a Jellyfin job is about (id: known for a removal, and for an addition once Jellyfin made it).",
       "type": "object",
       "required": ["name"],
       "additionalProperties": false,
@@ -6936,10 +6759,10 @@
         "result": { "oneOf": [{ "$ref": "#/$defs/JobResult" }, { "type": "null" }] },
         "session_restart_required": { "type": "boolean" },
         "subject": { "$ref": "#/$defs/JobSubject" },
-        "started_at": { "description": "0.7: when the job was started (equals created_at).", "type": "integer" },
-        "percent": { "description": "0.7: the latest percent of a running job (null when finished or unknown).", "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 100 }, { "type": "null" }] },
-        "detail": { "description": "0.7: the latest progress detail of a running job.", "oneOf": [{ "$ref": "#/$defs/ProgressDetail" }, { "type": "null" }] },
-        "last_activity_at": { "description": "0.7: the last time a running job's process printed anything.", "oneOf": [{ "type": "integer" }, { "type": "null" }] }
+        "started_at": { "description": "When the job was started (equals created_at).", "type": "integer" },
+        "percent": { "description": "The latest percent of a running job (null when finished or unknown).", "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 100 }, { "type": "null" }] },
+        "detail": { "description": "The latest progress detail of a running job.", "oneOf": [{ "$ref": "#/$defs/ProgressDetail" }, { "type": "null" }] },
+        "last_activity_at": { "description": "The last time a running job's process printed anything.", "oneOf": [{ "type": "integer" }, { "type": "null" }] }
       }
     },
     "BtAddress": { "description": "A Bluetooth address, upper case.", "type": "string", "pattern": "^([0-9A-F]{2}:){5}[0-9A-F]{2}$" },

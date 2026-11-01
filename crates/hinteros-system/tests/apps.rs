@@ -1,4 +1,4 @@
-//! Per-profile apps (system API 0.4, apps.md) against the real binary, a fake root and fake
+//! Per-profile apps (apps.md) against the real binary, a fake root and fake
 //! `nix`/`nix-env`/`nix-store`: install, remove and rollback in the caller's own Nix profile,
 //! the box stage, the registry and the final apps stage of system jobs.
 

@@ -1,4 +1,4 @@
-//! Runtime settings of the session API (0.7): Wi-Fi, Bluetooth, audio, display and power, all
+//! Runtime settings of the session API: Wi-Fi, Bluetooth, audio, display and power, all
 //! applied without a rebuild by the session daemon through the system's own services
 //! (NetworkManager, BlueZ, PipeWire, gamescope, logind). Re-exported from [`crate::session`].
 
@@ -45,7 +45,7 @@ pub enum Service {
     Polkit,
     /// `base.set` to a base that is not built (`not_built`).
     Base,
-    /// 0.19 (system API 0.11): the Server section's services (`off`, `not_ready`).
+    /// The Server section's services (`off`, `not_ready`).
     Jellyfin,
     Plex,
     Tailscale,
@@ -91,11 +91,13 @@ impl Service {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Connectivity {
-    Unknown,
     None,
     Portal,
     Limited,
     Full,
+    /// NetworkManager does not know, or a value of a later minor.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Connectivity {
@@ -139,6 +141,9 @@ pub enum WifiSecurity {
     Wpa3,
     /// 802.1X: cannot be joined with a password alone.
     Enterprise,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl WifiSecurity {
@@ -187,13 +192,11 @@ impl fmt::Debug for WifiConnectParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WifiForgetParams {
     pub ssid: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WifiEnableParams {
     pub enabled: bool,
 }
@@ -231,6 +234,9 @@ pub enum BtKind {
     Phone,
     Computer,
     Other,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl BtKind {
@@ -278,7 +284,6 @@ pub struct BtDevices {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct BtScanParams {
     pub enabled: bool,
     /// Stop scanning by itself after this many seconds [default 30].
@@ -291,13 +296,11 @@ pub const BT_SCAN_TIMEOUT_DEFAULT_S: u32 = 30;
 pub const BT_SCAN_TIMEOUT_MAX_S: u32 = 300;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct BtAddressParams {
     pub address: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct BtConfirmParams {
     pub address: String,
     pub accept: bool,
@@ -316,6 +319,9 @@ pub enum BtConfirmMode {
     Confirm,
     /// Show the passkey: the user types it on the device. No answer.
     Display,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl BtConfirmMode {
@@ -373,6 +379,9 @@ pub enum AudioKind {
     Usb,
     Bluetooth,
     Other,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl AudioKind {
@@ -408,13 +417,11 @@ pub struct AudioState {
 pub const VOLUME_MAX: u8 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AudioSetOutputParams {
     pub id: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AudioVolumeParams {
     /// The new volume; absent: just report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -422,7 +429,6 @@ pub struct AudioVolumeParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AudioMuteParams {
     pub muted: bool,
 }
@@ -443,7 +449,6 @@ impl Event for AudioChanged {
 /// A display mode as set: size in pixels and refresh rate in Hz (whole numbers: gamescope's
 /// mode list is in Hz, 59.94 Hz shows as 60).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Mode {
     pub width: u32,
     pub height: u32,
@@ -500,6 +505,9 @@ pub enum PowerCapability {
     Challenge,
     /// Not supported by the hardware or kernel.
     Na,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl PowerCapability {

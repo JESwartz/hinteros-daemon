@@ -690,7 +690,7 @@ pub(crate) enum Request {
     Profiles(profiles::ProfilesRequest),
     Storage(storage::StorageRequest),
     TimeZoneSet(system::TimeZoneSetParams),
-    /// 0.11: the Server section.
+    /// The Server section.
     Servers(servers::ServersRequest),
     JobsCancel(JobIdParams),
 }

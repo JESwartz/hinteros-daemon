@@ -52,7 +52,7 @@
     "methodName": { "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$" },
     "eventName": { "pattern": "^[a-z][a-z0-9_]*$" },
     "since": {
-      "description": "API version that introduced this item (MAJOR.MINOR).",
+      "description": "The minor that added this item (MAJOR.MINOR). Absent: part of the major's first version, x.0.",
       "type": "string",
       "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
     },
@@ -68,7 +68,7 @@
     },
     "method": {
       "type": "object",
-      "required": ["summary", "since", "params", "result", "errors", "examples"],
+      "required": ["summary", "params", "result", "errors", "examples"],
       "additionalProperties": false,
       "properties": {
         "summary": { "type": "string" },
@@ -119,7 +119,7 @@
     },
     "event": {
       "type": "object",
-      "required": ["summary", "since", "params", "examples"],
+      "required": ["summary", "params", "examples"],
       "additionalProperties": false,
       "properties": {
         "summary": { "type": "string" },

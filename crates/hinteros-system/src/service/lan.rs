@@ -1,4 +1,4 @@
-//! The local network filter (system API 0.10, [`crate::lanfilter`]): `lan_filter.set` and
+//! The local network filter ([`crate::lanfilter`]): `lan_filter.set` and
 //! `lan_filter.clear`, the session daemon's own calls (not relayed).
 //!
 //! They only restrict the caller's own processes, so there is no seat or polkit check: a cgroup

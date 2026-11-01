@@ -1,4 +1,4 @@
-//! Greeter mode (session API 0.12) against a fake greetd IPC socket: the picker's list, logging
+//! Greeter mode against a fake greetd IPC socket: the picker's list, logging
 //! in with and without a PIN, the PIN backoff message, and `hinteros-session greet`'s fast path.
 
 use std::io::{Read, Write};

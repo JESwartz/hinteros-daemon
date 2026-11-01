@@ -97,7 +97,7 @@ pub enum Command {
         #[arg(long, default_value = "/etc/localtime")]
         localtime: PathBuf,
     },
-    /// Load the local network filter (`hinteros-lan-filter.service`, system API 0.10): the
+    /// Load the local network filter (`hinteros-lan-filter.service`): the
     /// nftables table `inet hinteros_lan` for the cgroups in `<run-dir>/lan-filter.json`
     LanFilterApply {
         #[arg(long, default_value = "/run/hinteros")]
@@ -295,7 +295,7 @@ pub struct ServeArgs {
     /// The link `time_zone.set` points at `<zoneinfo-dir>/<zone>`
     #[arg(long, default_value = "/etc/localtime")]
     pub localtime: PathBuf,
-    /// `lan_filter.*` (system API 0.10): the box has the local network filter
+    /// `lan_filter.*`: the box has the local network filter
     /// (`hinteros-lan-filter.service`); without it they fail. An environment variable too, so a
     /// unit whose `ExecStart` is replaced keeps it
     #[arg(long, env = "HINTEROS_LAN_FILTER")]
@@ -303,7 +303,7 @@ pub struct ServeArgs {
     /// The cgroup v2 root: `lan_filter.set` checks the caller's cgroup there
     #[arg(long, default_value = "/sys/fs/cgroup")]
     pub cgroup_root: PathBuf,
-    /// Server section (0.11): the media folder Jellyfin libraries are made from
+    /// Server section: the media folder Jellyfin libraries are made from
     #[arg(long, default_value = "/srv/media")]
     pub media_dir: PathBuf,
     /// Where services keep their state (`stateDirs` are below it)
@@ -434,7 +434,7 @@ pub struct Paths {
     /// The link to the box's time zone file.
     #[serde(default = "default_localtime")]
     pub localtime: PathBuf,
-    /// The Server section's services (0.11).
+    /// The Server section's services.
     #[serde(default)]
     pub server: ServerPaths,
 }

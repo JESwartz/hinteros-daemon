@@ -1,4 +1,4 @@
-//! Per-profile apps (system API 0.4, apps.md "Install, remove, rollback"):
+//! Per-profile apps (apps.md "Install, remove, rollback"):
 //! `apps.list`, `apps.generations`, `apps.install`, `apps.remove`, `apps.rollback`,
 //! `apps.accept_terms`, `apps.clear_data` and the box-feature bookkeeping of system jobs.
 
@@ -292,7 +292,7 @@ impl Service {
         }
     }
 
-    /// 0.11 `apps.clear_data`: a job that deletes one app's `dataPaths` in the caller's home,
+    /// `apps.clear_data`: a job that deletes one app's `dataPaths` in the caller's home,
     /// whether the app is installed or not.
     pub(super) async fn apps_clear_data(
         &self,

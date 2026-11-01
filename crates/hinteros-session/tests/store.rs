@@ -219,7 +219,7 @@ async fn store_list_merges_catalog_and_install_state() {
     task.abort();
 }
 
-/// 0.18: a catalog app's permissions before install: `apps.set_permission`, then `store.list`
+/// A catalog app's permissions before install: `apps.set_permission`, then `store.list`
 /// shows the choice and the profile's permissions.json keeps it.
 #[tokio::test(flavor = "multi_thread")]
 async fn set_permission_before_install() {

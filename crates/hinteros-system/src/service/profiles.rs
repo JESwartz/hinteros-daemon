@@ -1,4 +1,4 @@
-//! Profiles (system API 0.4, profiles.md "API changes"): `profiles.*`, `guest.set`,
+//! Profiles (profiles.md "API changes"): `profiles.*`, `guest.set`,
 //! `starter_set.*`, `display.save_mode`, `audio.save_output`, the public view and the switch
 //! hint. PINs are checked here with the shared backoff (never logged; the audit records which
 //! PIN was checked and the outcome).

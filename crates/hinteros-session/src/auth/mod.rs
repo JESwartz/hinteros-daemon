@@ -187,7 +187,9 @@ impl Auth {
         match outcome {
             AuthOutcome::Authorized => Ok(()),
             AuthOutcome::Cancelled => Err(AgentError::Cancelled("dismissed".into())),
-            AuthOutcome::Failed => Err(AgentError::Failed("not authenticated".into())),
+            AuthOutcome::Failed | AuthOutcome::Unknown => {
+                Err(AgentError::Failed("not authenticated".into()))
+            }
         }
     }
 

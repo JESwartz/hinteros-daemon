@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 21);
+pub const VERSION: ApiVersion = ApiVersion::new(1, 0);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -15,7 +15,7 @@ pub const SOCKET_IN_RUNTIME_DIR: &str = "hinteros/session.sock";
 
 pub use crate::common::{HelloParams, HelloResult, Peer, PingParams, PingResult};
 
-// Runtime settings (0.7).
+// Runtime settings.
 pub use crate::runtime::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -151,6 +151,9 @@ pub struct AppsListParams {}
 pub enum AppKind {
     Native,
     Web,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl AppKind {
@@ -164,10 +167,10 @@ pub struct App {
     pub kind: AppKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    /// 0.12: vendor terms this profile has not accepted yet (an app from the starter set).
+    /// Vendor terms this profile has not accepted yet (an app from the starter set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_terms: Option<StoreTerms>,
-    /// 0.18: what the app may use in its sandbox (empty for Steam and unsandboxed apps).
+    /// What the app may use in its sandbox (empty for Steam and unsandboxed apps).
     pub permissions: Vec<AppPermission>,
 }
 
@@ -183,7 +186,7 @@ impl Method for AppsList {
     type Result = AppsListResult;
 }
 
-/// 0.18: one permission an app declares in the catalog, and this profile's choice.
+/// One permission an app declares in the catalog, and this profile's choice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppPermission {
     /// `gamepad`, `mic`, `downloads`; clients show unknown names as they are.
@@ -194,7 +197,7 @@ pub struct AppPermission {
     pub granted: bool,
 }
 
-/// 0.18: `apps.set_permission`.
+/// `apps.set_permission`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppsSetPermissionParams {
     pub id: String,
@@ -212,11 +215,11 @@ impl Method for AppsSetPermission {
     type Result = AppsSetPermissionResult;
 }
 
-/// 0.18: the fewest and most app displays (`apps.displays.set`).
+/// The fewest and most app displays (`apps.displays.set`).
 pub const APP_DISPLAYS_MIN: u32 = 1;
 pub const APP_DISPLAYS_MAX: u32 = 8;
 
-/// 0.18: how many apps can run at once, each on an X display of its own (`apps.displays.*`).
+/// How many apps can run at once, each on an X display of its own (`apps.displays.*`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppDisplays {
     /// The setting: the number of app displays the next session starts with.
@@ -314,6 +317,9 @@ pub enum AppSource {
     Command,
     Steam,
     SteamClient,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl AppSource {
@@ -395,6 +401,9 @@ pub enum ExitReason {
     Crashed,
     LaunchTimeout,
     Closed,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ExitReason {
@@ -452,6 +461,9 @@ pub enum NavAction {
     TriggerRight,
     Quick,
     Keyboard,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl NavAction {
@@ -489,6 +501,9 @@ pub enum NavPhase {
     Press,
     Repeat,
     Release,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl NavPhase {
@@ -517,7 +532,7 @@ pub const STEAM_CLIENT_GAMESCOPE_APP_ID: u32 = 769;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppsCloseParams {
     pub id: String,
-    /// 0.19: kill it now (SIGKILL), no request to quit first. For Steam (`steam_client`): the
+    /// Kill it now (SIGKILL), no request to quit first. For Steam (`steam_client`): the
     /// whole Steam client, not just Big Picture.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
@@ -544,6 +559,9 @@ pub enum InstallState {
     Updating,
     Installing,
     Uninstalling,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl InstallState {
@@ -672,7 +690,7 @@ pub struct OskParams {}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OskState {
     pub visible: bool,
-    /// The keyboard is up for a password field (0.10): the keyboard masks what it shows of
+    /// The keyboard is up for a password field: the keyboard masks what it shows of
     /// the typed text. Only sent when true.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub password: bool,
@@ -884,9 +902,9 @@ impl Method for KeysAction {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Controller settings (0.20)
+// Controller settings
 
-/// 0.20: a controller button that can be remapped: the physical button (after the Xbox label
+/// A controller button that can be remapped: the physical button (after the Xbox label
 /// swap), named by its Xbox label. Guide and the directions are never remapped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -954,7 +972,7 @@ impl ControllerButton {
     }
 }
 
-/// 0.20: the actions `general` gives to buttons.
+/// The actions `general` gives to buttons.
 pub const CONTROLLER_ACTIONS: &[NavAction] = &[
     NavAction::Accept,
     NavAction::Back,
@@ -968,7 +986,7 @@ pub const CONTROLLER_ACTIONS: &[NavAction] = &[
     NavAction::TriggerRight,
 ];
 
-/// 0.20: the actions a keyboard-mode app maps to keys: the directions and
+/// The actions a keyboard-mode app maps to keys: the directions and
 /// [`CONTROLLER_ACTIONS`].
 pub const KEY_ACTIONS: &[NavAction] = &[
     NavAction::Up,
@@ -987,16 +1005,16 @@ pub const KEY_ACTIONS: &[NavAction] = &[
     NavAction::TriggerRight,
 ];
 
-/// 0.20: a key action mapped to this sends nothing.
+/// A key action mapped to this sends nothing.
 pub const KEY_NONE: &str = "none";
 
-/// 0.20: the pointer speed, in percent of the configured speed.
+/// The pointer speed, in percent of the configured speed.
 pub const POINTER_SPEED_MIN: u32 = 25;
 pub const POINTER_SPEED_MAX: u32 = 400;
 pub const POINTER_SPEED_STEP: u32 = 25;
 pub const POINTER_SPEED_DEFAULT: u32 = 100;
 
-/// 0.20: the profile's controller settings, only what the user changed (the stored form,
+/// The profile's controller settings, only what the user changed (the stored form,
 /// `$XDG_STATE_HOME/hinteros/controller.json`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1028,7 +1046,7 @@ pub struct PointerSettings {
     pub right_click: Option<String>,
 }
 
-/// 0.20: the pointer settings with nothing left out (`defaults.pointer`).
+/// The pointer settings with nothing left out (`defaults.pointer`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PointerDefaults {
     pub speed: u32,
@@ -1053,7 +1071,7 @@ pub struct SpeedRange {
     pub step: u32,
 }
 
-/// 0.20: a keyboard-mode app and its own keymap (catalog/config: back_key, keymap, the
+/// A keyboard-mode app and its own keymap (catalog/config: back_key, keymap, the
 /// address bar's keys).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyboardApp {
@@ -1062,7 +1080,7 @@ pub struct KeyboardApp {
     pub keymap: std::collections::BTreeMap<NavAction, String>,
 }
 
-/// 0.20: result of `input.settings.get` / `input.settings.set`.
+/// Result of `input.settings.get` / `input.settings.set`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputSettings {
     pub settings: ControllerSettings,
@@ -1306,7 +1324,7 @@ fn nullable_u32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D
 }
 
 // ---------------------------------------------------------------------------------------------
-// System relay (0.6): methods forwarded unchanged to the system service, and its job events.
+// System relay: methods forwarded unchanged to the system service, and its job events.
 
 macro_rules! relay {
     ($($name:ident = $wire:literal => $system:ty;)*) => {
@@ -1412,7 +1430,7 @@ impl Event for JobFinished {
     type Params = crate::system::JobFinishedParams;
 }
 
-/// 0.16: relayed from the system service's `time_zone_changed`.
+/// Relayed from the system service's `time_zone_changed`.
 pub struct TimeZoneChanged;
 impl Event for TimeZoneChanged {
     const NAME: &'static str = "time_zone_changed";
@@ -1420,7 +1438,7 @@ impl Event for TimeZoneChanged {
 }
 
 // ---------------------------------------------------------------------------------------------
-// polkit authentication agent (0.8)
+// polkit authentication agent
 
 /// The `hello` client name of the launcher. Only connections with this name get
 /// `authentication_requested` and may answer it (`auth.respond`, `auth.cancel`).
@@ -1469,6 +1487,9 @@ pub enum AuthOutcome {
     Failed,
     /// `auth.cancel`, polkit cancelled it, or nobody answered in time.
     Cancelled,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl AuthOutcome {
@@ -1538,7 +1559,7 @@ impl Method for AuthCancel {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Session restart (0.8)
+// Session restart
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRestartParams {}
@@ -1554,16 +1575,14 @@ impl Method for SessionRestart {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Profiles (0.12, profiles.md)
+// Profiles (profiles.md)
 
 /// Params of the profile methods that take none (closed).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProfileNoParams {}
 
 /// An empty result.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProfileEmpty {}
 
 /// `profile.current`: who this session is.
@@ -1621,7 +1640,6 @@ impl Method for SessionSwitchWait {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SwitchForceCloseParams {
     /// The app id from `switch_blocked`.
     pub app: String,
@@ -1688,6 +1706,9 @@ pub enum SwitchStage {
     Ending,
     /// `session.switch_cancel`: the profile stays.
     Cancelled,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl SwitchStage {
@@ -1743,7 +1764,7 @@ impl Event for ProfilesChanged {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Greeter mode (0.12): the picker
+// Greeter mode: the picker
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GreeterProfile {
@@ -1849,7 +1870,7 @@ pub struct GreeterResultParams {
     /// The PIN backoff: wait this long.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locked_s: Option<u32>,
-    /// 0.17: the admin profile's PIN is refused until the box restarts (10 wrong tries this
+    /// The admin profile's PIN is refused until the box restarts (10 wrong tries this
     /// boot).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reboot_required: bool,
@@ -1866,7 +1887,7 @@ fn nullable_i64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i64>, D
 }
 
 // ---------------------------------------------------------------------------------------------
-// Store (0.8)
+// Store
 
 /// Where an app is, as the Store shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1883,6 +1904,9 @@ pub enum StoreState {
     Retired,
     /// Installed, and removed from the catalog: the next update takes it away.
     Unavailable,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl StoreState {
@@ -1902,6 +1926,9 @@ pub enum CatalogStatus {
     Available,
     Retired,
     Removed,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl CatalogStatus {
@@ -1924,7 +1951,7 @@ pub struct StoreIcon {
     pub firefox_profile: bool,
     /// The resolved icon on this box (an absolute path to an image), when there is one: from
     /// the installed app's desktop file, or downloaded and cached from `icon_url` /
-    /// `site_url`. Absent until resolved; `store_changed` is sent when it appears (0.9).
+    /// `site_url`. Absent until resolved; `store_changed` is sent when it appears.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
@@ -1941,7 +1968,7 @@ pub struct StoreTerms {
     pub file: String,
 }
 
-/// 0.19: the upstream project's README, shown on the app's Store page.
+/// The upstream project's README, shown on the app's Store page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreReadme {
     pub url: String,
@@ -1972,7 +1999,7 @@ pub struct StoreApp {
     pub data_paths: Vec<String>,
     #[serde(deserialize_with = "nullable_terms")]
     pub terms: Option<StoreTerms>,
-    /// 0.19: absent when the app has none.
+    /// Absent when the app has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readme: Option<StoreReadme>,
     pub builds_on_device: bool,
@@ -1982,14 +2009,14 @@ pub struct StoreApp {
     #[serde(deserialize_with = "nullable")]
     pub status_reason: Option<String>,
     pub state: StoreState,
-    /// 0.18: what the app may use in its sandbox; for an app that is not installed, the choice
+    /// What the app may use in its sandbox; for an app that is not installed, the choice
     /// stored for its install.
     pub permissions: Vec<AppPermission>,
-    /// 0.18: runs without the app sandbox (Steam, `sandbox = false`, or the sandbox is off on
+    /// Runs without the app sandbox (Steam, `sandbox = false`, or the sandbox is off on
     /// this box): it can use everything the profile can.
     #[serde(default)]
     pub full_access: bool,
-    /// 0.19: one of its `dataPaths` exists in this profile's home (installed or not: a remove
+    /// One of its `dataPaths` exists in this profile's home (installed or not: a remove
     /// can leave data behind).
     #[serde(default)]
     pub has_data: bool,

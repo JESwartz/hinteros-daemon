@@ -81,19 +81,9 @@ async fn handshake_ping_apps_and_home_event() {
 async fn version_mismatch_is_rejected_and_closes() {
     let d = Daemon::start();
     for client_version in [
-        ApiVersion::new(1, 0),
-        ApiVersion::new(0, 2),
-        ApiVersion::new(0, 7),
-        ApiVersion::new(0, 8),
-        ApiVersion::new(0, 9),
-        ApiVersion::new(0, 10),
-        ApiVersion::new(0, 11),
-        ApiVersion::new(0, 12),
-        ApiVersion::new(0, 13),
-        ApiVersion::new(0, 14),
-        ApiVersion::new(0, 15),
-        ApiVersion::new(0, 16),
-        ApiVersion::new(0, 17),
+        ApiVersion::new(session::VERSION.major + 1, 0),
+        ApiVersion::new(session::VERSION.major, session::VERSION.minor + 1),
+        ApiVersion::new(0, 21),
     ] {
         let mut c = d.connect().await;
         let e = rpc_error(

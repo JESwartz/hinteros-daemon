@@ -20,11 +20,11 @@ pub enum ErrorCode {
     SteamNoWindows,
     KeyboardUnavailable,
     OskUnavailable,
-    /// 0.18: `apps.set_permission`: the app does not declare it.
+    /// `apps.set_permission`: the app does not declare it.
     UnknownPermission,
-    /// 0.18: `apps.set_permission`: a required permission cannot be denied.
+    /// `apps.set_permission`: a required permission cannot be denied.
     PermissionRequired,
-    /// 0.18: `apps.launch`: every app display is in use.
+    /// `apps.launch`: every app display is in use.
     NoAppDisplay,
     SystemUnavailable,
     PermissionDenied,
@@ -40,9 +40,9 @@ pub enum ErrorCode {
     AuthenticationRequired,
     AppConflict,
     TermsRequired,
-    /// 0.4: `profiles.create` with 8 profiles.
+    /// `profiles.create` with 8 profiles.
     ProfileLimit,
-    /// 0.4: a PIN is missing or wrong.
+    /// A PIN is missing or wrong.
     PinRequired,
     Unavailable,
     DeviceFailed,

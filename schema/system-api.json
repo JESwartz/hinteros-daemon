@@ -1,8 +1,8 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.12",
-  "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. The lan_filter methods (0.10) are the session daemon's own (not relayed): they only restrict the caller's processes, so they need no seat or polkit check, but are rate limited and audited. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
+  "version": "1.0",
+  "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. The lan_filter methods are the session daemon's own (not relayed): they only restrict the caller's processes, so they need no seat or polkit check, but are rate limited and audited. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md. Compatibility: a client works with a server of the same major and an equal or higher minor. Clients ignore fields, enum values and events they do not know; the document lists exactly what this version sends. Enums that a client also sends are closed: a new value there is a new major.",
   "transport": {
     "protocol": "jsonrpc-2.0",
     "framing": "ndjson",
@@ -12,7 +12,6 @@
   "methods": {
     "hello": {
       "summary": "Version handshake. Must be the first request on a connection, within 5 seconds.",
-      "since": "0.1",
       "handshake": true,
       "params": {
         "type": "object",
@@ -36,23 +35,22 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.12", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.12", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "1.0", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "1.0", "server": { "name": "hinteros-system", "version": "0.1.0" } }
         },
         {
           "name": "mismatch",
-          "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
+          "params": { "api_version": "2.0", "client": { "name": "hinteros-session", "version": "0.0.9" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 0.1, server 0.12",
-            "data": { "client_api_version": "0.1", "server_api_version": "0.12" }
+            "message": "API version mismatch: client 2.0, server 1.0",
+            "data": { "client_api_version": "2.0", "server_api_version": "1.0" }
           }
         }
       ]
     },
     "ping": {
       "summary": "Liveness check. Echoes the optional nonce.",
-      "since": "0.1",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -68,7 +66,6 @@
     },
     "subscribe": {
       "summary": "Start receiving the given events on this connection. Returns the full subscription set.",
-      "since": "0.2",
       "params": { "$ref": "#/$defs/SubscriptionParams", "type": "object" },
       "result": { "$ref": "#/$defs/SubscriptionResult", "type": "object" },
       "errors": [],
@@ -82,7 +79,6 @@
     },
     "unsubscribe": {
       "summary": "Stop receiving the given events on this connection. Returns the remaining subscription set.",
-      "since": "0.2",
       "params": { "$ref": "#/$defs/SubscriptionParams", "type": "object" },
       "result": { "$ref": "#/$defs/SubscriptionResult", "type": "object" },
       "errors": [],
@@ -90,7 +86,6 @@
     },
     "system.info": {
       "summary": "What is running: release, channel, base, locked revision, generation, hostname, dev build, SSH state and host key fingerprints. Read-only.",
-      "since": "0.2",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -140,7 +135,6 @@
     },
     "settings.get": {
       "summary": "The user-settable view of state.json and its revision (a hash of the file). Read-only.",
-      "since": "0.2",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -155,7 +149,7 @@
             "properties": {
               "base": { "$ref": "#/$defs/Base" },
               "requirements": {
-                "description": "0.4: the box features that are on (read-only).",
+                "description": "The box features that are on (read-only).",
                 "type": "array",
                 "items": { "$ref": "#/$defs/BoxFeature" }
               },
@@ -183,8 +177,7 @@
     },
     "settings.set": {
       "summary": "Change state.json settings (job). Action org.hinteros.system.settings.",
-      "description": "changes is a closed, typed object: each settable state.json field is a property here (bool, enum, bounded integer), never free-form. It has no properties in 0.2 (SSH, base and channel have their own methods), so any field is invalid_params with data {field, reason: unknown_field}, and an empty changes object returns job_id null. revision must equal settings.get's, else state_conflict. The service writes state.json from its own typed state, never the caller's bytes.",
-      "since": "0.2",
+      "description": "changes is a closed, typed object: each settable state.json field is a property here (bool, enum, bounded integer), never free-form. It has no properties (SSH, base and channel have their own methods), so any field is invalid_params with data {field, reason: unknown_field}, and an empty changes object returns job_id null. revision must equal settings.get's, else state_conflict. The service writes state.json from its own typed state, never the caller's bytes.",
       "params": {
         "type": "object",
         "required": ["revision", "changes"],
@@ -211,8 +204,7 @@
     },
     "ssh.set": {
       "summary": "Turn SSH (sshd) on or off (job). Action org.hinteros.system.ssh, which needs the admin password (auth_admin).",
-      "description": "Login over SSH is the admin account with its password; the system repo configures sshd. polkit's default for this action is auth_admin. The service checks it with AllowUserInteraction (since 0.3): polkit asks the authentication agent registered for the calling process (the session daemon's, which shows the launcher a password prompt) and the call waits until the user answered (at most 5 minutes). Without an agent the call gets authentication_required; a cancelled or timed-out prompt also gives authentication_required, too many wrong passwords permission_denied (reason polkit). Returns job_id null if SSH already is in that state.",
-      "since": "0.2",
+      "description": "Login over SSH is the admin account with its password; the system repo configures sshd. polkit's default for this action is auth_admin. The service checks it with AllowUserInteraction: polkit asks the authentication agent registered for the calling process (the session daemon's, which shows the launcher a password prompt) and the call waits until the user answered (at most 5 minutes). Without an agent the call gets authentication_required; a cancelled or timed-out prompt also gives authentication_required, too many wrong passwords permission_denied (reason polkit). Returns job_id null if SSH already is in that state.",
       "params": {
         "type": "object",
         "required": ["enabled"],
@@ -237,7 +229,6 @@
     },
     "generations.list": {
       "summary": "System generations on disk (newest first). Read-only.",
-      "since": "0.2",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -261,7 +252,6 @@
     },
     "rebuild": {
       "summary": "Re-apply the current /etc/hinteros (job): repair after a failed switch. Action org.hinteros.system.rebuild.",
-      "since": "0.2",
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources"],
@@ -287,7 +277,6 @@
     "hardware.redetect": {
       "summary": "Regenerate facter.json with nixos-facter and apply it (job). Action org.hinteros.system.rebuild.",
       "description": "The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root.",
-      "since": "0.2",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -303,7 +292,6 @@
     "rollback": {
       "summary": "Switch to an earlier generation (default: the one before the current), then restore /etc/hinteros from its snapshot (job). Action org.hinteros.system.rollback.",
       "description": "The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root. After the switch and the apps stage, box features that the owners' current app envs need and the restored generation lacks are turned back on in a box stage: the apply flow on the restored configuration with requirements = what the envs need (a second, mostly cached build; a new generation). The result then lists them in features_readded; generations.list names them beforehand per generation (readds_features). If that build fails the job fails at stage box (the rollback itself stays).",
-      "since": "0.2",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -320,8 +308,7 @@
     },
     "update.check": {
       "summary": "Look for a newer signed revision of the channel (job), or, within 60 s of the last check, return that result without a job. Action org.hinteros.system.update.check.",
-      "description": "The job lists the channel branch (git ls-remote of the URL from the running generation's channel table), fetches it into a root-owned bare repo, verifies the tip's SSH signature against the allowed signers shipped in the running generation, requires it to descend from the locked revision, and reads the highest Security: <low|medium|high|critical> trailer among the new commits. (0.9) It also requires the tip to descend from the newest verified tip this box saw on the branch (older_than_seen), and fetches and verifies the other channels' branches of the table to record their newest verified tips (root-only state that rollbacks and channel switches never lower; their failures do not fail the check). The job's result is an UpdateCheckResult; failures are job_failed, update_unreachable or update_verification_failed in job_finished.error.",
-      "since": "0.2",
+      "description": "The job lists the channel branch (git ls-remote of the URL from the running generation's channel table), fetches it into a root-owned bare repo, verifies the tip's SSH signature against the allowed signers shipped in the running generation, requires it to descend from the locked revision, and reads the highest Security: <low|medium|high|critical> trailer among the new commits. It also requires the tip to descend from the newest verified tip this box saw on the branch (older_than_seen), and fetches and verifies the other channels' branches of the table to record their newest verified tips (root-only state that rollbacks and channel switches never lower; their failures do not fail the check). The job's result is an UpdateCheckResult; failures are job_failed, update_unreachable or update_verification_failed in job_finished.error.",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -364,7 +351,6 @@
     "update.apply": {
       "summary": "Install the revision found by the last update.check (job). Action org.hinteros.system.update.apply.",
       "description": "rev must equal the last verified check result's available.rev for the current channel and locked revision, else state_conflict. The job re-verifies it, locks the hinteros input to ?rev=<rev> (never re-fetching the branch) and runs the apply flow. The admin profile's PIN is needed in admin_pin, from every profile (the guest's included): pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet; an admin profile without a PIN yet passes. Not needed from root. The PIN is checked before rev is compared with the last check. update.check needs no PIN.",
-      "since": "0.2",
       "params": {
         "type": "object",
         "required": ["rev"],
@@ -384,9 +370,8 @@
       ]
     },
     "channel.check": {
-      "summary": "0.9: verify the tip of another channel before switching to it (job). Action org.hinteros.system.update.check (no PIN).",
+      "summary": "Verify the tip of another channel before switching to it (job). Action org.hinteros.system.update.check (no PIN).",
       "description": "The job fetches the target channel's branch (URL from the running generation's channel table), verifies the tip's SSH signature against the allowed signers shipped in the running generation, and requires it to descend from (or equal) the newest verified tip this box saw on that branch (update_verification_failed {reason: older_than_seen} otherwise). It does not need to descend from the locked revision: older is true when it does not (the switch may go back to an older version). The job's result is a ChannelCheckResult; the launcher shows target.version and target.date and asks the owner to confirm, then calls channel.set with target.rev. Returns job_id null if the channel is already the current one. Failures are job_failed, update_unreachable or update_verification_failed in job_finished.error.",
-      "since": "0.9",
       "params": {
         "type": "object",
         "required": ["channel"],
@@ -402,8 +387,7 @@
     },
     "channel.set": {
       "summary": "Follow another channel (job), at the revision channel.check verified. Action org.hinteros.system.channel.",
-      "description": "The URL comes from the running generation's channel table, never from params. Returns job_id null if the channel is already the current one. Otherwise (0.9) rev is needed and must equal the last channel.check result's target.rev for this channel and the locked revision, else state_conflict {reason: channel_rev}: the owner confirmed that version. The job re-verifies rev (an allowed signer; it must descend from the newest verified tip this box saw on the target branch, else update_verification_failed {reason: older_than_seen}), locks the hinteros input to it on the target branch and runs the apply flow. rev may be older than the locked revision (beta to stable). Before 0.9 the target was the branch tip and acknowledge_downgrade allowed any older signed tip. The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root. The PIN is checked first.",
-      "since": "0.2",
+      "description": "The URL comes from the running generation's channel table, never from params. Returns job_id null if the channel is already the current one. Otherwise rev is needed and must equal the last channel.check result's target.rev for this channel and the locked revision, else state_conflict {reason: channel_rev}: the owner confirmed that version. The job re-verifies rev (an allowed signer; it must descend from the newest verified tip this box saw on the target branch, else update_verification_failed {reason: older_than_seen}), locks the hinteros input to it on the target branch and runs the apply flow. rev may be older than the locked revision (beta to stable). The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root. The PIN is checked first.",
       "params": {
         "type": "object",
         "required": ["channel"],
@@ -429,7 +413,6 @@
     "base.set": {
       "summary": "Switch the nixpkgs base (job). Action org.hinteros.system.channel. A base that is not built is refused: unavailable {service: base, reason: not_built} (only unstable today). unstable to stable needs acknowledge_downgrade: true.",
       "description": "The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root. The PIN is checked before anything else, also when the base is already the requested one.",
-      "since": "0.2",
       "params": {
         "type": "object",
         "required": ["base"],
@@ -451,7 +434,6 @@
     "apps.install": {
       "summary": "Install Store apps (job). Action org.hinteros.system.apps.",
       "description": "ids (1 to 8 catalog ids) must be in the running generation's catalog index (/run/current-system/sw/share/hinteros/catalog.json, never the caller's copy) with status available; their depends are added (transitively). Ids already installed are skipped; if nothing is left the result is job_id null. A conflict between a new app and an installed or requested one is app_conflict. Every new app with vendor terms needs accepted_terms[id] equal to the catalog's terms.version, else terms_required (the box records the acceptance: id, version, time, uid and profile, in the audit log and /var/lib/hinteros/terms-accepted.json). revision is the app revision from apps.list (state_conflict otherwise), and the apps are installed into the caller's own profile (a new generation of its Nix profile, no system rebuild unless a box feature must be turned on first: stage box). Free disk space must cover the new apps' sizeMiB plus the usual rebuild margin (insufficient_resources). The job writes state.json's apps from the service's typed state and runs the apply flow.",
-      "since": "0.3",
       "params": {
         "type": "object",
         "required": ["ids", "revision"],
@@ -494,7 +476,6 @@
     "apps.remove": {
       "summary": "Remove installed Store apps (job), optionally with their data. Action org.hinteros.system.apps.",
       "description": "ids (1 to 8) must be installed (not_found otherwise). An app that another installed app depends on cannot be removed alone (app_conflict, conflicts_with names the dependent). The job writes state.json without them and runs the apply flow. With delete_data, after a successful switch the job deletes each removed app's dataPaths (from the running generation's catalog) in every profile's home, as root without following symlinks (each path component is opened with O_NOFOLLOW relative to the home; nothing outside the home and no other filesystem is touched) and logs what it deleted. The launcher closes running apps first.",
-      "since": "0.3",
       "params": {
         "type": "object",
         "required": ["ids", "revision", "delete_data"],
@@ -519,9 +500,8 @@
       ]
     },
     "apps.list": {
-      "summary": "The caller's own apps (0.4): its current app env.",
+      "summary": "The caller's own apps: its current app env.",
       "description": "Read-only. The caller is resolved from its uid: a profile (or the guest). revision stands for the current app generation; pass it to apps.install/apps.remove as revision. needs_terms: ids whose vendor terms this profile has not accepted at the catalog's current version (apps that came with the starter set); the launcher shows the terms on first launch and calls apps.accept_terms. A spare account gets an empty list.",
-      "since": "0.4",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": {
         "type": "object",
@@ -541,9 +521,8 @@
       ]
     },
     "apps.generations": {
-      "summary": "The caller's app generations (0.4), newest first.",
+      "summary": "The caller's app generations, newest first.",
       "description": "Read-only. Every generation of the caller's Nix profile of apps (the newest 3 plus the current one are kept), with the ids of its env and the system revision it was built against. apps.rollback takes one of them.",
-      "since": "0.4",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": {
         "type": "object",
@@ -575,9 +554,8 @@
       ]
     },
     "apps.rollback": {
-      "summary": "Switch the caller's apps back to an earlier generation (job, 0.4). Action org.hinteros.system.apps.",
+      "summary": "Switch the caller's apps back to an earlier generation (job). Action org.hinteros.system.apps.",
       "description": "generation must be one of apps.generations and not the current one (not_found otherwise). If its env needs box features that are off, the job first runs the box stage (a system rebuild). Job kind apps_rollback.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": ["generation"],
@@ -592,9 +570,8 @@
       ]
     },
     "apps.accept_terms": {
-      "summary": "Accept an installed app's vendor terms for the caller's profile (0.4). Action org.hinteros.system.apps.",
+      "summary": "Accept an installed app's vendor terms for the caller's profile. Action org.hinteros.system.apps.",
       "description": "For apps that reached the profile without an acceptance (the starter set): id must be in the caller's env and have terms, version must be the running catalog's terms.version (invalid_params otherwise). Records {version, accepted_at, by: <user>, profile: <id>} in terms-accepted.json and the audit log; then the id leaves apps.list's needs_terms. Accepting what is already accepted is a no-op.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": ["id", "version"],
@@ -609,9 +586,8 @@
       ]
     },
     "apps.clear_data": {
-      "summary": "Delete a Store app's data in the caller's profile (job apps_clear_data, 0.11). Action org.hinteros.system.apps.",
+      "summary": "Delete a Store app's data in the caller's profile (job apps_clear_data). Action org.hinteros.system.apps.",
       "description": "id must be a catalog app (installed or not: data a remove left behind). The job deletes the app's dataPaths in the caller's own home, as apps.remove {delete_data} does (no symlink followed, nothing on another filesystem); other profiles' data is never touched. The app is not closed first: the launcher stops it before. Schema-1 boxes: unavailable.",
-      "since": "0.11",
       "params": {
         "type": "object",
         "required": ["id"],
@@ -626,9 +602,8 @@
       ]
     },
     "profiles.list": {
-      "summary": "The profiles (0.4). Read-only; starts a usage scan when the data is older than an hour.",
+      "summary": "The profiles. Read-only; starts a usage scan when the data is older than an hour.",
       "description": "Every account of the running state.json that has metadata, with the caller (spares are not listed; first_boot: no admin profile exists).",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [],
@@ -847,7 +822,6 @@
     "profiles.create": {
       "summary": "Create a profile (job, a rebuild that adds the account). Action org.hinteros.system.profiles.create; also on greeter.sock.",
       "description": "name 1 to 32 characters (trimmed, no control or format characters; duplicates allowed), color one of ProfileColor (default teal), pin 4 to 8 digits, locked as chosen, revision = settings.get's. At 8 profiles: profile_limit. The id is taken from the counter at once (never reused, even if the job fails). On success the job writes the metadata and the PIN hash, gives the account the starter env, and (from the greeter) a one-time token so the greeter enters it without the PIN. Job kind profiles_create.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [
@@ -934,9 +908,8 @@
       ]
     },
     "profiles.setup_admin": {
-      "summary": "First-boot mode: make the caller's spare account the admin profile (0.4). No job, no rebuild, no network.",
+      "summary": "First-boot mode: make the caller's spare account the admin profile. No job, no rebuild, no network.",
       "description": "Only a spare caller, only while no admin profile exists (else permission_denied {reason: profile}). Writes the metadata (admin) and the PIN hash; the account's app profile is set to the starter env right after (a short apps job when the box is idle).",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [
@@ -993,9 +966,8 @@
       ]
     },
     "profiles.rename": {
-      "summary": "Rename a profile (0.4). Own: no PIN; another: the admin PIN.",
+      "summary": "Rename a profile. Own: no PIN; another: the admin PIN.",
       "description": "pin_required {pin: admin} (with retry_after_ms during the backoff lock) when renaming another profile without the right admin PIN.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [
@@ -1054,9 +1026,8 @@
       ]
     },
     "profiles.set_appearance": {
-      "summary": "The caller's colour and the appearance mirrored for the picker (0.4).",
+      "summary": "The caller's colour and the appearance mirrored for the picker.",
       "description": "text_scale 0.5 to 3.0. The picker uses the most accessible combination of all profiles' values.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [],
@@ -1100,9 +1071,8 @@
       ]
     },
     "profiles.set_pin": {
-      "summary": "Change the caller's PIN (0.4). current_pin is required once a PIN is set (a profile without one sets its first PIN without it).",
+      "summary": "Change the caller's PIN. current_pin is required once a PIN is set (a profile without one sets its first PIN without it).",
       "description": "pin_required {pin: self} for a missing or wrong current_pin (with the backoff).",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [
@@ -1155,8 +1125,7 @@
       ]
     },
     "profiles.set_locked": {
-      "summary": "Whether the caller's profile asks for its PIN to enter (0.4). Own PIN.",
-      "since": "0.4",
+      "summary": "Whether the caller's profile asks for its PIN to enter. Own PIN.",
       "params": {
         "type": "object",
         "required": [
@@ -1197,9 +1166,8 @@
       ]
     },
     "profiles.reset_pin": {
-      "summary": "Set another profile's PIN with the admin PIN (0.4). The admin profile's own: the admin account's password (polkit org.hinteros.system.profiles.recover, interactive) instead.",
+      "summary": "Set another profile's PIN with the admin PIN. The admin profile's own: the admin account's password (polkit org.hinteros.system.profiles.recover, interactive) instead.",
       "description": "For the admin profile admin_pin is not used; the service asks polkit for org.hinteros.system.profiles.recover with the session daemon's agent (authentication_required when dismissed). The target's backoff is reset.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [
@@ -1261,7 +1229,6 @@
     "profiles.remove": {
       "summary": "Remove a profile, its home and its apps (job, a rebuild). Own PIN for yourself, the admin PIN for others; never the admin profile.",
       "description": "confirm_id must equal id. The job kills every process of the account, rebuilds without it, then deletes the home (no symlink is followed, one filesystem), the PIN, the metadata, the app profile links and the registry entry. A failed or cancelled job deletes nothing. Removing your own profile: end the session first (the launcher switches to the picker). invalid_params {field: id, reason: admin} for the admin profile. Job kind profiles_remove.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [
@@ -1333,9 +1300,8 @@
       ]
     },
     "profiles.switch": {
-      "summary": "Choose the next profile (0.4): writes the switch hint the greeter reads. A locked target needs its PIN here, before the caller's session closes anything.",
+      "summary": "Choose the next profile: writes the switch hint the greeter reads. A locked target needs its PIN here, before the caller's session closes anything.",
       "description": "id is a profile id or guest. A locked profile (with a PIN) other than the caller's own needs pin = the target's PIN: wrong or missing is pin_required {pin: target, retry_after_ms?} and nothing is written; right, the hint carries a one-time token for the target (single use, bound to its user, valid 60 s), so the greeter enters it without any UI. The same caller may call again without pin while its token is live to extend hint and token by 60 s (a switch waiting for apps to close). The admin profile's PIN has no backoff wait, but 10 wrong tries a boot (then reboot_required). For the caller's own id it issues a one-time resume token (session.restart). Unlocked profiles and the guest need no PIN. The session daemon then ends the session (session.switch_profile).",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [
@@ -1411,9 +1377,8 @@
       ]
     },
     "profiles.switch_cancel": {
-      "summary": "Drop the caller's switch hint and its token (0.4): the switch was cancelled and the session stays.",
+      "summary": "Drop the caller's switch hint and its token: the switch was cancelled and the session stays.",
       "description": "Only a hint the caller wrote is removed; otherwise nothing happens.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [],
@@ -1440,9 +1405,8 @@
       ]
     },
     "profiles.unlock": {
-      "summary": "The caller's PIN after sleep (0.4): the lock screen of a locked profile.",
+      "summary": "The caller's PIN after sleep: the lock screen of a locked profile.",
       "description": "pin_required {pin: self, retry_after_ms?} when wrong or during the backoff lock.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [
@@ -1494,7 +1458,6 @@
     "guest.set": {
       "summary": "Turn the guest account on or off (job, a rebuild). Admin PIN. Action org.hinteros.system.starter.",
       "description": "job_id null when it is already so. Job kind guest_set.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [
@@ -1537,9 +1500,8 @@
       ]
     },
     "guest.end": {
-      "summary": "End guest session (0.5): end the guest's session and wipe the guest now (job). Only the guest itself. Action org.hinteros.system.profiles.",
+      "summary": "End guest session: end the guest's session and wipe the guest now (job). Only the guest itself. Action org.hinteros.system.profiles.",
       "description": "Only a caller that is the guest account (hinteros-guest, while the guest is on) may call it; anyone else gets permission_denied {reason: profile}. The service checks the account first: the name hinteros-guest, the expected guest uid (20000 on a box), no other account with that uid, a home that is an absolute path ending in /hinteros-guest; otherwise internal_error and nothing is touched. The job (kind guest_end) hides the guest from the picker (profiles-public.json guest.enabled false; PAM refuses the guest) while it runs, ends the guest's session itself (logind TerminateUser, its user slice, then SIGKILL for anything left of the uid; it fails at stage preparing if processes remain, before anything is deleted), then deletes everything the guest uid owns in its home (the home directory itself stays), in /tmp, /var/tmp and /dev/shm (top-level entries owned by the uid; no symlink is followed, no other filesystem entered, nothing owned by another uid touched), the guest's app env link (then given the starter env again), its terms acceptances (by hinteros-guest), its usage entry and a switch hint that targets it. The boot-time wipe stays. The caller's own session ends while the job runs: call it last.",
-      "since": "0.5",
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy"],
@@ -1549,8 +1511,7 @@
       ]
     },
     "display.save_mode": {
-      "summary": "Make a display mode the box's (0.4): stored in runtime.json, published as /run/hinteros/gamescope-modes for every profile's session. Action org.hinteros.system.settings.",
-      "since": "0.4",
+      "summary": "Make a display mode the box's: stored in runtime.json, published as /run/hinteros/gamescope-modes for every profile's session. Action org.hinteros.system.settings.",
       "params": {
         "type": "object",
         "required": [
@@ -1608,9 +1569,8 @@
       ]
     },
     "audio.save_output": {
-      "summary": "Make an audio output the box's (0.4): stored in runtime.json, published as /run/hinteros/audio-output. Action org.hinteros.system.settings.",
+      "summary": "Make an audio output the box's: stored in runtime.json, published as /run/hinteros/audio-output. Action org.hinteros.system.settings.",
       "description": "node is a PipeWire node name.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [
@@ -1646,8 +1606,7 @@
       ]
     },
     "starter_set.get": {
-      "summary": "The starter set: the apps every new profile and guest session starts with (0.4). Read-only.",
-      "since": "0.4",
+      "summary": "The starter set: the apps every new profile and guest session starts with. Read-only.",
       "params": {
         "type": "object",
         "required": [],
@@ -1699,7 +1658,6 @@
     "starter_set.set": {
       "summary": "Change the starter set (job). Admin PIN; ids must be apps the admin profile has now. Action org.hinteros.system.starter.",
       "description": "0 to 16 ids, each in the admin profile's current env, else invalid_params {field: ids, reason: not_in_admin_profile}. The job builds the new starter env (an evaluation only), with the box stage when a feature is off. Only profiles and guest sessions created afterwards get it. Job kind starter_set.",
-      "since": "0.4",
       "params": {
         "type": "object",
         "required": [
@@ -1750,9 +1708,8 @@
       ]
     },
     "storage.get": {
-      "summary": "0.6: the last storage measurement (storage.md): the disk, the top level of the ring, every profile's total, the system and apps breakdown, garbage and the clean-up estimates. Read-only, open to every caller.",
+      "summary": "The last storage measurement (storage.md): the disk, the top level of the ring, every profile's total, the system and apps breakdown, garbage and the clean-up estimates. Read-only, open to every caller.",
       "description": "Null until the first storage_measure job has finished. Kept in /var/lib/hinteros/storage.json (root, 0600) with its time. Never contains a file, folder or Steam game name or an app id: profile and guest nodes have no children here (storage.tree gives a home's detailed tree). estimates.system[keep-1] and estimates.profiles[keep-1] (keep 1 to 10) say how many generations storage.cleanup_system / storage.cleanup_profiles with that keep would remove now and about how many bytes it frees (garbage_bytes included; NAR sizes), from this measurement.",
-      "since": "0.6",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -1840,18 +1797,16 @@
       ]
     },
     "storage.measure": {
-      "summary": "0.6: measure what uses the disk (job storage_measure). Any profile or the guest; no PIN. Action org.hinteros.system.settings.",
+      "summary": "Measure what uses the disk (job storage_measure). Any profile or the guest; no PIN. Action org.hinteros.system.settings.",
       "description": "A storage_measure job that is already running is the answer (its job_id, no new job); another job running is job_busy. Stages preparing, measuring (with percent), finishing; cancellable at any time (the last measurement stays). Measures: statvfs of the store's filesystem; nix path-info --all -s (NAR sizes) and nix-store --gc --print-live (garbage = all minus live); nix-store -qR of every system and app generation; every home with a walk that never follows a symlink, never leaves the home's filesystem and never reads a file (only Steam's libraryfolders.vdf and appmanifest_*.acf, for the games' names). The result is {measured_at}; then call storage.get. Nothing a caller can read (events, results, the job's log) names a file of a home.",
-      "since": "0.6",
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy"],
       "examples": [{ "name": "started", "params": {}, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
     },
     "storage.tree": {
-      "summary": "0.6: one home's detailed tree from the last measurement: its folders and its Steam games. The caller's own home: open; another profile's or the guest's: the admin PIN. Action org.hinteros.system.settings.",
+      "summary": "One home's detailed tree from the last measurement: its folders and its Steam games. The caller's own home: open; another profile's or the guest's: the admin PIN. Action org.hinteros.system.settings.",
       "description": "id: a profile id or guest (else invalid_params {field: id, reason: bad_format}). The caller's own account (or the guest asking for guest) needs no PIN; anything else needs admin_pin, checked like every box-wide action (pin_required {pin: admin} when missing or wrong, or without an admin profile; an admin profile without a PIN yet passes; root is exempt). not_found: nothing measured yet, or that home was not measured (measure again). The root is kind profile (with id) or guest; its bytes equal the top level's. Children: steam (its children: steam_game, one per installed game, named from appmanifest_<appid>.acf in each Steam library folder inside the home; the game folders are not counted again among the folders), dir (recursively) and files (files directly in a folder, and folders too small or deep to show). At most 6 folder levels, folders of at least max(1 MiB, 0.5 % of the home), at most 16 per folder, at most 400 nodes; names at most 128 characters, control characters replaced by U+FFFD.",
-      "since": "0.6",
       "params": {
         "type": "object",
         "required": ["id"],
@@ -1910,9 +1865,8 @@
       ]
     },
     "storage.cleanup_system": {
-      "summary": "0.6: clean up the system (job cleanup_system): remove the system generations older than the newest keep (never the running or the booted one), rewrite the boot menu, collect garbage. Admin PIN every time. Action org.hinteros.system.rebuild.",
+      "summary": "Clean up the system (job cleanup_system): remove the system generations older than the newest keep (never the running or the booted one), rewrite the boot menu, collect garbage. Admin PIN every time. Action org.hinteros.system.rebuild.",
       "description": "keep: 1 to 10 (else invalid_params {field: keep, reason: out_of_range}). admin_pin as for every box-wide action. Always a job (garbage is collected even when no generation goes). Stages preparing, cleaning (removing generations with nix-env --delete-generations, then switch-to-configuration boot of the default generation so no boot entry points at a removed one; not cancellable from here), collecting (nix-store --gc), finishing. Result {freed_bytes, generations_removed}: freed_bytes is the store filesystem's free space after minus before. The estimate comes from storage.get's estimates.system. Below 2 the launcher warns that there is no older version to roll back to.",
-      "since": "0.6",
       "params": { "$ref": "#/$defs/CleanupParams", "type": "object" },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required"],
@@ -1921,26 +1875,23 @@
       ]
     },
     "storage.cleanup_profiles": {
-      "summary": "0.6: clean up profiles (job cleanup_profiles): in every profile's app env and the starter set's, remove the generations older than the newest keep (never the current one), then collect garbage. Admin PIN every time. Action org.hinteros.system.rebuild.",
+      "summary": "Clean up profiles (job cleanup_profiles): in every profile's app env and the starter set's, remove the generations older than the newest keep (never the current one), then collect garbage. Admin PIN every time. Action org.hinteros.system.rebuild.",
       "description": "keep: 1 to 10. The guest's env (a single link) is not touched. Stages preparing, cleaning, collecting, finishing; result {freed_bytes, generations_removed}. The estimate comes from storage.get's estimates.profiles. Below 2 the launcher warns that app rollback in those profiles is gone.",
-      "since": "0.6",
       "params": { "$ref": "#/$defs/CleanupParams", "type": "object" },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required"],
       "examples": [{ "name": "keep 2", "params": { "keep": 2, "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
     },
     "cleanup.get": {
-      "summary": "0.6: the automatic clean-up setting (state.json settings.cleanup; defaults when absent: on, weekly, keep 5 and 5). Read-only.",
-      "since": "0.6",
+      "summary": "The automatic clean-up setting (state.json settings.cleanup; defaults when absent: on, weekly, keep 5 and 5). Read-only.",
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/CleanupSettings", "type": "object" },
       "errors": [],
       "examples": [{ "name": "default", "params": {}, "result": { "enabled": true, "frequency": "weekly", "keep_system": 5, "keep_profiles": 5 } }]
     },
     "cleanup.set": {
-      "summary": "0.6: change the automatic clean-up (job cleanup_set, a rebuild like ssh.set). Admin PIN. Action org.hinteros.system.settings.",
+      "summary": "Change the automatic clean-up (job cleanup_set, a rebuild like ssh.set). Admin PIN. Action org.hinteros.system.settings.",
       "description": "All four fields; keep_system and keep_profiles 1 to 10 (else invalid_params {field, reason: out_of_range}). Writes settings.cleanup {enable, frequency, keepSystem, keepProfiles} to state.json through the apply flow; job_id null when nothing changes (also when it was absent and the defaults are asked for). The system's nix-gc timer and the boot menu limit follow it.",
-      "since": "0.6",
       "params": {
         "type": "object",
         "required": ["enabled", "frequency", "keep_system", "keep_profiles"],
@@ -1964,9 +1915,8 @@
       ]
     },
     "time_zone.get": {
-      "summary": "0.8: the box's time zone (state.json settings.timeZone; UTC when absent) and its offsets now. Read-only.",
+      "summary": "The box's time zone (state.json settings.timeZone; UTC when absent) and its offsets now. Read-only.",
       "description": "Offsets come from the system's tzdata (/etc/zoneinfo), the same files /etc/localtime points into. offset_s: seconds east of UTC now (DST included). standard_offset_s: the zone's standard offset now: the lower of its two offsets while it observes DST (so tzdata's negative DST, e.g. Europe/Dublin, gives its winter offset, as the map's bands do), otherwise offset_s. offset_valid_until: Unix time of the next change of offset_s (the next DST change), null when the zone has none. The launcher's clock shows UTC plus offset_s and gets the zone again at offset_valid_until and on time_zone_changed. A zone in state.json that tzdata does not have (or a bad one) reads as UTC.",
-      "since": "0.8",
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
       "errors": [],
@@ -1976,9 +1926,8 @@
       ]
     },
     "time_zone.list": {
-      "summary": "0.8: every zone the picker offers: tzdata's zone1970.tab zones plus UTC, sorted by name, each with its offsets now. Read-only.",
+      "summary": "Every zone the picker offers: tzdata's zone1970.tab zones plus UTC, sorted by name, each with its offsets now. Read-only.",
       "description": "Offsets as in time_zone.get. A zone1970.tab entry whose file is missing or unreadable is left out (and logged).",
-      "since": "0.8",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -2003,9 +1952,8 @@
       ]
     },
     "time_zone.set": {
-      "summary": "0.8: set the box's time zone at once (no job, no rebuild). Admin PIN, except in first-boot mode. Action org.hinteros.system.settings.",
+      "summary": "Set the box's time zone at once (no job, no rebuild). Admin PIN, except in first-boot mode. Action org.hinteros.system.settings.",
       "description": "zone: an IANA name that the system's tzdata has (a TZif file under /etc/zoneinfo; UTC always). A badly formed name is invalid_params {field: zone, reason: bad_format}; a well-formed name tzdata does not have is invalid_params {field: zone, reason: unknown}. The admin PIN is needed (pin_required {pin: admin} when it is missing or wrong) except in first-boot mode (no admin profile yet, the rule of profiles.setup_admin). Writes settings.timeZone to state.json (atomically; a running job's own state.json keeps the new zone) and points /etc/localtime at /etc/zoneinfo/<zone> (a new link renamed over the old one), through the oneshot hinteros-time-zone-apply.service (the service waits for it, up to 30 s; else internal_error). Processes started later see the new zone. Then time_zone_changed. The result is the new zone and its offsets; setting the current zone again changes nothing and sends no event.",
-      "since": "0.8",
       "params": {
         "type": "object",
         "required": ["zone"],
@@ -2033,9 +1981,8 @@
       ]
     },
     "lan_filter.set": {
-      "summary": "0.10: apps without the lan permission cannot reach the local network: the session daemon's own call, not relayed. No polkit action, no seat check (it only restricts the caller's own processes).",
+      "summary": "Apps without the lan permission cannot reach the local network: the session daemon's own call, not relayed. No polkit action, no seat check (it only restricts the caller's own processes).",
       "description": "cgroup: the caller's cgroup v2 path for those apps, as in /proc/self/cgroup: below /user.slice/user-<uid>.slice/user@<uid>.service/ of the caller's uid, parts of [A-Za-z0-9._@:-] (no . or ..), at most 512 bytes; it must exist (a directory owned by the caller) and must not be removed and created again while the filter is on (nftables keeps the cgroup it found). Else invalid_params {field: cgroup, reason: bad_format | not_found | not_owned}. One cgroup per uid: a new call replaces the caller's. The service keeps the cgroups in /run/hinteros/lan-filter.json and starts the oneshot hinteros-lan-filter.service, which loads the nftables table inet hinteros_lan (output hook, socket cgroupv2): from those cgroups, TCP to a local address is reset and other packets are dropped. Local: 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 127/8, 224/4, 255.255.255.255, fc00::/7, fe80::/10, ff00::/8, ::1, the destinations of the box's on-link routes, and the box's own, broadcast and multicast addresses. Allowed: port 53 (UDP and TCP) to the nameservers of /etc/resolv.conf. The unit runs again when /etc/resolv.conf or the network changes; cgroups that are gone are dropped. The call waits for the unit (up to 30 s); when it fails: internal_error, and the table is what it was. Without the filter on this box (--lan-filter): internal_error. Rate limited (a bucket of its own). A failed unit job is tried once more.",
-      "since": "0.10",
       "params": {
         "type": "object",
         "required": ["cgroup"],
@@ -2056,18 +2003,16 @@
       ]
     },
     "lan_filter.clear": {
-      "summary": "0.10: remove the caller's lan_filter.set cgroup (its session ends): the session daemon's own call, not relayed.",
+      "summary": "Remove the caller's lan_filter.set cgroup (its session ends): the session daemon's own call, not relayed.",
       "description": "Nothing set: nothing changes. Otherwise like lan_filter.set: the unit loads the table again (internal_error when it fails).",
-      "since": "0.10",
       "params": { "type": "object", "additionalProperties": false },
       "result": { "type": "object", "required": [], "additionalProperties": false, "properties": {} },
       "errors": ["rate_limited"],
       "examples": [{ "name": "session ends", "params": {}, "result": {} }]
     },
     "services.list": {
-      "summary": "0.11: the Server section: every service the catalog offers (kind service, status available) and every enabled one, with its unit's state and its setup flow's detail. Read-only, open to every caller.",
+      "summary": "The Server section: every service the catalog offers (kind service, status available) and every enabled one, with its unit's state and its setup flow's detail. Read-only, open to every caller.",
       "description": "revision is the hash of state.json (pass it to services.enable/services.disable). status: systemd's ActiveState of the service's unit (jellyfin.service, plex.service, tailscaled.service, hinteros-cloudflared.service; inactive when not loaded), null when the service is off or has no known unit. setup: the catalog's setup flow (null: none, or one this daemon does not know: show only on/off). terms: the vendor terms to show before services.enable (file: the absolute path of the text next to the running catalog). detail: null unless the service is on and has a setup flow; no secrets. Jellyfin: setup_done (the first-run setup by HinterOS is done), url (http://<local IP>:<port>), libraries (from Jellyfin's API on loopback, or the last list a job or read saw while Jellyfin does not answer), users (each profile's Jellyfin user name). Plex: claimed (linked to a Plex account), server_name, url. Tailscale: state from tailscaled (unavailable: it does not answer), name, tailnet IPv4, MagicDNS name, tailnet, key_expiry (Unix seconds; null: never or unknown); all null unless signed in. Cloudflare: token_set, connected (cloudflared has a connection), local_ip (the box's address on its local network, for the private-network route). Each service is asked with a 1 s timeout.",
-      "since": "0.11",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -2138,9 +2083,8 @@
       ]
     },
     "services.enable": {
-      "summary": "0.11: turn services on (job services_enable, a rebuild). Admin PIN. Action org.hinteros.system.services.",
+      "summary": "Turn services on (job services_enable, a rebuild). Admin PIN. Action org.hinteros.system.services.",
       "description": "ids: 1 to 8 different catalog ids, each kind service with status available in the running generation's catalog (not_found: not in the catalog; invalid_params {field: ids, reason: not_a_service | not_available}). Ids already on are skipped; job_id null when nothing is left. revision: services.list's (state_conflict otherwise). A service with vendor terms (Plex) needs accepted_terms[id] equal to the catalog's terms.version (terms_required {id, version}; terms for ids not being turned on: invalid_params {field: accepted_terms, reason: not_requested}); the acceptance is audited and recorded in /var/lib/hinteros/terms-accepted.json by the caller's user, with the admin profile's id. The job writes state.json's services and runs the apply flow (stages preparing, evaluating, downloading, building, activating, finishing); for jellyfin-server it then waits up to 3 minutes for HinterOS's first-run setup (stage configuring) and makes each profile's Jellyfin user (best effort: jellyfin.users.reveal and every Jellyfin job make missing users too). Result: the applied generation.",
-      "since": "0.11",
       "params": {
         "type": "object",
         "required": ["ids", "pin", "revision"],
@@ -2174,9 +2118,8 @@
       ]
     },
     "services.disable": {
-      "summary": "0.11: turn services off (job services_disable, a rebuild), their data deleted on request. Admin PIN. Action org.hinteros.system.services.",
+      "summary": "Turn services off (job services_disable, a rebuild), their data deleted on request. Admin PIN. Action org.hinteros.system.services.",
       "description": "ids: 1 to 8 different ids, each on (not_found otherwise). revision: services.list's. The job writes state.json without them and runs the apply flow. With delete_data (the launcher confirms twice), after a successful switch it deletes each service's catalog stateDirs below /var/lib, and for jellyfin-server also /var/cache/jellyfin and /var/lib/hinteros/services/jellyfin-server (admin password, API key, profile users), as root without following a symlink anywhere and without entering another filesystem; anything outside /var/lib and /var/cache is refused. Media files in /srv/media are never deleted. Without delete_data the data stays and turning the service on again finds it.",
-      "since": "0.11",
       "params": {
         "type": "object",
         "required": ["ids", "pin", "revision", "delete_data"],
@@ -2197,9 +2140,8 @@
       ]
     },
     "media.folders": {
-      "summary": "0.11: one level of folders under /srv/media, for a Jellyfin library. Read-only, open to every caller.",
+      "summary": "One level of folders under /srv/media, for a Jellyfin library. Read-only, open to every caller.",
       "description": "Without folder_id: the folders directly in /srv/media (an empty list when it does not exist); with it: the folders in that folder. An id is the folder's path relative to /srv/media (no empty, . or .. component, no component starting with a dot, no control characters, at most 1024 bytes; else invalid_params {field: folder_id}). Every component is opened without following symlinks: a symlink is neither listed nor entered (not_found), so no id leads out of /srv/media. Hidden folders, files, symlinks and names that are not UTF-8 are left out. Sorted by name, at most 500. has_children: the folder has folders of its own.",
-      "since": "0.11",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -2222,9 +2164,8 @@
       ]
     },
     "jellyfin.libraries.add": {
-      "summary": "0.11: add a Jellyfin library on a folder in /srv/media (job jellyfin_library_add). Admin PIN. Action org.hinteros.system.services.",
+      "summary": "Add a Jellyfin library on a folder in /srv/media (job jellyfin_library_add). Admin PIN. Action org.hinteros.system.services.",
       "description": "name: 1 to 64 characters after trimming, no control or format characters, none of /\\:*?\"<>| (invalid_params {field: name, reason: bad_length | bad_name}); a library with the same name (any case) is invalid_params {field: name, reason: exists} when Jellyfin answers in time, else the job fails. kind: movies, shows, music or mixed (Jellyfin's collection types movies, tvshows, music, and none for mixed). folder: a media.folders id, resolved again (no symlink followed) when the request comes and again in the job (not_found: no such folder). Jellyfin off: unavailable {service: jellyfin, reason: off}; its first-run setup not done: unavailable {service: jellyfin, reason: not_ready}. The job (stages preparing, configuring, finishing) waits up to 90 s for Jellyfin, makes missing profile users, adds the library and starts its scan; job_progress's subject then gains library.id. Failures: job_failed with reason unreachable, not_ready or refused.",
-      "since": "0.11",
       "params": {
         "type": "object",
         "required": ["pin", "name", "kind", "folder"],
@@ -2245,9 +2186,8 @@
       ]
     },
     "jellyfin.libraries.remove": {
-      "summary": "0.11: remove a Jellyfin library (job jellyfin_library_remove); the media files stay. Admin PIN. Action org.hinteros.system.services.",
+      "summary": "Remove a Jellyfin library (job jellyfin_library_remove); the media files stay. Admin PIN. Action org.hinteros.system.services.",
       "description": "library_id: a library id from services.list (not_found when Jellyfin answers in time and has no such library; else the job fails with reason refused). Jellyfin removes its own folder for the library (links, options), never the media. unavailable as for jellyfin.libraries.add.",
-      "since": "0.11",
       "params": {
         "type": "object",
         "required": ["pin", "library_id"],
@@ -2262,9 +2202,8 @@
       ]
     },
     "jellyfin.users.reveal": {
-      "summary": "0.11: the Jellyfin passwords, for other devices: the admin user's and each profile's (admin PIN; not a job). Action org.hinteros.system.services.",
+      "summary": "The Jellyfin passwords, for other devices: the admin user's and each profile's (admin PIN; not a job). Action org.hinteros.system.services.",
       "description": "Makes missing profile users first (one Jellyfin user per profile, not the guest; named after the profile: letters, digits, space and _-'.@+ kept, unique in any case with a number added; not an administrator, no media deletion; random 16-character password), when Jellyfin answers within 3 s. admin: null until HinterOS's first-run setup wrote it. users: every profile that has a user, with the profile's name now. The answer is never logged; the audit records only that it was asked. Jellyfin off: unavailable {service: jellyfin, reason: off}.",
-      "since": "0.11",
       "params": {
         "type": "object",
         "required": ["pin"],
@@ -2297,9 +2236,8 @@
       ]
     },
     "jellyfin.client_token": {
-      "summary": "0.11: a Jellyfin access token for the caller's own profile, so the Jellyfin app on the box signs in by itself (spike S1). No PIN; read-only for the caller (no seat check, no rate limit).",
+      "summary": "A Jellyfin access token for the caller's own profile, so the Jellyfin app on the box signs in by itself (spike S1). No PIN; read-only for the caller (no seat check, no rate limit).",
       "description": "The profile comes from the caller's uid (SO_PEERCRED): the guest, spare accounts and other users get permission_denied {reason: profile}. Jellyfin off or not set up: unavailable {service: jellyfin, reason: off | not_ready}; Jellyfin does not answer or refuses: unavailable {service: jellyfin, reason: unreachable}. The profile's Jellyfin user is made first if it has none. The token is made with POST /Users/AuthenticateByName as device hinteros-<profile id> (Jellyfin ends that device's older token, so a profile has one live token), kept in users.json (root only) and made again when Jellyfin answers 401 to it. Never logged.",
-      "since": "0.11",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -2320,9 +2258,8 @@
     },
 
     "plex.claim": {
-      "summary": "0.11: link Plex Media Server to the owner's Plex account with a code from plex.tv/claim (job plex_claim). Admin PIN. Action org.hinteros.system.services.",
+      "summary": "Link Plex Media Server to the owner's Plex account with a code from plex.tv/claim (job plex_claim). Admin PIN. Action org.hinteros.system.services.",
       "description": "code: claim- and 20 letters, digits, _ or - (what plex.tv/claim gives; valid about 4 minutes; never logged). Plex off: unavailable {service: plex, reason: off}; already linked: job_id null. The job (stages preparing, configuring, finishing) waits up to 90 s for Plex on 127.0.0.1:32400, posts the code to Plex's own /myplex/claim (Plex exchanges it with plex.tv), and succeeds once Preferences.xml has the account token (at most 30 s). Failures: job_failed with reason unreachable (Plex does not answer) or refused (Plex refused the code, e.g. it expired). Plex libraries are added in Plex's own app afterwards.",
-      "since": "0.11",
       "params": {
         "type": "object",
         "required": ["pin", "code"],
@@ -2338,9 +2275,8 @@
       ]
     },
     "tailscale.login": {
-      "summary": "0.11: sign the box in to Tailscale (job tailscale_login). Admin PIN. Action org.hinteros.system.services.",
+      "summary": "Sign the box in to Tailscale (job tailscale_login). Admin PIN. Action org.hinteros.system.services.",
       "description": "Tailscale off: unavailable {service: tailscale, reason: off}; signed in already (Running): job_id null. The job runs tailscale up --reset --json --timeout=600s (the defaults: no exit node, no subnet routes, no Tailscale SSH; --force-reauth when an expired key needs a new sign-in). When Tailscale has the sign-in URL, job_progress has stage signing_in and detail.auth_url (https, at most 512 printable ASCII characters; the launcher shows it as a QR code; jobs.get's detail has it too); a newer URL comes in a new job_progress. The job succeeds when tailscaled is Running (the person signed in, and the tailnet approved the device if it must). jobs.cancel stops the wait. Failures: job_failed with reason timeout (nobody signed in within 10 minutes), refused (the CLI failed; log_hint says why) or unreachable (no tailscale CLI).",
-      "since": "0.11",
       "params": {
         "type": "object",
         "required": ["pin"],
@@ -2355,9 +2291,8 @@
       ]
     },
     "tailscale.logout": {
-      "summary": "0.11: sign the box out of Tailscale (job tailscale_logout; tailscale logout). Admin PIN. Action org.hinteros.system.services.",
+      "summary": "Sign the box out of Tailscale (job tailscale_logout; tailscale logout). Admin PIN. Action org.hinteros.system.services.",
       "description": "Tailscale off: unavailable {service: tailscale, reason: off}; signed out already (NeedsLogin): job_id null. Stages preparing, configuring, finishing.",
-      "since": "0.11",
       "params": {
         "type": "object",
         "required": ["pin"],
@@ -2369,9 +2304,8 @@
       "examples": [{ "name": "sign out", "params": { "pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
     },
     "cloudflare.set_token": {
-      "summary": "0.11: set the Cloudflare tunnel token and (re)start the tunnel (job cloudflare_set_token). Admin PIN. Action org.hinteros.system.services.",
+      "summary": "Set the Cloudflare tunnel token and (re)start the tunnel (job cloudflare_set_token). Admin PIN. Action org.hinteros.system.services.",
       "description": "token: the token of a remotely managed tunnel from the Zero Trust dashboard, checked strictly: at most 512 characters, standard padded base64 of a JSON object with exactly a (account tag, 32 hex digits), t (tunnel id, a UUID), s (secret: base64 of 32 to 256 bytes) and optionally e (endpoint, lower-case letters), each once; else invalid_params {field: token, reason: bad_length | not_base64 | not_a_token | bad_account | bad_tunnel_id | bad_secret | bad_endpoint}. Never logged. Cloudflare off: unavailable {service: cloudflare, reason: off}. The service writes it to /var/lib/hinteros/services/cloudflare-tunnel/token (0600 root, atomically); the job restarts hinteros-cloudflared.service and waits up to 30 s for a connection (stages configuring, finishing). Failures: job_failed with reason not_connected (the token is kept: check it, or clear it) or unreachable (systemd refused the restart).",
-      "since": "0.11",
       "params": {
         "type": "object",
         "required": ["pin", "token"],
@@ -2386,9 +2320,8 @@
       ]
     },
     "cloudflare.clear_token": {
-      "summary": "0.11: stop the Cloudflare tunnel and delete its token (job cloudflare_clear_token). Admin PIN. Action org.hinteros.system.services.",
+      "summary": "Stop the Cloudflare tunnel and delete its token (job cloudflare_clear_token). Admin PIN. Action org.hinteros.system.services.",
       "description": "No token: job_id null. Cloudflare off: unavailable {service: cloudflare, reason: off}. Stages configuring, finishing.",
-      "since": "0.11",
       "params": {
         "type": "object",
         "required": ["pin"],
@@ -2402,7 +2335,6 @@
 
     "jobs.get": {
       "summary": "One job: running or among the last 10 finished. Read-only.",
-      "since": "0.2",
       "params": {
         "type": "object",
         "required": ["job_id"],
@@ -2468,7 +2400,6 @@
     },
     "jobs.list": {
       "summary": "The running job, if any, and the last 10 finished jobs, newest first. Read-only.",
-      "since": "0.2",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -2513,7 +2444,6 @@
     },
     "jobs.cancel": {
       "summary": "Cancel a running job before its activation stage; the box stays unchanged. Action org.hinteros.system.jobs.cancel.",
-      "since": "0.2",
       "params": {
         "type": "object",
         "required": ["job_id"],
@@ -2530,26 +2460,22 @@
   },
   "events": {
     "keyboard_home": {
-      "summary": "0.9: Ctrl + Super + D was pressed on a keyboard: go Home. The service reads no keyboard itself: hinteros-system keyboard-home (its own sandboxed unit, the only reader of keyboards) reports the chord on the keyboard socket. Sent only to connections of the uid owning seat0's active session; never to the greeter socket.",
-      "since": "0.9",
+      "summary": "Ctrl + Super + D was pressed on a keyboard: go Home. The service reads no keyboard itself: hinteros-system keyboard-home (its own sandboxed unit, the only reader of keyboards) reports the chord on the keyboard socket. Sent only to connections of the uid owning seat0's active session; never to the greeter socket.",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "examples": [{ "name": "home", "params": {} }]
     },
     "time_zone_changed": {
       "summary": "The box's time zone changed (time_zone.set, or a rollback restored another zone): the new zone and its offsets, as time_zone.get.",
-      "since": "0.8",
       "params": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
       "examples": [{ "name": "Chicago", "params": {"zone": "America/Chicago", "offset_s": -18000, "standard_offset_s": -21600, "offset_valid_until": 1793516400} }]
     },
     "profiles_changed": {
-      "summary": "0.4: profiles changed (a profile job finished, a rename, a PIN, lock or appearance change): re-query profiles.list.",
-      "since": "0.4",
+      "summary": "Profiles changed (a profile job finished, a rename, a PIN, lock or appearance change): re-query profiles.list.",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "examples": [{ "name": "changed", "params": {} }]
     },
     "job_started": {
-      "summary": "A job was started (by any caller). 0.7: subject (what the job is about) and started_at.",
-      "since": "0.2",
+      "summary": "A job was started (by any caller). Subject (what the job is about) and started_at.",
       "params": {
         "type": "object",
         "required": ["job_id", "kind", "uid", "subject", "started_at"],
@@ -2577,8 +2503,7 @@
       ]
     },
     "job_progress": {
-      "summary": "A job reached a stage or made progress (at most 4 per second), and 0.7: at least every 2 s while the job runs (a heartbeat repeats the latest values). percent where meaningful: downloading and building (0.7; never goes back within a stage run, below 100 while nix runs), measuring. last_activity_at: the last time the job's process printed anything (nix log lines included). subject only when it changed during the job (it replaces the one from job_started).",
-      "since": "0.2",
+      "summary": "A job reached a stage or made progress (at most 4 per second), and at least every 2 s while the job runs (a heartbeat repeats the latest values). percent where meaningful: downloading and building (never goes back within a stage run, below 100 while nix runs), measuring. last_activity_at: the last time the job's process printed anything (nix log lines included). subject only when it changed during the job (it replaces the one from job_started).",
       "params": {
         "type": "object",
         "required": ["job_id", "kind", "stage", "started_at"],
@@ -2649,8 +2574,7 @@
       ]
     },
     "job_finished": {
-      "summary": "A job ended. session_restart_required: the switch replaced the system service's API or the session daemon, so the launcher should offer a session restart. 0.7: subject (as the job last knew it), started_at, finished_at.",
-      "since": "0.2",
+      "summary": "A job ended. session_restart_required: the switch replaced the system service's API or the session daemon, so the launcher should offer a session restart. Subject (as the job last knew it), started_at, finished_at.",
       "params": {
         "type": "object",
         "required": ["job_id", "kind", "ok", "session_restart_required", "subject", "started_at", "finished_at"],
@@ -2742,10 +2666,9 @@
       }
     },
     "internal_error": { "code": -32603, "summary": "Unexpected server-side failure." },
-    "handshake_required": { "code": 1001, "since": "0.1", "summary": "A method other than 'hello' was called before the handshake." },
+    "handshake_required": { "code": 1001, "summary": "A method other than 'hello' was called before the handshake." },
     "version_mismatch": {
       "code": 1002,
-      "since": "0.1",
       "summary": "Client and server API versions are incompatible.",
       "closes_connection": true,
       "data": {
@@ -2758,10 +2681,9 @@
         }
       }
     },
-    "already_handshaken": { "code": 1003, "since": "0.1", "summary": "'hello' was called twice on one connection." },
+    "already_handshaken": { "code": 1003, "summary": "'hello' was called twice on one connection." },
     "permission_denied": {
       "code": 3002,
-      "since": "0.2",
       "summary": "Not allowed: the caller does not own seat0's active session (seat), polkit said no (polkit), or the peer cannot be identified safely (peer: no SO_PEERPIDFD, or the process is gone).",
       "data": {
         "type": "object",
@@ -2775,8 +2697,7 @@
     },
     "job_failed": {
       "code": 3003,
-      "since": "0.2",
-      "summary": "Only in job_finished.error and jobs.get: the job failed (or was cancelled) at stage; log_hint is the last relevant log line. 0.11: reason says why a Server section job failed: unreachable (the service does not answer), not_ready (its setup is not done), refused (the service or tool said no; log_hint says why), timeout (nobody signed in in time), not_connected (the Cloudflare tunnel did not connect).",
+      "summary": "Only in job_finished.error and jobs.get: the job failed (or was cancelled) at stage; log_hint is the last relevant log line. Reason says why a Server section job failed: unreachable (the service does not answer), not_ready (its setup is not done), refused (the service or tool said no; log_hint says why), timeout (nobody signed in in time), not_connected (the Cloudflare tunnel did not connect).",
       "data": {
         "type": "object",
         "required": ["stage", "log_hint"],
@@ -2790,7 +2711,6 @@
     },
     "insufficient_resources": {
       "code": 3004,
-      "since": "0.2",
       "summary": "Not enough memory or free disk space for a rebuild.",
       "data": {
         "type": "object",
@@ -2805,7 +2725,6 @@
     },
     "job_busy": {
       "code": 3005,
-      "since": "0.2",
       "summary": "Another job runs (only one at a time), or the job is past the point of cancelling.",
       "data": {
         "type": "object",
@@ -2816,7 +2735,6 @@
     },
     "rate_limited": {
       "code": 3006,
-      "since": "0.2",
       "summary": "Too many mutating requests from this user (10 per minute, burst 3).",
       "data": {
         "type": "object",
@@ -2827,8 +2745,7 @@
     },
     "state_conflict": {
       "code": 3007,
-      "since": "0.2",
-      "summary": "Stale settings revision, update.apply's rev is not the last verified check result (update_rev), or (0.9) channel.set's rev is not the last verified channel.check result for that channel (channel_rev).",
+      "summary": "Stale settings revision, update.apply's rev is not the last verified check result (update_rev), or channel.set's rev is not the last verified channel.check result for that channel (channel_rev).",
       "data": {
         "type": "object",
         "required": ["reason"],
@@ -2838,7 +2755,6 @@
     },
     "update_unreachable": {
       "code": 3008,
-      "since": "0.2",
       "summary": "The update server cannot be reached (the 'home lab unreachable' screen).",
       "data": {
         "type": "object",
@@ -2849,8 +2765,7 @@
     },
     "update_verification_failed": {
       "code": 3009,
-      "since": "0.2",
-      "summary": "The channel tip is unsigned, signed by an unknown signer, does not descend from the locked revision (not_fast_forward), or (0.9) does not descend from the newest verified tip this box saw on that channel branch (older_than_seen: an older signed release served again).",
+      "summary": "The channel tip is unsigned, signed by an unknown signer, does not descend from the locked revision (not_fast_forward), or does not descend from the newest verified tip this box saw on that channel branch (older_than_seen: an older signed release served again).",
       "data": {
         "type": "object",
         "required": ["reason"],
@@ -2858,11 +2773,10 @@
         "properties": { "reason": { "enum": ["unsigned", "unknown_signer", "not_fast_forward", "older_than_seen"] } }
       }
     },
-    "not_found": { "code": 3010, "since": "0.2", "summary": "Unknown generation or job; apps.install: an id that is not in the running generation's catalog; apps.remove: an id that is not installed; storage.tree (0.6): nothing measured yet, or that home was not measured." },
-    "needs_acknowledgement": { "code": 3011, "since": "0.2", "summary": "A downgrading base switch without acknowledge_downgrade: true. (Before 0.9 also channel.set; since 0.9 channel.set takes the rev the owner confirmed after channel.check instead.)" },
+    "not_found": { "code": 3010, "summary": "Unknown generation or job; apps.install: an id that is not in the running generation's catalog; apps.remove: an id that is not installed; storage.tree: nothing measured yet, or that home was not measured." },
+    "needs_acknowledgement": { "code": 3011, "summary": "A downgrading base switch without acknowledge_downgrade: true. (channel.set takes the rev the owner confirmed after channel.check instead.)" },
     "authentication_required": {
       "code": 3012,
-      "since": "0.2",
       "summary": "polkit would allow the action only after interactive authentication (auth_admin: the admin password), and it did not happen: no authentication agent is registered for the caller (no session daemon agent, or another client than the session daemon called), or the user cancelled the prompt or did not answer in time.",
       "data": {
         "type": "object",
@@ -2873,7 +2787,6 @@
     },
     "app_conflict": {
       "code": 3013,
-      "since": "0.3",
       "summary": "apps.install: id conflicts with conflicts_with (installed or also requested). apps.remove: conflicts_with, which stays installed, depends on id.",
       "data": {
         "type": "object",
@@ -2884,8 +2797,7 @@
     },
     "unavailable": {
       "code": 4001,
-      "since": "0.4",
-      "summary": "0.11: the Server section: service jellyfin, plex, tailscale or cloudflare with reason off (the service is not on) or not_ready (Jellyfin's first-run setup is not done).",
+      "summary": "The Server section: service jellyfin, plex, tailscale or cloudflare with reason off (the service is not on) or not_ready (Jellyfin's first-run setup is not done).",
       "data": {
         "type": "object",
         "required": ["service", "reason"],
@@ -2898,14 +2810,12 @@
     },
     "profile_limit": {
       "code": 3015,
-      "since": "0.4",
       "summary": "profiles.create with the most profiles there may be (8; the guest does not count).",
       "data": { "type": "object", "required": ["max"], "additionalProperties": false, "properties": { "max": { "type": "integer" } } }
     },
     "pin_required": {
       "code": 3016,
-      "since": "0.4",
-      "summary": "A PIN is missing or wrong: the caller's own (self), the admin profile's (admin) or the profile being entered (target). retry_after_ms while the backoff lock is on (3 free failures, then 1 s doubling to 5 min, per profile). The admin profile's PIN has no wait but 10 wrong tries a boot (counted from every path, the greeter's included): after them every check of it, also with the right PIN, is refused with reboot_required: true until the box restarts (since 0.9; a new PIN, the admin password's profiles.reset_pin or root's reset-pin clears it).",
+      "summary": "A PIN is missing or wrong: the caller's own (self), the admin profile's (admin) or the profile being entered (target). retry_after_ms while the backoff lock is on (3 free failures, then 1 s doubling to 5 min, per profile). The admin profile's PIN has no wait but 10 wrong tries a boot (counted from every path, the greeter's included): after them every check of it, also with the right PIN, is refused with reboot_required: true until the box restarts (a new PIN, the admin password's profiles.reset_pin or root's reset-pin clears it).",
       "data": {
         "type": "object",
         "required": ["pin"],
@@ -2915,7 +2825,6 @@
     },
     "terms_required": {
       "code": 3014,
-      "since": "0.3",
       "summary": "apps.install: app id has vendor terms and accepted_terms does not name their current version (show the terms, then retry with it).",
       "data": {
         "type": "object",
@@ -3011,12 +2920,12 @@
         "current": { "type": "boolean" },
         "booted": { "type": "boolean" },
         "profiles": {
-          "description": "The accounts in that generation's state.json with their current names (null: no longer a profile); absent if its state.json cannot be read (since 0.4). The rollback screen lists the profiles a rollback would drop or bring back empty.",
+          "description": "The accounts in that generation's state.json with their current names (null: no longer a profile); absent if its state.json cannot be read. The rollback screen lists the profiles a rollback would drop or bring back empty.",
           "type": "array",
           "items": { "$ref": "#/$defs/GenerationProfile" }
         },
         "readds_features": {
-          "description": "0.5: box features a rollback to this generation would turn back on: the profiles' apps need them and its state.json lacks them (the rollback job re-adds them in a box stage; the rollback screen says so). Absent when there are none or it is unknown (schema 1, unreadable state.json).",
+          "description": "Box features a rollback to this generation would turn back on: the profiles' apps need them and its state.json lacks them (the rollback job re-adds them in a box stage; the rollback screen says so). Absent when there are none or it is unknown (schema 1, unreadable state.json).",
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/$defs/BoxFeature" }
@@ -3047,11 +2956,11 @@
         },
         "commits": { "type": "integer", "minimum": 1 },
         "new_apps": {
-          "description": "Apps the update makes installable (in the target's catalog, not available in the running one), by id; null if the target's catalog could not be read (since 0.3). The Store says 'More apps are available after the next update'.",
+          "description": "Apps the update makes installable (in the target's catalog, not available in the running one), by id; null if the target's catalog could not be read. The Store says 'More apps are available after the next update'.",
           "oneOf": [{ "type": "array", "items": { "$ref": "#/$defs/CatalogApp" } }, { "type": "null" }]
         },
         "removed_apps": {
-          "description": "Installed apps the update takes away (removed from, or missing in, the target's catalog); null if unknown (since 0.3). The update screen names them with the reason.",
+          "description": "Installed apps the update takes away (removed from, or missing in, the target's catalog); null if unknown. The update screen names them with the reason.",
           "oneOf": [{ "type": "array", "items": { "$ref": "#/$defs/RemovedApp" } }, { "type": "null" }]
         },
         "version": {
@@ -3076,7 +2985,7 @@
       }
     },
     "ChannelCheckResult": {
-      "description": "0.9: a channel_check job's result: the verified tip of the target channel.",
+      "description": "A channel_check job's result: the verified tip of the target channel.",
       "type": "object",
       "required": ["channel", "current_rev", "target", "older", "checked_at"],
       "additionalProperties": false,
@@ -3096,7 +3005,7 @@
         "generation": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
         "rev": { "oneOf": [{ "$ref": "#/$defs/Rev" }, { "type": "null" }] },
         "apps_not_updated": {
-          "description": "0.4: app envs the final apps stage could not rebuild; each keeps its previous generation, which still works. Absent when there were none.",
+          "description": "App envs the final apps stage could not rebuild; each keeps its previous generation, which still works. Absent when there were none.",
           "type": "array",
           "items": {
             "type": "object",
@@ -3118,7 +3027,7 @@
       }
     },
     "JobResult": {
-      "description": "update_check jobs: an UpdateCheckResult; jobs that change the system: an AppliedResult; storage_measure (0.6): a MeasuredResult; cleanup_system and cleanup_profiles (0.6): a CleanedResult; channel_check (0.9): a ChannelCheckResult.",
+      "description": "update_check jobs: an UpdateCheckResult; jobs that change the system: an AppliedResult; storage_measure: a MeasuredResult; cleanup_system and cleanup_profiles: a CleanedResult; channel_check: a ChannelCheckResult.",
       "oneOf": [{ "$ref": "#/$defs/UpdateCheckResult" }, { "$ref": "#/$defs/AppliedResult" }, { "$ref": "#/$defs/MeasuredResult" }, { "$ref": "#/$defs/CleanedResult" }, { "$ref": "#/$defs/ChannelCheckResult" }]
     },
     "Keep": { "description": "Generations to keep (the running, booted and current ones always stay).", "type": "integer", "minimum": 1, "maximum": 10 },
@@ -3258,15 +3167,15 @@
         "paths_total": { "type": "integer", "minimum": 0 },
         "bytes_done": { "type": "integer", "minimum": 0 },
         "bytes_total": { "type": "integer", "minimum": 0 },
-        "builds_done": { "description": "0.7: derivations built so far in this nix run.", "type": "integer", "minimum": 0 },
-        "builds_total": { "description": "0.7: derivations nix expects to build (may grow while nix discovers more).", "type": "integer", "minimum": 0 },
-        "builds_running": { "description": "0.7: derivations building at once.", "type": "integer", "minimum": 0 },
+        "builds_done": { "description": "Derivations built so far in this nix run.", "type": "integer", "minimum": 0 },
+        "builds_total": { "description": "Derivations nix expects to build (may grow while nix discovers more).", "type": "integer", "minimum": 0 },
+        "builds_running": { "description": "Derivations building at once.", "type": "integer", "minimum": 0 },
         "building": { "$ref": "#/$defs/Building" },
-        "auth_url": { "description": "0.11: tailscale_login, stage signing_in: the URL to sign in at (https, printable ASCII; shown as a QR code).", "type": "string", "maxLength": 512, "pattern": "^https://[!-~]+$" }
+        "auth_url": { "description": "Tailscale_login, stage signing_in: the URL to sign in at (https, printable ASCII; shown as a QR code).", "type": "string", "maxLength": 512, "pattern": "^https://[!-~]+$" }
       }
     },
     "Building": {
-      "description": "0.7: the most recently started derivation that is still building. name and version from the .drv name (nix's rule: the version starts at the first dash followed by a non-letter); phase is nix's build phase without the Phase suffix (unpack, patch, configure, build, check, install, fixup, ...), absent until nix reports one.",
+      "description": "The most recently started derivation that is still building. name and version from the .drv name (nix's rule: the version starts at the first dash followed by a non-letter); phase is nix's build phase without the Phase suffix (unpack, patch, configure, build, check, install, fixup, ...), absent until nix reports one.",
       "type": "object",
       "required": ["name"],
       "additionalProperties": false,
@@ -3274,11 +3183,11 @@
         "name": { "type": "string", "maxLength": 320 },
         "version": { "type": "string", "maxLength": 320 },
         "phase": { "type": "string", "maxLength": 160 },
-        "percent": { "description": "System API 0.10, session API 0.18: how far this derivation is, from the last standard stdenv phase it started (unpack 0, patch 5, updateAutotoolsGnuConfigScripts 8, configure 10, build 20, check 80, install 88, fixup 94, installCheck 98, dist 99; other phases keep the value); never goes back; below 100. Absent before the first standard phase and for builders without phases.", "type": "integer", "minimum": 0, "maximum": 99 }
+        "percent": { "description": "How far this derivation is, from the last standard stdenv phase it started (unpack 0, patch 5, updateAutotoolsGnuConfigScripts 8, configure 10, build 20, check 80, install 88, fixup 94, installCheck 98, dist 99; other phases keep the value); never goes back; below 100. Absent before the first standard phase and for builders without phases.", "type": "integer", "minimum": 0, "maximum": 99 }
       }
     },
     "SubjectProfile": {
-      "description": "0.7: a profile a job is for, with its display name when the job started (the id when it has none).",
+      "description": "A profile a job is for, with its display name when the job started (the id when it has none).",
       "type": "object",
       "required": ["id", "name"],
       "additionalProperties": false,
@@ -3288,7 +3197,7 @@
       }
     },
     "JobSubject": {
-      "description": "0.7: what a job is about. Every field optional; which ones each kind sets: README, What a job is about.",
+      "description": "What a job is about. Every field optional; which ones each kind sets: README, What a job is about.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -3312,14 +3221,14 @@
         "frequency": { "$ref": "#/$defs/CleanupFrequency" },
         "keep_system": { "type": "integer", "minimum": 0 },
         "keep_profiles": { "type": "integer", "minimum": 0 },
-        "services": { "description": "0.11: services turned on or off (services_enable, services_disable).", "type": "array", "items": { "$ref": "#/$defs/CatalogApp" } },
+        "services": { "description": "Services turned on or off (services_enable, services_disable).", "type": "array", "items": { "$ref": "#/$defs/CatalogApp" } },
         "library": { "$ref": "#/$defs/SubjectLibrary" }
       }
     },
-    "Setup": { "description": "0.11: a service's setup flow in the Server section (catalog setup).", "enum": ["jellyfin", "plex", "tailscale", "cloudflare"] },
-    "UnitState": { "description": "0.11: systemd's ActiveState of a service's unit (unknown: a value this daemon does not know).", "enum": ["active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance", "refreshing", "unknown"] },
+    "Setup": { "description": "A service's setup flow in the Server section (catalog setup).", "enum": ["jellyfin", "plex", "tailscale", "cloudflare"] },
+    "UnitState": { "description": "Systemd's ActiveState of a service's unit (unknown: a value this daemon does not know).", "enum": ["active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance", "refreshing", "unknown"] },
     "ServiceTerms": {
-      "description": "0.11: a service's vendor terms; file is the absolute path of the text on the box.",
+      "description": "A service's vendor terms; file is the absolute path of the text on the box.",
       "type": "object",
       "required": ["title", "version", "url", "file"],
       "additionalProperties": false,
@@ -3331,7 +3240,7 @@
       }
     },
     "ServiceInfo": {
-      "description": "0.11: one service of the Server section.",
+      "description": "One service of the Server section.",
       "type": "object",
       "required": ["id", "name", "available", "enabled", "status", "setup", "terms", "detail", "has_data"],
       "additionalProperties": false,
@@ -3358,7 +3267,7 @@
       }
     },
     "ServiceIcon": {
-      "description": "0.11: where a service's real icon is (HinterOS ships no logos): the catalog entry's desktopId, iconUrl (with sha256: a download with another SHA-256 is not kept) or siteUrl (discovery on the site).",
+      "description": "Where a service's real icon is (HinterOS ships no logos): the catalog entry's desktopId, iconUrl (with sha256: a download with another SHA-256 is not kept) or siteUrl (discovery on the site).",
       "type": "object",
       "required": ["firefox_profile"],
       "additionalProperties": false,
@@ -3402,8 +3311,8 @@
         "folder": { "description": "The media.folders id of its first folder; null when that is not in /srv/media.", "oneOf": [{ "$ref": "#/$defs/FolderId" }, { "type": "null" }] }
       }
     },
-    "LibraryKind": { "description": "0.11: what a new Jellyfin library holds (mixed: movies and shows).", "enum": ["movies", "shows", "music", "mixed"] },
-    "LibraryKindShown": { "description": "0.11: what a Jellyfin library holds; other: a type made in Jellyfin's dashboard (books, photos, music videos, ...).", "enum": ["movies", "shows", "music", "mixed", "other"] },
+    "LibraryKind": { "description": "What a new Jellyfin library holds (mixed: movies and shows).", "enum": ["movies", "shows", "music", "mixed"] },
+    "LibraryKindShown": { "description": "What a Jellyfin library holds; other: a type made in Jellyfin's dashboard (books, photos, music videos, ...).", "enum": ["movies", "shows", "music", "mixed", "other"] },
     "JellyfinId": { "description": "A Jellyfin item id.", "type": "string", "pattern": "^[0-9a-f]{32}$" },
     "LibraryName": { "description": "1 to 64 characters after trimming, without control or format characters or /\\:*?\"<>|.", "type": "string", "minLength": 1, "maxLength": 256 },
     "FolderId": { "description": "A folder below /srv/media, as its path relative to it (media.folders).", "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^/.\\u0000-\\u001f\\u007f][^/\\u0000-\\u001f\\u007f]*(/[^/.\\u0000-\\u001f\\u007f][^/\\u0000-\\u001f\\u007f]*)*$" },
@@ -3444,7 +3353,7 @@
         "url": { "oneOf": [{ "type": "string" }, { "type": "null" }] }
       }
     },
-    "TailscaleState": { "description": "0.11: needs_login: not signed in; needs_approval: the tailnet's admin must approve the device; unavailable: tailscaled does not answer.", "enum": ["needs_login", "needs_approval", "starting", "running", "stopped", "unavailable"] },
+    "TailscaleState": { "description": "Needs_login: not signed in; needs_approval: the tailnet's admin must approve the device; unavailable: tailscaled does not answer.", "enum": ["needs_login", "needs_approval", "starting", "running", "stopped", "unavailable"] },
     "TailscaleDetail": {
       "type": "object",
       "required": ["state", "name", "ip4", "dns_name", "tailnet", "key_expiry"],
@@ -3471,7 +3380,7 @@
     "PlexClaimCode": { "description": "A plex.tv/claim code. Never logged.", "type": "string", "pattern": "^claim-[A-Za-z0-9_-]{20}$" },
     "TunnelToken": { "description": "A Cloudflare tunnel token (standard padded base64). Never logged.", "type": "string", "minLength": 4, "maxLength": 512, "pattern": "^[A-Za-z0-9+/]+={0,2}$" },
     "SubjectLibrary": {
-      "description": "0.11: the library a Jellyfin job is about (id: known for a removal, and for an addition once Jellyfin made it).",
+      "description": "The library a Jellyfin job is about (id: known for a removal, and for an addition once Jellyfin made it).",
       "type": "object",
       "required": ["name"],
       "additionalProperties": false,
@@ -3510,10 +3419,10 @@
         "result": { "oneOf": [{ "$ref": "#/$defs/JobResult" }, { "type": "null" }] },
         "session_restart_required": { "type": "boolean" },
         "subject": { "$ref": "#/$defs/JobSubject" },
-        "started_at": { "description": "0.7: when the job was started (equals created_at).", "type": "integer" },
-        "percent": { "description": "0.7: the latest percent of a running job (null when finished or unknown).", "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 100 }, { "type": "null" }] },
-        "detail": { "description": "0.7: the latest progress detail of a running job.", "oneOf": [{ "$ref": "#/$defs/ProgressDetail" }, { "type": "null" }] },
-        "last_activity_at": { "description": "0.7: the last time a running job's process printed anything.", "oneOf": [{ "type": "integer" }, { "type": "null" }] }
+        "started_at": { "description": "When the job was started (equals created_at).", "type": "integer" },
+        "percent": { "description": "The latest percent of a running job (null when finished or unknown).", "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 100 }, { "type": "null" }] },
+        "detail": { "description": "The latest progress detail of a running job.", "oneOf": [{ "$ref": "#/$defs/ProgressDetail" }, { "type": "null" }] },
+        "last_activity_at": { "description": "The last time a running job's process printed anything.", "oneOf": [{ "type": "integer" }, { "type": "null" }] }
       }
     }
   }

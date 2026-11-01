@@ -70,7 +70,7 @@ fn fake_system(
                                     "needs the admin password",
                                     json!({"action": "org.hinteros.system.ssh"}),
                                 )),
-                                // Installing an update needs the admin PIN (system API 0.5).
+                                // Installing an update needs the admin PIN.
                                 "update.apply" if params["admin_pin"] == "2468" => {
                                     Ok(json!({"job_id": "3f9a0c2b7e4d1a65"}))
                                 }
@@ -79,7 +79,7 @@ fn fake_system(
                                     "a PIN is needed",
                                     json!({"pin": "admin"}),
                                 )),
-                                // The Jellyfin app's sign-in (system API 0.11).
+                                // The Jellyfin app's sign-in.
                                 "jellyfin.client_token" => Ok(json!({
                                     "server_id": "0123456789abcdef0123456789abcdef",
                                     "user_id": "fedcba9876543210fedcba9876543210",
@@ -99,7 +99,7 @@ fn fake_system(
                                     }),
                                 );
                                 write_message(&mut w, &ev).await.unwrap();
-                                // System API 0.10: a build's own percent.
+                                // A build's own percent.
                                 let ev = jsonrpc::notification(
                                     "job_progress",
                                     json!({
@@ -121,7 +121,7 @@ fn fake_system(
                                     }),
                                 );
                                 write_message(&mut w, &ev).await.unwrap();
-                                // 0.9: Ctrl+Super+D, read by the system.
+                                // Ctrl+Super+D, read by the system.
                                 let ev = jsonrpc::notification("keyboard_home", json!({}));
                                 write_message(&mut w, &ev).await.unwrap();
                             }
@@ -173,7 +173,7 @@ async fn relays_methods_errors_and_job_events() {
     assert_eq!(name, "job_progress");
     assert_eq!(params["detail"]["building"]["percent"], 20);
     assert_eq!(params["percent"], 59);
-    // 0.16: and the time zone event.
+    // And the time zone event.
     let (name, params) = next_event(&mut launcher).await;
     assert_eq!(name, "time_zone_changed");
     assert_eq!(params["zone"], "America/Chicago");

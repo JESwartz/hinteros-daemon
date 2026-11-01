@@ -1,4 +1,4 @@
-//! The Server section (system API 0.11, M10, `hinteros-docs/design/server.md`): box-wide catalog
+//! The Server section (M10, `hinteros-docs/design/server.md`): box-wide catalog
 //! services (`kind = service`) and their setup flows: Jellyfin, Plex, Tailscale, Cloudflare
 //! Tunnel. The service talks to them only on loopback or their unix sockets (a short timeout,
 //! never blocking the service); everything that waits longer runs in a job.

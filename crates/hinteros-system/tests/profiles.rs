@@ -1,4 +1,4 @@
-//! Profiles (system API 0.4, profiles.md) against the real binary and a fake root: the list,
+//! Profiles (profiles.md) against the real binary and a fake root: the list,
 //! create and remove jobs, which PIN each method checks, the backoff, the switch hint, the
 //! public view, first-boot mode, the greeter socket and the PAM helper's verbs.
 
@@ -980,7 +980,7 @@ async fn the_admin_pin_locks_until_a_reboot() {
 
 /// Rollback, channel and base switches, hardware re-detect and installing a system update
 /// (update.apply) need the admin profile's PIN
-/// (system API 0.5): missing or wrong is `pin_required {pin: admin}` before anything else
+/// Missing or wrong is `pin_required {pin: admin}` before anything else
 /// happens; right, the method goes on as before. Without an admin profile (first-boot mode)
 /// they are refused like every admin action; an admin profile without a PIN yet passes.
 #[tokio::test(flavor = "multi_thread")]
@@ -1121,7 +1121,7 @@ fn become_the_guest(root: &Root) -> std::path::PathBuf {
     home
 }
 
-/// End guest session (system API 0.5): the guest ends its own session and the job wipes it now:
+/// End guest session: the guest ends its own session and the job wipes it now:
 /// its home (never following a link out of it), its entries in the shared temp directories,
 /// its app env (back to the starter env), its terms, usage entry and a switch hint into it.
 #[tokio::test(flavor = "multi_thread")]

@@ -231,7 +231,7 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   default) shows it as soon as a field gets focus. Either way a keyboard shown for a field hides
   250 ms after the field loses focus (no flicker between fields), unless it was shown or
   hidden by hand meanwhile. See "On-screen keyboard for Firefox text fields" below.
-  `osk_changed` carries `password: true` (session API 0.10) while the keyboard is up for a
+  `osk_changed` carries `password: true` while the keyboard is up for a
   password field, so the keyboard masks its preview only then (and again, still visible, when a
   field of the other kind gets focus; a field losing focus changes nothing).
   **Address bar**: WebExtensions cannot see Firefox's own URL bar, so Firefox's autoConfig
@@ -277,20 +277,20 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   `apps_changed` if the icon changed; a downloaded icon always replaces it.
 - **Runtime settings** (`runtime/`): Wi-Fi through NetworkManager, Bluetooth through BlueZ
   (with a pairing agent), power through logind (all D-Bus, zbus), audio through `pactl`, display
-  modes through gamescope's Wayland output, Xwayland and mode save file. Session API 0.7; see
+  modes through gamescope's Wayland output, Xwayland and mode save file. See
   "Runtime settings" below.
 - **System relay** (`system.rs`): one connection to the system service (see below), handshaken
   and subscribed to its job events; the session API's `system.*` methods are passed through
   unchanged and `job_*` events forwarded. While the service is down or speaks another version,
   they fail with `system_unavailable {reason: down|version_mismatch}`.
 - **Admin password** (`auth/`): a polkit authentication agent for this process; prompts go to
-  the launcher (`authentication_requested`, `auth.respond`, `auth.cancel`). Session API 0.8, 0.9, 0.10; see
+  the launcher (`authentication_requested`, `auth.respond`, `auth.cancel`). See
   "Admin password, session restart and Store" below.
 - **Session restart** (`restart.rs`): `session.restart` ends the greetd session through logind
   (greetd starts it again) and restarts the daemon's own user unit.
 - **Store** (`store.rs`): `store.list` merges the catalog index with the installed apps;
   `store_changed`; `system.apps.install`/`.remove` are relayed. Catalog icons are resolved like app
-  icons (`icon.path`, 0.9). **Reload** (`reload.rs`): the app list follows the config file and
+  icons (`icon.path`). **Reload** (`reload.rs`): the app list follows the config file and
   the catalog without a restart; see "Store icons and the app list without a restart".
 - **Reaper** (`reaper.rs`): `hinteros-session reaper SteamLaunch AppId=<id> -- <command>` runs
   a command as a child subreaper named `reaper`, which is how gamescope (Steam mode) learns the
@@ -559,7 +559,7 @@ nothing: it never takes part in the TV setup.
   with `.local/share/Steam` and a second library at `SteamLibrary`, linked by a relative path in
   `libraryfolders.vdf`, which only the daemon accepts; real Steam writes absolute ones).
 
-### Runtime settings (session API 0.7)
+### Runtime settings
 
 Settings that need no rebuild, served by the session daemon as the session user and authorised by
 the polkit rules of the system repo's `runtime.nix` (NetworkManager `network-control`,
@@ -826,24 +826,22 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.12 (0.12: `state.json` is schema 2 only, see "state.json" below; 0.11: the Server section, see "Server section" below; 0.10: a build's own percent, `building.percent`, see "Job progress" below, and `lan_filter.set`/`lan_filter.clear`, see "Local network filter" below; 0.9: `keyboard_home`, see "Keyboard Home" below; channel switches to a verified, confirmed revision, see "Channel switches" below, and the admin PIN is refused until a reboot after 10 wrong tries, `pin_required {reboot_required}`, see "Admin PIN limit" below; 0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
-box-wide actions, `guest.end`, rollback re-adds box features; see "Profiles and per-profile apps" below)
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 1.0
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
 trust.
 
 - **Methods:** read-only `system.info`, `settings.get`, `generations.list`, `jobs.get`,
-  `jobs.list`; mutating `settings.set {revision, changes}` (closed, typed `changes`; empty in
-  0.2), `ssh.set {enabled}`, `rebuild`, `hardware.redetect`, `rollback {generation?}`,
-  `update.check`, `update.apply {rev}`, `channel.check {channel}` (0.9), `channel.set {channel, rev?}`,
+  `jobs.list`; mutating `settings.set {revision, changes}` (closed, typed `changes`; empty), `ssh.set {enabled}`, `rebuild`, `hardware.redetect`, `rollback {generation?}`,
+  `update.check`, `update.apply {rev}`, `channel.check {channel}`, `channel.set {channel, rev?}`,
   `base.set {base, acknowledge_downgrade?}`, `apps.install {ids, revision, accepted_terms?}`,
-  `apps.remove {ids, revision, delete_data}` (0.3, see "Store backend" below), `jobs.cancel {job_id}`. Events `job_started`,
+  `apps.remove {ids, revision, delete_data}` (see "Store backend" below), `jobs.cancel {job_id}`. Events `job_started`,
   `job_progress`, `job_finished {…, session_restart_required}` after `subscribe`.
 - **Authorization** (`peer.rs`, `authz.rs`): uid/gid/pid from `SO_PEERCRED` and a pidfd from
   `SO_PEERPIDFD` at accept. Mutating methods need: the pidfd (and the process alive), the caller
   owning seat0's active logind session (or root), and polkit `CheckAuthorization` saying yes for
   the method's action, with a `unix-process` subject carrying the pidfd, pid, start time and uid,
-  without user interaction except for `org.hinteros.system.ssh` (0.3: see "Admin password" below).
+  without user interaction except for `org.hinteros.system.ssh` (see "Admin password" below).
   A polkit challenge (`auth_admin`) is `authentication_required`
   (3012), anything else `permission_denied` (3002, `reason: peer|seat|polkit`). Before that:
   strict params (every params object is closed; unknown fields are `invalid_params` with
@@ -900,13 +898,13 @@ trust.
   revision, re-verifies, and locks `?ref=<branch>&rev=<rev>` with
   `nix flake lock --override-input`. `channel.set` rewrites `flake.nix`'s input URL (it must
   appear exactly once, as `"git+<repo>?ref=<branch>"`) and locks the revision `channel.check`
-  verified on the new branch (0.9; see "Channel switches" below).
+  verified on the new branch (see "Channel switches" below).
   `base.set` edits `state.json` (unstable → stable needs the acknowledgement).
 - **Rollback**: `nix-env --switch-generation N` + `switch-to-configuration switch`, then
   `/etc/hinteros`'s `flake.nix`, `flake.lock` and `state.json` from the generation's snapshot
   (`$out/hinteros/`, as `hinteros-config-sync` does at boot).
 - **`hardware.redetect`**: `nixos-facter -o staging/facter.json`, then the apply flow.
-- **Keyboard Home** (0.9, `keyboard.rs`): Ctrl + Super + D on a keyboard is Home. No profile
+- **Keyboard Home** (`keyboard.rs`): Ctrl + Super + D on a keyboard is Home. No profile
   account may read keyboards (a game would log the admin password typed into the launcher's
   prompt or on the admin console), so `hinteros-system keyboard-home` is the only reader, in its
   own unit (system repo: `hinteros-keyboard`, a dynamic user in groups `input` and
@@ -1001,7 +999,7 @@ For `daemon.nix` (and the VM tests) in the system repo:
   **`restartIfChanged = false; stopIfChanged = false`** (`X-RestartIfChanged=false`) so the
   switch it performs never restarts the running instance. `StateDirectory=hinteros` (0700)
   for `/var/lib/hinteros` on either unit.
-- **Keyboards** (0.9): no profile account may read a keyboard (no uaccess rule for keyboards, no
+- **Keyboards**: no profile account may read a keyboard (no uaccess rule for keyboards, no
   group `input`). `hinteros-keyboard.service`: `ExecStart=hinteros-system keyboard-home`,
   `DynamicUser`, `SupplementaryGroups=input hinteros-keyboard`, `DeviceAllow=char-input r`,
   no network, no capabilities. Group `hinteros-keyboard`, and `hinteros-system.service` in it
@@ -1044,9 +1042,9 @@ session user with hostile input, a non-member, a non-seat user, a rules file ret
 cancel; `job_busy`; inhibitor), `update-verify` (git server + cache VMs). The daemon-side
 behaviour is covered by `crates/hinteros-system/tests/` against fakes.
 
-### What the launcher must do (session API 0.6)
+### What the launcher must do
 
-Move to session API 0.6 (the `system.*` methods are relayed unchanged): subscribe to
+The `system.*` methods are relayed unchanged. Subscribe to
 `job_started`/`job_progress`/`job_finished` and drive progress UI from them (re-query
 `system.jobs.list` after reconnecting); treat `system_unavailable` (`down`/`version_mismatch`)
 as "settings unavailable" rather than an error; on `authentication_required` from
@@ -1058,9 +1056,9 @@ when `available.security` is non-null show the full-screen security notice with 
 `state_conflict`; offer a session restart on `session_restart_required`; show `dev` as a DEV
 badge and the SSH host key fingerprints in Settings → System.
 
-### What the launcher must do (session API 0.7)
+### What the launcher must do
 
-Move to session API 0.7 (additive: the 0.6 methods and events are unchanged). The new methods map
+The new methods map
 onto the launcher's `lib/src/system` repository interfaces:
 
 | Interface | Calls |
@@ -1071,7 +1069,7 @@ onto the launcher's `lib/src/system` repository interfaces:
 | `DisplayAudioRepository.audio / setAudioOutput / setVolume / setMuted` | `audio.outputs` (`AudioState`: outputs with `default` for `current`, `volume` 0 to 100, `muted`), `audio.set_output`, `audio.volume`, `audio.mute`; `audio_changed` |
 | `SystemRepository.power` | `power.suspend` (sleep), `power.reboot` (restart), `power.poweroff` (shutdown); `power.capabilities` to hide what is not offered; `power_inhibited` (4005) while an update switches over; `unavailable` (4001) is `SystemErrorKind.unavailable` |
 
-## Admin password, session restart and Store (session API 0.8, system API 0.3)
+## Admin password, session restart and Store
 
 ### Admin password: the polkit authentication agent
 
@@ -1140,7 +1138,7 @@ greetd really comes back and the daemon restarts with the new store path.
 
 ### Store backend
 
-System API 0.3, `apps.install {ids, revision, accepted_terms?}` and `apps.remove {ids, revision,
+`apps.install {ids, revision, accepted_terms?}` and `apps.remove {ids, revision,
 delete_data}` (polkit `org.hinteros.system.apps`, seat check, rate limit, audit), in
 `crates/hinteros-system/src/store.rs`:
 
@@ -1176,7 +1174,7 @@ delete_data}` (polkit `org.hinteros.system.apps`, seat check, rate limit, audit)
   allow-import-from-derivation false "<input url>&rev=<rev>#lib.catalogIds"` and compares with the
   running index (null when that fails; the update is still offered).
 
-Session API 0.8: `store.list` merges the index (`[store] index`) with `system.settings.get`'s apps:
+`store.list` merges the index (`[store] index`) with `system.settings.get`'s apps:
 available apps plus installed ones whatever their status, by name, with `state`
 (`available|installed|installing|removing|retired|unavailable`; installing/removing from apps jobs
 relayed through this daemon), all catalog fields in snake_case, terms with the absolute path of the
@@ -1187,7 +1185,7 @@ index version); `system_unavailable` while the system service is down. `system.a
 `system.apps.remove` are relayed. Verified against fake roots and fakes; needs the system repo's
 `store-install` VM test (real build, `apps.list` reload).
 
-### Store icons and the app list without a restart (session API 0.9)
+### Store icons and the app list without a restart
 
 **Store icons.** Every `store.list` entry's `icon` object gains an optional `path`: the resolved
 icon on this box, absent until there is one. The daemon resolves the catalog index's `icon` fields
@@ -1197,9 +1195,7 @@ icon themes), else `iconUrl` or `siteUrl` downloaded into the same cache
 refresh, and the same 1 min / 10 min / 1 h / 6 h retries, in the same background thread). An
 installed app's own `[[apps]]` entry wins for the same id. `store_changed` is sent when a catalog
 icon arrives (and `apps_changed` when an app's does). `icons.fetch = false` turns downloads off
-for both. The catalog is re-read on a new generation. Why 0.9: the schema's `icon` object is closed
-(`additionalProperties: false`), and while the major version is 0 every minor is breaking for a
-client built against the old schema; the new field is the only change to an existing object.
+for both. The catalog is re-read on a new generation.
 
 **Reloading the app list.** The daemon watches the config file named by `--config` (default
 `$XDG_CONFIG_HOME/hinteros/session.toml`, also while it does not exist yet) and the catalog
@@ -1228,7 +1224,7 @@ a TERM-ignoring app killed after the grace period, SIGKILL of the daemon) and `t
 (reload with a symlink switch, broken file, running removed app; Store icons from a local HTTP
 server, `--icon-allow-http`, a hidden test flag).
 
-### What the system repo must provide (0.8 / 0.3)
+### What the system repo must provide
 
 - **polkit agent helper**: on NixOS the setuid wrapper `/run/wrappers/bin/polkit-agent-helper-1`
   (`security.polkit.enable` provides it; the daemon's default `[auth] helper`). **The session
@@ -1258,9 +1254,9 @@ server, `--icon-allow-http`, a hidden test flag).
   input in `system-escalation` (`../x`, store paths, unknown ids, terms for other apps, a symlinked
   data path pointing out of the home).
 
-### What the launcher must do (session API 0.11; 0.12 adds profiles, below)
+### What the launcher must do
 
-Say hello with 0.12 (client name `hinteros-launcher`), match responses by id (they may come out of
+Say hello with client name `hinteros-launcher`, match responses by id (they may come out of
 order), and:
 
 - Subscribe to `authentication_requested`/`authentication_finished`. On a request show the admin
@@ -1276,13 +1272,13 @@ order), and:
   show the named terms; `app_conflict` names the other app; remove with `system.apps.remove {ids,
   revision, delete_data}` after closing the app (and confirming `data_paths` twice); progress from
   the job events; "More apps after the next update" when `more_after_update`.
-- On-screen keyboard (0.10): mask the typed-text preview only while `osk_changed.password` is
+- On-screen keyboard: mask the typed-text preview only while `osk_changed.password` is
   true; show it plainly otherwise (also when no field was reported).
 - Updates (0.11): show `available.version` ("HinterOS 0.6.1") on the update screen and banner
   (the short rev when it is absent), and `available.security_summary`, when non-null, under the
   severity on the security notice and the update screen.
 
-## Profiles and per-profile apps (system API 0.5, session API 0.13; M7)
+## Profiles and per-profile apps (M7)
 
 Design: `hinteros-docs/design/profiles.md` and `apps.md`. Cross-repo contracts (paths, file
 formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
@@ -1291,8 +1287,7 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
 
 - **Schema 2** (`state.rs`): `state.json` without `apps`, with `requirements` (box features:
   `graphics32`, `steam-devices`), `services`, `profiles: [{id, user}]` (1–8; `p1` = `hinteros`,
-  else `hinteros-p<N>`) and `settings.guest.enable`. Schema 1 keeps working unchanged
-  (`apps.install/remove` rebuild the box as in 0.3).
+  else `hinteros-p<N>`) and `settings.guest.enable`.
 - **Envs** (`appreg.rs`, `runner/apps.rs`): a profile's apps are the root-owned Nix profile
   `/nix/var/nix/profiles/hinteros/apps/<user>` (`--apps-profiles-dir`), the starter set's
   `…/starter`, the guest's a single link `/run/hinteros/apps/hinteros-guest` (an indirect GC root
@@ -1319,7 +1314,7 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   so unneeded features go only then. Update, channel, base and rollback jobs end with an `apps`
   stage that rebuilds every owner's env against the new system (tombstoned ids dropped); an env
   that fails keeps its generation and is listed in `apps_not_updated`, the job still succeeds.
-- **Rollback re-adds features** (0.5): after a rollback's `apps` stage, features the envs need that
+- **Rollback re-adds features**: after a rollback's `apps` stage, features the envs need that
   the restored generation lacks are turned back on in a `box` stage (the apply flow on the restored
   configuration with `requirements` = what the envs need; a new generation). The result lists
   them in `features_readded`; `generations.list` entries name them beforehand (`readds_features`).
@@ -1343,7 +1338,7 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   set_pin/set_locked/reset_pin/remove/switch/switch_cancel/unlock`, `guest.set`, `starter_set.get/set`,
   `display.save_mode`, `audio.save_output`; event `profiles_changed`. Which PIN each checks:
   own changes `self`, anything on another profile or the box `admin`; a profile without a PIN yet
-  passes. `pin_required` (3016) names it, with `retry_after_ms` during the lock and (0.9)
+  passes. `pin_required` (3016) names it, with `retry_after_ms` during the lock and
   `reboot_required: true` while the admin PIN is refused until a reboot; the audit has
   `HINTEROS_PIN_CHECK`/`_PIN_OUTCOME` and every PIN field is `***` in `HINTEROS_PARAMS`.
   `profiles.create`/`remove`/`guest.set`/`starter_set.set` are jobs (`profiles_create`,
@@ -1351,12 +1346,12 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   starter env only after the account's switch; a removal ends the account's processes, switches
   without it, then deletes the home with `datadel`'s no-symlink walk, the PIN, the metadata and the
   app links. Profiles (and the guest) without an env get the starter env while the box is idle.
-- **Admin PIN for box-wide actions** (0.5): `rollback`, `update.apply`, `channel.set`, `base.set`
+- **Admin PIN for box-wide actions**: `rollback`, `update.apply`, `channel.set`, `base.set`
   and `hardware.redetect` take `admin_pin`; it is checked first (`pin_required
   {pin: admin}` when missing or wrong, or without an admin profile), from every profile, the
   guest included (installing a system update always needs it). Not for root; an
   admin profile without a PIN yet passes. `update.check` stays open.
-- **End guest session** (0.5, `guest.rs`, `runner/profiles.rs`): `guest.end` (the guest only;
+- **End guest session** (`guest.rs`, `runner/profiles.rs`): `guest.end` (the guest only;
   job `guest_end`) checks the account (`hinteros-guest`, `--guest-uid` 20000, the uid maps back to
   the name, home `…/hinteros-guest`), hides the guest from the picker and PAM while it runs, ends
   the guest's processes, then deletes what the uid owns in its home and in `--guest-tmp-dir`s
@@ -1372,7 +1367,7 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   account a token).
 - `hinteros-system pin unlocked|verify|end-others|splash` (`pam.rs`): the PAM helper (`PAM_USER`;
   the PIN on stdin; prints only `hinteros:wrong` / `hinteros:locked:<s>` / `hinteros:reboot`, which
-  the session daemon passes on as `greeter_result {reboot_required: true}`, session API 0.17). `splash`
+  the session daemon passes on as `greeter_result {reboot_required: true}`). `splash`
   (`splash.rs`) paints the session's VT (`PAM_TTY`, only `/dev/ttyN`/`ttyN`, opened without
   following links and checked to be a VT) during greetd's handover: console escape sequences only
   (palette background/foreground = the launcher's `#0E1118`/`#F4F6FB`, clear, cursor hidden) and
@@ -1421,17 +1416,17 @@ Verified here against fakes (`crates/hinteros-system/tests/{apps,profiles}.rs`,
 (profiles-*, apps-*, first-boot, guest, starter-set): real greetd/PAM, logind's sleep signal,
 `end-others` killing a real profile's processes, real `appEnv.build`.
 
-### What the launcher must do (session API 0.13)
+### What the launcher must do
 
-Hello with `0.13`. 0.13: pass `admin_pin` to `system.rollback`, `system.update.apply` (every
+Pass `admin_pin` to `system.rollback`, `system.update.apply` (every
 profile, the guest too), `system.channel.set`, `system.base.set` and `system.hardware.redetect` (ask on `pin_required {pin: admin}`); say
-"wiped now" for End guest session; show `readds_features` on the rollback screen. Everything of 0.10 stays. New: the methods and events above (schema:
+"wiped now" for End guest session; show `readds_features` on the rollback screen. New: the methods and events above (schema:
 `schema/session-api.json`), all `system.*` profile, apps and starter-set relays; the first-boot
 wizard when `profile.current.setup_required`; "Set your PIN" when `!pin_set`; the terms dialog
 for `apps.list` entries with `needs_terms`; pass `system.apps.list`'s
 `revision` to `system.apps.install/remove`.
 
-## Storage and clean-up (system API 0.6, session API 0.14)
+## Storage and clean-up
 
 Design: `hinteros-docs/design/storage.md`. Every method below is relayed as `system.<method>`.
 
@@ -1480,7 +1475,7 @@ filled in; `cleanup.set {enabled, frequency, keep_system, keep_profiles, admin_p
 polkit `org.hinteros.system.settings`) writes all four fields through the apply flow (job
 `cleanup_set`, `null` when nothing changes, also for the defaults while absent).
 
-### What the system repo must do (0.6)
+### What the system repo must do
 
 - `state.nix`: accept `settings.cleanup` as above; `nix.gc.automatic` from `enable`, `dates` from
   `frequency`, the system preStart `--delete-generations +keepSystem` and
@@ -1489,9 +1484,9 @@ polkit `org.hinteros.system.settings`) writes all four fields through the apply 
 - `hinteros-job@.service`'s `path` needs `nix-store` (already there with `nix`). No new polkit
   action (existing ones are reused).
 
-### What the launcher must do (session API 0.14)
+### What the launcher must do
 
-Hello with `0.14`. Settings → Storage: show `system.storage.get`'s measurement at once with its
+Settings → Storage: show `system.storage.get`'s measurement at once with its
 age, or start `system.storage.measure` (progress from `job_progress {stage: measuring,
 percent}`; re-read `storage.get` on `job_finished`); draw the ring from `root` (names for kinds
 are the launcher's; profile names from `profiles.list`); entering the caller's own profile calls
@@ -1503,7 +1498,7 @@ are the launcher's; profile names from `profiles.list`); entering the caller's o
 `system.cleanup.set` (admin PIN). New job kinds `storage_measure`, `cleanup_system`,
 `cleanup_profiles`, `cleanup_set`; new stages `measuring`, `cleaning`, `collecting`.
 
-## Job progress (system API 0.7, session API 0.15)
+## Job progress
 
 A job's page must say what is going on at every moment, also while nix compiles on the box for
 many minutes, and the launcher lets the person leave the page while the job runs (a top-bar
@@ -1523,7 +1518,7 @@ bytes; builds), each weighted equally; it never goes back (when nix finds more w
 then covers the rest of the way) and stays below 100 until nix ends. It is rough: derivations
 differ hugely in build time, so the count is what the launcher shows prominently.
 
-`building.percent` (system API 0.10, session API 0.18) is how far that one derivation is, from
+`building.percent` is how far that one derivation is, from
 the last standard stdenv phase it started: unpack 0, patch 5, updateAutotoolsGnuConfigScripts 8,
 configure 10, build 20, check 80, install 88, fixup 94, installCheck 98, dist 99 (`PHASES`). An
 unknown phase keeps the last value, it never goes back and stays below 100; absent before the
@@ -1561,8 +1556,8 @@ whole new `subject`, which `jobs.get` and `job_finished` keep). Fields, each opt
 | `ssh`, `guest_set` | `enabled` |
 | `update_check` | `channel`, `from_rev` |
 | `update_apply` | `rev`, `version`, `channel`, `from_rev`, `from_version` |
-| `channel_check` (0.9) | `channel` (target), `from_channel`, `from_rev`; `rev`, `version` once verified |
-| `channel` | `channel` (target), `from_channel`, `from_rev`, `from_version`, `rev`, `version` (0.9: the confirmed revision, from the start) |
+| `channel_check` | `channel` (target), `from_channel`, `from_rev`; `rev`, `version` once verified |
+| `channel` | `channel` (target), `from_channel`, `from_rev`, `from_version`, `rev`, `version` (the confirmed revision, from the start) |
 | `base` | `base`, `from_base` |
 | `rollback` | `generation`, `from_generation` |
 | `apps_install` | `owner`, `profile` (a profile), `apps` (only the new ones); the automatic starter env of a new profile or the guest (uid 0): `owner`, `profile`?, `from_owner: starter` |
@@ -1573,20 +1568,20 @@ whole new `subject`, which `jobs.get` and `job_finished` keep). Fields, each opt
 | `guest_end` | `owner: guest` |
 | `cleanup_system`, `cleanup_profiles` | `keep` |
 | `cleanup_set` | `enabled`, `frequency`, `keep_system`, `keep_profiles` |
-| `services_enable` (0.11) | `services` |
-| `services_disable` (0.11) | `services`, `delete_data` |
-| `jellyfin_library_add` (0.11) | `library {name, kind, folder}`; `library.id` once Jellyfin made it (in `job_progress`) |
-| `jellyfin_library_remove` (0.11) | `library {id, name}` |
-| `plex_claim`, `tailscale_login`, `tailscale_logout`, `cloudflare_set_token`, `cloudflare_clear_token` (0.11) | none (the kind says it) |
+| `services_enable` | `services` |
+| `services_disable` | `services`, `delete_data` |
+| `jellyfin_library_add` | `library {name, kind, folder}`; `library.id` once Jellyfin made it (in `job_progress`) |
+| `jellyfin_library_remove` | `library {id, name}` |
+| `plex_claim`, `tailscale_login`, `tailscale_logout`, `cloudflare_set_token`, `cloudflare_clear_token` | none (the kind says it) |
 
 `Job` also has `started_at` (equals `created_at`) and, for a running job, the latest `percent`,
 `detail` and `last_activity_at` (null once finished); `job_finished` has `started_at` and
 `finished_at`. The job's spec and `status.json` carry the subject, so it survives a restart of the
 service.
 
-### What the launcher must do (session API 0.15)
+### What the launcher must do
 
-Hello with `0.15` (system relays need the session built against system 0.7). On the job page and
+On the job page and
 in the top-bar indicator: name the job from `kind` + `subject` (an update as
 `{version}.{rev[..7]} {channel}`, e.g. `0.7.1.c6b69ce beta`; "Installing Moonlight for Sam";
 "Removing …"; the profile, generation, base or channel concerned); show elapsed time from
@@ -1602,7 +1597,7 @@ when opening the page later, call `system.jobs.list` (the running job is first) 
 started_at, finished_at}`; new `Job` fields `subject`, `started_at`, `percent`, `detail`,
 `last_activity_at`.
 
-## Time zone (system API 0.8, session API 0.16)
+## Time zone
 
 Design: `hinteros-docs/design/time-zone.md`. Code: `timezone.rs` (zones, offsets, list, the
 link), `service/timezone.rs` (the methods).
@@ -1642,7 +1637,7 @@ link), `service/timezone.rs` (the methods).
   then points `/etc/localtime` at that zone (the switch ran before the restore); the service
   sends `time_zone_changed` after any job when the zone that applies changed.
 
-### What the system repo must do (0.8)
+### What the system repo must do
 
 - `state.nix`: accept `settings.timeZone` (a string; the shape above). `time.timeZone = null`;
   an activation script points `/etc/localtime` at `/etc/zoneinfo/<zone>` from the live
@@ -1657,16 +1652,16 @@ link), `service/timezone.rs` (the methods).
   The service only needs `/run/hinteros` writable (no `/etc`) and may start this unit (it is
   root; systemd's manager API). No new polkit action.
 
-### What the launcher must do (session API 0.16)
+### What the launcher must do
 
-Hello with `0.16`. `system.time_zone.get` → `{zone, offset_s, standard_offset_s,
+`system.time_zone.get` → `{zone, offset_s, standard_offset_s,
 offset_valid_until}`; `system.time_zone.list` → `{zones: [{zone, offset_s,
 standard_offset_s}]}`; `system.time_zone.set {zone, admin_pin?}` → the new `TimeZoneInfo`
 (no PIN in the first-boot wizard; in Settings ask for the admin PIN on `pin_required`). Event
 `time_zone_changed` (a `TimeZoneInfo`): subscribe to it. The clock shows UTC plus
 `offset_s` and gets the zone again at `offset_valid_until` and on `time_zone_changed`.
 
-## Admin PIN limit (system API 0.9, session API 0.17)
+## Admin PIN limit
 
 The admin profile's PIN has no wait (DECISIONS J4), so without a limit any process on the box
 could try every 4-digit PIN through system.sock in hours. The owner's rule: "After 10 failed
@@ -1686,20 +1681,19 @@ attempts require that the box needs to be restarted before it can be attempted a
   `profiles.reset_pin` on the admin profile (polkit `profiles.recover`: the admin account's
   password); both set or remove the PIN, which resets the count. A missing PIN is not a try.
 
-### What the launcher must do (session API 0.17)
+### What the launcher must do
 
-Hello with `0.17`. On `pin_required` with `reboot_required: true`, and on `greeter_result` with
+On `pin_required` with `reboot_required: true`, and on `greeter_result` with
 `reboot_required: true`, show that the box must restart (no retry countdown) and take no more
 PIN input on that pad.
 
-## Channel switches (system API 0.9, session API 0.17)
+## Channel switches
 
 Code: `update.rs` (`SeenTips`, `Rejection::OlderThanSeen`), `runner.rs` (`update_check`,
 `channel_check`, `apply`), `service.rs` (`channel.check`, `channel.set`).
 
-Before 0.9 `channel.set {acknowledge_downgrade: true}` (needed for every beta → stable switch)
-locked whatever signed commit the target branch pointed at: a server that served an old
-release with a known hole on that branch got it installed.
+`channel.set` never locks whatever signed commit the target branch points at: a server that
+serves an old release with a known hole on that branch must not get it installed.
 
 - **Newest verified tips** (`/var/lib/hinteros/channel-tips.json`, root only, `{"version": 1, "tips": {"<branch>":
   "<rev>"}}`): every job that verifies a channel tip records it there, but only forward (a
@@ -1725,16 +1719,16 @@ release with a known hole on that branch got it installed.
   (hotfixes are released onto `stable`), and `main` is not a channel. A branch that is ever
   rewound on the server is refused by every box that saw the newer tip.
 
-### What the launcher must do (session API 0.17)
+### What the launcher must do
 
-Hello with `0.17`. To switch channels: `system.channel.check {channel}`, wait for its job, show
+To switch channels: `system.channel.check {channel}`, wait for its job, show
 `result.target.version` and `result.target.date` (and, when `result.older`, that the version is
 older than the one on the box), and on confirm call `system.channel.set {channel, rev:
 result.target.rev, admin_pin}`. `update_verification_failed {reason: older_than_seen}` (from either
 job): the server offers an older version than one the box already saw; nothing changed.
 `state_conflict {reason: channel_rev}`: check again. Job kind `channel_check`.
 
-## App sandbox and permissions (session API 0.18, system API 0.10)
+## App sandbox and permissions
 
 Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command line),
 `permissions.rs` (the profile's choices), `apps.rs` (`ProcessSpawner`), `reaper.rs`, `lan.rs`
@@ -1833,7 +1827,7 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   with (`null` without app displays). gamescope makes its Xwaylands at start only, so a new
   `count` applies at the next session start (`session.restart`).
 
-### What the system repo must do (session API 0.18)
+### What the system repo must do
 
 `session.toml`: `[sandbox] enable = true`, `bwrap = "<bubblewrap>/bin/bwrap"`, and, once a
 play-only pulse socket exists, `pulse_socket` / `pulse_record_socket` (relative to
@@ -1847,9 +1841,9 @@ number written to `$XDG_RUNTIME_DIR/hinteros/app-displays` before gamescope star
 without abstract sockets, every one but `#1` sized to the output and without `LIBEI_SOCKET` from
 `#2` on, and `[gamescope] apps_display = "auto+2"`, `app_displays = 4`.
 
-### What the launcher must do (session API 0.18)
+### What the launcher must do
 
-Hello with `0.18`. Show `permissions` on the install sheet and the app page (required ones
+Show `permissions` on the install sheet and the app page (required ones
 locked); call `apps.set_permission` for each optional permission whose switch differs from
 `granted`, then `system.apps.install`. When `full_access` is true (Steam, `sandbox = false`, or the
 sandbox is off), the install sheet warns that the app can use everything the profile can.
@@ -1857,7 +1851,7 @@ On `no_app_display` from `apps.launch`, ask which app of `data.apps` to close (o
 `apps.close` it, wait for its `app_exited` and launch again. Settings: `apps.displays.get` /
 `apps.displays.set`; when `count` differs from `active`, offer `session.restart`.
 
-## Local network filter (system API 0.10)
+## Local network filter
 
 The system side of the `lan` permission (design: `hinteros-docs/design/sandbox.md`; the session
 side is in "App sandbox and permissions"). Code: `lanfilter.rs`, `service/lan.rs`.
@@ -1902,10 +1896,9 @@ anyway (it filters ports, not destinations), and multicast, IPv6 and DNS need th
 nftables matches every protocol in the kernel, on any firewall backend (its own table), with
 `nft` doing the work in a small unit of its own.
 
-## Server section (system API 0.11, session API 0.19; M10)
+## Server section (M10)
 
-Design: `hinteros-docs/design/server.md` (the owner's design calls this "system API 0.5"; 0.5 to
-0.10 were taken, so it ships as 0.11). Box-wide catalog services (`kind = service`) and their
+Design: `hinteros-docs/design/server.md`. Box-wide catalog services (`kind = service`) and their
 setup flows. Code: `servers/` (HTTP client, Jellyfin, Plex, Tailscale, Cloudflare, media folders,
 the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relayed as
 `system.<method>`.
@@ -2015,7 +2008,7 @@ Flags (all paths default to the box's; tests point them at a temporary root and 
 `--cloudflared-metrics` (`127.0.0.1:20241`), `--tailscale-login-timeout-s` (600). Every address
 must be loopback (the HTTP client refuses anything else).
 
-### What the system repo must provide (0.11)
+### What the system repo must provide
 
 As agreed (system repo `m10-server`): `/var/lib/hinteros/services/<id>/` while a service is on;
 Jellyfin's `setup-done`, `admin-password`, `api-key` (no trailing newline needed: they are
@@ -2035,9 +2028,9 @@ from the fragment and opens `/web/index.html`). For the backup: `jellyfin.servic
 names the server's store path (`<hash>-jellyfin-<version>`). VM tests (system repo):
 `server-api` (every method through the session relay) and `server-jellyfin-signin`.
 
-### What the launcher must do (session API 0.19)
+### What the launcher must do
 
-Hello with 0.19. Server tab: `system.services.list` (re-query on `job_finished` of the new kinds,
+Server tab: `system.services.list` (re-query on `job_finished` of the new kinds,
 on `store_changed`, since a service's icon may have arrived, and after reconnecting; the icon is
 `icon.path`, else a letter tile); "Turn on" with the admin PIN (`terms` shown in full, then
 `accepted_terms`); job pages from `job_progress` (the new stages `configuring` and `signing_in`;
@@ -2047,7 +2040,7 @@ for `tailscale_login` the QR of `detail.auth_url`, also in `system.jobs.get`); J
 off (+ delete data when `has_data`, second confirmation); `job_failed.data.reason` and
 `unavailable {service, reason}` for the messages.
 
-## Controller settings (session API 0.20)
+## Controller settings
 
 Per profile (`controller.rs`), in `$XDG_STATE_HOME/hinteros/controller.json`: only what the user
 changed, exactly as `input.settings.set` got it (written atomically). A missing file is the
@@ -2103,14 +2096,14 @@ Methods (launcher only):
   is dropped too) and capture ends. Guide ends it with `{button: null}` and goes Home as usual;
   so does 10 s without a press. A second call restarts the 10 s.
 
-### What the launcher must do (session API 0.20)
+### What the launcher must do
 
-Hello with 0.20. Controller page: `input.settings.get`, edit the stored form, send all of it
+Controller page: `input.settings.get`, edit the stored form, send all of it
 with `input.settings.set`; press to assign with `input.capture` and `input_captured` (when the
 pressed button already has another action, swap the two); "Reset to defaults" sends `{}` (or
 drops one part).
 
-## state.json (system API 0.12, session API 0.21)
+## state.json
 
 `schemaVersion` is 2, the only value read or written; any other is an error that names what is
 supported. Required: `schemaVersion`, `base`, `stateVersion`, `requirements`, `services`,
@@ -2126,9 +2119,37 @@ to ignore bumps `schemaVersion`. Bad values of known fields are errors. `check-s
 
 ### What the launcher must do
 
-Hello with session API 0.21. `system.settings.get`: no `settings.apps`; `settings.requirements`
+`system.settings.get`: no `settings.apps`; `settings.requirements`
 is always there. `migrate_apps` is gone from `JobKind`. The `unavailable` `service` value
 `profiles` is gone (`base` takes its place). Profile users are `hinteros-p<N>` for p1 too.
+
+## API versions
+
+Both APIs are 1.0. A client works with a server of the same major and an equal or higher minor
+(`ApiVersion::is_compatible_with`); `hello` answers the client's version, and anything else is
+`version_mismatch`. Major 0 has no rule of its own.
+
+- **A minor adds:** methods, events, fields, enum values in what a server sends. A client ignores
+  what it does not know. Every enum a client only reads has an `Unknown` value
+  (`#[serde(other)]`; Jellyfin's library kind has `other`, `Connectivity` and `UnitState` their
+  own `unknown`), `ServiceInfo.setup`, `ServiceInfo.detail` and `result` of a job read as null
+  when they are not known, and an error code outside `ErrorCode` is `ErrorObject::kind() == None`.
+- **Results and events never deny unknown fields.** Only `input.settings.*` still does, in
+  `settings`: `ControllerSettings` is the `controller.json` format.
+- **Requests stay closed where that protects something.** A server's minor is never lower than
+  its client's, so it sees only fields it knows. Every system API params type denies unknown
+  fields (a root service). In the session API, so do the ones that carry a credential or choose
+  an account: `session.switch_profile`, `session.unlock`, `greeter.pin`, `greeter.login`,
+  `greeter.create`, `wifi.connect`, `input.settings.set`, the runtime methods without params
+  (`power.reboot {force: true}` must not reboot anyway), and `hello` in both APIs.
+- **Enums a client also sends are closed:** a new value of `Channel`, `Base`,
+  `CleanupFrequency`, `LibraryKind`, `Key`, `Modifier`, `KeyAction`, `ControllerButton` or either
+  `EventName` is a new major. A catch-all there would let an unknown value through to the server
+  or into `state.json`.
+
+The schema documents list exactly what their version sends (`additionalProperties: false`), so
+the conformance tests catch a server that sends what is not documented. An item a later minor
+adds has `since`; an item without it is part of x.0.
 
 ## Persisted JSON files
 
@@ -2165,7 +2186,7 @@ nix build            # both binaries
 Try it by hand: run
 `cargo run -p hinteros-session -- --socket /tmp/s.sock --no-gamescope --no-inputplumber`,
 connect with `socat - UNIX-CONNECT:/tmp/s.sock`, send
-`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.17","client":{"name":"me","version":"0"}}}`,
+`{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"1.0","client":{"name":"me","version":"0"}}}`,
 and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch something with
 `{"jsonrpc":"2.0","id":2,"method":"apps.launch","params":{"command":["xterm"]}}`.
 

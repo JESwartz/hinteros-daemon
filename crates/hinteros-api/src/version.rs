@@ -16,18 +16,17 @@ impl ApiVersion {
         Self { major, minor }
     }
 
-    /// Whether a client built against `client` can talk to a server implementing `self`.
-    ///
-    /// Majors must match. While the major is 0, every minor is breaking, so the minor must
-    /// match too (the same rule Cargo applies to 0.x versions).
+    /// Whether a client built against `client` can talk to a server implementing `self`: the
+    /// same major and an equal or higher minor. Both sides ignore fields and enum values they do
+    /// not know, so a client reads a newer server of its major.
     pub fn is_compatible_with(self, client: ApiVersion) -> bool {
-        self.major == client.major && (self.major != 0 || self.minor == client.minor)
+        self.major == client.major && self.minor >= client.minor
     }
 
-    /// The version both sides use for this connection: the lower of the two, so neither side
-    /// relies on methods, events or fields the other doesn't know. `None` if incompatible.
+    /// The version both sides use for this connection: the client's, the lower of the two.
+    /// `None` if incompatible.
     pub fn negotiate(self, client: ApiVersion) -> Option<ApiVersion> {
-        self.is_compatible_with(client).then(|| self.min(client))
+        self.is_compatible_with(client).then_some(client)
     }
 }
 
@@ -93,13 +92,25 @@ mod tests {
     #[test]
     fn negotiation() {
         let v = ApiVersion::new;
-        // 0.x: exact match only.
-        assert_eq!(v(0, 1).negotiate(v(0, 1)), Some(v(0, 1)));
-        assert_eq!(v(0, 2).negotiate(v(0, 1)), None);
-        assert_eq!(v(0, 1).negotiate(v(1, 1)), None);
-        // 1.x and later: same major, lower minor wins.
+        // Same major: the client's minor, if the server has it.
+        assert_eq!(v(1, 0).negotiate(v(1, 0)), Some(v(1, 0)));
         assert_eq!(v(1, 3).negotiate(v(1, 1)), Some(v(1, 1)));
-        assert_eq!(v(1, 1).negotiate(v(1, 3)), Some(v(1, 1)));
+        assert_eq!(v(1, 1).negotiate(v(1, 3)), None);
+        // Another major, in both directions.
         assert_eq!(v(2, 0).negotiate(v(1, 9)), None);
+        assert_eq!(v(1, 9).negotiate(v(2, 0)), None);
+        assert_eq!(v(1, 0).negotiate(v(0, 21)), None);
+        assert_eq!(v(0, 21).negotiate(v(1, 0)), None);
+    }
+
+    #[test]
+    fn compatibility_has_one_rule() {
+        let v = ApiVersion::new;
+        assert!(v(1, 2).is_compatible_with(v(1, 2)));
+        assert!(v(1, 2).is_compatible_with(v(1, 0)), "older client");
+        assert!(!v(1, 2).is_compatible_with(v(1, 3)), "newer client");
+        // Major 0 has no rule of its own.
+        assert!(v(0, 2).is_compatible_with(v(0, 1)));
+        assert!(!v(0, 1).is_compatible_with(v(0, 2)));
     }
 }

@@ -1,4 +1,4 @@
-//! The session's side of profiles (session API 0.12, profiles.md "Switching profiles on a TV"):
+//! The session's side of profiles (profiles.md "Switching profiles on a TV"):
 //! `profile.current`, the profile switch (close every app without a silent force-close, close
 //! Steam, end the session), the sleep lock of a locked profile, and `profiles_changed`.
 

@@ -1,4 +1,4 @@
-//! Time zone (system API 0.8, time-zone.md) against the real binary and a fake root: the zone
+//! Time zone (time-zone.md) against the real binary and a fake root: the zone
 //! and list from tzdata fixtures, `time_zone.set` (state.json, the localtime link, the event),
 //! its errors, the admin PIN and first-boot mode, a job that runs across a change, and a
 //! rollback that restores another zone. The helper unit (`hinteros-time-zone-apply.service`) is

@@ -1,4 +1,4 @@
-//! Storage (storage.md, system API 0.6): what uses the disk, as the ring's tree.
+//! Storage (storage.md): what uses the disk, as the ring's tree.
 //!
 //! The `storage_measure` job ([`crate::runner`]) gathers the facts: the store's filesystem
 //! (statvfs), the NAR size of every store path and which are live, the closure of every system

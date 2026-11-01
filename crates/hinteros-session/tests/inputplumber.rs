@@ -1289,7 +1289,7 @@ async fn watchdog_leaves_inputplumbers_guide_switch_alone() {
     );
 }
 
-/// The profile's pointer settings (session API 0.20): a change while the pointer profile is
+/// The profile's pointer settings: a change while the pointer profile is
 /// loaded loads it again with the new speed and sticks; a change while it is not waits for the
 /// next load. Unloading puts the profile from before ours back.
 #[tokio::test(flavor = "multi_thread")]

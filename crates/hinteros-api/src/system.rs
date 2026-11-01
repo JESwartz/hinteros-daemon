@@ -3,16 +3,19 @@
 //! `hinteros-docs/design/system-api.md`.
 //!
 //! Every params type here rejects unknown fields: the service is a root process and its inputs
-//! are closed (a forged `uid` or a stray `path` is an error, not ignored).
+//! are closed (a forged `uid` or a stray `path` is an error, not ignored). A client never sends
+//! more than its server knows (the server's minor is equal or higher). Results and events take
+//! unknown fields and values: an older client reads a newer server.
 
 use std::collections::BTreeMap;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, ErrorObject, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 12);
+pub const VERSION: ApiVersion = ApiVersion::new(1, 0);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/system-api.json");
@@ -26,6 +29,13 @@ pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// field being absent.)
 fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     Option::<T>::deserialize(d)
+}
+
+/// A nullable field a later minor can fill with something this build does not know: that reads
+/// as `None`.
+fn lenient<'de, D: Deserializer<'de>, T: DeserializeOwned>(d: D) -> Result<Option<T>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 /// Server-issued job id: 16 lowercase hex digits.
@@ -90,48 +100,51 @@ pub enum JobKind {
     Base,
     AppsInstall,
     AppsRemove,
-    /// 0.4: a profile's apps back to an earlier generation.
+    /// A profile's apps back to an earlier generation.
     AppsRollback,
-    /// 0.4: a new starter env.
+    /// A new starter env.
     StarterSet,
-    /// 0.4: a new account (a rebuild).
+    /// A new account (a rebuild).
     ProfilesCreate,
-    /// 0.4: an account and its home removed (a rebuild).
+    /// An account and its home removed (a rebuild).
     ProfilesRemove,
-    /// 0.4: the guest account on or off (a rebuild).
+    /// The guest account on or off (a rebuild).
     GuestSet,
-    /// 0.5: the guest session ended and the guest wiped now (home, app env, sign-ins).
+    /// The guest session ended and the guest wiped now (home, app env, sign-ins).
     GuestEnd,
-    /// 0.6: measure what uses the disk (`storage.measure`).
+    /// Measure what uses the disk (`storage.measure`).
     StorageMeasure,
-    /// 0.6: old system generations removed, then garbage collected.
+    /// Old system generations removed, then garbage collected.
     CleanupSystem,
-    /// 0.6: old app-env generations of every profile removed, then garbage collected.
+    /// Old app-env generations of every profile removed, then garbage collected.
     CleanupProfiles,
-    /// 0.6: the automatic clean-up setting changed (a rebuild).
+    /// The automatic clean-up setting changed (a rebuild).
     CleanupSet,
-    /// 0.9: the tip of another channel verified before `channel.set`.
+    /// The tip of another channel verified before `channel.set`.
     ChannelCheck,
-    /// 0.11: services turned on (a rebuild).
+    /// Services turned on (a rebuild).
     ServicesEnable,
-    /// 0.11: services turned off (a rebuild), their data deleted on request.
+    /// Services turned off (a rebuild), their data deleted on request.
     ServicesDisable,
-    /// 0.11: a Jellyfin library added.
+    /// A Jellyfin library added.
     JellyfinLibraryAdd,
-    /// 0.11: a Jellyfin library removed (the media files stay).
+    /// A Jellyfin library removed (the media files stay).
     JellyfinLibraryRemove,
-    /// 0.11: Plex linked to the owner's account.
+    /// Plex linked to the owner's account.
     PlexClaim,
-    /// 0.11: Tailscale sign-in (waits for the person at the sign-in URL).
+    /// Tailscale sign-in (waits for the person at the sign-in URL).
     TailscaleLogin,
-    /// 0.11: Tailscale sign-out.
+    /// Tailscale sign-out.
     TailscaleLogout,
-    /// 0.11: the Cloudflare tunnel token written and the tunnel restarted.
+    /// The Cloudflare tunnel token written and the tunnel restarted.
     CloudflareSetToken,
-    /// 0.11: the Cloudflare tunnel stopped and its token deleted.
+    /// The Cloudflare tunnel stopped and its token deleted.
     CloudflareClearToken,
-    /// 0.11: an app's data deleted in the caller's home (`apps.clear_data`).
+    /// An app's data deleted in the caller's home (`apps.clear_data`).
     AppsClearData,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl JobKind {
@@ -178,6 +191,9 @@ pub enum JobState {
     Succeeded,
     Failed,
     Cancelled,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl JobState {
@@ -196,26 +212,29 @@ pub enum Stage {
     Preparing,
     Fetching,
     Verifying,
-    /// 0.4: the system rebuild that turns on box features an app needs (nix progress still
+    /// The system rebuild that turns on box features an app needs (nix progress still
     /// attached).
     Box,
-    /// 0.6: measuring the disk (`storage_measure`; with `percent`).
+    /// Measuring the disk (`storage_measure`; with `percent`).
     Measuring,
     Evaluating,
     Downloading,
     Building,
     Activating,
-    /// 0.6: removing old generations (clean-ups; no longer cancellable).
+    /// Removing old generations (clean-ups; no longer cancellable).
     Cleaning,
-    /// 0.6: collecting garbage (clean-ups).
+    /// Collecting garbage (clean-ups).
     Collecting,
-    /// 0.4: after a system switch, every profile's app env is rebuilt against the new system.
+    /// After a system switch, every profile's app env is rebuilt against the new system.
     Apps,
-    /// 0.11: talking to a local service (Jellyfin, Plex, Tailscale, cloudflared).
+    /// Talking to a local service (Jellyfin, Plex, Tailscale, cloudflared).
     Configuring,
-    /// 0.11: waiting for the person to sign in at `detail.auth_url` (Tailscale).
+    /// Waiting for the person to sign in at `detail.auth_url` (Tailscale).
     SigningIn,
     Finishing,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Stage {
@@ -246,6 +265,9 @@ pub enum Severity {
     Medium,
     High,
     Critical,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Severity {
@@ -263,11 +285,11 @@ pub enum EventName {
     JobStarted,
     JobProgress,
     JobFinished,
-    /// 0.4: profiles changed (a job, a rename, a PIN, lock or appearance change): re-query.
+    /// Profiles changed (a job, a rename, a PIN, lock or appearance change): re-query.
     ProfilesChanged,
-    /// 0.8: the box's time zone changed (`time_zone.set`, or a rollback restored another).
+    /// The box's time zone changed (`time_zone.set`, or a rollback restored another).
     TimeZoneChanged,
-    /// 0.9: Ctrl + Super + D on a keyboard: Home (only to the seat0 owner's connections).
+    /// Ctrl + Super + D on a keyboard: Home (only to the seat0 owner's connections).
     KeyboardHome,
 }
 
@@ -380,7 +402,7 @@ pub struct SshSettings {
 pub struct Settings {
     pub base: Base,
     pub ssh: SshSettings,
-    /// 0.4: the box features that are on (read-only).
+    /// The box features that are on (read-only).
     pub requirements: Vec<String>,
 }
 
@@ -407,10 +429,10 @@ pub struct Generation {
     pub rev: Option<String>,
     pub current: bool,
     pub booted: bool,
-    /// The accounts in that generation's `state.json` (0.4); `None` when it cannot be read.
+    /// The accounts in that generation's `state.json`; `None` when it cannot be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profiles: Option<Vec<GenerationProfile>>,
-    /// 0.5: box features a rollback to this generation would turn back on (the profiles' apps
+    /// Box features a rollback to this generation would turn back on (the profiles' apps
     /// need them, its `state.json` lacks them). Absent when none, or unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readds_features: Option<Vec<String>>,
@@ -418,7 +440,6 @@ pub struct Generation {
 
 /// A profile of a generation's `state.json`, with its current name (`None`: not a profile now).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GenerationProfile {
     pub id: String,
     #[serde(deserialize_with = "nullable")]
@@ -441,8 +462,8 @@ impl Method for GenerationsList {
 // Settings and SSH
 
 /// The closed set of `state.json` fields `settings.set` may change. Each new setting adds a
-/// typed field here (bool, enum, bounded integer), never a free-form value. Empty in 0.2: SSH
-/// has its own method and base/channel theirs.
+/// typed field here (bool, enum, bounded integer), never a free-form value. Empty: SSH has its
+/// own method and base/channel theirs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsChanges {}
@@ -484,7 +505,7 @@ impl Method for Rebuild {
     type Result = JobRef;
 }
 
-/// 0.5: the admin profile's PIN guards the box-wide actions (`hardware.redetect`, `rollback`,
+/// The admin profile's PIN guards the box-wide actions (`hardware.redetect`, `rollback`,
 /// `update.apply`, `channel.set`, `base.set`): `pin_required {pin: admin}` without it or when it is wrong, on a
 /// caller that is not root.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,7 +527,7 @@ impl Method for HardwareRedetect {
 pub struct RollbackParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<u32>,
-    /// 0.5: the admin profile's PIN.
+    /// The admin profile's PIN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_pin: Option<String>,
 }
@@ -567,7 +588,6 @@ pub struct RemovedApp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct UpdateCheckResult {
     pub channel: Channel,
     #[serde(deserialize_with = "nullable")]
@@ -598,7 +618,7 @@ impl Method for UpdateCheck {
 #[serde(deny_unknown_fields)]
 pub struct UpdateApplyParams {
     pub rev: String,
-    /// 0.5: the admin profile's PIN (installing a system update is box-wide: needed from every
+    /// The admin profile's PIN (installing a system update is box-wide: needed from every
     /// profile, the guest's included).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_pin: Option<String>,
@@ -611,7 +631,7 @@ impl Method for UpdateApply {
     type Result = JobRef;
 }
 
-/// 0.9: `channel.check`: verify the tip of another channel before `channel.set`.
+/// `channel.check`: verify the tip of another channel before `channel.set`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelCheckParams {
@@ -625,9 +645,8 @@ impl Method for ChannelCheck {
     type Result = JobRef;
 }
 
-/// 0.9: the result of a `channel_check` job: the verified tip of the target channel.
+/// The result of a `channel_check` job: the verified tip of the target channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChannelCheckResult {
     /// The target channel.
     pub channel: Channel,
@@ -648,11 +667,11 @@ pub struct ChannelCheckResult {
 #[serde(deny_unknown_fields)]
 pub struct ChannelSetParams {
     pub channel: Channel,
-    /// 0.9: the target revision the owner confirmed: the last `channel.check` result's
+    /// The target revision the owner confirmed: the last `channel.check` result's
     /// `target.rev` for this channel (needed unless `channel` is the current one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
-    /// 0.5: the admin profile's PIN.
+    /// The admin profile's PIN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_pin: Option<String>,
 }
@@ -670,7 +689,7 @@ pub struct BaseSetParams {
     pub base: Base,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acknowledge_downgrade: Option<bool>,
-    /// 0.5: the admin profile's PIN.
+    /// The admin profile's PIN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_pin: Option<String>,
 }
@@ -723,7 +742,7 @@ impl Method for AppsRemove {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Apps per profile (0.4)
+// Apps per profile
 
 /// `apps.list`: the caller's current app env.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -798,7 +817,6 @@ pub struct AppsAcceptTermsParams {
 
 /// An empty result object.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Empty {}
 
 pub struct AppsAcceptTerms;
@@ -808,7 +826,7 @@ impl Method for AppsAcceptTerms {
     type Result = Empty;
 }
 
-/// 0.11 `apps.clear_data`: delete a catalog app's `dataPaths` in the caller's home, installed
+/// `apps.clear_data`: delete a catalog app's `dataPaths` in the caller's home, installed
 /// or not (data a remove left behind).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -824,7 +842,7 @@ impl Method for AppsClearData {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Profiles (0.4, profiles.md)
+// Profiles (profiles.md)
 
 /// `^p[1-9][0-9]{0,2}$`.
 pub fn is_profile_id(s: &str) -> bool {
@@ -1100,7 +1118,7 @@ impl Method for GuestSet {
     type Result = JobRef;
 }
 
-/// 0.5: End guest session. Only the guest may call it (from its own session); the job ends the
+/// End guest session. Only the guest may call it (from its own session); the job ends the
 /// guest's session itself (every process of the guest account), then wipes the guest's home,
 /// app env, terms acceptances, usage entry and switch hint, and gives it the starter env again.
 pub struct GuestEnd;
@@ -1180,7 +1198,7 @@ impl Event for ProfilesChanged {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Storage (0.6, storage.md): what uses the disk, clean-up, automatic clean-up
+// Storage (storage.md): what uses the disk, clean-up, automatic clean-up
 
 /// Most generations a clean-up (or the automatic one) may keep.
 pub const MAX_KEEP: u32 = 10;
@@ -1219,6 +1237,9 @@ pub enum NodeKind {
     Steam,
     /// One Steam game (`name`, `app_id`).
     SteamGame,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl NodeKind {
@@ -1244,7 +1265,6 @@ impl NodeKind {
 /// One segment of the storage ring. Children add up exactly to `bytes` (remainders are nodes
 /// of their own), except at the `disk` root when the measured parts exceed the filesystem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct StorageNode {
     pub kind: NodeKind,
     pub bytes: u64,
@@ -1284,7 +1304,6 @@ impl StorageNode {
 
 /// The store's filesystem (statvfs), like df.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DiskUsage {
     pub total_bytes: u64,
     pub used_bytes: u64,
@@ -1293,7 +1312,6 @@ pub struct DiskUsage {
 
 /// What one clean-up with `keep` would remove and free now (an estimate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CleanupEstimate {
     pub keep: u32,
     /// Generations it would remove.
@@ -1304,7 +1322,6 @@ pub struct CleanupEstimate {
 
 /// For keep 1 to 10 (index `keep - 1`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CleanupEstimates {
     pub system: Vec<CleanupEstimate>,
     pub profiles: Vec<CleanupEstimate>,
@@ -1312,7 +1329,6 @@ pub struct CleanupEstimates {
 
 /// The last measurement, as every profile may see it (no names of files, folders or games).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Measurement {
     /// When it finished (Unix seconds).
     pub measured_at: i64,
@@ -1417,7 +1433,6 @@ impl CleanupFrequency {
 
 /// The automatic clean-up (`state.json` `settings.cleanup`, defaults when absent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CleanupSettings {
     pub enabled: bool,
     pub frequency: CleanupFrequency,
@@ -1454,14 +1469,12 @@ impl Method for CleanupSet {
 
 /// `storage_measure` job result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MeasuredResult {
     pub measured_at: i64,
 }
 
 /// Clean-up job result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CleanedResult {
     /// Free space after minus before on the store's filesystem (never negative).
     pub freed_bytes: u64,
@@ -1469,7 +1482,7 @@ pub struct CleanedResult {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Time zone (0.8, time-zone.md)
+// Time zone (time-zone.md)
 
 /// The zone that applies when `state.json` names none.
 pub const DEFAULT_TIME_ZONE: &str = "UTC";
@@ -1496,7 +1509,6 @@ pub fn is_zone_name(s: &str) -> bool {
 
 /// The box's time zone and its offsets now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TimeZoneInfo {
     /// An IANA name (`UTC` when `state.json` names none).
     pub zone: String,
@@ -1511,7 +1523,6 @@ pub struct TimeZoneInfo {
 
 /// A zone in `time_zone.list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TimeZoneEntry {
     pub zone: String,
     pub offset_s: i32,
@@ -1565,10 +1576,9 @@ impl Event for TimeZoneChanged {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Keyboard Home (0.9)
+// Keyboard Home
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct KeyboardHomeParams {}
 
 /// `keyboard_home`: Ctrl + Super + D was pressed on a keyboard. Only `hinteros-system
@@ -1581,7 +1591,7 @@ impl Event for KeyboardHome {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Local network filter (0.10)
+// Local network filter
 
 /// Longest cgroup path `lan_filter.set` takes.
 pub const MAX_CGROUP_PATH_BYTES: usize = 512;
@@ -1613,7 +1623,7 @@ impl Method for LanFilterClear {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Server section (0.11, server.md): box-wide services, Jellyfin, Plex, Tailscale, Cloudflare
+// Server section (server.md): box-wide services, Jellyfin, Plex, Tailscale, Cloudflare
 
 pub use crate::catalog::Setup;
 
@@ -1657,7 +1667,6 @@ impl UnitState {
 
 /// The vendor terms of a service (Plex), with the absolute path of the text on the box.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ServiceTerms {
     pub title: String,
     pub version: String,
@@ -1675,7 +1684,9 @@ pub enum LibraryKindShown {
     Music,
     /// Mixed movies and shows (no collection type, or Jellyfin's `mixed`).
     Mixed,
-    /// A type made in Jellyfin's own dashboard (books, photos, music videos, ...).
+    /// A type made in Jellyfin's own dashboard (books, photos, music videos, ...), or a value of
+    /// a later minor.
+    #[serde(other)]
     Other,
 }
 
@@ -1709,7 +1720,6 @@ impl LibraryKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct JellyfinLibrary {
     /// Jellyfin's item id (32 lowercase hex digits).
     pub id: String,
@@ -1721,7 +1731,6 @@ pub struct JellyfinLibrary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct JellyfinUserRef {
     pub profile_id: String,
     /// The profile's Jellyfin user name.
@@ -1729,7 +1738,6 @@ pub struct JellyfinUserRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct JellyfinDetail {
     /// HinterOS made the first-run setup (admin user, API key).
     pub setup_done: bool,
@@ -1741,7 +1749,6 @@ pub struct JellyfinDetail {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PlexDetail {
     /// Linked to a Plex account (`plex.claim`).
     pub claimed: bool,
@@ -1763,6 +1770,9 @@ pub enum TailscaleState {
     Stopped,
     /// tailscaled does not answer.
     Unavailable,
+    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl TailscaleState {
@@ -1777,7 +1787,6 @@ impl TailscaleState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TailscaleDetail {
     pub state: TailscaleState,
     /// The device's name in the tailnet.
@@ -1798,7 +1807,6 @@ pub struct TailscaleDetail {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CloudflareDetail {
     pub token_set: bool,
     /// cloudflared has a connection to Cloudflare.
@@ -1821,7 +1829,6 @@ pub enum ServiceDetail {
 /// Where a service's real icon is: the catalog entry's `icon`, as `store.list` shows an app's
 /// (HinterOS ships no logos).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ServiceIcon {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop_id: Option<String>,
@@ -1842,7 +1849,6 @@ pub struct ServiceIcon {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ServiceInfo {
     pub id: String,
     pub name: String,
@@ -1854,13 +1860,13 @@ pub struct ServiceInfo {
     #[serde(deserialize_with = "nullable")]
     pub status: Option<UnitState>,
     /// The setup flow (null: on/off only).
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "lenient")]
     pub setup: Option<Setup>,
     /// Vendor terms to accept before `services.enable`.
     #[serde(deserialize_with = "nullable")]
     pub terms: Option<ServiceTerms>,
     /// Per-setup detail (enabled services with a setup only).
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "lenient")]
     pub detail: Option<ServiceDetail>,
     /// The catalog entry's icon; absent when the catalog no longer has the entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1934,7 +1940,6 @@ pub struct MediaFoldersParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MediaFolder {
     /// The folder's path relative to `/srv/media`.
     pub id: String,
@@ -1992,14 +1997,12 @@ impl Method for JellyfinLibrariesRemove {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct JellyfinAccount {
     pub name: String,
     pub password: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct JellyfinProfileAccount {
     pub profile_id: String,
     /// The profile's name now.
@@ -2075,7 +2078,6 @@ impl Method for TailscaleLogout {
 
 /// The caller's own Jellyfin session (spike S1: the Jellyfin app on the box signs in by itself).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct JellyfinClientTokenResult {
     /// Jellyfin's server id (32 hex digits).
     pub server_id: String,
@@ -2138,7 +2140,7 @@ impl Method for CloudflareClearToken {
     type Result = JobRef;
 }
 
-/// 0.11: the library a Jellyfin job is about.
+/// The library a Jellyfin job is about.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubjectLibrary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2155,7 +2157,6 @@ pub struct SubjectLibrary {
 
 /// Result of a job that changed the system.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AppliedResult {
     /// Generation after the job.
     #[serde(deserialize_with = "nullable")]
@@ -2163,11 +2164,11 @@ pub struct AppliedResult {
     /// Locked revision after the job.
     #[serde(deserialize_with = "nullable")]
     pub rev: Option<String>,
-    /// 0.4: app envs the final `apps` stage could not rebuild (they keep their previous
+    /// App envs the final `apps` stage could not rebuild (they keep their previous
     /// generation, which still works). Absent when every env was rebuilt or there was none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apps_not_updated: Option<Vec<AppNotUpdated>>,
-    /// 0.5: box features a rollback turned back on because the profiles' apps need them and the
+    /// Box features a rollback turned back on because the profiles' apps need them and the
     /// restored generation lacked them (a `box` stage after the rollback). Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features_readded: Option<Vec<String>>,
@@ -2189,11 +2190,11 @@ pub struct AppNotUpdated {
 pub enum JobResult {
     UpdateCheck(UpdateCheckResult),
     Applied(AppliedResult),
-    /// 0.6: `storage_measure`.
+    /// `storage_measure`.
     Measured(MeasuredResult),
-    /// 0.6: `cleanup_system`, `cleanup_profiles`.
+    /// `cleanup_system`, `cleanup_profiles`.
     Cleaned(CleanedResult),
-    /// 0.9: `channel_check`.
+    /// `channel_check`.
     ChannelCheck(ChannelCheckResult),
 }
 
@@ -2212,32 +2213,32 @@ pub struct Job {
     pub finished_at: Option<i64>,
     #[serde(deserialize_with = "nullable")]
     pub error: Option<ErrorObject>,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "lenient")]
     pub result: Option<JobResult>,
     pub session_restart_required: bool,
-    /// 0.7: what the job is about.
+    /// What the job is about.
     pub subject: JobSubject,
-    /// 0.7: when the job's process started (`created_at` until it has).
+    /// When the job's process started (`created_at` until it has).
     pub started_at: i64,
-    /// 0.7: the latest percent (running jobs; null when finished).
+    /// The latest percent (running jobs; null when finished).
     #[serde(deserialize_with = "nullable")]
     pub percent: Option<u8>,
-    /// 0.7: the latest progress detail (running jobs; null when finished).
+    /// The latest progress detail (running jobs; null when finished).
     #[serde(deserialize_with = "nullable")]
     pub detail: Option<ProgressDetail>,
-    /// 0.7: the last time the job's process produced output (running jobs).
+    /// The last time the job's process produced output (running jobs).
     #[serde(deserialize_with = "nullable")]
     pub last_activity_at: Option<i64>,
 }
 
-/// 0.7: a profile a job is for, with its display name when the job started.
+/// A profile a job is for, with its display name when the job started.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubjectProfile {
     pub id: String,
     pub name: String,
 }
 
-/// 0.7: what a job is about. Every field is optional; which ones each kind sets is in the
+/// What a job is about. Every field is optional; which ones each kind sets is in the
 /// README ("What a job is about").
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobSubject {
@@ -2293,10 +2294,10 @@ pub struct JobSubject {
     pub keep_system: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_profiles: Option<u32>,
-    /// 0.11: services turned on or off.
+    /// Services turned on or off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub services: Option<Vec<CatalogApp>>,
-    /// 0.11: the Jellyfin library added or removed.
+    /// The Jellyfin library added or removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<SubjectLibrary>,
 }
@@ -2353,9 +2354,7 @@ pub struct JobStartedParams {
     pub job_id: String,
     pub kind: JobKind,
     pub uid: u32,
-    /// 0.7.
     pub subject: JobSubject,
-    /// 0.7.
     pub started_at: i64,
 }
 
@@ -2376,25 +2375,25 @@ pub struct ProgressDetail {
     pub bytes_done: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_total: Option<u64>,
-    /// 0.7: derivations built so far.
+    /// Derivations built so far.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builds_done: Option<u64>,
-    /// 0.7: derivations nix expects to build (may grow).
+    /// Derivations nix expects to build (may grow).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builds_total: Option<u64>,
-    /// 0.7: derivations building at once.
+    /// Derivations building at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builds_running: Option<u64>,
-    /// 0.7: the most recently started derivation that is still building.
+    /// The most recently started derivation that is still building.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub building: Option<Building>,
-    /// 0.11: `tailscale_login`, stage `signing_in`: the URL to sign in at (the launcher shows it
+    /// `tailscale_login`, stage `signing_in`: the URL to sign in at (the launcher shows it
     /// as a QR code).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_url: Option<String>,
 }
 
-/// 0.7: a derivation being built.
+/// A derivation being built.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Building {
     /// From the `.drv` name, e.g. `hinteros-daemon`.
@@ -2404,7 +2403,7 @@ pub struct Building {
     /// Nix's build phase without `Phase` (`unpack`, `configure`, `build`, `install`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
-    /// 0.10: how far this derivation is (0..=99), from the last standard stdenv phase it
+    /// How far this derivation is (0..=99), from the last standard stdenv phase it
     /// started; absent before the first one and for builders without phases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent: Option<u8>,
@@ -2419,19 +2418,17 @@ impl ProgressDetail {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobProgressParams {
     pub job_id: String,
-    /// 0.7.
     pub kind: JobKind,
     pub stage: Stage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<ProgressDetail>,
-    /// 0.7.
     pub started_at: i64,
-    /// 0.7: the last time the job's process produced output.
+    /// The last time the job's process produced output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<i64>,
-    /// 0.7: the job's subject, only when it changed during the job (replaces the old one).
+    /// The job's subject, only when it changed during the job (replaces the old one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<JobSubject>,
 }
@@ -2449,15 +2446,16 @@ pub struct JobFinishedParams {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorObject>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub result: Option<JobResult>,
     /// The switch replaced the system service or the session daemon: offer a session restart.
     pub session_restart_required: bool,
-    /// 0.7.
     pub subject: JobSubject,
-    /// 0.7.
     pub started_at: i64,
-    /// 0.7.
     pub finished_at: i64,
 }
 
@@ -2620,7 +2618,7 @@ pub const GREETER_METHODS: &[&str] = &[
 /// Methods whose params carry PINs (never logged; the audit summary redacts them).
 pub const PIN_FIELDS: &[&str] = &["pin", "current_pin", "new_pin", "admin_pin"];
 
-/// 0.11: other secret params (a Plex claim code, a Cloudflare tunnel token): never logged either.
+/// Other secret params (a Plex claim code, a Cloudflare tunnel token): never logged either.
 pub const SECRET_FIELDS: &[&str] = &["code", "token"];
 
 /// The polkit action that guards a mutating method.
@@ -2629,7 +2627,7 @@ pub fn polkit_action(method: &str) -> Option<&'static str> {
         SettingsSet::NAME => "org.hinteros.system.settings",
         SshSet::NAME => "org.hinteros.system.ssh",
         Rebuild::NAME | HardwareRedetect::NAME => "org.hinteros.system.rebuild",
-        // 0.9: a check like update.check (no PIN), so the policy file needs no change.
+        // A check like update.check (no PIN), so the policy file needs no change.
         UpdateCheck::NAME | ChannelCheck::NAME => "org.hinteros.system.update.check",
         UpdateApply::NAME => "org.hinteros.system.update.apply",
         Rollback::NAME => "org.hinteros.system.rollback",
@@ -2654,14 +2652,14 @@ pub fn polkit_action(method: &str) -> Option<&'static str> {
         | GuestEnd::NAME => "org.hinteros.system.profiles",
         GuestSet::NAME | StarterSetSet::NAME => "org.hinteros.system.starter",
         DisplaySaveMode::NAME | AudioSaveOutput::NAME => "org.hinteros.system.settings",
-        // 0.6: existing actions, so the policy file needs no change.
+        // Existing actions, so the policy file needs no change.
         StorageMeasure::NAME | StorageTree::NAME | CleanupSet::NAME => {
             "org.hinteros.system.settings"
         }
         StorageCleanupSystem::NAME | StorageCleanupProfiles::NAME => "org.hinteros.system.rebuild",
-        // 0.8: an existing action, so the policy file needs no change.
+        // An existing action, so the policy file needs no change.
         TimeZoneSet::NAME => "org.hinteros.system.settings",
-        // 0.11: the admin PIN is checked by the service.
+        // The admin PIN is checked by the service.
         ServicesEnable::NAME
         | ServicesDisable::NAME
         | JellyfinLibrariesAdd::NAME

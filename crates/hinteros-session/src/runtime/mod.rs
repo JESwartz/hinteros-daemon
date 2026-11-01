@@ -1,6 +1,6 @@
 //! Runtime settings: what Settings changes without a rebuild (Wi-Fi, Bluetooth, audio, display,
 //! power), served as `network.*`, `wifi.*`, `bluetooth.*`, `audio.*`, `display.*` and
-//! `power.*` (session API 0.7).
+//! `power.*`.
 //!
 //! The daemon runs as the session user and talks to the system's own services, which authorise
 //! it with the polkit rules from the system repo (`runtime.nix`): NetworkManager and BlueZ and

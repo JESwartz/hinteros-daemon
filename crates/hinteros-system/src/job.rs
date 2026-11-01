@@ -67,7 +67,7 @@ pub struct JobSpec {
     /// D-Bus address for logind inhibitors (`None`: the system bus).
     pub bus: Option<String>,
     pub action: Action,
-    /// What the job is about (API 0.7; the runner may refine it, see [`ProgressLine::subject`]).
+    /// What the job is about (the runner may refine it, see [`ProgressLine::subject`]).
     #[serde(default)]
     pub subject: JobSubject,
 }
@@ -105,22 +105,22 @@ pub enum Action {
     StorageMeasure(MeasureJob),
     /// Remove old generations (system or app envs), then collect garbage.
     Cleanup(CleanupJob),
-    /// 0.11: services turned on or off (the apply flow), then their follow-up (Jellyfin users,
+    /// Services turned on or off (the apply flow), then their follow-up (Jellyfin users,
     /// deleting data).
     Services(ServicesJob),
-    /// 0.11: a Jellyfin library added or removed.
+    /// A Jellyfin library added or removed.
     Jellyfin(JellyfinJob),
-    /// 0.11: Plex linked to an account.
+    /// Plex linked to an account.
     Plex(PlexJob),
-    /// 0.11: Tailscale sign-in or sign-out.
+    /// Tailscale sign-in or sign-out.
     Tailscale(TailscaleJob),
-    /// 0.11: the Cloudflare tunnel restarted on a new token, or stopped and its token deleted.
+    /// The Cloudflare tunnel restarted on a new token, or stopped and its token deleted.
     Cloudflare(CloudflareJob),
-    /// 0.11: one app's data deleted in the caller's home (`apps.clear_data`); nothing rebuilt.
+    /// One app's data deleted in the caller's home (`apps.clear_data`); nothing rebuilt.
     ClearData(DeleteData),
 }
 
-/// 0.11: `services.enable` / `services.disable`.
+/// `services.enable` / `services.disable`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServicesJob {
@@ -475,7 +475,7 @@ impl Status {
     }
 }
 
-/// `job_failed` with `reason` (0.11: why a Server section job failed: `unreachable`,
+/// `job_failed` with `reason` (why a Server section job failed: `unreachable`,
 /// `not_ready`, `refused`, `timeout`, `not_connected`).
 pub fn job_failed_because(stage: Stage, hint: &str, reason: &str) -> ErrorObject {
     let mut e = job_failed(stage, hint);

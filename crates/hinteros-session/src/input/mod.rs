@@ -132,7 +132,7 @@ pub fn translate(event: &str) -> Option<Intent> {
 }
 
 /// The physical button behind an InputPlumber D-Bus event (after the Xbox label swap), for the
-/// ten buttons the profile can remap (session API 0.20). Guide, the directions and the rest:
+/// ten buttons the profile can remap. Guide, the directions and the rest:
 /// `None`.
 pub fn button(event: &str) -> Option<ControllerButton> {
     use ControllerButton::*;

@@ -485,7 +485,7 @@ async fn closing_a_steam_game_ends_its_process_tree() {
             &steam,
             &format!(
                 "id=${{2#steam://rungameid/}}\n\
-                 {reaper} reaper SteamLaunch AppId=$id -- sh -c \"trap '' TERM; echo \\$\\$ > {dir}/game.pid; sleep 60\" >/dev/null 2>&1 &",
+                 {reaper} reaper SteamLaunch AppId=$id -- sh -c \"trap '' TERM; echo \\$\\$ > {dir}/game.pid; sleep 300\" >/dev/null 2>&1 &",
                 reaper = env!("CARGO_BIN_EXE_hinteros-session"),
                 dir = dir.display(),
             ),
@@ -524,7 +524,11 @@ async fn closing_a_steam_game_ends_its_process_tree() {
     .await;
     gs.set("GAMESCOPE_FOCUSABLE_APPS", &[GAME]);
     gs.set("GAMESCOPE_FOCUSED_APP", &[GAME]);
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // The daemon must have seen the game before it goes, or nothing says that it went.
+    eventually("the daemon to see the game", async || {
+        d.log().contains("Steam's reaper for it runs").then_some(())
+    })
+    .await;
 
     call(
         &mut c,
@@ -846,7 +850,7 @@ async fn steam_game_launch_survives_shader_precaching_and_is_not_launched_twice(
         &format!(
             "echo \"$*\" >> {dir}/requests\n\
              case \"$2\" in steam://rungameid/*) id=${{2#steam://rungameid/}}\n\
-             {reaper} reaper SteamLaunch AppId=$id -- sh -c \"echo \\$\\$ > {dir}/game.pid; exec sleep 60\" >/dev/null 2>&1 & ;; esac",
+             {reaper} reaper SteamLaunch AppId=$id -- sh -c \"echo \\$\\$ > {dir}/game.pid; exec sleep 600\" >/dev/null 2>&1 & ;; esac",
             reaper = env!("CARGO_BIN_EXE_hinteros-session"),
             dir = dir.display(),
         ),
@@ -857,7 +861,10 @@ async fn steam_game_launch_survives_shader_precaching_and_is_not_launched_twice(
             .lines()
             .count()
     };
-    let d = start_daemon_with_steam(&gs, &steam, "[steam]\nlaunch_timeout_s = 1\n");
+    // The fake Steam must start its reaper within the timeout: it has that long on a loaded
+    // machine, and the test waits as long.
+    let launch_timeout = Duration::from_secs(5);
+    let d = start_daemon_with_steam(&gs, &steam, "[steam]\nlaunch_timeout_s = 5\n");
     gs.baselayer_becomes(&[LAUNCHER]).await;
     let mut c = d.client().await;
     call(
@@ -867,6 +874,7 @@ async fn steam_game_launch_survives_shader_precaching_and_is_not_launched_twice(
     )
     .await
     .unwrap();
+    let launched = std::time::Instant::now();
     call(
         &mut c,
         "apps.launch",
@@ -903,8 +911,9 @@ async fn steam_game_launch_survives_shader_precaching_and_is_not_launched_twice(
     .await;
     gs.set("GAMESCOPE_FOCUSABLE_APPS", &[769]);
     gs.set("GAMESCOPE_FOCUSED_APP", &[769]);
-    // Well past the launch timeout (1 s): still launching, still focused.
-    let quiet = tokio::time::timeout(Duration::from_secs(3), next_event(&mut c)).await;
+    // Well past the launch timeout: still launching, still focused.
+    let past = launched + launch_timeout + Duration::from_secs(2);
+    let quiet = tokio::time::timeout_at(past.into(), next_event(&mut c)).await;
     assert!(quiet.is_err(), "unexpected {quiet:?}");
     gs.destroy(shaders);
     gs.set("GAMESCOPE_FOCUSABLE_APPS", &[]);

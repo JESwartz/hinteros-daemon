@@ -13,7 +13,9 @@ use rustix::process::{Pid, Signal, kill_process};
 use serde_json::{Value, json};
 use tokio::time::timeout;
 
-pub const TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a test waits for something that must happen: a ceiling, far above any normal wait,
+/// for machines under heavy load.
+pub const TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct Daemon {
     pub child: Child,

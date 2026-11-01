@@ -91,7 +91,7 @@ async fn get_list_set_and_a_job_across_it() {
     let r = call(&mut c, "time_zone.get", json!({})).await.unwrap();
     assert_eq!(
         r,
-        json!({"zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0, "offset_valid_until": null})
+        json!({"zone": "UTC", "offset_s": 0, "standard_offset_s": 0, "offset_valid_until": null})
     );
     // The list: the tab's zones that have a file, plus UTC, sorted.
     let r = call(&mut c, "time_zone.list", json!({})).await.unwrap();
@@ -113,7 +113,7 @@ async fn get_list_set_and_a_job_across_it() {
         .unwrap();
     assert_eq!(
         *kolkata,
-        json!({"zone": "Asia/Kolkata", "offset_seconds": 19800, "standard_offset_seconds": 19800})
+        json!({"zone": "Asia/Kolkata", "offset_s": 19800, "standard_offset_s": 19800})
     );
 
     // Bad names and zones tzdata does not have.
@@ -157,10 +157,10 @@ async fn get_list_set_and_a_job_across_it() {
         .unwrap();
     assert_eq!(r["zone"], "America/Chicago");
     assert!(
-        [-5 * 3600, -6 * 3600].contains(&r["offset_seconds"].as_i64().unwrap()),
+        [-5 * 3600, -6 * 3600].contains(&r["offset_s"].as_i64().unwrap()),
         "{r}"
     );
-    assert_eq!(r["standard_offset_seconds"], -6 * 3600);
+    assert_eq!(r["standard_offset_s"], -6 * 3600);
     assert!(r["offset_valid_until"].as_i64().unwrap() > 1_790_000_000);
     assert_eq!(localtime(root), zoneinfo_fixtures().join("America/Chicago"));
     assert_eq!(root.etc_state()["settings"]["timeZone"], "America/Chicago");
@@ -187,7 +187,7 @@ async fn get_list_set_and_a_job_across_it() {
         .unwrap();
     assert_eq!(
         r,
-        json!({"zone": "Asia/Tokyo", "offset_seconds": 32400, "standard_offset_seconds": 32400, "offset_valid_until": null})
+        json!({"zone": "Asia/Tokyo", "offset_s": 32400, "standard_offset_s": 32400, "offset_valid_until": null})
     );
     assert_eq!(
         zone_event(&mut w).await["zone"],
@@ -309,7 +309,7 @@ async fn admin_pin_except_in_first_boot() {
     .await
     .unwrap();
     assert_eq!(r["zone"], "Australia/Lord_Howe");
-    assert_eq!(r["standard_offset_seconds"], 10 * 3600 + 1800);
+    assert_eq!(r["standard_offset_s"], 10 * 3600 + 1800);
     assert_eq!(
         sys.root.etc_state()["settings"]["timeZone"],
         "Australia/Lord_Howe"

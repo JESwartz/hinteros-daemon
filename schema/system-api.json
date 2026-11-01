@@ -1935,7 +1935,7 @@
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/CleanupSettings", "type": "object" },
       "errors": [],
-      "examples": [{ "name": "default", "params": {}, "result": { "enable": true, "frequency": "weekly", "keep_system": 5, "keep_profiles": 5 } }]
+      "examples": [{ "name": "default", "params": {}, "result": { "enabled": true, "frequency": "weekly", "keep_system": 5, "keep_profiles": 5 } }]
     },
     "cleanup.set": {
       "summary": "0.6: change the automatic clean-up (job cleanup_set, a rebuild like ssh.set). Admin PIN. Action org.hinteros.system.settings.",
@@ -1943,10 +1943,10 @@
       "since": "0.6",
       "params": {
         "type": "object",
-        "required": ["enable", "frequency", "keep_system", "keep_profiles"],
+        "required": ["enabled", "frequency", "keep_system", "keep_profiles"],
         "additionalProperties": false,
         "properties": {
-          "enable": { "type": "boolean" },
+          "enabled": { "type": "boolean" },
           "frequency": { "$ref": "#/$defs/CleanupFrequency" },
           "keep_system": { "$ref": "#/$defs/Keep" },
           "keep_profiles": { "$ref": "#/$defs/Keep" },
@@ -1958,21 +1958,21 @@
       "examples": [
         {
           "name": "monthly, keep 3",
-          "params": { "enable": true, "frequency": "monthly", "keep_system": 3, "keep_profiles": 3, "admin_pin": "2468" },
+          "params": { "enabled": true, "frequency": "monthly", "keep_system": 3, "keep_profiles": 3, "admin_pin": "2468" },
           "result": { "job_id": "3f9a0c2b7e4d1a65" }
         }
       ]
     },
     "time_zone.get": {
       "summary": "0.8: the box's time zone (state.json settings.timeZone; UTC when absent) and its offsets now. Read-only.",
-      "description": "Offsets come from the system's tzdata (/etc/zoneinfo), the same files /etc/localtime points into. offset_seconds: seconds east of UTC now (DST included). standard_offset_seconds: the zone's standard offset now: the lower of its two offsets while it observes DST (so tzdata's negative DST, e.g. Europe/Dublin, gives its winter offset, as the map's bands do), otherwise offset_seconds. offset_valid_until: Unix time of the next change of offset_seconds (the next DST change), null when the zone has none. The launcher's clock shows UTC plus offset_seconds and gets the zone again at offset_valid_until and on time_zone_changed. A zone in state.json that tzdata does not have (or a bad one) reads as UTC.",
+      "description": "Offsets come from the system's tzdata (/etc/zoneinfo), the same files /etc/localtime points into. offset_s: seconds east of UTC now (DST included). standard_offset_s: the zone's standard offset now: the lower of its two offsets while it observes DST (so tzdata's negative DST, e.g. Europe/Dublin, gives its winter offset, as the map's bands do), otherwise offset_s. offset_valid_until: Unix time of the next change of offset_s (the next DST change), null when the zone has none. The launcher's clock shows UTC plus offset_s and gets the zone again at offset_valid_until and on time_zone_changed. A zone in state.json that tzdata does not have (or a bad one) reads as UTC.",
       "since": "0.8",
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
       "errors": [],
       "examples": [
-        { "name": "Chicago in October", "params": {}, "result": {"zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600, "offset_valid_until": 1793516400} },
-        { "name": "never set", "params": {}, "result": {"zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0, "offset_valid_until": null} }
+        { "name": "Chicago in October", "params": {}, "result": {"zone": "America/Chicago", "offset_s": -18000, "standard_offset_s": -21600, "offset_valid_until": 1793516400} },
+        { "name": "never set", "params": {}, "result": {"zone": "UTC", "offset_s": 0, "standard_offset_s": 0, "offset_valid_until": null} }
       ]
     },
     "time_zone.list": {
@@ -1993,10 +1993,10 @@
           "params": {},
           "result": {
             "zones": [
-              { "zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600 },
-              { "zone": "Asia/Kolkata", "offset_seconds": 19800, "standard_offset_seconds": 19800 },
-              { "zone": "Europe/Dublin", "offset_seconds": 3600, "standard_offset_seconds": 0 },
-              { "zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0 }
+              { "zone": "America/Chicago", "offset_s": -18000, "standard_offset_s": -21600 },
+              { "zone": "Asia/Kolkata", "offset_s": 19800, "standard_offset_s": 19800 },
+              { "zone": "Europe/Dublin", "offset_s": 3600, "standard_offset_s": 0 },
+              { "zone": "UTC", "offset_s": 0, "standard_offset_s": 0 }
             ]
           }
         }
@@ -2018,8 +2018,8 @@
       "result": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "pin_required"],
       "examples": [
-        { "name": "Chicago", "params": { "zone": "America/Chicago", "admin_pin": "2468" }, "result": {"zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600, "offset_valid_until": 1793516400} },
-        { "name": "first boot (no PIN)", "params": { "zone": "UTC" }, "result": {"zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0, "offset_valid_until": null} },
+        { "name": "Chicago", "params": { "zone": "America/Chicago", "admin_pin": "2468" }, "result": {"zone": "America/Chicago", "offset_s": -18000, "standard_offset_s": -21600, "offset_valid_until": 1793516400} },
+        { "name": "first boot (no PIN)", "params": { "zone": "UTC" }, "result": {"zone": "UTC", "offset_s": 0, "standard_offset_s": 0, "offset_valid_until": null} },
         {
           "name": "unknown zone",
           "params": { "zone": "Mars/Olympus_Mons", "admin_pin": "2468" },
@@ -2539,7 +2539,7 @@
       "summary": "The box's time zone changed (time_zone.set, or a rollback restored another zone): the new zone and its offsets, as time_zone.get.",
       "since": "0.8",
       "params": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
-      "examples": [{ "name": "Chicago", "params": {"zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600, "offset_valid_until": 1793516400} }]
+      "examples": [{ "name": "Chicago", "params": {"zone": "America/Chicago", "offset_s": -18000, "standard_offset_s": -21600, "offset_valid_until": 1793516400} }]
     },
     "profiles_changed": {
       "summary": "0.4: profiles changed (a profile job finished, a rename, a PIN, lock or appearance change): re-query profiles.list.",
@@ -3139,31 +3139,31 @@
     "OffsetSeconds": { "description": "Seconds east of UTC.", "type": "integer", "minimum": -86400, "maximum": 86400 },
     "TimeZoneInfo": {
       "type": "object",
-      "required": ["zone", "offset_seconds", "standard_offset_seconds", "offset_valid_until"],
+      "required": ["zone", "offset_s", "standard_offset_s", "offset_valid_until"],
       "additionalProperties": false,
       "properties": {
         "zone": { "$ref": "#/$defs/ZoneName" },
-        "offset_seconds": { "$ref": "#/$defs/OffsetSeconds" },
-        "standard_offset_seconds": { "$ref": "#/$defs/OffsetSeconds" },
+        "offset_s": { "$ref": "#/$defs/OffsetSeconds" },
+        "standard_offset_s": { "$ref": "#/$defs/OffsetSeconds" },
         "offset_valid_until": { "description": "Unix time of the next offset change; null when there is none.", "oneOf": [{ "type": "integer" }, { "type": "null" }] }
       }
     },
     "TimeZoneEntry": {
       "type": "object",
-      "required": ["zone", "offset_seconds", "standard_offset_seconds"],
+      "required": ["zone", "offset_s", "standard_offset_s"],
       "additionalProperties": false,
       "properties": {
         "zone": { "$ref": "#/$defs/ZoneName" },
-        "offset_seconds": { "$ref": "#/$defs/OffsetSeconds" },
-        "standard_offset_seconds": { "$ref": "#/$defs/OffsetSeconds" }
+        "offset_s": { "$ref": "#/$defs/OffsetSeconds" },
+        "standard_offset_s": { "$ref": "#/$defs/OffsetSeconds" }
       }
     },
     "CleanupSettings": {
       "type": "object",
-      "required": ["enable", "frequency", "keep_system", "keep_profiles"],
+      "required": ["enabled", "frequency", "keep_system", "keep_profiles"],
       "additionalProperties": false,
       "properties": {
-        "enable": { "type": "boolean" },
+        "enabled": { "type": "boolean" },
         "frequency": { "$ref": "#/$defs/CleanupFrequency" },
         "keep_system": { "$ref": "#/$defs/Keep" },
         "keep_profiles": { "$ref": "#/$defs/Keep" }

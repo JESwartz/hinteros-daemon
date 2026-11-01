@@ -456,7 +456,7 @@ pub struct Shell {
     osk_auto: bool,
     /// The text field lost focus: hide the automatically shown keyboard at this time.
     osk_auto_hide_at: Option<Instant>,
-    /// Whether the keyboard is up for a password field (the last `osk_visibility.password`).
+    /// Whether the keyboard is up for a password field (the last `osk_changed.password`).
     osk_password: bool,
     /// Guide is held (see [`GuideHold`]).
     guide: Option<GuideHold>,
@@ -2097,7 +2097,7 @@ impl Shell {
         }
         self.osk_password = visible && self.password_field();
         self.emit(
-            EventName::OskVisibility,
+            EventName::OskChanged,
             OskState {
                 visible,
                 password: self.osk_password,
@@ -2114,7 +2114,7 @@ impl Shell {
     }
 
     /// While the keyboard is up, a field of the other kind (text / password) got focus: tell
-    /// the keyboard (`osk_visibility` again, still visible), so it masks or unmasks. Losing
+    /// the keyboard (`osk_changed` again, still visible), so it masks or unmasks. Losing
     /// focus changes nothing (what was typed into a password field stays masked).
     fn follow_field_kind(&mut self) {
         let password = self.password_field();
@@ -2122,7 +2122,7 @@ impl Shell {
             debug!(password, "on-screen keyboard: field kind changed");
             self.osk_password = password;
             self.emit(
-                EventName::OskVisibility,
+                EventName::OskChanged,
                 OskState {
                     visible: true,
                     password,
@@ -4299,7 +4299,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|g| &g["appid"])
+            .map(|g| &g["steam_app_id"])
             .collect();
         assert_eq!(
             ids,
@@ -4432,7 +4432,7 @@ mod tests {
         );
         assert_eq!(
             code(set(&mut t, "nope", "mic", false)),
-            ErrorCode::UnknownApp.code()
+            ErrorCode::AppNotFound.code()
         );
     }
 
@@ -5362,7 +5362,7 @@ mod tests {
         );
         assert_eq!(
             t.events(),
-            [ev(EventName::OskVisibility, json!({"visible": true}))]
+            [ev(EventName::OskChanged, json!({"visible": true}))]
         );
         // Again: nothing changes.
         t.call("osk.show", json!({})).unwrap();
@@ -5399,7 +5399,7 @@ mod tests {
         );
         assert_eq!(
             t.events(),
-            [ev(EventName::OskVisibility, json!({"visible": false}))]
+            [ev(EventName::OskChanged, json!({"visible": false}))]
         );
         t.call("osk.hide", json!({})).unwrap();
         assert!(t.events().is_empty());
@@ -5418,7 +5418,7 @@ mod tests {
         assert_eq!(
             t.events(),
             [
-                ev(EventName::OskVisibility, json!({"visible": false})),
+                ev(EventName::OskChanged, json!({"visible": false})),
                 ev(EventName::HomePressed, json!({})),
                 ev(EventName::FocusChanged, json!({"app": null})),
             ]
@@ -5438,7 +5438,7 @@ mod tests {
         assert!(!t.shell.osk_visible());
         assert!(
             t.events()
-                .contains(&ev(EventName::OskVisibility, json!({"visible": false})))
+                .contains(&ev(EventName::OskChanged, json!({"visible": false})))
         );
         // gamescope restarts: the visibility is re-sent only while shown.
         t.call("osk.show", json!({})).unwrap();
@@ -5490,7 +5490,7 @@ mod tests {
         t.input("ui_guide", 0.0);
         assert_eq!(
             t.events(),
-            [ev(EventName::OskVisibility, json!({"visible": true}))]
+            [ev(EventName::OskChanged, json!({"visible": true}))]
         );
         assert_eq!(t.shell.focused(), Some("portal"));
         assert_eq!(
@@ -5510,7 +5510,7 @@ mod tests {
         );
         assert_eq!(
             t.events(),
-            [ev(EventName::OskVisibility, json!({"visible": false}))]
+            [ev(EventName::OskChanged, json!({"visible": false}))]
         );
 
         // Guide alone: Home on release.
@@ -5787,7 +5787,7 @@ mod tests {
         );
         assert_eq!(
             t.events(),
-            [ev(EventName::OskVisibility, json!({"visible": true}))]
+            [ev(EventName::OskChanged, json!({"visible": true}))]
         );
         // Moving to the next field (none, then a password): no flicker, only the masking.
         t.text_focus(555, FieldFocus::None);
@@ -5799,7 +5799,7 @@ mod tests {
         assert_eq!(
             t.events(),
             [ev(
-                EventName::OskVisibility,
+                EventName::OskChanged,
                 json!({"visible": true, "password": true})
             )]
         );
@@ -5816,7 +5816,7 @@ mod tests {
         );
         assert_eq!(
             t.events(),
-            [ev(EventName::OskVisibility, json!({"visible": false}))]
+            [ev(EventName::OskChanged, json!({"visible": false}))]
         );
         assert_eq!(t.shell.deadline(), None);
     }
@@ -6004,7 +6004,7 @@ mod tests {
         );
         assert_eq!(
             (events[1].0, events[1].1.clone()),
-            (EventName::OskVisibility, json!({"visible": true}))
+            (EventName::OskChanged, json!({"visible": true}))
         );
         // Its release goes to whoever has navigation now (the OSK), no Home.
         assert_eq!(
@@ -6271,7 +6271,7 @@ mod tests {
             if password {
                 p["password"] = json!(true);
             }
-            ev(EventName::OskVisibility, p)
+            ev(EventName::OskChanged, p)
         };
         // Opened by A on a password field: masked.
         t.text_focus(555, FieldFocus::Password);
@@ -6320,7 +6320,7 @@ mod tests {
         assert_eq!(
             to_osk,
             [(
-                EventName::OskVisibility,
+                EventName::OskChanged,
                 json!({"visible": true}),
                 Audience::All
             )],
@@ -6337,7 +6337,7 @@ mod tests {
         );
         assert_eq!(
             t.events(),
-            [ev(EventName::OskVisibility, json!({"visible": false}))]
+            [ev(EventName::OskChanged, json!({"visible": false}))]
         );
 
         // The field is left: A is Enter again.
@@ -6377,7 +6377,7 @@ mod tests {
         );
         assert_eq!(
             t.events(),
-            [ev(EventName::OskVisibility, json!({"visible": false}))]
+            [ev(EventName::OskChanged, json!({"visible": false}))]
         );
         // Over the launcher: B after that goes to the launcher as usual.
         let mut t = T::new();

@@ -188,7 +188,7 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   (`WM_CLASS` or process `hinteros-osk`, or the started pid) becomes a gamescope
   `GAMESCOPE_EXTERNAL_OVERLAY`: painted over everything, never focused, shown and hidden with
   `_NET_WM_WINDOW_OPACITY` (it stays resident). `osk.show`/`osk.hide` or the controller chord
-  (hold Guide, press Y) toggle it; `osk_visibility` reports it. While it is visible InputPlumber
+  (hold Guide, press Y) toggle it; `osk_changed` reports it. While it is visible InputPlumber
   is in ALL and `input_nav` goes only to the `hinteros-osk` connection, not the launcher; hiding
   restores the previous mode. Home and focus changes hide it.
   Chord: InputPlumber has no chord events, but in PASS mode it switches the pad to ALL on the
@@ -217,7 +217,7 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   by the xpad driver of the sources, else the "Microsoft X-Box ..." config name; Bluetooth Xbox
   pads, PlayStation, Switch are left alone), so Y is always the chord button.
   **B closes it**, whatever has focus (launcher, game or app): while it is visible the daemon
-  takes B itself (`osk_visibility false`, the keyboard client never sees B, nor its release),
+  takes B itself (`osk_changed false`, the keyboard client never sees B, nor its release),
   and the previous mode comes back. The keyboard client owns the other buttons (X Backspace,
   Y Shift, ...).
   **Text fields** (`textfocus.rs`, `firefox-extension/`): the Firefox extension reports which
@@ -231,7 +231,7 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   default) shows it as soon as a field gets focus. Either way a keyboard shown for a field hides
   250 ms after the field loses focus (no flicker between fields), unless it was shown or
   hidden by hand meanwhile. See "On-screen keyboard for Firefox text fields" below.
-  `osk_visibility` carries `password: true` (session API 0.10) while the keyboard is up for a
+  `osk_changed` carries `password: true` (session API 0.10) while the keyboard is up for a
   password field, so the keyboard masks its preview only then (and again, still visible, when a
   field of the other kind gets focus; a field losing focus changes nothing).
   **Address bar**: WebExtensions cannot see Firefox's own URL bar, so Firefox's autoConfig
@@ -1276,7 +1276,7 @@ order), and:
   show the named terms; `app_conflict` names the other app; remove with `system.apps.remove {ids,
   revision, delete_data}` after closing the app (and confirming `data_paths` twice); progress from
   the job events; "More apps after the next update" when `more_after_update`.
-- On-screen keyboard (0.10): mask the typed-text preview only while `osk_visibility.password` is
+- On-screen keyboard (0.10): mask the typed-text preview only while `osk_changed.password` is
   true; show it plainly otherwise (also when no field was reported).
 - Updates (0.11): show `available.version` ("HinterOS 0.6.1") on the update screen and banner
   (the short rev when it is absent), and `available.security_summary`, when non-null, under the
@@ -1403,7 +1403,7 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   `switch_blocked {app, waited_s}`; `[switch] wait_s = 10`, `steam_wait_s = 15`; nothing is
   killed without `switch_force_close`), `session.end_guest` (closes the apps, then `system.guest.end` ends the session and wipes the guest
   now), the sleep lock (logind delay
-  inhibitor; `lock_state`, `session.lock_state`, `session.unlock`), `profiles_changed {profiles}`.
+  inhibitor; `lock_changed`, `session.lock_state`, `session.unlock`), `profiles_changed {profiles}`.
   `display.keep` and `audio.set_output` also save the mode/output for every profile; at start the
   published `/run/hinteros/audio-output` (`[audio] shared_output`) becomes the default sink once
   that sink exists (retried for 60 s).
@@ -1476,7 +1476,7 @@ Design: `hinteros-docs/design/storage.md`. Every method below is relayed as `sys
 `state.json` `settings.cleanup {enable, frequency: daily|weekly|monthly, keepSystem, keepProfiles
 (1..10)}`, every field optional (defaults on, weekly, 5, 5), schemas 1 and 2, checked by
 `State::parse` and so by `check-state`. `cleanup.get` (read-only) returns it with the defaults
-filled in; `cleanup.set {enable, frequency, keep_system, keep_profiles, admin_pin?}` (admin PIN,
+filled in; `cleanup.set {enabled, frequency, keep_system, keep_profiles, admin_pin?}` (admin PIN,
 polkit `org.hinteros.system.settings`) writes all four fields through the apply flow (job
 `cleanup_set`, `null` when nothing changes, also for the defaults while absent).
 
@@ -1612,7 +1612,7 @@ link), `service/timezone.rs` (the methods).
   `[A-Z][A-Za-z0-9_+-]*`, at most 64 bytes); a well-formed zone tzdata does not have reads as UTC.
 - Offsets come from the system's tzdata (`--zoneinfo-dir`, `/etc/zoneinfo`; parsed with `tz-rs`),
   the files `/etc/localtime` points into, never from a database in the daemon.
-  `offset_seconds` is the offset now; `standard_offset_seconds` the lower of the zone's two
+  `offset_s` is the offset now; `standard_offset_s` the lower of the zone's two
   offsets while it observes DST (so tzdata's negative DST, Europe/Dublin, gives its winter
   offset, like the map's bands), otherwise the offset now; `offset_valid_until` the next change
   of the offset (the explicit transitions, then the TZif footer's rule), or null.
@@ -1659,12 +1659,12 @@ link), `service/timezone.rs` (the methods).
 
 ### What the launcher must do (session API 0.16)
 
-Hello with `0.16`. `system.time_zone.get` → `{zone, offset_seconds, standard_offset_seconds,
-offset_valid_until}`; `system.time_zone.list` → `{zones: [{zone, offset_seconds,
-standard_offset_seconds}]}`; `system.time_zone.set {zone, admin_pin?}` → the new `TimeZoneInfo`
+Hello with `0.16`. `system.time_zone.get` → `{zone, offset_s, standard_offset_s,
+offset_valid_until}`; `system.time_zone.list` → `{zones: [{zone, offset_s,
+standard_offset_s}]}`; `system.time_zone.set {zone, admin_pin?}` → the new `TimeZoneInfo`
 (no PIN in the first-boot wizard; in Settings ask for the admin PIN on `pin_required`). Event
 `time_zone_changed` (a `TimeZoneInfo`): subscribe to it. The clock shows UTC plus
-`offset_seconds` and gets the zone again at `offset_valid_until` and on `time_zone_changed`.
+`offset_s` and gets the zone again at `offset_valid_until` and on `time_zone_changed`.
 
 ## Admin PIN limit (system API 0.9, session API 0.17)
 
@@ -1804,7 +1804,7 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
 - `apps.list` and `store.list` entries carry `permissions: [{name, required, granted}]`
   (display order gamepad, mic, downloads; empty for Steam and unsandboxed apps; for a Store app
   that is not installed, the stored choice). `apps.set_permission {id, permission, granted}`
-  takes installed apps and catalog apps not installed yet; errors `unknown_app`,
+  takes installed apps and catalog apps not installed yet; errors `app_not_found`,
   `unknown_permission`, `permission_required`; emits `apps_changed` and `store_changed`.
 - Apps get no `WAYLAND_DISPLAY` / `GAMESCOPE_WAYLAND_DISPLAY` with or without the sandbox
   (gamescope's private protocols); only Steam keeps them.

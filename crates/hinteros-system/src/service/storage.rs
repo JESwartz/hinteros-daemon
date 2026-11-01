@@ -91,7 +91,7 @@ impl StorageRequest {
 /// The API view of the setting.
 pub fn cleanup_settings(c: CleanupState) -> CleanupSettings {
     CleanupSettings {
-        enable: c.enable,
+        enabled: c.enable,
         frequency: c.frequency,
         keep_system: c.keep_system,
         keep_profiles: c.keep_profiles,
@@ -224,7 +224,7 @@ impl Service {
                     .await?;
                 let (state, _) = self.load_state()?;
                 let wanted = CleanupState {
-                    enable: p.enable,
+                    enable: p.enabled,
                     frequency: p.frequency,
                     keep_system: p.keep_system,
                     keep_profiles: p.keep_profiles,
@@ -246,7 +246,7 @@ impl Service {
                     }),
                 );
                 let spec = spec.about(system::JobSubject {
-                    enabled: Some(p.enable),
+                    enabled: Some(p.enabled),
                     frequency: Some(p.frequency),
                     keep_system: Some(p.keep_system),
                     keep_profiles: Some(p.keep_profiles),

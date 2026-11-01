@@ -1419,7 +1419,7 @@ impl CleanupFrequency {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CleanupSettings {
-    pub enable: bool,
+    pub enabled: bool,
     pub frequency: CleanupFrequency,
     pub keep_system: u32,
     pub keep_profiles: u32,
@@ -1436,7 +1436,7 @@ impl Method for CleanupGet {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CleanupSetParams {
-    pub enable: bool,
+    pub enabled: bool,
     pub frequency: CleanupFrequency,
     pub keep_system: u32,
     pub keep_profiles: u32,
@@ -1501,9 +1501,9 @@ pub struct TimeZoneInfo {
     /// An IANA name (`UTC` when `state.json` names none).
     pub zone: String,
     /// Seconds east of UTC now (DST included).
-    pub offset_seconds: i32,
+    pub offset_s: i32,
     /// The zone's standard offset now (without DST): the band the map shows.
-    pub standard_offset_seconds: i32,
+    pub standard_offset_s: i32,
     /// Unix time of the next offset change; null when there is none.
     #[serde(deserialize_with = "nullable")]
     pub offset_valid_until: Option<i64>,
@@ -1514,8 +1514,8 @@ pub struct TimeZoneInfo {
 #[serde(deny_unknown_fields)]
 pub struct TimeZoneEntry {
     pub zone: String,
-    pub offset_seconds: i32,
-    pub standard_offset_seconds: i32,
+    pub offset_s: i32,
+    pub standard_offset_s: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

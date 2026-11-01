@@ -175,11 +175,11 @@ pub fn offsets(tz: &TimeZone, now: i64) -> (i32, i32, Option<i64>) {
 /// `zone`'s info at `now`.
 pub fn info(dir: &Path, zone: &str, now: i64) -> Result<TimeZoneInfo, ZoneError> {
     let tz = load(dir, zone)?;
-    let (offset_seconds, standard_offset_seconds, offset_valid_until) = offsets(&tz, now);
+    let (offset_s, standard_offset_s, offset_valid_until) = offsets(&tz, now);
     Ok(TimeZoneInfo {
         zone: zone.to_owned(),
-        offset_seconds,
-        standard_offset_seconds,
+        offset_s,
+        standard_offset_s,
         offset_valid_until,
     })
 }
@@ -188,8 +188,8 @@ pub fn info(dir: &Path, zone: &str, now: i64) -> Result<TimeZoneInfo, ZoneError>
 pub fn utc_info() -> TimeZoneInfo {
     TimeZoneInfo {
         zone: DEFAULT_TIME_ZONE.into(),
-        offset_seconds: 0,
-        standard_offset_seconds: 0,
+        offset_s: 0,
+        standard_offset_s: 0,
         offset_valid_until: None,
     }
 }
@@ -240,8 +240,8 @@ pub fn list(dir: &Path, now: i64) -> Vec<TimeZoneEntry> {
         .filter_map(|zone| match info(dir, &zone, now) {
             Ok(i) => Some(TimeZoneEntry {
                 zone: i.zone,
-                offset_seconds: i.offset_seconds,
-                standard_offset_seconds: i.standard_offset_seconds,
+                offset_s: i.offset_s,
+                standard_offset_s: i.standard_offset_s,
             }),
             Err(e) => {
                 warn!(zone, "zone1970.tab names a zone that cannot be used: {e}");
@@ -399,33 +399,33 @@ mod tests {
     fn chicago() {
         // October: CDT (-5), standard CST (-6), back to CST on 2026-11-01 07:00 UTC.
         let i = at("America/Chicago", OCT_2026);
-        assert_eq!(i.offset_seconds, -5 * 3600);
-        assert_eq!(i.standard_offset_seconds, -6 * 3600);
+        assert_eq!(i.offset_s, -5 * 3600);
+        assert_eq!(i.standard_offset_s, -6 * 3600);
         assert_eq!(i.offset_valid_until, Some(1_793_516_400));
         // January: CST, DST starts 2026-03-08 08:00 UTC.
         let i = at("America/Chicago", JAN_2026);
-        assert_eq!(i.offset_seconds, -6 * 3600);
-        assert_eq!(i.standard_offset_seconds, -6 * 3600);
+        assert_eq!(i.offset_s, -6 * 3600);
+        assert_eq!(i.standard_offset_s, -6 * 3600);
         assert_eq!(i.offset_valid_until, Some(1_772_956_800));
         // The change itself: one second before is still the old offset.
         let i = at("America/Chicago", 1_793_516_399);
-        assert_eq!(i.offset_seconds, -5 * 3600);
+        assert_eq!(i.offset_s, -5 * 3600);
         assert_eq!(i.offset_valid_until, Some(1_793_516_400));
         let i = at("America/Chicago", 1_793_516_400);
-        assert_eq!(i.offset_seconds, -6 * 3600);
+        assert_eq!(i.offset_s, -6 * 3600);
     }
 
     #[test]
     fn past_the_explicit_transitions_the_rule_applies() {
         // 2040-07-01T00:00:00Z: past tzdata's last listed transition (2037), from the footer.
         let i = at("America/Chicago", 2_224_713_600);
-        assert_eq!(i.offset_seconds, -5 * 3600);
-        assert_eq!(i.standard_offset_seconds, -6 * 3600);
+        assert_eq!(i.offset_s, -5 * 3600);
+        assert_eq!(i.standard_offset_s, -6 * 3600);
         // 2040-11-04 07:00 UTC (first Sunday of November).
         assert_eq!(i.offset_valid_until, Some(2_235_625_200));
         let i = at("Europe/London", 2_224_713_600);
-        assert_eq!(i.offset_seconds, 3600);
-        assert_eq!(i.standard_offset_seconds, 0);
+        assert_eq!(i.offset_s, 3600);
+        assert_eq!(i.standard_offset_s, 0);
         // 2040-10-28 01:00 UTC (last Sunday of October).
         assert_eq!(i.offset_valid_until, Some(2_234_998_800));
     }
@@ -434,14 +434,14 @@ mod tests {
     fn no_dst() {
         for (zone, offset) in [("Asia/Kolkata", 19_800), ("Asia/Tokyo", 9 * 3600)] {
             let i = at(zone, OCT_2026);
-            assert_eq!(i.offset_seconds, offset, "{zone}");
-            assert_eq!(i.standard_offset_seconds, offset, "{zone}");
+            assert_eq!(i.offset_s, offset, "{zone}");
+            assert_eq!(i.standard_offset_s, offset, "{zone}");
             assert_eq!(i.offset_valid_until, None, "{zone}");
         }
         // Brazil stopped DST in 2019: no further change.
         let i = at("America/Sao_Paulo", OCT_2026);
-        assert_eq!(i.offset_seconds, -3 * 3600);
-        assert_eq!(i.standard_offset_seconds, -3 * 3600);
+        assert_eq!(i.offset_s, -3 * 3600);
+        assert_eq!(i.standard_offset_s, -3 * 3600);
         assert_eq!(i.offset_valid_until, None);
         assert_eq!(at("UTC", OCT_2026), utc_info());
     }
@@ -450,11 +450,11 @@ mod tests {
     fn negative_dst_gives_the_winter_offset() {
         // tzdata's Europe/Dublin: IST (+1) is standard, winter GMT is flagged DST.
         let summer = at("Europe/Dublin", 1_783_000_000);
-        assert_eq!(summer.offset_seconds, 3600);
-        assert_eq!(summer.standard_offset_seconds, 0);
+        assert_eq!(summer.offset_s, 3600);
+        assert_eq!(summer.standard_offset_s, 0);
         let winter = at("Europe/Dublin", JAN_2026);
-        assert_eq!(winter.offset_seconds, 0);
-        assert_eq!(winter.standard_offset_seconds, 0);
+        assert_eq!(winter.offset_s, 0);
+        assert_eq!(winter.standard_offset_s, 0);
         assert!(winter.offset_valid_until.is_some());
     }
 
@@ -462,11 +462,11 @@ mod tests {
     fn half_hour_dst() {
         // Lord Howe: +10:30 standard, +11 in (southern) summer.
         let i = at("Australia/Lord_Howe", JAN_2026);
-        assert_eq!(i.offset_seconds, 11 * 3600);
-        assert_eq!(i.standard_offset_seconds, 10 * 3600 + 1800);
+        assert_eq!(i.offset_s, 11 * 3600);
+        assert_eq!(i.standard_offset_s, 10 * 3600 + 1800);
         let i = at("Australia/Lord_Howe", 1_783_000_000);
-        assert_eq!(i.offset_seconds, 10 * 3600 + 1800);
-        assert_eq!(i.standard_offset_seconds, 10 * 3600 + 1800);
+        assert_eq!(i.offset_s, 10 * 3600 + 1800);
+        assert_eq!(i.standard_offset_s, 10 * 3600 + 1800);
     }
 
     #[test]
@@ -526,7 +526,7 @@ mod tests {
         );
         let chicago = &l[0];
         assert_eq!(
-            (chicago.offset_seconds, chicago.standard_offset_seconds),
+            (chicago.offset_s, chicago.standard_offset_s),
             (-5 * 3600, -6 * 3600)
         );
     }

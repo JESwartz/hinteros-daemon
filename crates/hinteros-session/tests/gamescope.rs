@@ -602,7 +602,7 @@ async fn on_screen_keyboard_is_an_overlay_shown_by_opacity() {
     .await;
 
     let mut c = d.client().await;
-    call(&mut c, "subscribe", json!({ "events": ["osk_visibility"] }))
+    call(&mut c, "subscribe", json!({ "events": ["osk_changed"] }))
         .await
         .unwrap();
     assert_eq!(
@@ -611,7 +611,7 @@ async fn on_screen_keyboard_is_an_overlay_shown_by_opacity() {
     );
     assert_eq!(
         next_event(&mut c).await,
-        ("osk_visibility".into(), json!({ "visible": true }))
+        ("osk_changed".into(), json!({ "visible": true }))
     );
     eventually("the OSK window to be shown", async || {
         (state(osk) == shown).then_some(())
@@ -639,7 +639,7 @@ async fn on_screen_keyboard_is_an_overlay_shown_by_opacity() {
     );
     assert_eq!(
         next_event(&mut c).await,
-        ("osk_visibility".into(), json!({ "visible": false }))
+        ("osk_changed".into(), json!({ "visible": false }))
     );
     eventually("the OSK window to be hidden", async || {
         (state(osk) == hidden).then_some(())

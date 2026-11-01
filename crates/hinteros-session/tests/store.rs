@@ -292,5 +292,5 @@ async fn set_permission_before_install() {
     )
     .await
     .unwrap_err();
-    assert_eq!(e["code"], ErrorCode::UnknownApp.code());
+    assert_eq!(e["code"], ErrorCode::AppNotFound.code());
 }

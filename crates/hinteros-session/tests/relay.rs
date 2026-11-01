@@ -115,8 +115,8 @@ fn fake_system(
                                 let ev = jsonrpc::notification(
                                     "time_zone_changed",
                                     json!({
-                                        "zone": "America/Chicago", "offset_seconds": -18000,
-                                        "standard_offset_seconds": -21600,
+                                        "zone": "America/Chicago", "offset_s": -18000,
+                                        "standard_offset_s": -21600,
                                         "offset_valid_until": 1793516400
                                     }),
                                 );

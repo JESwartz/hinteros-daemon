@@ -617,7 +617,7 @@ context = "ctrl+l"
         call(
             c,
             "subscribe",
-            json!({ "events": ["input_nav", "osk_visibility", "home_pressed", "focus_changed"] }),
+            json!({ "events": ["input_nav", "osk_changed", "home_pressed", "focus_changed"] }),
         )
         .await
         .unwrap();
@@ -677,7 +677,7 @@ context = "ctrl+l"
     );
     for c in [&mut launcher, &mut osk] {
         assert_eq!(
-            event_named(c, "osk_visibility").await,
+            event_named(c, "osk_changed").await,
             json!({ "visible": true })
         );
     }
@@ -699,7 +699,7 @@ context = "ctrl+l"
     // Hidden again: keys for the app, nothing for the OSK.
     call(&mut osk, "osk.hide", json!({})).await.unwrap();
     assert_eq!(
-        event_named(&mut osk, "osk_visibility").await,
+        event_named(&mut osk, "osk_changed").await,
         json!({ "visible": false })
     );
     fake.press("ui_up", 1.0).await;
@@ -716,13 +716,13 @@ context = "ctrl+l"
     fake.press("ui_context", 0.0).await;
     fake.press("ui_guide", 0.0).await;
     assert_eq!(
-        event_named(&mut osk, "osk_visibility").await,
+        event_named(&mut osk, "osk_changed").await,
         json!({ "visible": true })
     );
     fake.press("ui_guide", 1.0).await;
     fake.press("ui_guide", 0.0).await;
     assert_eq!(
-        event_named(&mut osk, "osk_visibility").await,
+        event_named(&mut osk, "osk_changed").await,
         json!({ "visible": false })
     );
     assert_eq!(next_event(&mut osk).await.0, "home_pressed");
@@ -771,7 +771,7 @@ async fn xbox_pad_labels_are_swapped_per_device() {
     call(
         &mut c,
         "subscribe",
-        json!({ "events": ["input_nav", "osk_visibility", "home_pressed"] }),
+        json!({ "events": ["input_nav", "osk_changed", "home_pressed"] }),
     )
     .await
     .unwrap();
@@ -808,14 +808,14 @@ async fn xbox_pad_labels_are_swapped_per_device() {
     fake.press("ui_action", 0.0).await;
     fake.press("ui_guide", 0.0).await;
     assert_eq!(
-        event_named(&mut c, "osk_visibility").await,
+        event_named(&mut c, "osk_changed").await,
         json!({ "visible": true })
     );
     // The target-to-pad lookup is done once, not per event (each read is a polkit check in
     // InputPlumber): a burst of input reads the property no more.
     call(&mut c, "osk.hide", json!({})).await.unwrap();
     assert_eq!(
-        event_named(&mut c, "osk_visibility").await,
+        event_named(&mut c, "osk_changed").await,
         json!({ "visible": false })
     );
     let reads = fake.calls.dbus_reads.load(Ordering::SeqCst);
@@ -898,7 +898,7 @@ input = "keyboard"
     call(
         &mut c,
         "subscribe",
-        json!({ "events": ["osk_visibility", "focus_changed"] }),
+        json!({ "events": ["osk_changed", "focus_changed"] }),
     )
     .await
     .unwrap();
@@ -916,7 +916,7 @@ input = "keyboard"
     fake.press("ui_accept", 1.0).await;
     fake.press("ui_accept", 0.0).await;
     assert_eq!(
-        event_named(&mut c, "osk_visibility").await,
+        event_named(&mut c, "osk_changed").await,
         json!({ "visible": true })
     );
     ready(&fake, 0, 2).await;
@@ -924,7 +924,7 @@ input = "keyboard"
     fake.press("ui_back", 1.0).await;
     fake.press("ui_back", 0.0).await;
     assert_eq!(
-        event_named(&mut c, "osk_visibility").await,
+        event_named(&mut c, "osk_changed").await,
         json!({ "visible": false })
     );
     ready(&fake, 0, 3).await;

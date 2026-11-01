@@ -542,10 +542,10 @@ async fn the_automatic_clean_up_setting() {
     let r = call(&mut c, "cleanup.get", json!({})).await.unwrap();
     assert_eq!(
         r,
-        json!({"enable": true, "frequency": "weekly", "keep_system": 5, "keep_profiles": 5})
+        json!({"enabled": true, "frequency": "weekly", "keep_system": 5, "keep_profiles": 5})
     );
     let set =
-        json!({"enable": false, "frequency": "monthly", "keep_system": 3, "keep_profiles": 2});
+        json!({"enabled": false, "frequency": "monthly", "keep_system": 3, "keep_profiles": 2});
     let with_pin = |mut v: Value| {
         v["admin_pin"] = json!(ADMIN_PIN);
         v
@@ -568,7 +568,7 @@ async fn the_automatic_clean_up_setting() {
         &mut c,
         "cleanup.set",
         with_pin(
-            json!({"enable": true, "frequency": "weekly", "keep_system": 5, "keep_profiles": 5}),
+            json!({"enabled": true, "frequency": "weekly", "keep_system": 5, "keep_profiles": 5}),
         ),
     )
     .await

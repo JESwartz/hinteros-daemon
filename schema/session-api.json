@@ -159,7 +159,7 @@
     },
     "apps.set_permission": {
       "summary": "0.18: grant or deny one optional permission of an app, for this profile. Applies the next time the app starts.",
-      "description": "id: an installed app (apps.list) or a catalog app that is not installed yet (store.list): the launcher calls this for each permission switched off on the install sheet, then system.apps.install. The choice is kept per profile ($XDG_STATE_HOME/hinteros/permissions.json); only denials are stored, so an app without a stored choice has every permission. Emits apps_changed and store_changed. Errors: unknown_app (not installed and not in the catalog), unknown_permission (the app does not declare it, or it is not enforced on this box), permission_required (granted false for a required one). Granting a required one is accepted and changes nothing.",
+      "description": "id: an installed app (apps.list) or a catalog app that is not installed yet (store.list): the launcher calls this for each permission switched off on the install sheet, then system.apps.install. The choice is kept per profile ($XDG_STATE_HOME/hinteros/permissions.json); only denials are stored, so an app without a stored choice has every permission. Emits apps_changed and store_changed. Errors: app_not_found (not installed and not in the catalog), unknown_permission (the app does not declare it, or it is not enforced on this box), permission_required (granted false for a required one). Granting a required one is accepted and changes nothing.",
       "since": "0.18",
       "params": {
         "type": "object",
@@ -172,13 +172,13 @@
         }
       },
       "result": { "type": "object", "additionalProperties": false, "properties": {} },
-      "errors": ["unknown_app", "unknown_permission", "permission_required"],
+      "errors": ["app_not_found", "unknown_permission", "permission_required"],
       "examples": [
         { "name": "deny mic", "params": { "id": "youtube", "permission": "mic", "granted": false }, "result": {} },
         { "name": "grant again", "params": { "id": "youtube", "permission": "mic", "granted": true }, "result": {} },
         { "name": "required", "params": { "id": "jellyfin", "permission": "gamepad", "granted": false }, "error": { "code": 2008, "message": "jellyfin needs gamepad" } },
         { "name": "not declared", "params": { "id": "youtube", "permission": "downloads", "granted": false }, "error": { "code": 2007, "message": "youtube does not use downloads" } },
-        { "name": "unknown app", "params": { "id": "nope", "permission": "mic", "granted": false }, "error": { "code": 2006, "message": "no app with id 'nope'" } }
+        { "name": "unknown app", "params": { "id": "nope", "permission": "mic", "granted": false }, "error": { "code": 2001, "message": "no app with id 'nope'" } }
       ]
     },
     "apps.displays.get": {
@@ -237,7 +237,7 @@
           "result": {
             "games": [
               {
-                "appid": 620,
+                "steam_app_id": 620,
                 "name": "Portal 2",
                 "install_state": "installed",
                 "size_bytes": 12976394567,
@@ -251,7 +251,7 @@
                 }
               },
               {
-                "appid": 1000001,
+                "steam_app_id": 1000001,
                 "name": "Example Game",
                 "install_state": "updating",
                 "size_bytes": 831365954,
@@ -475,7 +475,7 @@
     },
     "osk.show": {
       "summary": "Show the on-screen keyboard over whatever has focus.",
-      "description": "The on-screen keyboard is a separate client (hinteros-osk) whose window the daemon shows as a gamescope overlay; it never takes focus, so typed keys reach the focused app. While it is visible, InputPlumber is in intercept mode ALL and input_nav goes only to the connection whose hello client name is 'hinteros-osk' (not to the launcher). osk_visibility follows if the visibility changed. Showing it again does nothing. The user can also summon it with the controller (Guide + Y by default, or A on a focused text field in a keyboard-profile Firefox app), and B hides it whatever has focus (the keyboard client never receives back while visible).",
+      "description": "The on-screen keyboard is a separate client (hinteros-osk) whose window the daemon shows as a gamescope overlay; it never takes focus, so typed keys reach the focused app. While it is visible, InputPlumber is in intercept mode ALL and input_nav goes only to the connection whose hello client name is 'hinteros-osk' (not to the launcher). osk_changed follows if the visibility changed. Showing it again does nothing. The user can also summon it with the controller (Guide + Y by default, or A on a focused text field in a keyboard-profile Firefox app), and B hides it whatever has focus (the keyboard client never receives back while visible).",
       "since": "0.4",
       "params": {
         "type": "object",
@@ -488,7 +488,7 @@
         "additionalProperties": false,
         "properties": {
           "visible": { "description": "Whether the on-screen keyboard is now visible.", "type": "boolean" },
-          "password": { "description": "(0.10) The keyboard is up for a password field (see osk_visibility). Absent when false.", "type": "boolean" }
+          "password": { "description": "(0.10) The keyboard is up for a password field (see osk_changed). Absent when false.", "type": "boolean" }
         }
       },
       "errors": ["osk_unavailable"],
@@ -499,7 +499,7 @@
     },
     "osk.hide": {
       "summary": "Hide the on-screen keyboard.",
-      "description": "Restores the previous input routing: InputPlumber's mode for whatever has focus, input_nav to the launcher while it has focus. osk_visibility follows if the visibility changed. Home and focus changes also hide it.",
+      "description": "Restores the previous input routing: InputPlumber's mode for whatever has focus, input_nav to the launcher while it has focus. osk_changed follows if the visibility changed. Home and focus changes also hide it.",
       "since": "0.4",
       "params": {
         "type": "object",
@@ -512,7 +512,7 @@
         "additionalProperties": false,
         "properties": {
           "visible": { "description": "Whether the on-screen keyboard is now visible.", "type": "boolean" },
-          "password": { "description": "(0.10) The keyboard is up for a password field (see osk_visibility). Absent when false.", "type": "boolean" }
+          "password": { "description": "(0.10) The keyboard is up for a password field (see osk_changed). Absent when false.", "type": "boolean" }
         }
       },
       "errors": [],
@@ -2327,117 +2327,6 @@
       ],
       "relay": true
     },
-    "system.profiles.switch": {
-      "summary": "Relayed to the system service's profiles.switch. Choose the next profile (0.4): writes the switch hint the greeter reads. A locked target needs its PIN here, before the caller's session closes anything.",
-      "description": "id is a profile id or guest. A locked profile (with a PIN) other than the caller's own needs pin = the target's PIN: wrong or missing is pin_required {pin: target, retry_after_ms?} and nothing is written; right, the hint carries a one-time token for the target (single use, bound to its user, valid 60 s), so the greeter enters it without any UI. The same caller may call again without pin while its token is live to extend hint and token by 60 s (a switch waiting for apps to close). The admin profile's PIN has no backoff wait, but 10 wrong tries a boot (then reboot_required). For the caller's own id it issues a one-time resume token (session.restart). Unlocked profiles and the guest need no PIN. The session daemon then ends the session (session.switch_profile).",
-      "since": "0.12",
-      "params": {
-        "type": "object",
-        "required": [
-          "id"
-        ],
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "oneOf": [
-              {
-                "$ref": "#/$defs/ProfileId"
-              },
-              {
-                "const": "guest"
-              }
-            ]
-          },
-          "pin": {
-            "$ref": "#/$defs/Pin"
-          }
-        }
-      },
-      "result": {
-        "type": "object",
-        "required": [],
-        "additionalProperties": false,
-        "properties": {}
-      },
-      "errors": [
-        "system_unavailable",
-        "permission_denied",
-        "authentication_required",
-        "rate_limited",
-        "not_found",
-        "pin_required"
-      ],
-      "examples": [
-        {
-          "name": "to Sam",
-          "params": {
-            "id": "p3"
-          },
-          "result": {}
-        },
-        {
-          "name": "to the locked Kim, with her PIN",
-          "params": {
-            "id": "p4",
-            "pin": "2468"
-          },
-          "result": {}
-        },
-        {
-          "name": "to the locked Kim, wrong PIN",
-          "params": {
-            "id": "p4",
-            "pin": "0000"
-          },
-          "error": {
-            "code": 3016,
-            "message": "that PIN didn't match",
-            "data": {
-              "pin": "target"
-            }
-          }
-        },
-        {
-          "name": "guest",
-          "params": {
-            "id": "guest"
-          },
-          "result": {}
-        }
-      ],
-      "relay": true
-    },
-    "system.profiles.switch_cancel": {
-      "summary": "Relayed to the system service's profiles.switch_cancel. Drop the caller's switch hint and its token (0.4): the switch was cancelled and the session stays.",
-      "description": "Only a hint the caller wrote is removed; otherwise nothing happens.",
-      "since": "0.12",
-      "params": {
-        "type": "object",
-        "required": [],
-        "additionalProperties": false,
-        "properties": {}
-      },
-      "result": {
-        "type": "object",
-        "required": [],
-        "additionalProperties": false,
-        "properties": {}
-      },
-      "errors": [
-        "system_unavailable",
-        "permission_denied",
-        "authentication_required",
-        "rate_limited"
-      ],
-      "examples": [
-        {
-          "name": "cancel",
-          "params": {},
-          "result": {}
-        }
-      ],
-      "relay": true
-    },
     "system.profiles.unlock": {
       "summary": "Relayed to the system service's profiles.unlock. The caller's PIN after sleep (0.4): the lock screen of a locked profile.",
       "description": "pin_required {pin: self, retry_after_ms?} when wrong or during the backoff lock.",
@@ -2939,7 +2828,7 @@
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/CleanupSettings", "type": "object" },
       "errors": ["system_unavailable"],
-      "examples": [{ "name": "default", "params": {}, "result": { "enable": true, "frequency": "weekly", "keep_system": 5, "keep_profiles": 5 } }],
+      "examples": [{ "name": "default", "params": {}, "result": { "enabled": true, "frequency": "weekly", "keep_system": 5, "keep_profiles": 5 } }],
       "relay": true
     },
     "system.cleanup.set": {
@@ -2948,10 +2837,10 @@
       "since": "0.14",
       "params": {
         "type": "object",
-        "required": ["enable", "frequency", "keep_system", "keep_profiles"],
+        "required": ["enabled", "frequency", "keep_system", "keep_profiles"],
         "additionalProperties": false,
         "properties": {
-          "enable": { "type": "boolean" },
+          "enabled": { "type": "boolean" },
           "frequency": { "$ref": "#/$defs/CleanupFrequency" },
           "keep_system": { "$ref": "#/$defs/Keep" },
           "keep_profiles": { "$ref": "#/$defs/Keep" },
@@ -2963,7 +2852,7 @@
       "examples": [
         {
           "name": "monthly, keep 3",
-          "params": { "enable": true, "frequency": "monthly", "keep_system": 3, "keep_profiles": 3, "admin_pin": "2468" },
+          "params": { "enabled": true, "frequency": "monthly", "keep_system": 3, "keep_profiles": 3, "admin_pin": "2468" },
           "result": { "job_id": "3f9a0c2b7e4d1a65" }
         }
       ],
@@ -2971,14 +2860,14 @@
     },
     "system.time_zone.get": {
       "summary": "Relayed to the system service's time_zone.get. the box's time zone (state.json settings.timeZone; UTC when absent) and its offsets now. Read-only.",
-      "description": "Offsets come from the system's tzdata (/etc/zoneinfo), the same files /etc/localtime points into. offset_seconds: seconds east of UTC now (DST included). standard_offset_seconds: the zone's standard offset now: the lower of its two offsets while it observes DST (so tzdata's negative DST, e.g. Europe/Dublin, gives its winter offset, as the map's bands do), otherwise offset_seconds. offset_valid_until: Unix time of the next change of offset_seconds (the next DST change), null when the zone has none. The launcher's clock shows UTC plus offset_seconds and gets the zone again at offset_valid_until and on time_zone_changed. A zone in state.json that tzdata does not have (or a bad one) reads as UTC.",
+      "description": "Offsets come from the system's tzdata (/etc/zoneinfo), the same files /etc/localtime points into. offset_s: seconds east of UTC now (DST included). standard_offset_s: the zone's standard offset now: the lower of its two offsets while it observes DST (so tzdata's negative DST, e.g. Europe/Dublin, gives its winter offset, as the map's bands do), otherwise offset_s. offset_valid_until: Unix time of the next change of offset_s (the next DST change), null when the zone has none. The launcher's clock shows UTC plus offset_s and gets the zone again at offset_valid_until and on time_zone_changed. A zone in state.json that tzdata does not have (or a bad one) reads as UTC.",
       "since": "0.16",
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
       "errors": ["system_unavailable"],
       "examples": [
-        { "name": "Chicago in October", "params": {}, "result": {"zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600, "offset_valid_until": 1793516400} },
-        { "name": "never set", "params": {}, "result": {"zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0, "offset_valid_until": null} }
+        { "name": "Chicago in October", "params": {}, "result": {"zone": "America/Chicago", "offset_s": -18000, "standard_offset_s": -21600, "offset_valid_until": 1793516400} },
+        { "name": "never set", "params": {}, "result": {"zone": "UTC", "offset_s": 0, "standard_offset_s": 0, "offset_valid_until": null} }
       ],
       "relay": true
     },
@@ -3000,10 +2889,10 @@
           "params": {},
           "result": {
             "zones": [
-              { "zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600 },
-              { "zone": "Asia/Kolkata", "offset_seconds": 19800, "standard_offset_seconds": 19800 },
-              { "zone": "Europe/Dublin", "offset_seconds": 3600, "standard_offset_seconds": 0 },
-              { "zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0 }
+              { "zone": "America/Chicago", "offset_s": -18000, "standard_offset_s": -21600 },
+              { "zone": "Asia/Kolkata", "offset_s": 19800, "standard_offset_s": 19800 },
+              { "zone": "Europe/Dublin", "offset_s": 3600, "standard_offset_s": 0 },
+              { "zone": "UTC", "offset_s": 0, "standard_offset_s": 0 }
             ]
           }
         }
@@ -3026,8 +2915,8 @@
       "result": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
       "errors": ["system_unavailable", "permission_denied", "authentication_required", "rate_limited", "pin_required"],
       "examples": [
-        { "name": "Chicago", "params": { "zone": "America/Chicago", "admin_pin": "2468" }, "result": {"zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600, "offset_valid_until": 1793516400} },
-        { "name": "first boot (no PIN)", "params": { "zone": "UTC" }, "result": {"zone": "UTC", "offset_seconds": 0, "standard_offset_seconds": 0, "offset_valid_until": null} },
+        { "name": "Chicago", "params": { "zone": "America/Chicago", "admin_pin": "2468" }, "result": {"zone": "America/Chicago", "offset_s": -18000, "standard_offset_s": -21600, "offset_valid_until": 1793516400} },
+        { "name": "first boot (no PIN)", "params": { "zone": "UTC" }, "result": {"zone": "UTC", "offset_s": 0, "standard_offset_s": 0, "offset_valid_until": null} },
         {
           "name": "unknown zone",
           "params": { "zone": "Mars/Olympus_Mons", "admin_pin": "2468" },
@@ -3575,48 +3464,6 @@
             "message": "the job is activating and can no longer be cancelled",
             "data": {
               "job_id": "3f9a0c2b7e4d1a65"
-            }
-          }
-        }
-      ],
-      "relay": true
-    },
-    "system.guest.end": {
-      "summary": "Relayed to the system service's guest.end. End guest session (0.5): end the guest's session and wipe the guest now (job). Only the guest itself. Action org.hinteros.system.profiles.",
-      "description": "Only a caller that is the guest account (hinteros-guest, while the guest is on) may call it; anyone else gets permission_denied {reason: profile}. The service checks the account first: the name hinteros-guest, the expected guest uid (20000 on a box), no other account with that uid, a home that is an absolute path ending in /hinteros-guest; otherwise internal_error and nothing is touched. The job (kind guest_end) hides the guest from the picker (profiles-public.json guest.enabled false; PAM refuses the guest) while it runs, ends the guest's session itself (logind TerminateUser, its user slice, then SIGKILL for anything left of the uid; it fails at stage preparing if processes remain, before anything is deleted), then deletes everything the guest uid owns in its home (the home directory itself stays), in /tmp, /var/tmp and /dev/shm (top-level entries owned by the uid; no symlink is followed, no other filesystem entered, nothing owned by another uid touched), the guest's app env link (then given the starter env again), its terms acceptances (by hinteros-guest), its usage entry and a switch hint that targets it. The boot-time wipe stays. The caller's own session ends while the job runs: call it last.",
-      "since": "0.13",
-      "params": {
-        "type": "object",
-        "additionalProperties": false
-      },
-      "result": {
-        "$ref": "#/$defs/JobRef",
-        "type": "object"
-      },
-      "errors": [
-        "system_unavailable",
-        "permission_denied",
-        "authentication_required",
-        "rate_limited",
-        "job_busy"
-      ],
-      "examples": [
-        {
-          "name": "started",
-          "params": {},
-          "result": {
-            "job_id": "3f9a0c2b7e4d1a65"
-          }
-        },
-        {
-          "name": "not the guest",
-          "params": {},
-          "error": {
-            "code": 3002,
-            "message": "only the guest can end the guest session",
-            "data": {
-              "action": "org.hinteros.system.profiles",
-              "reason": "profile"
             }
           }
         }
@@ -4319,7 +4166,7 @@
       ]
     },
     "session.unlock": {
-      "summary": "The PIN on the sleep lock screen (relays system.profiles.unlock); lock_state {locked: false} follows.",
+      "summary": "The PIN on the sleep lock screen (relays system.profiles.unlock); lock_changed {locked: false} follows.",
       "since": "0.12",
       "params": {
         "type": "object",
@@ -4621,7 +4468,7 @@
       ]
     },
     "greeter.pin": {
-      "summary": "Answer the PIN prompt. greeter_result follows: ok, or not ok with locked_seconds during the backoff (the greetd conversation is then over; log in again). Greeter mode only (hinteros-session --greeter); only the hinteros-launcher connection may call it (else not_authorized).",
+      "summary": "Answer the PIN prompt. greeter_result follows: ok, or not ok with locked_s during the backoff (the greetd conversation is then over; log in again). Greeter mode only (hinteros-session --greeter); only the hinteros-launcher connection may call it (else not_authorized).",
       "since": "0.12",
       "params": {
         "type": "object",
@@ -5018,7 +4865,7 @@
         { "name": "cleared", "params": { "windows": [] } }
       ]
     },
-    "osk_visibility": {
+    "osk_changed": {
       "summary": "The on-screen keyboard was shown or hidden (osk.show/osk.hide, the controller chord, A on a focused text field, B while it is visible, Home, or a focus change).",
       "description": "(0.10) password is true while the keyboard is up for a password field (reported by the Firefox extension or Firefox itself in a keyboard-profile app); the keyboard should mask what it shows of the typed text then, and show it plainly otherwise (also when nothing reported a field, e.g. the keyboard was opened with the controller chord). While visible, the event is sent again (visible true) when another field of the other kind gets focus; a field losing focus changes nothing.",
       "since": "0.4",
@@ -5041,7 +4888,7 @@
       "summary": "Relayed from the system service. The box's time zone changed (time_zone.set, or a rollback restored another zone): the new zone and its offsets, as time_zone.get.",
       "since": "0.16",
       "params": { "$ref": "#/$defs/TimeZoneInfo", "type": "object" },
-      "examples": [{ "name": "Chicago", "params": {"zone": "America/Chicago", "offset_seconds": -18000, "standard_offset_seconds": -21600, "offset_valid_until": 1793516400} }]
+      "examples": [{ "name": "Chicago", "params": {"zone": "America/Chicago", "offset_s": -18000, "standard_offset_s": -21600, "offset_valid_until": 1793516400} }]
     },
     "job_started": {
       "summary": "Relayed from the system service. A job was started (by any caller). 0.15 (system 0.7): subject (what the job is about) and started_at.",
@@ -5417,7 +5264,7 @@
         }
       ]
     },
-    "lock_state": {
+    "lock_changed": {
       "summary": "0.12: the sleep lock went up (before the box sleeps, for a locked profile) or down (session.unlock).",
       "since": "0.12",
       "params": {
@@ -5468,7 +5315,7 @@
       ]
     },
     "greeter_result": {
-      "summary": "Greeter mode: the login ended: ok (the session starts, the greeter goes away) or not (wrong PIN; locked_seconds during the backoff: 'Too many tries. Try again in N seconds'). 0.17: reboot_required: true when the admin profile's PIN is refused until the box restarts (10 wrong tries this boot).",
+      "summary": "Greeter mode: the login ended: ok (the session starts, the greeter goes away) or not (wrong PIN; locked_s during the backoff: 'Too many tries. Try again in N seconds'). 0.17: reboot_required: true when the admin profile's PIN is refused until the box restarts (10 wrong tries this boot).",
       "since": "0.12",
       "params": {
         "type": "object",
@@ -5480,7 +5327,7 @@
           "ok": {
             "type": "boolean"
           },
-          "locked_seconds": {
+          "locked_s": {
             "type": "integer",
             "minimum": 0
           },
@@ -5500,7 +5347,7 @@
           "name": "wait",
           "params": {
             "ok": false,
-            "locked_seconds": 30
+            "locked_s": 30
           }
         },
         {
@@ -5596,12 +5443,11 @@
       }
     },
     "already_handshaken": { "code": 1003, "since": "0.1", "summary": "'hello' was called twice on one connection." },
-    "app_not_found": { "code": 2001, "since": "0.2", "summary": "No such app (apps.launch: not in apps.list; apps.focus, apps.close: not running)." },
+    "app_not_found": { "code": 2001, "since": "0.2", "summary": "No such app (apps.launch: not in apps.list; apps.focus, apps.close: not running; apps.set_permission: not installed and not in the catalog)." },
     "app_launch_failed": { "code": 2002, "since": "0.2", "summary": "The app could not be started (spawn failed, or it has nothing to launch)." },
     "steam_no_windows": { "code": 2003, "since": "0.3", "summary": "steam.focus: Steam has no windows that could be shown (not running, or no gamescope)." },
     "keyboard_unavailable": { "code": 2004, "since": "0.4", "summary": "keys.*: nothing can deliver the input (no virtual keyboard because /dev/uinput could not be opened, and, for text and some actions, no gamescope input method)." },
     "osk_unavailable": { "code": 2005, "since": "0.4", "summary": "osk.show: the on-screen keyboard is disabled in the daemon's config." },
-    "unknown_app": { "code": 2006, "since": "0.18", "summary": "apps.set_permission: the app is not installed and not in the catalog." },
     "unknown_permission": { "code": 2007, "since": "0.18", "summary": "apps.set_permission: the app does not declare this permission (or it is not enforced on this box)." },
     "permission_required": { "code": 2008, "since": "0.18", "summary": "apps.set_permission: a required permission cannot be denied." },
     "no_app_display": {
@@ -5938,7 +5784,7 @@
     },
     "EventName": {
       "type": "string",
-      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_visibility", "job_started", "job_progress", "job_finished", "network_changed", "wifi_list_changed", "bluetooth_changed", "bluetooth_confirm", "audio_changed", "authentication_requested", "authentication_finished", "store_changed", "switch_progress", "switch_blocked", "lock_state", "profiles_changed", "greeter_prompt", "greeter_result", "time_zone_changed", "input_captured"]
+      "enum": ["home_pressed", "app_started", "app_exited", "focus_changed", "input_nav", "games_changed", "apps_changed", "steam_attention", "osk_changed", "job_started", "job_progress", "job_finished", "network_changed", "wifi_list_changed", "bluetooth_changed", "bluetooth_confirm", "audio_changed", "authentication_requested", "authentication_finished", "store_changed", "switch_progress", "switch_blocked", "lock_changed", "profiles_changed", "greeter_prompt", "greeter_result", "time_zone_changed", "input_captured"]
     },
     "AppId": {
       "description": "App identifier: an apps.list id, or for running apps started by command or Steam URL 'cmd-<n>' / 'steam-<appid>'. 'steam' is Steam itself (Big Picture and its other windows).",
@@ -6169,10 +6015,10 @@
     "Game": {
       "description": "An installed Steam game.",
       "type": "object",
-      "required": ["appid", "name", "install_state", "size_bytes", "last_played", "artwork"],
+      "required": ["steam_app_id", "name", "install_state", "size_bytes", "last_played", "artwork"],
       "additionalProperties": false,
       "properties": {
-        "appid": { "description": "Steam app id. Launch with apps.launch {url: 'steam://rungameid/<appid>'}; it then runs as 'steam-<appid>'.", "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "steam_app_id": { "description": "Steam app id. Launch with apps.launch {url: 'steam://rungameid/<appid>'}; it then runs as 'steam-<appid>'.", "type": "integer", "minimum": 1, "maximum": 4294967295 },
         "name": { "description": "Display name from the manifest.", "type": "string", "minLength": 1 },
         "install_state": { "$ref": "#/$defs/InstallState" },
         "size_bytes": { "description": "Size on disk (0 if unknown).", "type": "integer", "minimum": 0 },
@@ -6712,31 +6558,31 @@
     "OffsetSeconds": { "description": "Seconds east of UTC.", "type": "integer", "minimum": -86400, "maximum": 86400 },
     "TimeZoneInfo": {
       "type": "object",
-      "required": ["zone", "offset_seconds", "standard_offset_seconds", "offset_valid_until"],
+      "required": ["zone", "offset_s", "standard_offset_s", "offset_valid_until"],
       "additionalProperties": false,
       "properties": {
         "zone": { "$ref": "#/$defs/ZoneName" },
-        "offset_seconds": { "$ref": "#/$defs/OffsetSeconds" },
-        "standard_offset_seconds": { "$ref": "#/$defs/OffsetSeconds" },
+        "offset_s": { "$ref": "#/$defs/OffsetSeconds" },
+        "standard_offset_s": { "$ref": "#/$defs/OffsetSeconds" },
         "offset_valid_until": { "description": "Unix time of the next offset change; null when there is none.", "oneOf": [{ "type": "integer" }, { "type": "null" }] }
       }
     },
     "TimeZoneEntry": {
       "type": "object",
-      "required": ["zone", "offset_seconds", "standard_offset_seconds"],
+      "required": ["zone", "offset_s", "standard_offset_s"],
       "additionalProperties": false,
       "properties": {
         "zone": { "$ref": "#/$defs/ZoneName" },
-        "offset_seconds": { "$ref": "#/$defs/OffsetSeconds" },
-        "standard_offset_seconds": { "$ref": "#/$defs/OffsetSeconds" }
+        "offset_s": { "$ref": "#/$defs/OffsetSeconds" },
+        "standard_offset_s": { "$ref": "#/$defs/OffsetSeconds" }
       }
     },
     "CleanupSettings": {
       "type": "object",
-      "required": ["enable", "frequency", "keep_system", "keep_profiles"],
+      "required": ["enabled", "frequency", "keep_system", "keep_profiles"],
       "additionalProperties": false,
       "properties": {
-        "enable": { "type": "boolean" },
+        "enabled": { "type": "boolean" },
         "frequency": { "$ref": "#/$defs/CleanupFrequency" },
         "keep_system": { "$ref": "#/$defs/Keep" },
         "keep_profiles": { "$ref": "#/$defs/Keep" }

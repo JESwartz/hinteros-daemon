@@ -608,7 +608,7 @@ async fn games_list_reads_the_steam_library() {
         .collect();
     assert_eq!(names, ["Baldur's Gate 3", "Dota 2", "Hades", "Portal 2"]);
     let portal = &games["games"][3];
-    assert_eq!(portal["appid"], 620);
+    assert_eq!(portal["steam_app_id"], 620);
     assert_eq!(portal["install_state"], "installed");
     assert_eq!(portal["last_played"], 1_786_300_589);
     let hero = portal["artwork"]["hero"].as_str().unwrap();
@@ -742,7 +742,7 @@ async fn steam_entry_opens_big_picture() {
 async fn osk_and_keys_without_a_keyboard() {
     let d = Daemon::start();
     let mut c = d.client().await;
-    call(&mut c, "subscribe", json!({ "events": ["osk_visibility"] }))
+    call(&mut c, "subscribe", json!({ "events": ["osk_changed"] }))
         .await
         .unwrap();
     // No virtual keyboard (--no-uinput) and no gamescope input method.
@@ -766,7 +766,7 @@ async fn osk_and_keys_without_a_keyboard() {
     );
     assert_eq!(
         next_event(&mut c).await,
-        ("osk_visibility".into(), json!({ "visible": true }))
+        ("osk_changed".into(), json!({ "visible": true }))
     );
     assert_eq!(
         call(&mut c, "osk.hide", json!({})).await.unwrap(),
@@ -774,7 +774,7 @@ async fn osk_and_keys_without_a_keyboard() {
     );
     assert_eq!(
         next_event(&mut c).await,
-        ("osk_visibility".into(), json!({ "visible": false }))
+        ("osk_changed".into(), json!({ "visible": false }))
     );
 
     // Disabled in the config: osk_unavailable.

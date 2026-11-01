@@ -29,7 +29,7 @@ pub enum EventName {
     GamesChanged,
     AppsChanged,
     SteamAttention,
-    OskVisibility,
+    OskChanged,
     JobStarted,
     JobProgress,
     JobFinished,
@@ -43,7 +43,7 @@ pub enum EventName {
     StoreChanged,
     SwitchProgress,
     SwitchBlocked,
-    LockState,
+    LockChanged,
     ProfilesChanged,
     GreeterPrompt,
     GreeterResult,
@@ -61,7 +61,7 @@ impl EventName {
         EventName::GamesChanged,
         EventName::AppsChanged,
         EventName::SteamAttention,
-        EventName::OskVisibility,
+        EventName::OskChanged,
         EventName::JobStarted,
         EventName::JobProgress,
         EventName::JobFinished,
@@ -75,7 +75,7 @@ impl EventName {
         EventName::StoreChanged,
         EventName::SwitchProgress,
         EventName::SwitchBlocked,
-        EventName::LockState,
+        EventName::LockChanged,
         EventName::ProfilesChanged,
         EventName::GreeterPrompt,
         EventName::GreeterResult,
@@ -94,7 +94,7 @@ impl EventName {
             EventName::GamesChanged => GamesChanged::NAME,
             EventName::AppsChanged => AppsChanged::NAME,
             EventName::SteamAttention => SteamAttention::NAME,
-            EventName::OskVisibility => OskVisibility::NAME,
+            EventName::OskChanged => OskChanged::NAME,
             EventName::JobStarted => JobStarted::NAME,
             EventName::JobProgress => JobProgress::NAME,
             EventName::JobFinished => JobFinished::NAME,
@@ -108,7 +108,7 @@ impl EventName {
             EventName::StoreChanged => StoreChanged::NAME,
             EventName::SwitchProgress => SwitchProgress::NAME,
             EventName::SwitchBlocked => SwitchBlocked::NAME,
-            EventName::LockState => LockState::NAME,
+            EventName::LockChanged => LockChanged::NAME,
             EventName::ProfilesChanged => ProfilesChanged::NAME,
             EventName::GreeterPrompt => GreeterPrompt::NAME,
             EventName::GreeterResult => GreeterResult::NAME,
@@ -574,7 +574,7 @@ pub struct GameArtwork {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Game {
-    pub appid: u32,
+    pub steam_app_id: u32,
     pub name: String,
     pub install_state: InstallState,
     pub size_bytes: u64,
@@ -668,7 +668,7 @@ pub const OSK_CLIENT_NAME: &str = "hinteros-osk";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OskParams {}
 
-/// Result of `osk.show` / `osk.hide`, and the `osk_visibility` event.
+/// Result of `osk.show` / `osk.hide`, and the `osk_changed` event.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OskState {
     pub visible: bool,
@@ -692,9 +692,9 @@ impl Method for OskHide {
     type Result = OskState;
 }
 
-pub struct OskVisibility;
-impl Event for OskVisibility {
-    const NAME: &'static str = "osk_visibility";
+pub struct OskChanged;
+impl Event for OskChanged {
+    const NAME: &'static str = "osk_changed";
     type Params = OskState;
 }
 
@@ -1181,11 +1181,8 @@ pub static API: ApiInfo = ApiInfo {
         MethodInfo::of::<RelayProfilesSetLocked>(),
         MethodInfo::of::<RelayProfilesResetPin>(),
         MethodInfo::of::<RelayProfilesRemove>(),
-        MethodInfo::of::<RelayProfilesSwitch>(),
-        MethodInfo::of::<RelayProfilesSwitchCancel>(),
         MethodInfo::of::<RelayProfilesUnlock>(),
         MethodInfo::of::<RelayGuestSet>(),
-        MethodInfo::of::<RelayGuestEnd>(),
         MethodInfo::of::<RelayDisplaySaveMode>(),
         MethodInfo::of::<RelayAudioSaveOutput>(),
         MethodInfo::of::<RelayStarterSetGet>(),
@@ -1270,7 +1267,7 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<GamesChanged>(),
         EventInfo::of::<AppsChanged>(),
         EventInfo::of::<SteamAttention>(),
-        EventInfo::of::<OskVisibility>(),
+        EventInfo::of::<OskChanged>(),
         EventInfo::of::<JobStarted>(),
         EventInfo::of::<JobProgress>(),
         EventInfo::of::<JobFinished>(),
@@ -1284,7 +1281,7 @@ pub static API: ApiInfo = ApiInfo {
         EventInfo::of::<StoreChanged>(),
         EventInfo::of::<SwitchProgress>(),
         EventInfo::of::<SwitchBlocked>(),
-        EventInfo::of::<LockState>(),
+        EventInfo::of::<LockChanged>(),
         EventInfo::of::<ProfilesChanged>(),
         EventInfo::of::<GreeterPrompt>(),
         EventInfo::of::<GreeterResult>(),
@@ -1358,11 +1355,8 @@ relay! {
     RelayProfilesSetLocked = "system.profiles.set_locked" => crate::system::ProfilesSetLocked;
     RelayProfilesResetPin = "system.profiles.reset_pin" => crate::system::ProfilesResetPin;
     RelayProfilesRemove = "system.profiles.remove" => crate::system::ProfilesRemove;
-    RelayProfilesSwitch = "system.profiles.switch" => crate::system::ProfilesSwitch;
-    RelayProfilesSwitchCancel = "system.profiles.switch_cancel" => crate::system::ProfilesSwitchCancel;
     RelayProfilesUnlock = "system.profiles.unlock" => crate::system::ProfilesUnlock;
     RelayGuestSet = "system.guest.set" => crate::system::GuestSet;
-    RelayGuestEnd = "system.guest.end" => crate::system::GuestEnd;
     RelayDisplaySaveMode = "system.display.save_mode" => crate::system::DisplaySaveMode;
     RelayAudioSaveOutput = "system.audio.save_output" => crate::system::AudioSaveOutput;
     RelayStarterSetGet = "system.starter_set.get" => crate::system::StarterSetGet;
@@ -1730,9 +1724,9 @@ impl Event for SwitchBlocked {
     type Params = SwitchBlockedParams;
 }
 
-pub struct LockState;
-impl Event for LockState {
-    const NAME: &'static str = "lock_state";
+pub struct LockChanged;
+impl Event for LockChanged {
+    const NAME: &'static str = "lock_changed";
     type Params = LockStateParams;
 }
 
@@ -1854,7 +1848,7 @@ pub struct GreeterResultParams {
     pub ok: bool,
     /// The PIN backoff: wait this long.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub locked_seconds: Option<u32>,
+    pub locked_s: Option<u32>,
     /// 0.17: the admin profile's PIN is refused until the box restarts (10 wrong tries this
     /// boot).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

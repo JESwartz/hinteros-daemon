@@ -156,7 +156,7 @@ impl Permissions {
         granted: bool,
     ) -> Result<bool, ErrorObject> {
         let declared = declared.ok_or_else(|| {
-            ErrorObject::new(ErrorCode::UnknownApp, format!("no app with id '{id}'"))
+            ErrorObject::new(ErrorCode::AppNotFound, format!("no app with id '{id}'"))
         })?;
         let need = declared
             .get(permission)
@@ -395,7 +395,7 @@ mod tests {
         let code = |r: Result<bool, ErrorObject>| r.unwrap_err().kind().unwrap();
         assert_eq!(
             code(p.set("nope", None, "mic", false)),
-            ErrorCode::UnknownApp
+            ErrorCode::AppNotFound
         );
         assert_eq!(
             code(p.set("app", Some(&d), "downloads", false)),

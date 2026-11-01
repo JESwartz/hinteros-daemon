@@ -169,7 +169,7 @@ async fn picker_logs_in_through_greetd() {
         .unwrap();
     assert_eq!(
         event_named(&mut c, "greeter_result").await,
-        json!({"ok": false, "locked_seconds": 30})
+        json!({"ok": false, "locked_s": 30})
     );
     // The admin PIN refused until the box restarts.
     call(&mut c, "greeter.login", json!({"id": "p3"}))

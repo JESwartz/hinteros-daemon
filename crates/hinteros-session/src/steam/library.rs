@@ -269,7 +269,7 @@ pub fn scan(steam: &Path) -> Vec<Game> {
             };
             seen.insert(m.appid);
             games.push(Game {
-                appid: m.appid,
+                steam_app_id: m.appid,
                 name: m.name,
                 install_state,
                 size_bytes: m.size_bytes,
@@ -288,7 +288,7 @@ pub fn scan(steam: &Path) -> Vec<Game> {
         a.name
             .to_lowercase()
             .cmp(&b.name.to_lowercase())
-            .then(a.appid.cmp(&b.appid))
+            .then(a.steam_app_id.cmp(&b.steam_app_id))
     });
     games
 }
@@ -420,7 +420,7 @@ fn shortcut_game(s: Shortcut, config: &Path) -> Game {
         .map(str::to_string)
         .or_else(|| find("_icon"));
     Game {
-        appid: s.appid,
+        steam_app_id: s.appid,
         artwork: GameArtwork {
             portrait: find("p"),
             header: find(""),
@@ -709,7 +709,10 @@ pub(crate) mod tests {
         let games = scan(steam.path());
         assert_eq!(games.len(), 1, "the hidden one is left out: {games:?}");
         let g = &games[0];
-        assert_eq!((g.appid, g.name.as_str()), (2_396_848_268, "Zombie Force"));
+        assert_eq!(
+            (g.steam_app_id, g.name.as_str()),
+            (2_396_848_268, "Zombie Force")
+        );
         assert_eq!(g.install_state, InstallState::Installed);
         assert_eq!(g.last_played, Some(1_791_578_911));
         assert!(
@@ -887,7 +890,7 @@ pub(crate) mod tests {
         let games = scan(&steam);
         let ids: Vec<(u32, &str, InstallState)> = games
             .iter()
-            .map(|g| (g.appid, g.name.as_str(), g.install_state))
+            .map(|g| (g.steam_app_id, g.name.as_str(), g.install_state))
             .collect();
         assert_eq!(
             ids,

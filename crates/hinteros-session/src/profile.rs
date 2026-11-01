@@ -204,7 +204,7 @@ impl Profiles {
                     .await?;
                 if self.inner.locked.swap(false, Ordering::SeqCst) {
                     info!("unlocked");
-                    self.send(EventName::LockState, LockStateParams { locked: false });
+                    self.send(EventName::LockChanged, LockStateParams { locked: false });
                 }
                 encode_result::<SessionUnlock>(ProfileEmpty {})
             }
@@ -540,7 +540,7 @@ impl Profiles {
         if locked_profile && !self.inner.locked.swap(true, Ordering::SeqCst) {
             info!("locking the profile for sleep");
             let _ = self.inner.shell.send(Msg::Home);
-            self.send(EventName::LockState, LockStateParams { locked: true });
+            self.send(EventName::LockChanged, LockStateParams { locked: true });
         }
     }
 

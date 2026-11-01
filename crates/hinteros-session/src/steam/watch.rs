@@ -187,7 +187,10 @@ mod tests {
             Some(steam.clone()),
             Duration::from_millis(50),
             Duration::from_secs(3600), // inotify only
-            move |games| tx.send(games.iter().map(|g| g.appid).collect()).is_ok(),
+            move |games| {
+                tx.send(games.iter().map(|g| g.steam_app_id).collect())
+                    .is_ok()
+            },
         );
         thread::sleep(Duration::from_millis(200));
         let next = || {

@@ -21,7 +21,7 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
-use crate::greetd::{AuthMessageType, Greetd, Request, Response, locked_seconds, reboot_required};
+use crate::greetd::{AuthMessageType, Greetd, Request, Response, locked_s, reboot_required};
 use crate::{Audience, Broadcast};
 
 pub const METHODS: &[&str] = &[
@@ -134,10 +134,7 @@ pub enum Outcome {
     Started,
     /// Refused (wrong PIN, a lock, an account that may not enter). `reboot`: the admin
     /// profile's PIN is refused until the box restarts.
-    Failed {
-        locked_seconds: Option<u32>,
-        reboot: bool,
-    },
+    Failed { locked_s: Option<u32>, reboot: bool },
 }
 
 /// Drive a conversation from `resp` until it needs the PIN or ends; starts `cmd` on success.
@@ -150,7 +147,7 @@ pub fn advance(conn: &mut Greetd, mut resp: Response, cmd: &[String]) -> std::io
                 auth_message_type: AuthMessageType::Info | AuthMessageType::Error,
                 auth_message,
             } => {
-                locked = locked.or(locked_seconds(&auth_message));
+                locked = locked.or(locked_s(&auth_message));
                 reboot |= reboot_required(&auth_message);
                 conn.request(&Request::PostAuthMessageResponse { response: None })?
             }
@@ -165,7 +162,7 @@ pub fn advance(conn: &mut Greetd, mut resp: Response, cmd: &[String]) -> std::io
                         warn!("greetd refused to start the session: {other:?}");
                         let _ = conn.request(&Request::CancelSession);
                         return Ok(Outcome::Failed {
-                            locked_seconds: locked,
+                            locked_s: locked,
                             reboot,
                         });
                     }
@@ -175,7 +172,7 @@ pub fn advance(conn: &mut Greetd, mut resp: Response, cmd: &[String]) -> std::io
                 info!("greetd: {description}");
                 let _ = conn.request(&Request::CancelSession);
                 return Ok(Outcome::Failed {
-                    locked_seconds: locked,
+                    locked_s: locked,
                     reboot,
                 });
             }
@@ -320,21 +317,18 @@ impl Greeter {
                     EventName::GreeterResult,
                     GreeterResultParams {
                         ok: true,
-                        locked_seconds: None,
+                        locked_s: None,
                         reboot_required: false,
                     },
                 );
             }
-            Outcome::Failed {
-                locked_seconds,
-                reboot,
-            } => {
+            Outcome::Failed { locked_s, reboot } => {
                 *self.inner.conn.lock().unwrap() = None;
                 self.send(
                     EventName::GreeterResult,
                     GreeterResultParams {
                         ok: false,
-                        locked_seconds,
+                        locked_s,
                         reboot_required: reboot,
                     },
                 );
@@ -403,7 +397,7 @@ impl Greeter {
                 self.step(move |conn, cmd| {
                     let Some(c) = conn.as_mut() else {
                         return Ok(Outcome::Failed {
-                            locked_seconds: None,
+                            locked_s: None,
                             reboot: false,
                         });
                     };

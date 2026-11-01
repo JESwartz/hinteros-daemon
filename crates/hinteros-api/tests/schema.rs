@@ -330,15 +330,15 @@ fn schema_rejects_what_it_should() {
         ),
         (
             "/methods/games.list/result",
-            r#"{"games":[{"appid":1,"name":"x","install_state":"installed","size_bytes":0,"last_played":null}]}"#,
+            r#"{"games":[{"steam_app_id":1,"name":"x","install_state":"installed","size_bytes":0,"last_played":null}]}"#,
         ),
         (
             "/methods/games.list/result",
-            r#"{"games":[{"appid":1,"name":"x","install_state":"gone","size_bytes":0,"last_played":null,"artwork":{"portrait":null,"header":null,"hero":null,"logo":null,"icon":null}}]}"#,
+            r#"{"games":[{"steam_app_id":1,"name":"x","install_state":"gone","size_bytes":0,"last_played":null,"artwork":{"portrait":null,"header":null,"hero":null,"logo":null,"icon":null}}]}"#,
         ),
         (
             "/methods/games.list/result",
-            r#"{"games":[{"appid":1,"name":"x","install_state":"installed","size_bytes":0,"last_played":null,"artwork":{"portrait":null}}]}"#,
+            r#"{"games":[{"steam_app_id":1,"name":"x","install_state":"installed","size_bytes":0,"last_played":null,"artwork":{"portrait":null}}]}"#,
         ),
         ("/methods/games.list/params", r#"{"x":1}"#),
         ("/methods/keys.type/params", r#"{"text":""}"#),
@@ -354,7 +354,7 @@ fn schema_rejects_what_it_should() {
         ),
         ("/methods/keys.action/params", r#"{"action":"jump"}"#),
         ("/methods/osk.show/result", r#"{}"#),
-        ("/events/osk_visibility/params", r#"{"visible":"yes"}"#),
+        ("/events/osk_changed/params", r#"{"visible":"yes"}"#),
         // 0.18: permissions.
         (
             "/methods/apps.list/result",
@@ -509,7 +509,7 @@ fn game_nullables_are_required_in_rust_too() {
     );
     let game = |last: &str| {
         format!(
-            r#"{{"appid":1,"name":"x","install_state":"installed","size_bytes":0,{last}"artwork":{artwork}}}"#
+            r#"{{"steam_app_id":1,"name":"x","install_state":"installed","size_bytes":0,{last}"artwork":{artwork}}}"#
         )
     };
     assert!(serde_json::from_str::<Game>(&game("")).is_err());
@@ -949,7 +949,7 @@ fn relay_matches_the_system_api() {
         .collect();
     assert_eq!(relayed, marked, "relay table vs schema relay flags");
     // Every system method except the core ones and the session daemon's own (`lan_filter.*`,
-    // 0.10) is relayed.
+    // the switch hint and the end of the guest session) is relayed.
     let system_methods: BTreeSet<&str> = y["methods"]
         .as_object()
         .unwrap()
@@ -957,6 +957,7 @@ fn relay_matches_the_system_api() {
         .map(String::as_str)
         .filter(|m| !["hello", "ping", "subscribe", "unsubscribe"].contains(m))
         .filter(|m| !m.starts_with("lan_filter."))
+        .filter(|m| !["profiles.switch", "profiles.switch_cancel", "guest.end"].contains(m))
         .collect();
     let targets: BTreeSet<&str> = session::RELAY.iter().map(|(_, t)| *t).collect();
     assert_eq!(system_methods, targets);

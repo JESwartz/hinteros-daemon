@@ -20,8 +20,6 @@ pub enum ErrorCode {
     SteamNoWindows,
     KeyboardUnavailable,
     OskUnavailable,
-    /// 0.18: `apps.set_permission`: not installed and not in the catalog.
-    UnknownApp,
     /// 0.18: `apps.set_permission`: the app does not declare it.
     UnknownPermission,
     /// 0.18: `apps.set_permission`: a required permission cannot be denied.
@@ -68,7 +66,6 @@ impl ErrorCode {
         Self::SteamNoWindows,
         Self::KeyboardUnavailable,
         Self::OskUnavailable,
-        Self::UnknownApp,
         Self::UnknownPermission,
         Self::PermissionRequired,
         Self::NoAppDisplay,
@@ -151,7 +148,6 @@ impl ErrorCode {
             Self::SteamNoWindows => 2003,
             Self::KeyboardUnavailable => 2004,
             Self::OskUnavailable => 2005,
-            Self::UnknownApp => 2006,
             Self::UnknownPermission => 2007,
             Self::PermissionRequired => 2008,
             Self::NoAppDisplay => 2009,
@@ -195,7 +191,6 @@ impl ErrorCode {
             Self::SteamNoWindows => "steam_no_windows",
             Self::KeyboardUnavailable => "keyboard_unavailable",
             Self::OskUnavailable => "osk_unavailable",
-            Self::UnknownApp => "unknown_app",
             Self::UnknownPermission => "unknown_permission",
             Self::PermissionRequired => "permission_required",
             Self::NoAppDisplay => "no_app_display",

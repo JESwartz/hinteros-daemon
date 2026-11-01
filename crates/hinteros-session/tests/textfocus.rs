@@ -46,18 +46,18 @@ async fn a_text_field_in_firefox_shows_the_keyboard() {
         vec!["--config".into(), config.into()]
     });
     let mut c = d.client().await;
-    call(&mut c, "subscribe", json!({"events": ["osk_visibility"]}))
+    call(&mut c, "subscribe", json!({"events": ["osk_changed"]}))
         .await
         .unwrap();
     call(&mut c, "apps.launch", json!({"id": "youtube"}))
         .await
         .unwrap();
     assert_eq!(
-        event_named(&mut c, "osk_visibility").await,
+        event_named(&mut c, "osk_changed").await,
         json!({"visible": true})
     );
     assert_eq!(
-        event_named(&mut c, "osk_visibility").await,
+        event_named(&mut c, "osk_changed").await,
         json!({"visible": false})
     );
     // The host answered both messages.

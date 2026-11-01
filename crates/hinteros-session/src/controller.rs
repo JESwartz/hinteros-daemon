@@ -1,10 +1,12 @@
 //! The profile's controller settings (session API 0.20, `input.settings.*`): which button does
 //! which action, the keys of keyboard-mode apps, and the right-stick pointer.
 //!
-//! Kept in `$XDG_STATE_HOME/hinteros/controller.json` as the launcher sends them, only what the
-//! user changed ([`ControllerSettings`]). [`Controller::check`] turns them into what the shell
-//! uses; a missing file is the defaults, a bad one too (with a warning: it never stops the
-//! session). `input.settings.set` checks the new settings, saves them atomically and the shell
+//! Kept in `$XDG_STATE_HOME/hinteros/controller.json` (`{"version": 1, "settings": ...}`) as the
+//! launcher sends them, only what the user changed ([`ControllerSettings`]).
+//! [`Controller::check`] turns them into what the shell uses; a missing file is the defaults, a
+//! bad one too (with a warning: it never stops the session). A file of a newer version (after a
+//! rollback) is the defaults and stays as it is: nothing is saved over it.
+//! `input.settings.set` checks the new settings, saves them atomically and the shell
 //! applies them at once.
 //!
 //! - `general`: action -> button over the defaults; every button has exactly one action. The
@@ -27,6 +29,7 @@ use hinteros_api::session::{
     KeyboardApp, Modifier, NavAction, POINTER_SPEED_DEFAULT, POINTER_SPEED_MAX, POINTER_SPEED_MIN,
     POINTER_SPEED_STEP, PointerDefaults, SpeedRange,
 };
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::config::{AppConfig, nav_action, valid_app_id};
@@ -35,6 +38,16 @@ use crate::keys::{KeyLayer, Keymap, apply_layer, binding_name, default_keymap, p
 
 /// The settings file, relative to `$XDG_STATE_HOME` (else `~/.local/state`).
 pub const SETTINGS_FILE: &str = "hinteros/controller.json";
+
+/// The version of the settings file.
+const FILE_VERSION: u32 = 1;
+
+/// The settings file.
+#[derive(Debug, Serialize, Deserialize)]
+struct SettingsFile<S> {
+    version: u32,
+    settings: S,
+}
 
 /// The default left and right click buttons.
 pub const LEFT_CLICK: ControllerButton = ControllerButton::Rt;
@@ -424,9 +437,18 @@ impl ControllerStore {
                 return store;
             }
         };
-        let checked = serde_json::from_str::<ControllerSettings>(&text)
+        let version = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v["version"].as_u64());
+        if let Some(version) = version.filter(|v| *v > u64::from(FILE_VERSION)) {
+            warn!(file = %path.display(), version, "controller settings are from a newer version, using the defaults");
+            store.file = None;
+            return store;
+        }
+        let checked = serde_json::from_str::<SettingsFile<ControllerSettings>>(&text)
             .map_err(|e| e.to_string())
-            .and_then(|s| {
+            .and_then(|f| {
+                let s = f.settings;
                 Controller::check(&s, |_| true)
                     .map(|c| (s, c))
                     .map_err(|e| e.message)
@@ -481,7 +503,13 @@ fn save(path: &Path, s: &ControllerSettings) -> std::io::Result<()> {
         .mode(0o700)
         .create(dir)?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    serde_json::to_writer_pretty(&mut tmp, s)?;
+    serde_json::to_writer_pretty(
+        &mut tmp,
+        &SettingsFile {
+            version: FILE_VERSION,
+            settings: s,
+        },
+    )?;
     writeln!(tmp)?;
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
@@ -771,7 +799,9 @@ mod tests {
         assert!(matches!(store.set(changed, &[]), Err(SetError::Invalid(_))));
         // Dropping it is fine.
         store.set(ControllerSettings::default(), &[]).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}\n");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved, json!({"version": 1, "settings": {}}));
     }
 
     #[test]
@@ -780,9 +810,10 @@ mod tests {
         let path = dir.path().join("controller.json");
         for text in [
             "not json",
-            r#"{"general": {"accept": "b"}}"#,
-            r#"{"pointer": {"speed": 7}}"#,
-            r#"{"extra": 1}"#,
+            r#"{"general": {"accept": "a"}}"#,
+            r#"{"version": 1, "settings": {"general": {"accept": "b"}}}"#,
+            r#"{"version": 1, "settings": {"pointer": {"speed": 7}}}"#,
+            r#"{"version": 1, "settings": {"extra": 1}}"#,
         ] {
             std::fs::write(&path, text).unwrap();
             let store = ControllerStore::load(Some(path.clone()));
@@ -790,8 +821,26 @@ mod tests {
             assert_eq!(store.get(), &Controller::default(), "{text}");
         }
         // An app that is not configured (now) is kept.
-        std::fs::write(&path, r#"{"apps": {"gone": {"back": "escape"}}}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"version": 1, "settings": {"apps": {"gone": {"back": "escape"}}}}"#,
+        )
+        .unwrap();
         let store = ControllerStore::load(Some(path.clone()));
         assert!(store.saved().apps.as_ref().unwrap().contains_key("gone"));
+    }
+
+    #[test]
+    fn newer_file_is_the_defaults_and_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("controller.json");
+        let text = r#"{"version": 2, "layers": []}"#;
+        std::fs::write(&path, text).unwrap();
+        let mut store = ControllerStore::load(Some(path.clone()));
+        assert_eq!(store.saved(), &ControllerSettings::default());
+        let s = settings(json!({"pointer": {"speed": 150}}));
+        store.set(s.clone(), &[]).unwrap();
+        assert_eq!(store.saved(), &s);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     }
 }

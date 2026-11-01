@@ -896,8 +896,10 @@ trust.
   `update_unreachable {host}` or `update_verification_failed {reason}` in `job_finished`.
   `update.apply {rev}` only accepts the last verified result for the current channel and
   revision, re-verifies, and locks `?ref=<branch>&rev=<rev>` with
-  `nix flake lock --override-input`. `channel.set` rewrites `flake.nix`'s input URL (it must
-  appear exactly once, as `"git+<repo>?ref=<branch>"`) and locks the revision `channel.check`
+  `nix flake lock --override-input`. `channel.set` rewrites the string of `inputs.hinteros.url`
+  in `flake.nix` and nothing else, in any layout (one plain string, defined once, equal to
+  `git+<repo>?ref=<branch>` for the current branch and `repo` of `channels.json`, else an
+  error and the file stays) and locks the revision `channel.check`
   verified on the new branch (see "Channel switches" below).
   `base.set` edits `state.json` (unstable → stable needs the acknowledgement).
 - **Rollback**: `nix-env --switch-generation N` + `switch-to-configuration switch`, then

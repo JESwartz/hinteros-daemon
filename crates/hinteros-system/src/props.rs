@@ -156,6 +156,7 @@ proptest! {
         let _ = flake::parse_lock(&s);
         let _ = flake::parse_lock(&v.to_string());
         let _ = flake::retarget_flake_nix(&s, "\"a\"", "b");
+        let _ = flake::retarget_flake_nix(&format!("{{ inputs.hinteros.url = {s}"), "a", "b");
         let _ = flake::is_branch(&s);
     }
 }

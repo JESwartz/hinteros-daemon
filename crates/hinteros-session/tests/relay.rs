@@ -285,7 +285,7 @@ async fn the_jellyfin_app_is_signed_in_before_it_starts() {
             format!(
                 r#"
                 [[apps]]
-                id = "jellyfin"
+                id = "jellyfin-desktop"
                 name = "Jellyfin"
                 command = ["{}"]
                 sandbox = false
@@ -300,7 +300,7 @@ async fn the_jellyfin_app_is_signed_in_before_it_starts() {
     let mut c = d.client().await;
 
     // No system service: the app starts unchanged.
-    call(&mut c, "apps.launch", json!({"id": "jellyfin"}))
+    call(&mut c, "apps.launch", json!({"id": "jellyfin-desktop"}))
         .await
         .unwrap();
     let seen = eventually("the app to start", async || {
@@ -310,7 +310,7 @@ async fn the_jellyfin_app_is_signed_in_before_it_starts() {
     })
     .await;
     assert!(seen.contains("No such file"), "{seen}");
-    call(&mut c, "apps.close", json!({"id": "jellyfin"}))
+    call(&mut c, "apps.close", json!({"id": "jellyfin-desktop"}))
         .await
         .unwrap();
     eventually("the app to end", async || {
@@ -325,7 +325,7 @@ async fn the_jellyfin_app_is_signed_in_before_it_starts() {
         call(&mut c, "system.info", json!({})).await.ok()
     })
     .await;
-    call(&mut c, "apps.launch", json!({"id": "jellyfin"}))
+    call(&mut c, "apps.launch", json!({"id": "jellyfin-desktop"}))
         .await
         .unwrap();
     let seen = eventually("the app to start", async || {

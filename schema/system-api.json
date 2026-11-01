@@ -468,7 +468,7 @@
         {
           "name": "conflict",
           "params": { "ids": ["kodi"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" },
-          "error": { "code": 3013, "message": "kodi conflicts with jellyfin", "data": { "id": "kodi", "conflicts_with": "jellyfin" } }
+          "error": { "code": 3013, "message": "kodi conflicts with jellyfin-desktop", "data": { "id": "kodi", "conflicts_with": "jellyfin-desktop" } }
         },
         { "name": "unknown app", "params": { "ids": ["nope"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "error": { "code": 3010, "message": "nope is not in this system's catalog" } }
       ]
@@ -2031,14 +2031,14 @@
           "result": {
             "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
             "services": [
-              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": false, "status": null, "setup": "cloudflare", "terms": null, "detail": null, "icon": { "site_url": "https://www.cloudflare.com/products/tunnel/", "firefox_profile": false }, "has_data": true },
+              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": false, "status": null, "setup": "cloudflare-tunnel", "terms": null, "detail": null, "icon": { "site_url": "https://www.cloudflare.com/products/tunnel/", "firefox_profile": false }, "has_data": true },
               {
                 "id": "jellyfin-server",
                 "name": "Jellyfin server",
                 "available": true,
                 "enabled": true,
                 "status": "active",
-                "setup": "jellyfin",
+                "setup": "jellyfin-server",
                 "terms": null,
                 "detail": {
                   "setup_done": true,
@@ -2058,7 +2058,7 @@
                 "available": true,
                 "enabled": false,
                 "status": null,
-                "setup": "plex",
+                "setup": "plex-media-server",
                 "terms": { "title": "Plex Terms of Service", "version": "2025-10-30", "url": "https://www.plex.tv/about/privacy-legal/plex-terms-of-service/", "file": "/run/current-system/sw/share/hinteros/terms/plex-media-server-2025-10-30.txt" },
                 "detail": null,
                 "icon": { "icon_url": "https://watch.plex.tv/icons/icon-512x512.png", "sha256": "78072fd57aacff1f73dee6432fb8d7f0360f300b4545422fb767cce638c4e7d3", "site_url": "https://www.plex.tv", "firefox_profile": false },
@@ -2074,8 +2074,8 @@
           "result": {
             "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
             "services": [
-              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": true, "status": "inactive", "setup": "cloudflare", "terms": null, "detail": { "token_set": false, "connected": false, "local_ip": "192.168.1.42" }, "icon": { "site_url": "https://www.cloudflare.com/products/tunnel/", "firefox_profile": false }, "has_data": true },
-              { "id": "plex-media-server", "name": "Plex Media Server", "available": true, "enabled": true, "status": "active", "setup": "plex", "terms": null, "detail": { "claimed": false, "server_name": "hinteros", "url": "http://192.168.1.42:32400" }, "icon": { "icon_url": "https://watch.plex.tv/icons/icon-512x512.png", "sha256": "78072fd57aacff1f73dee6432fb8d7f0360f300b4545422fb767cce638c4e7d3", "site_url": "https://www.plex.tv", "firefox_profile": false }, "has_data": true },
+              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": true, "status": "inactive", "setup": "cloudflare-tunnel", "terms": null, "detail": { "token_set": false, "connected": false, "local_ip": "192.168.1.42" }, "icon": { "site_url": "https://www.cloudflare.com/products/tunnel/", "firefox_profile": false }, "has_data": true },
+              { "id": "plex-media-server", "name": "Plex Media Server", "available": true, "enabled": true, "status": "active", "setup": "plex-media-server", "terms": null, "detail": { "claimed": false, "server_name": "hinteros", "url": "http://192.168.1.42:32400" }, "icon": { "icon_url": "https://watch.plex.tv/icons/icon-512x512.png", "sha256": "78072fd57aacff1f73dee6432fb8d7f0360f300b4545422fb767cce638c4e7d3", "site_url": "https://www.plex.tv", "firefox_profile": false }, "has_data": true },
               { "id": "tailscale", "name": "Tailscale", "available": true, "enabled": true, "status": "active", "setup": "tailscale", "terms": null, "detail": { "state": "running", "name": "hinteros", "ip4": "100.101.102.103", "dns_name": "hinteros.tail1234.ts.net", "tailnet": "owner@example.com", "key_expiry": 1808042400 }, "icon": { "site_url": "https://tailscale.com", "firefox_profile": false }, "has_data": true }
             ]
           }
@@ -2880,7 +2880,7 @@
       "additionalProperties": false,
       "properties": { "total_bytes": { "type": "integer", "minimum": 0 }, "steam_games_bytes": { "type": "integer", "minimum": 0 }, "at": { "type": "integer" } }
     },
-    "BoxFeature": { "description": "A box feature (catalog format 3): box-wide configuration an app needs, turned on when any owner has such an app.", "enum": ["graphics32", "steam-devices"] },
+    "BoxFeature": { "description": "A box feature: box-wide configuration an app needs, turned on when any owner has such an app.", "enum": ["graphics32", "steam-devices"] },
     "CatalogId": { "description": "Catalog app id (state.json apps).", "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
     "TermsVersion": { "description": "A vendor terms version from the catalog.", "type": "string", "pattern": "^[A-Za-z0-9._-]{1,32}$" },
     "CatalogApp": {
@@ -3225,7 +3225,7 @@
         "library": { "$ref": "#/$defs/SubjectLibrary" }
       }
     },
-    "Setup": { "description": "A service's setup flow in the Server section (catalog setup).", "enum": ["jellyfin", "plex", "tailscale", "cloudflare"] },
+    "Setup": { "description": "A service's setup flow in the Server section (catalog setup).", "enum": ["jellyfin-server", "plex-media-server", "tailscale", "cloudflare-tunnel"] },
     "UnitState": { "description": "Systemd's ActiveState of a service's unit (unknown: a value this daemon does not know).", "enum": ["active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance", "refreshing", "unknown"] },
     "ServiceTerms": {
       "description": "A service's vendor terms; file is the absolute path of the text on the box.",

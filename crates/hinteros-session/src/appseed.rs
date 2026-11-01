@@ -1,5 +1,5 @@
 //! The Jellyfin app signs in to this box's own Jellyfin server by itself (server.md, spike S1
-//! "seed page"). Before `apps.launch` of the catalog app `jellyfin` (not when it runs already, not
+//! "seed page"). Before `apps.launch` of the catalog app `jellyfin-desktop` (not when it runs already, not
 //! without `lan`): ask the system service for this profile's token (`jellyfin.client_token`,
 //! refused while `jellyfin-server` is off or not set up), then point the client's settings at
 //! the server's seed page (`/web/hinteros/signin.html`, the system repo's), which writes
@@ -29,7 +29,7 @@ use crate::shell::Msg;
 use crate::system::Relay;
 
 /// The catalog app this is for.
-pub const APP_ID: &str = "jellyfin";
+pub const APP_ID: &str = "jellyfin-desktop";
 /// This box's Jellyfin server, as the app reaches it.
 pub const SERVER: &str = "http://127.0.0.1:8096";
 /// The seed page on the server (the system repo binds it into Jellyfin's web directory).
@@ -258,14 +258,20 @@ mod tests {
 
     #[test]
     fn wants_only_the_jellyfin_launch() {
-        assert!(wants("apps.launch", Some(&json!({"id": "jellyfin"}))));
+        assert!(wants(
+            "apps.launch",
+            Some(&json!({"id": "jellyfin-desktop"}))
+        ));
         assert!(!wants("apps.launch", Some(&json!({"id": "youtube"}))));
         assert!(!wants(
             "apps.launch",
             Some(&json!({"command": ["jellyfin"]}))
         ));
         assert!(!wants("apps.launch", None));
-        assert!(!wants("apps.close", Some(&json!({"id": "jellyfin"}))));
+        assert!(!wants(
+            "apps.close",
+            Some(&json!({"id": "jellyfin-desktop"}))
+        ));
     }
 
     #[test]

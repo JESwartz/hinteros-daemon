@@ -456,8 +456,8 @@ fn launch_params_validation() {
         Ok(LaunchRequest::Steam(570))
     );
     assert_eq!(
-        parse(serde_json::json!({"id": "jellyfin"})),
-        Ok(LaunchRequest::Id("jellyfin".into()))
+        parse(serde_json::json!({"id": "jellyfin-desktop"})),
+        Ok(LaunchRequest::Id("jellyfin-desktop".into()))
     );
     assert!(matches!(
         parse(serde_json::json!({"command": ["sh", "-c", "true"], "name": "Shell"})),

@@ -97,9 +97,11 @@ impl IconSpec {
             id: app.id.clone(),
             icon: app.icon.clone(),
             desktop_id: app.desktop_id.clone(),
-            web: match (&app.icon_url, &app.site_url) {
-                (Some(url), _) => Some(web::Source::IconUrl(url.clone(), app.icon_sha256.clone())),
-                (None, Some(url)) => Some(web::Source::Site(url.clone())),
+            web: match (&app.icon_url, &app.icon_sha256, &app.site_url) {
+                (Some(url), Some(sha256), _) => {
+                    Some(web::Source::IconUrl(url.clone(), sha256.clone()))
+                }
+                (None, _, Some(url)) => Some(web::Source::Site(url.clone())),
                 _ => None,
             },
             firefox: app
@@ -385,14 +387,16 @@ impl Changed {
 /// `siteUrl`). Never a Firefox profile: that only exists once the app is installed and has run.
 pub fn catalog_specs(index: &hinteros_api::catalog::Index) -> Vec<IconSpec> {
     index
-        .apps
+        .entries
         .values()
         .map(|e| IconSpec {
             id: e.id.clone(),
             desktop_id: e.icon.desktop_id.clone(),
-            web: match (&e.icon.icon_url, &e.icon.site_url) {
-                (Some(url), _) => Some(web::Source::IconUrl(url.clone(), e.icon.sha256.clone())),
-                (None, Some(url)) => Some(web::Source::Site(url.clone())),
+            web: match (&e.icon.icon_url, &e.icon.sha256, &e.icon.site_url) {
+                (Some(url), Some(sha256), _) => {
+                    Some(web::Source::IconUrl(url.clone(), sha256.clone()))
+                }
+                (None, _, Some(url)) => Some(web::Source::Site(url.clone())),
                 _ => None,
             },
             ..IconSpec::default()
@@ -818,11 +822,17 @@ mod tests {
         };
         let store = IconStore::default();
         let ok = IconSpec {
-            web: Some(web::Source::IconUrl(format!("{base}/logo.png"), None)),
+            web: Some(web::Source::IconUrl(
+                format!("{base}/logo.png"),
+                web::sha256_hex(b"\x89PNG\r\n\x1a\nlogo"),
+            )),
             ..spec("ok")
         };
         let bad = IconSpec {
-            web: Some(web::Source::IconUrl(format!("{base}/missing.png"), None)),
+            web: Some(web::Source::IconUrl(
+                format!("{base}/missing.png"),
+                web::sha256_hex(b""),
+            )),
             ..spec("bad")
         };
         let fetcher = web::Fetcher::new(true);
@@ -867,7 +877,10 @@ mod tests {
         let catalog = |ids: &[&str]| -> Vec<IconSpec> {
             ids.iter()
                 .map(|id| IconSpec {
-                    web: Some(web::Source::IconUrl(format!("{base}/{id}.png"), None)),
+                    web: Some(web::Source::IconUrl(
+                        format!("{base}/{id}.png"),
+                        web::sha256_hex(b"\x89PNG\r\n\x1a\nlogo"),
+                    )),
                     ..spec(id)
                 })
                 .collect()
@@ -879,7 +892,7 @@ mod tests {
             icon: None,
             desktop_id: None,
             icon_url: Some(format!("{base}/{id}.png")),
-            icon_sha256: None,
+            icon_sha256: Some(web::sha256_hex(b"\x89PNG\r\n\x1a\nlogo")),
             site_url: None,
             firefox_profile: None,
             command: Some(vec!["x".into()]),

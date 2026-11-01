@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use hinteros_api::catalog::{Entry, Index, IndexError, Status};
 use hinteros_api::server::encode_result;
 use hinteros_api::session::{
-    AppKind, CatalogStatus, EventName, Service, StoreApp, StoreIcon, StoreList, StoreListResult,
+    CatalogStatus, Delivery, EventName, Service, StoreApp, StoreIcon, StoreList, StoreListResult,
     StoreReadme, StoreState, StoreTerms,
 };
 use hinteros_api::system::{self, JobFinishedParams, JobKind, JobResult, UpdateCheckResult};
@@ -332,9 +332,9 @@ pub fn merge(
     permissions: &Permissions,
 ) -> Vec<StoreApp> {
     let mut out: Vec<StoreApp> = Vec::new();
-    for e in index.apps.values() {
+    for e in index.entries.values() {
         // Services are box-wide and live in the Server section (M10), not in the Store.
-        if e.entry_kind != hinteros_api::catalog::EntryKind::App {
+        if e.kind != hinteros_api::catalog::EntryKind::App {
             continue;
         }
         let is_installed = installed.contains(&e.id);
@@ -408,21 +408,17 @@ fn empty(id: &str) -> StoreApp {
         description: String::new(),
         category: String::new(),
         homepage: String::new(),
-        kind: AppKind::Native,
         size_mib: 0,
         icon: StoreIcon::default(),
-        requires: vec![],
+        box_features: vec![],
         depends: vec![],
         conflicts: vec![],
-        installer: false,
         on_iso: false,
-        installer_default: false,
         data_paths: vec![],
         terms: None,
         readme: None,
-        builds_on_device: false,
-        free: false,
-        redistributable: false,
+        unfree: true,
+        delivery: Delivery::default(),
         status: CatalogStatus::Removed,
         status_reason: None,
         state: StoreState::Unavailable,
@@ -440,11 +436,6 @@ fn app(index: &Index, e: &Entry, state: StoreState, icon: Option<PathBuf>) -> St
         description: e.description.chars().take(1000).collect(),
         category: e.category.chars().take(32).collect(),
         homepage: e.homepage.clone(),
-        kind: if e.kind == "web" {
-            AppKind::Web
-        } else {
-            AppKind::Native
-        },
         size_mib: e.size_mib,
         icon: StoreIcon {
             desktop_id: e.icon.desktop_id.clone(),
@@ -453,12 +444,10 @@ fn app(index: &Index, e: &Entry, state: StoreState, icon: Option<PathBuf>) -> St
             firefox_profile: e.icon.firefox_profile,
             path: icon.map(|p| p.to_string_lossy().into_owned()),
         },
-        requires: e.requires.clone(),
+        box_features: e.box_features.clone(),
         depends: e.depends.clone(),
         conflicts: e.conflicts.clone(),
-        installer: e.installer,
         on_iso: e.on_iso,
-        installer_default: e.installer_default,
         data_paths: e.data_paths.clone(),
         terms: e.terms.as_ref().map(|t| StoreTerms {
             title: t.title.chars().take(80).collect(),
@@ -472,9 +461,8 @@ fn app(index: &Index, e: &Entry, state: StoreState, icon: Option<PathBuf>) -> St
             retrieved: r.retrieved.clone(),
             file: index.readme_file(r).display().to_string(),
         }),
-        builds_on_device: e.builds_on_device,
-        free: e.free,
-        redistributable: e.redistributable,
+        unfree: e.unfree,
+        delivery: e.delivery,
         status: match e.status {
             Status::Available => CatalogStatus::Available,
             Status::Removed => CatalogStatus::Removed,
@@ -565,7 +553,7 @@ mod tests {
     #[test]
     fn has_data_when_a_data_path_is_left() {
         let index = Index::parse(
-            br#"{"indexVersion":2,"apps":[
+            br#"{"indexVersion":4,"entries":[
               {"id":"moonlight","name":"M","status":"available","dataPaths":[".config/Moonlight"]},
               {"id":"youtube","name":"Y","status":"available","dataPaths":[".local/share/y"]}]}"#,
             "/idx".into(),
@@ -589,10 +577,10 @@ mod tests {
     #[test]
     fn merges_index_and_install_state() {
         let index = Index::parse(
-            br#"{"indexVersion":2,"apps":[
-              {"id":"steam","name":"Steam","status":"available","kind":"native","sizeMiB":1000,"permissions":{"gamepad":"optional"},
+            br#"{"indexVersion":4,"entries":[
+              {"id":"steam","name":"Steam","status":"available","sizeMiB":1000,"permissions":{"gamepad":"optional"},
                "terms":{"title":"SSA","version":"2026-09-10","url":"https://x","retrieved":"2026-10-06","file":"terms/steam-2026-09-10.txt"}},
-              {"id":"youtube","name":"YouTube","status":"available","kind":"web",
+              {"id":"youtube","name":"YouTube","status":"available",
                "permissions":{"mic":"optional","gamepad":"required"}},
               {"id":"moonlight","name":"moonlight","status":"available",
                "readme":{"url":"https://x","retrieved":"2026-10-25","file":"readme/moonlight.md"}},
@@ -646,10 +634,9 @@ mod tests {
         let icon_of = |id: &str| apps.iter().find(|a| a.id == id).unwrap().icon.path.clone();
         assert_eq!(icon_of("youtube").as_deref(), Some("/cache/youtube.png"));
         assert_eq!(icon_of("steam"), None);
-        assert_eq!(
-            apps.iter().find(|a| a.id == "youtube").unwrap().kind,
-            AppKind::Web
-        );
+        let youtube = apps.iter().find(|a| a.id == "youtube").unwrap();
+        assert!(youtube.unfree, "an entry that does not say is unfree");
+        assert_eq!(youtube.delivery, Delivery::Download);
         let perms_of = |id: &str| {
             serde_json::to_value(&apps.iter().find(|a| a.id == id).unwrap().permissions).unwrap()
         };

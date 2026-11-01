@@ -293,14 +293,14 @@ fn cloudflare_detail(c: &DetailCtx) -> CloudflareDetail {
 
 fn detail(setup: Setup, c: &DetailCtx) -> ServiceDetail {
     match setup {
-        Setup::Jellyfin => ServiceDetail::Jellyfin(jellyfin_detail(c)),
-        Setup::Plex => ServiceDetail::Plex(plex_detail(c)),
+        Setup::JellyfinServer => ServiceDetail::Jellyfin(jellyfin_detail(c)),
+        Setup::PlexMediaServer => ServiceDetail::Plex(plex_detail(c)),
         Setup::Tailscale => ServiceDetail::Tailscale(tailscale::detail(
             tailscale::status(&c.server.tailscale_socket, READ_TIMEOUT)
                 .ok()
                 .as_ref(),
         )),
-        Setup::Cloudflare => ServiceDetail::Cloudflare(cloudflare_detail(c)),
+        Setup::CloudflareTunnel => ServiceDetail::Cloudflare(cloudflare_detail(c)),
     }
 }
 
@@ -333,8 +333,8 @@ impl Service {
         let index: Option<Index> = self.catalog().ok();
         let mut ids: Vec<String> = index
             .iter()
-            .flat_map(|i| i.apps.values())
-            .filter(|e| e.entry_kind == EntryKind::Service && e.status == Status::Available)
+            .flat_map(|i| i.entries.values())
+            .filter(|e| e.kind == EntryKind::Service && e.status == Status::Available)
             .map(|e| e.id.clone())
             .collect();
         for id in &enabled {
@@ -367,9 +367,8 @@ impl Service {
             }
             services.push(ServiceInfo {
                 name: entry.map_or_else(|| id.clone(), |e| e.name.clone()),
-                available: entry.is_some_and(|e| {
-                    e.status == Status::Available && e.entry_kind == EntryKind::Service
-                }),
+                available: entry
+                    .is_some_and(|e| e.status == Status::Available && e.kind == EntryKind::Service),
                 enabled: on,
                 status,
                 setup,
@@ -507,7 +506,7 @@ impl Service {
                             format!("{id} is not in this system's catalog"),
                         ));
                     };
-                    if e.entry_kind != EntryKind::Service {
+                    if e.kind != EntryKind::Service {
                         return Err(ErrorObject::with_data(
                             ErrorCode::InvalidParams,
                             format!("{id} is not a service"),

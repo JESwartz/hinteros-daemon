@@ -28,8 +28,8 @@ pub const WANTED_SIZE: u32 = 192;
 /// Where a web app's icon comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-    /// This image; with a hex SHA-256, only if the file has it.
-    IconUrl(String, Option<String>),
+    /// This image, only if the file has this hex SHA-256.
+    IconUrl(String, String),
     /// Discover the icon from this page.
     Site(String),
 }
@@ -71,8 +71,7 @@ impl Fetcher {
 
     pub fn fetch_icon(&self, source: &Source) -> Result<Image> {
         match source {
-            Source::IconUrl(url, None) => self.fetch_image(&self.parse(url)?),
-            Source::IconUrl(url, Some(sha256)) => {
+            Source::IconUrl(url, sha256) => {
                 let image = self.fetch_image(&self.parse(url)?)?;
                 let got = sha256_hex(&image.bytes);
                 if !got.eq_ignore_ascii_case(sha256) {
@@ -660,7 +659,7 @@ mod tests {
             ])
         });
         let f = Fetcher::new(true);
-        let get = |p: &str| f.fetch_icon(&Source::IconUrl(server.url(p), None));
+        let get = |p: &str| f.fetch_image(&f.parse(&server.url(p)).unwrap());
         assert_eq!(get("/ok.svg").unwrap().ext, "svg");
         assert!(get("/text.png").is_err());
         assert!(get("/huge.png").unwrap_err().to_string().contains("larger"));
@@ -668,15 +667,11 @@ mod tests {
     }
 
     #[test]
-    fn icon_url_with_a_hash_only_takes_that_file() {
+    fn icon_url_only_takes_the_file_with_its_hash() {
         let server = Server::start(|_| HashMap::from([("/logo.png", ok("image/png", PNG))]));
         let f = Fetcher::new(true);
-        let pinned = |hash: &str| {
-            f.fetch_icon(&Source::IconUrl(
-                server.url("/logo.png"),
-                Some(hash.to_string()),
-            ))
-        };
+        let pinned =
+            |hash: &str| f.fetch_icon(&Source::IconUrl(server.url("/logo.png"), hash.to_string()));
         let right = sha256_hex(PNG);
         assert!(is_sha256_hex(&right));
         assert_eq!(pinned(&right).unwrap().bytes, PNG);
@@ -703,11 +698,11 @@ mod tests {
         });
         let f = Fetcher::new(true);
         assert!(
-            f.fetch_icon(&Source::IconUrl(server.url("/a"), None))
+            f.fetch_icon(&Source::IconUrl(server.url("/a"), sha256_hex(PNG)))
                 .is_ok()
         );
         assert!(
-            f.fetch_icon(&Source::IconUrl(server.url("/loop"), None))
+            f.fetch_icon(&Source::IconUrl(server.url("/loop"), sha256_hex(PNG)))
                 .unwrap_err()
                 .to_string()
                 .contains("redirects")
@@ -716,7 +711,7 @@ mod tests {
         let strict = Fetcher::new(false);
         assert!(
             strict
-                .fetch_icon(&Source::IconUrl(server.url("/b"), None))
+                .fetch_icon(&Source::IconUrl(server.url("/b"), sha256_hex(PNG)))
                 .is_err()
         );
         assert!(

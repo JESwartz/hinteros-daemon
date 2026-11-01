@@ -647,8 +647,8 @@ mod tests {
             "keyboard: unknown action 'quick'"
         );
         assert_eq!(
-            check(json!({"apps": {"jellyfin": {"back": "escape"}}})).unwrap_err(),
-            "no keyboard app 'jellyfin'"
+            check(json!({"apps": {"jellyfin-desktop": {"back": "escape"}}})).unwrap_err(),
+            "no keyboard app 'jellyfin-desktop'"
         );
         assert_eq!(
             check(json!({"apps": {"youtube": {"up": "w", "down": "nope"}}})).unwrap_err(),

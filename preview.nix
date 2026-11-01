@@ -51,7 +51,7 @@ writeShellApplication {
 
       cat > "$dir/session.toml" <<TOML
     [[apps]]
-    id = "jellyfin"
+    id = "jellyfin-desktop"
     name = "Jellyfin"
     command = ["${lib.getExe jellyfin-desktop}"]
     desktop_id = "org.jellyfin.JellyfinDesktop"

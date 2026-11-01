@@ -786,7 +786,7 @@ async fn updates_are_verified() {
     // The running catalog and the target's lib.catalogIds (what the fake `nix eval` prints).
     std::fs::write(
         root.p("policy/catalog.json"),
-        r#"{"indexVersion":2,"apps":[{"id":"steam","name":"Steam","status":"available"}]}"#,
+        r#"{"indexVersion":4,"entries":[{"id":"steam","name":"Steam","status":"available"}]}"#,
     )
     .unwrap();
     std::fs::write(
@@ -1254,7 +1254,7 @@ async fn interactive_authorization() {
     );
 }
 
-const CATALOG: &str = r#"{"indexVersion": 2, "apps": [
+const CATALOG: &str = r#"{"indexVersion": 4, "entries": [
   {"id": "plex-htpc", "name": "Plex", "status": "available", "sizeMiB": 300,
    "dataPaths": [".local/share/plex-htpc", ".cache/plex"],
    "terms": {"title": "Plex Terms of Service", "version": "2025-10-30", "url": "https://www.plex.tv/x",

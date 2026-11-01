@@ -16,6 +16,7 @@ pub const SOCKET_IN_RUNTIME_DIR: &str = "hinteros/session.sock";
 pub use crate::common::{HelloParams, HelloResult, Peer, PingParams, PingResult};
 
 // Runtime settings.
+pub use crate::catalog::Delivery;
 pub use crate::runtime::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1986,15 +1987,12 @@ pub struct StoreApp {
     /// `games`, `video`, `music`, `photos`, `utilities`; anything else means "Other".
     pub category: String,
     pub homepage: String,
-    pub kind: AppKind,
     pub size_mib: u64,
     pub icon: StoreIcon,
-    pub requires: Vec<String>,
+    pub box_features: Vec<String>,
     pub depends: Vec<String>,
     pub conflicts: Vec<String>,
-    pub installer: bool,
     pub on_iso: bool,
-    pub installer_default: bool,
     /// What "also delete its data" deletes, relative to each profile's home.
     pub data_paths: Vec<String>,
     #[serde(deserialize_with = "nullable_terms")]
@@ -2002,9 +2000,8 @@ pub struct StoreApp {
     /// Absent when the app has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readme: Option<StoreReadme>,
-    pub builds_on_device: bool,
-    pub free: bool,
-    pub redistributable: bool,
+    pub unfree: bool,
+    pub delivery: Delivery,
     pub status: CatalogStatus,
     #[serde(deserialize_with = "nullable")]
     pub status_reason: Option<String>,

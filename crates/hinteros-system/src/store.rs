@@ -89,7 +89,7 @@ pub fn plan_install(
     for id in &ids {
         let entry = index
             .get(id)
-            .filter(|e| e.entry_kind == catalog::EntryKind::App)
+            .filter(|e| e.kind == catalog::EntryKind::App)
             .ok_or_else(|| not_found(format!("{id} is not in this system's catalog")))?;
         // An installed app stays installed whatever its status; a new one must be available.
         if entry.status != Status::Available && !installed.contains(id) {
@@ -214,7 +214,7 @@ mod tests {
 
     fn index() -> Index {
         Index::parse(
-            br#"{"indexVersion":2,"apps":[
+            br#"{"indexVersion":4,"entries":[
               {"id":"steam","name":"Steam","status":"available","sizeMiB":1000,
                "dataPaths":[".local/share/Steam",".steam"],
                "terms":{"title":"SSA","version":"2026-09-10","url":"https://x","retrieved":"2026-10-06","file":"terms/steam-2026-09-10.txt"}},
@@ -222,8 +222,8 @@ mod tests {
               {"id":"firefox","name":"Firefox","status":"available","sizeMiB":10,"dataPaths":[".mozilla"]},
               {"id":"youtube","name":"YouTube","status":"available","sizeMiB":1,"depends":["firefox"],
                "dataPaths":[".local/share/hinteros/firefox/youtube"]},
-              {"id":"kodi","name":"Kodi","status":"available","sizeMiB":200,"conflicts":["jellyfin"]},
-              {"id":"jellyfin","name":"Jellyfin","status":"available","sizeMiB":100},
+              {"id":"kodi","name":"Kodi","status":"available","sizeMiB":200,"conflicts":["jellyfin-desktop"]},
+              {"id":"jellyfin-desktop","name":"Jellyfin","status":"available","sizeMiB":100},
               {"id":"old","name":"Old","status":"retired","statusReason":"x"},
               {"id":"gone","name":"Gone","status":"removed","statusReason":"x"},
               {"id":"broken","name":"Broken","status":"available","depends":["gone"]}
@@ -274,18 +274,18 @@ mod tests {
             assert_eq!(code(&e), Some(ErrorCode::InvalidParams), "{bad:?}");
         }
         // Conflicts both ways, and among the requested apps.
-        let e = plan_install(&i, &ids(&["jellyfin"]), &ids(&["kodi"]), &none).unwrap_err();
+        let e = plan_install(&i, &ids(&["jellyfin-desktop"]), &ids(&["kodi"]), &none).unwrap_err();
         assert_eq!(code(&e), Some(ErrorCode::AppConflict));
         assert_eq!(
             e.data.unwrap(),
-            json!({"id": "kodi", "conflicts_with": "jellyfin"})
+            json!({"id": "kodi", "conflicts_with": "jellyfin-desktop"})
         );
-        let e = plan_install(&i, &ids(&["kodi"]), &ids(&["jellyfin"]), &none).unwrap_err();
+        let e = plan_install(&i, &ids(&["kodi"]), &ids(&["jellyfin-desktop"]), &none).unwrap_err();
         assert_eq!(
             e.data.unwrap(),
-            json!({"id": "jellyfin", "conflicts_with": "kodi"})
+            json!({"id": "jellyfin-desktop", "conflicts_with": "kodi"})
         );
-        let e = plan_install(&i, &[], &ids(&["kodi", "jellyfin"]), &none).unwrap_err();
+        let e = plan_install(&i, &[], &ids(&["kodi", "jellyfin-desktop"]), &none).unwrap_err();
         assert_eq!(code(&e), Some(ErrorCode::AppConflict));
     }
 

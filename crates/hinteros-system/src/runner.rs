@@ -1463,7 +1463,7 @@ mod tests {
     #[test]
     fn catalog_changes_between_generations() {
         let current = hinteros_api::catalog::Index::parse(
-            br#"{"indexVersion":2,"apps":[
+            br#"{"indexVersion":4,"entries":[
               {"id":"steam","name":"Steam","status":"available"},
               {"id":"old","name":"Old","status":"available"},
               {"id":"later","name":"Later","status":"retired","statusReason":"x"}]}"#,

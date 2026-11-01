@@ -36,20 +36,20 @@ const ADMIN_PIN: &str = "2468";
 const API_KEY: &str = "0123456789abcdef0123456789abcdef";
 const CLAIM: &str = "claim-AbCdEfGhIjKlMnOpQrSt";
 
-const INDEX: &str = r#"{"indexVersion": 3, "apps": [
-  {"id": "jellyfin-server", "kind": "service", "type": "service", "name": "Jellyfin server", "status": "available",
+const INDEX: &str = r#"{"indexVersion": 4, "entries": [
+  {"id": "jellyfin-server", "kind": "service", "name": "Jellyfin server", "status": "available",
    "ports": [{"port": 8096, "proto": "tcp", "from": "lan"}, {"port": 7359, "proto": "udp", "from": "lan"}],
-   "setup": "jellyfin", "stateDirs": ["jellyfin"],
+   "setup": "jellyfin-server", "stateDirs": ["jellyfin"],
    "icon": {"iconUrl": "https://example.org/jellyfin.svg", "sha256": "817c25b47442b192250448fe48cd5f265fe9183bc75aa12030bbe335495255d1", "siteUrl": "https://jellyfin.org"}},
-  {"id": "plex-media-server", "kind": "service", "type": "service", "name": "Plex Media Server", "status": "available",
-   "ports": [{"port": 32400, "proto": "tcp", "from": "any"}], "setup": "plex", "stateDirs": ["plex"],
+  {"id": "plex-media-server", "kind": "service", "name": "Plex Media Server", "status": "available",
+   "ports": [{"port": 32400, "proto": "tcp", "from": "any"}], "setup": "plex-media-server", "stateDirs": ["plex"],
    "terms": {"title": "Plex Terms of Service", "version": "2025-10-30", "url": "https://www.plex.tv/", "retrieved": "2026-10-20",
              "file": "terms/plex-media-server-2025-10-30.txt"}},
-  {"id": "tailscale", "kind": "service", "type": "service", "name": "Tailscale", "status": "available",
+  {"id": "tailscale", "kind": "service", "name": "Tailscale", "status": "available",
    "ports": [{"port": 41641, "proto": "udp", "from": "any"}], "setup": "tailscale", "stateDirs": ["tailscale"]},
-  {"id": "cloudflare-tunnel", "kind": "service", "type": "service", "name": "Cloudflare Tunnel", "status": "available",
-   "ports": [], "setup": "cloudflare", "stateDirs": ["hinteros/services/cloudflare-tunnel"]},
-  {"id": "steam", "kind": "app", "type": "native", "name": "Steam", "status": "available"}]}"#;
+  {"id": "cloudflare-tunnel", "kind": "service", "name": "Cloudflare Tunnel", "status": "available",
+   "ports": [], "setup": "cloudflare-tunnel", "stateDirs": ["hinteros/services/cloudflare-tunnel"]},
+  {"id": "steam", "kind": "app", "name": "Steam", "status": "available"}]}"#;
 
 const ROUTE: &str = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
 wlan0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n\

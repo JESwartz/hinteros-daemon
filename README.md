@@ -259,7 +259,7 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   searched are the active one (GTK's
   `gtk-icon-theme-name`, or `icons.theme`), what it inherits, and `hicolor`, plus `pixmaps/`.
   The best file wins: the largest PNG of at least 256 px, else an SVG, else the largest
-  smaller PNG. Web apps: the daemon fetches `icon_url` (and, with `icon_sha256`, the catalog's
+  smaller PNG. Web apps: the daemon fetches `icon_url` (with its required `icon_sha256`, the catalog's
   `icon.sha256`, keeps it only if its SHA-256 matches; else it logs and retries later), or finds the icon of `site_url` (web app
   manifest icons, `apple-touch-icon`, `<link rel=icon>`, `/favicon.ico`; the largest square one
   of at least 192 px, not mask-only), over https only (also through redirects), with timeouts,
@@ -416,7 +416,7 @@ pulse_socket = "pulse/native"  # sound for apps, relative to XDG_RUNTIME_DIR
 pulse_record_socket = "pulse/native"  # with mic; the same as pulse_socket: mic is not listed
 
 [[apps]]                       # what apps.list returns after the built-in "steam" (a stub list if none)
-id = "jellyfin"
+id = "jellyfin-desktop"
 name = "Jellyfin"
 command = ["jellyfin-desktop"]
 desktop_id = "org.jellyfin.JellyfinDesktop"   # icon from its .desktop file (or: icon = "/path.png")
@@ -427,7 +427,7 @@ name = "YouTube"
 kind = "web"
 command = ["firefox", "--kiosk", "--new-instance", "https://www.youtube.com/tv"]
 site_url = "https://www.youtube.com/tv"     # icon from the site (or: icon_url = "https://.../icon.png")
-# icon_sha256 = "<64 hex digits>"           # with icon_url: refuse a download with another SHA-256
+# icon_sha256 = "<64 hex digits>"           # required with icon_url: refuse a download with another SHA-256
 # firefox_profile = "~/.local/share/hinteros/firefox/youtube"  # fallback: the favicon Firefox stored
 input = "keyboard"             # "gamepad" (default) or "keyboard"
 back_key = "escape"            # what B sends [default: escape]; e.g. "backspace", "alt+left"
@@ -1145,7 +1145,7 @@ delete_data}` (polkit `org.hinteros.system.apps`, seat check, rate limit, audit)
 `crates/hinteros-system/src/store.rs`:
 
 - ids (1 to 8) are checked against the **running generation's** catalog index
-  (`--catalog-index`, default `<current-system>/sw/share/hinteros/catalog.json`, index version 2,
+  (`--catalog-index`, default `<current-system>/sw/share/hinteros/catalog.json`, index version 4,
   read by `hinteros_api::catalog`; never the caller's copy). Unknown id: `not_found`; retired or
   removed: `invalid_params {reason: not_available}`; already installed: skipped (`job_id: null`
   when nothing is left). `depends` are added transitively. A conflict either way with an installed
@@ -1914,9 +1914,9 @@ setup flows. Code: `servers/` (HTTP client, Jellyfin, Plex, Tailscale, Cloudflar
 the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relayed as
 `system.<method>`.
 
-- **Catalog:** service entries' `ports`, `setup` (`jellyfin|plex|tailscale|cloudflare`; another
+- **Catalog:** service entries' `ports`, `setup` (`jellyfin-server|plex-media-server|tailscale|cloudflare-tunnel`; another
   value is on/off only) and `stateDirs` (checked like `dataPaths`: relative to `/var/lib`, no
-  `.`/`..`, `[A-Za-z0-9._-]` parts); all optional, so older indexes still parse.
+  `.`/`..`, `[A-Za-z0-9._-]` parts); all optional.
 - **`services.list`** (read-only, open): `{revision, services: [{id, name, available, enabled,
   status, setup, terms, detail, icon?, has_data}]}` for every available service and every enabled
   one. `icon`: the catalog entry's `icon` (`desktop_id`, `icon_url` with `sha256`, `site_url`,
@@ -1971,7 +1971,7 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   token), kept in `users.json`, minted again when `GET /System/Info` answers 401. The session
   daemon signs the Jellyfin app in with it (below).
 - **The Jellyfin app signs in by itself** (spike S1, session side, `appseed.rs`): before
-  `apps.launch {id: "jellyfin"}` (not while it runs, not without `lan`) the session daemon calls
+  `apps.launch {id: "jellyfin-desktop"}` (not while it runs, not without `lan`) the session daemon calls
   `jellyfin.client_token` (10 s at most; `unavailable` = the server is off or not set up: nothing
   to do) and writes the client's settings in the app's data home (its sandbox home): in
   `~/.local/share/jellyfin-desktop/`, `profiles.json`'s `defaultProfile` (else the first

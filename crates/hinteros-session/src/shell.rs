@@ -3098,7 +3098,7 @@ pub fn stub_apps() -> AppsListResult {
     };
     AppsListResult {
         apps: vec![
-            app("jellyfin", "Jellyfin", AppKind::Native),
+            app("jellyfin-desktop", "Jellyfin", AppKind::Native),
             app("youtube", "YouTube", AppKind::Web),
             app("crunchyroll", "Crunchyroll", AppKind::Web),
             app("firefox", "Firefox", AppKind::Native),
@@ -3405,7 +3405,7 @@ mod tests {
                 apps: vec![
                     AppConfig {
                         name: "Jellyfin".into(),
-                        ..app_config("jellyfin", Some("jellyfin-desktop"), None)
+                        ..app_config("jellyfin-desktop", Some("jellyfin-desktop"), None)
                     },
                     AppConfig {
                         name: "Portal".into(),
@@ -3782,8 +3782,8 @@ mod tests {
     #[test]
     fn app_that_closes_its_window_returns_focus_but_keeps_running() {
         let mut t = T::new();
-        let app = t.launch(json!({"id": "jellyfin"}));
-        assert_eq!(app.id, "jellyfin");
+        let app = t.launch(json!({"id": "jellyfin-desktop"}));
+        assert_eq!(app.id, "jellyfin-desktop");
         assert_eq!(app.name, "Jellyfin");
         t.gamescope(Some(app.gamescope_app_id), &[]); // native Wayland: focused, not listed
         t.events();
@@ -3800,10 +3800,10 @@ mod tests {
         );
         assert_eq!(
             t.call("apps.running", json!({})).unwrap()["apps"][0]["id"],
-            "jellyfin"
+            "jellyfin-desktop"
         );
         // Launching it again just focuses it.
-        assert_eq!(t.launch(json!({"id": "jellyfin"})), app);
+        assert_eq!(t.launch(json!({"id": "jellyfin-desktop"})), app);
     }
 
     #[test]
@@ -3918,12 +3918,12 @@ mod tests {
         // Stub entries (no apps configured) can't be launched.
         let mut t = T::with(|c| c.apps.clear());
         assert_eq!(
-            code(t.call("apps.launch", json!({"id": "jellyfin"}))),
+            code(t.call("apps.launch", json!({"id": "jellyfin-desktop"}))),
             ErrorCode::AppLaunchFailed.code()
         );
         let list = t.call("apps.list", json!({})).unwrap();
         assert_eq!(list["apps"][0]["id"], "steam");
-        assert_eq!(list["apps"][1]["id"], "jellyfin");
+        assert_eq!(list["apps"][1]["id"], "jellyfin-desktop");
     }
 
     #[test]
@@ -3971,11 +3971,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut t = T::new();
         with_displays(&mut t, dir.path(), 2);
-        let jellyfin = t.launch(json!({"id": "jellyfin"}));
+        let jellyfin = t.launch(json!({"id": "jellyfin-desktop"}));
         let youtube = t.launch(json!({"id": "youtube"}));
         assert_eq!(displays_of(t.log.take()), [":12", ":13"]);
         // Launching a running app only focuses it.
-        t.launch(json!({"id": "jellyfin"}));
+        t.launch(json!({"id": "jellyfin-desktop"}));
         assert!(displays_of(t.log.take()).is_empty());
 
         // Full: nothing starts; the error names the apps that hold one.
@@ -3996,12 +3996,13 @@ mod tests {
         assert!(displays_of(t.log.take()).is_empty());
 
         // Closing frees the display once the app has exited, not before.
-        t.call("apps.close", json!({"id": "jellyfin"})).unwrap();
+        t.call("apps.close", json!({"id": "jellyfin-desktop"}))
+            .unwrap();
         let e = t
             .call("apps.launch", json!({"command": ["/usr/bin/xterm"]}))
             .unwrap_err();
         assert_eq!(e.code, ErrorCode::NoAppDisplay.code());
-        exit(&mut t, "jellyfin", jellyfin.pid.unwrap(), 0);
+        exit(&mut t, "jellyfin-desktop", jellyfin.pid.unwrap(), 0);
         let xterm = t.launch(json!({"command": ["/usr/bin/xterm"]}));
         assert_eq!(displays_of(t.log.take()), [":12"]);
         assert_eq!(xterm.id, "cmd-1");
@@ -4018,7 +4019,7 @@ mod tests {
             .unwrap()
             .display_users
             .insert(":12".into(), vec![77]);
-        let jellyfin = t.launch(json!({"id": "jellyfin"}));
+        let jellyfin = t.launch(json!({"id": "jellyfin-desktop"}));
         assert_eq!(displays_of(t.log.take()), [":13"]);
         // Only apps we track can be closed: the error lists just those.
         let e = t.call("apps.launch", json!({"id": "youtube"})).unwrap_err();
@@ -4048,7 +4049,7 @@ mod tests {
         with_displays(&mut t, dir.path(), 2);
         t.shell.displays = t.shell.displays.clone().with_resolver(Arc::new(|_| None));
         let e = t
-            .call("apps.launch", json!({"id": "jellyfin"}))
+            .call("apps.launch", json!({"id": "jellyfin-desktop"}))
             .unwrap_err();
         assert_eq!(e.code, ErrorCode::AppLaunchFailed.code());
         assert!(
@@ -4085,7 +4086,7 @@ mod tests {
             assert_eq!(e.code, ErrorCode::InvalidParams.code());
         }
         // This session keeps 4 displays.
-        for id in ["jellyfin", "youtube"] {
+        for id in ["jellyfin-desktop", "youtube"] {
             t.launch(json!({ "id": id }));
         }
         assert_eq!(displays_of(t.log.take()), [":12", ":13"]);
@@ -4329,7 +4330,7 @@ mod tests {
     #[test]
     fn apps_list_reports_resolved_icons() {
         let icons = IconStore::default();
-        icons.set("jellyfin", Some("/icons/jellyfin.png".into()));
+        icons.set("jellyfin-desktop", Some("/icons/jellyfin.png".into()));
         icons.set("steam", Some("/icons/steam.svg".into()));
         let mut t = T::with(|c| {
             c.icons = icons.clone();
@@ -4353,10 +4354,10 @@ mod tests {
         let index = t.path().join("catalog.json");
         std::fs::write(
             &index,
-            r#"{"indexVersion":3,"apps":[
-              {"id":"kodi","kind":"app","type":"native","name":"Kodi","status":"available",
+            r#"{"indexVersion":4,"entries":[
+              {"id":"kodi","kind":"app","name":"Kodi","status":"available",
                "permissions":{"gamepad":"required","downloads":"optional"}},
-              {"id":"steam","kind":"app","type":"native","name":"Steam","status":"available",
+              {"id":"steam","kind":"app","name":"Steam","status":"available",
                "permissions":{"gamepad":"optional"}}]}"#,
         )
         .unwrap();
@@ -4397,7 +4398,10 @@ mod tests {
                 json!({"id": id, "permission": perm, "granted": granted}),
             )
         };
-        assert_eq!(set(&mut t, "jellyfin", "mic", false).unwrap(), json!({}));
+        assert_eq!(
+            set(&mut t, "jellyfin-desktop", "mic", false).unwrap(),
+            json!({})
+        );
         assert_eq!(perms_of(&mut t, 1)[1]["granted"], false);
         let names: Vec<EventName> = t.events().into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, [EventName::AppsChanged, EventName::StoreChanged]);
@@ -4413,11 +4417,11 @@ mod tests {
         );
         let code = |r: Result<Value, ErrorObject>| r.unwrap_err().code;
         assert_eq!(
-            code(set(&mut t, "jellyfin", "gamepad", false)),
+            code(set(&mut t, "jellyfin-desktop", "gamepad", false)),
             ErrorCode::PermissionRequired.code()
         );
         assert_eq!(
-            code(set(&mut t, "jellyfin", "downloads", false)),
+            code(set(&mut t, "jellyfin-desktop", "downloads", false)),
             ErrorCode::UnknownPermission.code()
         );
         assert_eq!(
@@ -4456,7 +4460,7 @@ mod tests {
         });
         t.call(
             "apps.set_permission",
-            json!({"id": "jellyfin", "permission": "downloads", "granted": false}),
+            json!({"id": "jellyfin-desktop", "permission": "downloads", "granted": false}),
         )
         .unwrap();
         let sandboxes = |t: &mut T| -> Vec<crate::sandbox::Spec> {
@@ -4469,11 +4473,11 @@ mod tests {
                 })
                 .collect()
         };
-        t.launch(json!({"id": "jellyfin"}));
+        t.launch(json!({"id": "jellyfin-desktop"}));
         assert_eq!(
             sandboxes(&mut t),
             [crate::sandbox::Spec {
-                id: "jellyfin".into(),
+                id: "jellyfin-desktop".into(),
                 grants: Grants {
                     gamepad: true,
                     mic: false,
@@ -4495,7 +4499,7 @@ mod tests {
         assert!(sandboxes(&mut t).is_empty());
         // Sandbox off: none.
         let mut t = T::with(|c| c.permissions = perms.clone());
-        t.launch(json!({"id": "jellyfin"}));
+        t.launch(json!({"id": "jellyfin-desktop"}));
         assert!(sandboxes(&mut t).is_empty());
     }
 
@@ -4522,7 +4526,7 @@ mod tests {
             exit(t, id, pid, 0);
             grants.lan
         };
-        assert!(!lan(&mut t, "jellyfin"), "does not declare lan");
+        assert!(!lan(&mut t, "jellyfin-desktop"), "does not declare lan");
         assert!(lan(&mut t, "youtube"), "declares it, granted by default");
         let list = t.call("apps.list", json!({})).unwrap();
         let youtube = list["apps"]
@@ -4555,7 +4559,7 @@ mod tests {
                 .map(|a| a["id"].as_str().unwrap().to_string())
                 .collect()
         };
-        assert_eq!(ids(&mut t), ["jellyfin", "portal", "youtube"]);
+        assert_eq!(ids(&mut t), ["jellyfin-desktop", "portal", "youtube"]);
         // Launching it is "no such app", not a failed spawn; Steam games cannot start either.
         let e = t.call("apps.launch", json!({"id": "steam"})).unwrap_err();
         assert_eq!(e.code, ErrorCode::AppNotFound.code());
@@ -4587,7 +4591,10 @@ mod tests {
         // Installed later: the entry comes back and launches.
         t.shell
             .handle(Msg::SetSteam(Some("/new/steam".into())), t.now);
-        assert_eq!(ids(&mut t), ["steam", "jellyfin", "portal", "youtube"]);
+        assert_eq!(
+            ids(&mut t),
+            ["steam", "jellyfin-desktop", "portal", "youtube"]
+        );
         let app = t.launch(json!({"id": "steam"}));
         assert_eq!(app.id, "steam");
         assert_eq!(
@@ -4616,7 +4623,7 @@ mod tests {
             t.events(),
             [ev(EventName::SteamAttention, json!({"windows": []}))]
         );
-        assert_eq!(ids(&mut t), ["jellyfin", "portal", "youtube"]);
+        assert_eq!(ids(&mut t), ["jellyfin-desktop", "portal", "youtube"]);
         assert_eq!(t.launch(json!({"id": "steam"})).id, "steam");
     }
 
@@ -5349,7 +5356,7 @@ mod tests {
     #[test]
     fn osk_show_hide_routes_nav_and_restores_the_mode() {
         let mut t = T::new();
-        t.launch(json!({"id": "jellyfin"}));
+        t.launch(json!({"id": "jellyfin-desktop"}));
         t.events();
         t.log.take();
 
@@ -5410,7 +5417,7 @@ mod tests {
     #[test]
     fn home_and_focus_changes_hide_the_osk() {
         let mut t = T::new();
-        t.launch(json!({"id": "jellyfin"}));
+        t.launch(json!({"id": "jellyfin-desktop"}));
         t.call("osk.show", json!({})).unwrap();
         t.events();
         t.log.take();
@@ -5658,7 +5665,7 @@ mod tests {
         // always, and nothing for Steam however long Guide is held.
         let mut t = T::new();
         t.procs.lock().unwrap().steam_running = true;
-        t.launch(json!({"id": "jellyfin"}));
+        t.launch(json!({"id": "jellyfin-desktop"}));
         t.events();
         t.log.take();
         t.input("ui_guide", 1.0);
@@ -5860,7 +5867,7 @@ mod tests {
     fn text_field_focus_needs_the_focused_keyboard_app() {
         // A gamepad-profile app (Jellyfin) gets no automatic keyboard.
         let mut t = T::with(auto_show);
-        let app = t.launch(json!({"id": "jellyfin"}));
+        let app = t.launch(json!({"id": "jellyfin-desktop"}));
         t.procs
             .lock()
             .unwrap()
@@ -6348,7 +6355,8 @@ mod tests {
 
         // A field of a background app does not count; neither with field_summon = none.
         t.text_focus(555, FieldFocus::Password);
-        t.call("apps.launch", json!({"id": "jellyfin"})).unwrap();
+        t.call("apps.launch", json!({"id": "jellyfin-desktop"}))
+            .unwrap();
         t.call("apps.launch", json!({"id": "youtube"})).unwrap();
         t.log.take();
         t.input("ui_accept", 1.0);
@@ -6606,8 +6614,8 @@ mod tests {
                 "general: b has two actions (accept, back)",
             ),
             (
-                json!({"apps": {"jellyfin": {"back": "escape"}}}),
-                "no keyboard app 'jellyfin'",
+                json!({"apps": {"jellyfin-desktop": {"back": "escape"}}}),
+                "no keyboard app 'jellyfin-desktop'",
             ),
             (
                 json!({"pointer": {"left_click": "lt"}}),
@@ -6812,7 +6820,7 @@ mod tests {
         assert_eq!(captured(&mut t), [(Value::Null, Audience::Launcher)]);
 
         // Guide ends it with no button and still goes Home.
-        t.launch(json!({"id": "jellyfin"}));
+        t.launch(json!({"id": "jellyfin-desktop"}));
         t.call("input.capture", json!({})).unwrap();
         t.events();
         t.input("ui_guide", 1.0);

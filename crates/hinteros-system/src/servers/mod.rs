@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn delete_targets_stay_in_var() {
         let index = hinteros_api::catalog::Index::parse(
-            br#"{"indexVersion":3,"apps":[
+            br#"{"indexVersion":4,"entries":[
               {"id":"jellyfin-server","kind":"service","name":"J","status":"available","stateDirs":["jellyfin"]},
               {"id":"cloudflare-tunnel","kind":"service","name":"C","status":"available","stateDirs":["hinteros/services/cloudflare-tunnel"]}]}"#,
             "/".into(),

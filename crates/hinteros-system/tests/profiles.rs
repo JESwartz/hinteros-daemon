@@ -484,9 +484,9 @@ async fn profiles_lifecycle_and_pins() {
     // installed nothing, follows it.
     std::fs::write(
         root.p("policy/catalog.json"),
-        r#"{"indexVersion": 3, "apps": [
-          {"id": "youtube", "kind": "app", "type": "web", "name": "YouTube", "status": "available"},
-          {"id": "moonlight", "kind": "app", "type": "native", "name": "Moonlight", "status": "available"}]}"#,
+        r#"{"indexVersion": 4, "entries": [
+          {"id": "youtube", "kind": "app", "name": "YouTube", "status": "available"},
+          {"id": "moonlight", "kind": "app", "name": "Moonlight", "status": "available"}]}"#,
     )
     .unwrap();
     let rev = call(&mut c, "apps.list", json!({})).await.unwrap()["revision"]

@@ -10,6 +10,7 @@ use hinteros_api::codec::{LineReader, write_message};
 use hinteros_api::common::Peer;
 use hinteros_api::server::{Connection, Step};
 use hinteros_api::{jsonrpc, system};
+use hinteros_session::icons::web::sha256_hex;
 use serde_json::{Value, json};
 use tokio::net::UnixListener;
 
@@ -141,10 +142,10 @@ fn ids(list: &Value) -> Vec<String> {
 
 fn entry(id: &str, icon: Value) -> Value {
     json!({"id": id, "name": id, "summary": "s", "description": "d", "category": "video",
-           "homepage": "https://example.org", "kind": "native", "sizeMiB": 1, "icon": icon,
-           "requires": [], "depends": [], "conflicts": [], "installer": true, "onIso": false,
-           "installerDefault": false, "dataPaths": [], "terms": null, "status": "available",
-           "statusReason": null, "buildsOnDevice": false, "free": true, "redistributable": true})
+           "homepage": "https://example.org", "kind": "app", "sizeMiB": 1, "icon": icon,
+           "depends": [], "conflicts": [], "onIso": false,
+           "dataPaths": [], "terms": null, "status": "available",
+           "statusReason": null, "unfree": false, "delivery": "download"})
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -162,13 +163,13 @@ async fn store_entries_carry_resolved_icons() {
             "[Desktop Entry]\nName=Desk\nIcon=org.example.Desk\n",
         )
         .unwrap();
-        let catalog = json!({"indexVersion": 2, "apps": [
+        let catalog = json!({"indexVersion": 4, "entries": [
             entry("desk", json!({"desktopId": "org.example.Desk"})),
-            entry("direct", json!({"iconUrl": site.url("/logo.png")})),
+            entry("direct", json!({"iconUrl": site.url("/logo.png"), "sha256": sha256_hex(PNG)})),
             entry("found", json!({"siteUrl": site.url("/page")})),
-            entry("broken", json!({"iconUrl": site.url("/missing.png")})),
+            entry("broken", json!({"iconUrl": site.url("/missing.png"), "sha256": sha256_hex(PNG)})),
             entry("plain", json!({})),
-            entry("tls", json!({"iconUrl": "http://127.0.0.1:1/never.png"})),
+            entry("tls", json!({"iconUrl": "http://127.0.0.1:1/never.png", "sha256": sha256_hex(PNG)})),
         ]});
         std::fs::write(dir.join("catalog.json"), catalog.to_string()).unwrap();
         vec!["--icon-allow-http".into()]
@@ -507,7 +508,7 @@ async fn unaccepted_terms_block_the_launch() {
                 "file": "terms/plex-2025-10-30.txt"});
             std::fs::write(
                 dir.join("catalog.json"),
-                json!({"indexVersion": 2, "apps": [e]}).to_string(),
+                json!({"indexVersion": 4, "entries": [e]}).to_string(),
             )
             .unwrap();
             vec![

@@ -26,15 +26,15 @@ const PROFILES: &str = r#"{"version": 1, "next": 3, "profiles": {
   "p1": {"name": "Dev", "color": "teal", "admin": true, "locked": false, "created_at": 0, "last_used_at": null,
          "appearance": {"text_scale": 1.0, "high_contrast": false, "reduce_motion": false}}}}"#;
 
-const CATALOG3: &str = r#"{"indexVersion": 3, "apps": [
-  {"id": "steam", "kind": "app", "type": "native", "name": "Steam", "status": "available", "sizeMiB": 1000,
-   "box": ["graphics32", "steam-devices"], "dataPaths": [".local/share/Steam"],
+const CATALOG3: &str = r#"{"indexVersion": 4, "entries": [
+  {"id": "steam", "kind": "app", "name": "Steam", "status": "available", "sizeMiB": 1000,
+   "boxFeatures": ["graphics32", "steam-devices"], "dataPaths": [".local/share/Steam"],
    "terms": {"title": "Steam Subscriber Agreement", "version": "2026-09-10", "url": "https://store.steampowered.com/x",
              "retrieved": "2026-10-06", "file": "terms/steam-2026-09-10.txt"}},
-  {"id": "moonlight", "kind": "app", "type": "native", "name": "Moonlight", "status": "available", "sizeMiB": 150,
+  {"id": "moonlight", "kind": "app", "name": "Moonlight", "status": "available", "sizeMiB": 150,
    "dataPaths": [".config/Moonlight Game Streaming Project"]},
-  {"id": "youtube", "kind": "app", "type": "web", "name": "YouTube", "status": "available", "sizeMiB": 1},
-  {"id": "jellyfin-server", "kind": "service", "type": "service", "name": "Jellyfin server", "status": "available", "sizeMiB": 300},
+  {"id": "youtube", "kind": "app", "name": "YouTube", "status": "available", "sizeMiB": 1},
+  {"id": "jellyfin-server", "kind": "service", "name": "Jellyfin server", "status": "available", "sizeMiB": 300},
   {"id": "old", "kind": "app", "name": "Old", "status": "removed", "statusReason": "Gone."}
 ]}"#;
 
@@ -399,7 +399,7 @@ async fn apps_stage_after_a_switch() {
     std::fs::write(
         root.p("policy/catalog.json"),
         CATALOG3.replace(
-            r#"{"id": "youtube", "kind": "app", "type": "web", "name": "YouTube", "status": "available", "sizeMiB": 1},"#,
+            r#"{"id": "youtube", "kind": "app", "name": "YouTube", "status": "available", "sizeMiB": 1},"#,
             r#"{"id": "youtube", "kind": "app", "name": "YouTube", "status": "removed", "statusReason": "Gone."},"#,
         ),
     )

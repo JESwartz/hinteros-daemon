@@ -17,21 +17,21 @@ mod common;
 
 use common::*;
 
-const CATALOG: &str = r#"{"indexVersion": 2, "apps": [
+const CATALOG: &str = r#"{"indexVersion": 4, "entries": [
   {"id": "steam", "name": "Steam", "summary": "Play your Steam library on the TV.", "description": "Valve's store.",
-   "category": "games", "homepage": "https://store.steampowered.com", "kind": "native", "sizeMiB": 1000,
-   "icon": {"desktopId": "steam", "siteUrl": "https://store.steampowered.com"}, "requires": ["graphics32"],
-   "depends": [], "conflicts": [], "installer": true, "onIso": false, "installerDefault": false,
+   "category": "games", "homepage": "https://store.steampowered.com", "kind": "app", "sizeMiB": 1000,
+   "icon": {"desktopId": "steam", "siteUrl": "https://store.steampowered.com"}, "boxFeatures": ["graphics32"],
+   "depends": [], "conflicts": [], "onIso": false,
    "dataPaths": [".local/share/Steam", ".steam"],
    "terms": {"title": "Steam Subscriber Agreement", "version": "2026-09-10",
              "url": "https://store.steampowered.com/subscriber_agreement/", "retrieved": "2026-10-06",
              "file": "terms/steam-2026-09-10.txt"},
-   "status": "available", "statusReason": null, "buildsOnDevice": false, "free": false, "redistributable": true},
+   "status": "available", "statusReason": null, "unfree": true, "delivery": "download"},
   {"id": "youtube", "name": "YouTube", "summary": "TV", "description": "d", "category": "video",
-   "homepage": "https://www.youtube.com", "kind": "web", "sizeMiB": 1, "icon": {"firefoxProfile": true},
-   "requires": [], "depends": [], "conflicts": [], "installer": true, "onIso": true, "installerDefault": true,
+   "homepage": "https://www.youtube.com", "kind": "app", "sizeMiB": 1, "icon": {"firefoxProfile": true},
+   "depends": [], "conflicts": [], "onIso": true,
    "dataPaths": [".local/share/hinteros/firefox/youtube"], "terms": null, "status": "available",
-   "statusReason": null, "buildsOnDevice": false, "free": true, "redistributable": true},
+   "statusReason": null, "unfree": false, "delivery": "download"},
   {"id": "old", "name": "Old", "status": "removed", "statusReason": "Gone."}
 ]}"#;
 
@@ -127,14 +127,16 @@ async fn store_list_merges_catalog_and_install_state() {
         e["data"],
         json!({"service": "catalog", "reason": "missing"})
     );
-    // A catalog of a version this daemon does not read.
-    std::fs::write(
-        dir.join("catalog.json"),
-        r#"{"indexVersion": 4, "apps": []}"#,
-    )
-    .unwrap();
-    let e = call(&mut c, "store.list", json!({})).await.unwrap_err();
-    assert_eq!(e["data"]["reason"], "unsupported_version");
+    // A catalog of a version this daemon does not read: older or newer.
+    for version in [3, 5] {
+        std::fs::write(
+            dir.join("catalog.json"),
+            format!(r#"{{"indexVersion": {version}, "entries": []}}"#),
+        )
+        .unwrap();
+        let e = call(&mut c, "store.list", json!({})).await.unwrap_err();
+        assert_eq!(e["data"]["reason"], "unsupported_version");
+    }
 
     std::fs::write(dir.join("catalog.json"), CATALOG).unwrap();
     std::fs::create_dir_all(dir.join("terms")).unwrap();
@@ -153,7 +155,7 @@ async fn store_list_merges_catalog_and_install_state() {
         call(&mut c, "store.list", json!({})).await.ok()
     })
     .await;
-    assert_eq!(list["index_version"], 2);
+    assert_eq!(list["index_version"], 4);
     assert_eq!(list["more_after_update"], false);
     let ids: Vec<&str> = list["apps"]
         .as_array()
@@ -167,12 +169,16 @@ async fn store_list_merges_catalog_and_install_state() {
         "by name, tombstone kept while installed"
     );
     assert_eq!(by_id(&list, "youtube")["state"], "installed");
-    assert_eq!(by_id(&list, "youtube")["kind"], "web");
+    assert_eq!(by_id(&list, "youtube")["unfree"], false);
+    assert_eq!(by_id(&list, "youtube")["delivery"], "download");
     assert_eq!(by_id(&list, "old")["state"], "unavailable");
     assert_eq!(by_id(&list, "old")["status_reason"], "Gone.");
     let steam = by_id(&list, "steam");
     assert_eq!(steam["state"], "available");
     assert_eq!(steam["icon"]["desktop_id"], "steam");
+    assert_eq!(steam["unfree"], true);
+    assert_eq!(steam["delivery"], "download");
+    assert_eq!(steam["box_features"], json!(["graphics32"]));
     let terms_file = steam["terms"]["file"].as_str().unwrap();
     assert_eq!(
         Path::new(terms_file),
@@ -234,10 +240,10 @@ async fn set_permission_before_install() {
     let dir = d.dir.path();
     std::fs::write(
         dir.join("catalog.json"),
-        r#"{"indexVersion": 3, "apps": [
-          {"id": "youtube", "kind": "app", "type": "web", "name": "YouTube", "status": "available",
+        r#"{"indexVersion": 4, "entries": [
+          {"id": "youtube", "kind": "app", "name": "YouTube", "status": "available",
            "permissions": {"mic": "optional", "gamepad": "required"}},
-          {"id": "steam", "kind": "app", "type": "native", "name": "Steam", "status": "available",
+          {"id": "steam", "kind": "app", "name": "Steam", "status": "available",
            "permissions": {"gamepad": "optional"}}]}"#,
     )
     .unwrap();

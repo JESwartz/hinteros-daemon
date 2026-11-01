@@ -114,15 +114,15 @@ mod tests {
     fn parses_the_documented_example() {
         let m = Manifest::parse(
             br#"{
-              "version": 1, "system_rev": "0f3c", "ids": ["jellyfin", "steam", "youtube"],
-              "apps": [{"id": "jellyfin", "name": "Jellyfin", "kind": "native",
+              "version": 1, "system_rev": "0f3c", "ids": ["jellyfin-desktop", "steam", "youtube"],
+              "apps": [{"id": "jellyfin-desktop", "name": "Jellyfin", "kind": "native",
                         "command": ["/nix/store/x-jellyfin/bin/jellyfin-desktop"]}],
               "steam": {"path": "/nix/store/x-steam/bin/steam"},
               "box": ["graphics32", "steam-devices"], "future": 1
             }"#,
         )
         .unwrap();
-        assert_eq!(m.ids, ["jellyfin", "steam", "youtube"]);
+        assert_eq!(m.ids, ["jellyfin-desktop", "steam", "youtube"]);
         assert_eq!(
             m.steam.unwrap().path,
             Path::new("/nix/store/x-steam/bin/steam")

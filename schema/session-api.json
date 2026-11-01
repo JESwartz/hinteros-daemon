@@ -143,7 +143,7 @@
             "apps": [
               { "id": "steam", "name": "Steam", "kind": "native", "permissions": [] },
               {
-                "id": "jellyfin", "name": "Jellyfin", "kind": "native", "icon": "/run/current-system/sw/share/icons/hicolor/scalable/apps/jellyfin.svg",
+                "id": "jellyfin-desktop", "name": "Jellyfin", "kind": "native", "icon": "/run/current-system/sw/share/icons/hicolor/scalable/apps/jellyfin.svg",
                 "permissions": [{ "name": "gamepad", "required": true, "granted": true }, { "name": "downloads", "required": false, "granted": false }]
               },
               { "id": "youtube", "name": "YouTube", "kind": "web", "permissions": [{ "name": "mic", "required": false, "granted": true }] }
@@ -170,7 +170,7 @@
       "examples": [
         { "name": "deny mic", "params": { "id": "youtube", "permission": "mic", "granted": false }, "result": {} },
         { "name": "grant again", "params": { "id": "youtube", "permission": "mic", "granted": true }, "result": {} },
-        { "name": "required", "params": { "id": "jellyfin", "permission": "gamepad", "granted": false }, "error": { "code": 2008, "message": "jellyfin needs gamepad" } },
+        { "name": "required", "params": { "id": "jellyfin-desktop", "permission": "gamepad", "granted": false }, "error": { "code": 2008, "message": "jellyfin-desktop needs gamepad" } },
         { "name": "not declared", "params": { "id": "youtube", "permission": "downloads", "granted": false }, "error": { "code": 2007, "message": "youtube does not use downloads" } },
         { "name": "unknown app", "params": { "id": "nope", "permission": "mic", "granted": false }, "error": { "code": 2001, "message": "no app with id 'nope'" } }
       ]
@@ -354,8 +354,8 @@
         },
         {
           "name": "configured app",
-          "params": { "id": "jellyfin" },
-          "result": { "app": { "id": "jellyfin", "name": "Jellyfin", "source": "command", "gamescope_app_id": 4100000002, "pid": 4243 } }
+          "params": { "id": "jellyfin-desktop" },
+          "result": { "app": { "id": "jellyfin-desktop", "name": "Jellyfin", "source": "command", "gamescope_app_id": 4100000002, "pid": 4243 } }
         },
         {
           "name": "unknown app",
@@ -370,7 +370,7 @@
             "message": "every app display is in use (2)",
             "data": { "apps": [
               { "id": "cmd-1", "name": "Kodi", "source": "command", "gamescope_app_id": 4100000001, "pid": 4200 },
-              { "id": "jellyfin", "name": "Jellyfin", "source": "command", "gamescope_app_id": 4100000002, "pid": 4201 }
+              { "id": "jellyfin-desktop", "name": "Jellyfin", "source": "command", "gamescope_app_id": 4100000002, "pid": 4201 }
             ] }
           }
         },
@@ -1422,7 +1422,7 @@
         {
           "name": "conflict",
           "params": { "ids": ["kodi"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" },
-          "error": { "code": 3013, "message": "kodi conflicts with jellyfin", "data": { "id": "kodi", "conflicts_with": "jellyfin" } }
+          "error": { "code": 3013, "message": "kodi conflicts with jellyfin-desktop", "data": { "id": "kodi", "conflicts_with": "jellyfin-desktop" } }
         },
         { "name": "unknown app", "params": { "ids": ["nope"], "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "error": { "code": 3010, "message": "nope is not in this system's catalog" } }
       ],
@@ -2886,14 +2886,14 @@
           "result": {
             "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
             "services": [
-              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": false, "status": null, "setup": "cloudflare", "terms": null, "detail": null, "icon": { "site_url": "https://www.cloudflare.com/products/tunnel/", "firefox_profile": false }, "has_data": true },
+              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": false, "status": null, "setup": "cloudflare-tunnel", "terms": null, "detail": null, "icon": { "site_url": "https://www.cloudflare.com/products/tunnel/", "firefox_profile": false }, "has_data": true },
               {
                 "id": "jellyfin-server",
                 "name": "Jellyfin server",
                 "available": true,
                 "enabled": true,
                 "status": "active",
-                "setup": "jellyfin",
+                "setup": "jellyfin-server",
                 "terms": null,
                 "detail": {
                   "setup_done": true,
@@ -2913,7 +2913,7 @@
                 "available": true,
                 "enabled": false,
                 "status": null,
-                "setup": "plex",
+                "setup": "plex-media-server",
                 "terms": { "title": "Plex Terms of Service", "version": "2025-10-30", "url": "https://www.plex.tv/about/privacy-legal/plex-terms-of-service/", "file": "/run/current-system/sw/share/hinteros/terms/plex-media-server-2025-10-30.txt" },
                 "detail": null,
                 "icon": { "icon_url": "https://watch.plex.tv/icons/icon-512x512.png", "sha256": "78072fd57aacff1f73dee6432fb8d7f0360f300b4545422fb767cce638c4e7d3", "site_url": "https://www.plex.tv", "firefox_profile": false },
@@ -2929,8 +2929,8 @@
           "result": {
             "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
             "services": [
-              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": true, "status": "inactive", "setup": "cloudflare", "terms": null, "detail": { "token_set": false, "connected": false, "local_ip": "192.168.1.42" }, "icon": { "site_url": "https://www.cloudflare.com/products/tunnel/", "firefox_profile": false }, "has_data": true },
-              { "id": "plex-media-server", "name": "Plex Media Server", "available": true, "enabled": true, "status": "active", "setup": "plex", "terms": null, "detail": { "claimed": false, "server_name": "hinteros", "url": "http://192.168.1.42:32400" }, "icon": { "icon_url": "https://watch.plex.tv/icons/icon-512x512.png", "sha256": "78072fd57aacff1f73dee6432fb8d7f0360f300b4545422fb767cce638c4e7d3", "site_url": "https://www.plex.tv", "firefox_profile": false }, "has_data": true },
+              { "id": "cloudflare-tunnel", "name": "Cloudflare Tunnel", "available": true, "enabled": true, "status": "inactive", "setup": "cloudflare-tunnel", "terms": null, "detail": { "token_set": false, "connected": false, "local_ip": "192.168.1.42" }, "icon": { "site_url": "https://www.cloudflare.com/products/tunnel/", "firefox_profile": false }, "has_data": true },
+              { "id": "plex-media-server", "name": "Plex Media Server", "available": true, "enabled": true, "status": "active", "setup": "plex-media-server", "terms": null, "detail": { "claimed": false, "server_name": "hinteros", "url": "http://192.168.1.42:32400" }, "icon": { "icon_url": "https://watch.plex.tv/icons/icon-512x512.png", "sha256": "78072fd57aacff1f73dee6432fb8d7f0360f300b4545422fb767cce638c4e7d3", "site_url": "https://www.plex.tv", "firefox_profile": false }, "has_data": true },
               { "id": "tailscale", "name": "Tailscale", "available": true, "enabled": true, "status": "active", "setup": "tailscale", "terms": null, "detail": { "state": "running", "name": "hinteros", "ip4": "100.101.102.103", "dns_name": "hinteros.tail1234.ts.net", "tailnet": "owner@example.com", "key_expiry": 1808042400 }, "icon": { "site_url": "https://tailscale.com", "firefox_profile": false, "path": "/home/tv/.cache/hinteros/icons/tailscale.png" }, "has_data": true }
             ]
           }
@@ -4505,28 +4505,28 @@
           "name": "catalog",
           "params": {},
           "result": {
-            "index_version": 2,
+            "index_version": 4,
             "apps": [
               {
                 "id": "moonlight", "name": "Moonlight", "summary": "Stream games from your gaming PC to the TV.",
                 "description": "Moonlight plays games streamed from a PC running Sunshine.", "category": "games",
-                "homepage": "https://moonlight-stream.org", "kind": "native", "size_mib": 150,
+                "homepage": "https://moonlight-stream.org", "size_mib": 150,
                 "icon": { "desktop_id": "com.moonlight_stream.Moonlight", "site_url": "https://moonlight-stream.org", "firefox_profile": false, "path": "/usr/share/icons/hicolor/256x256/apps/com.moonlight_stream.Moonlight.png" },
-                "requires": [], "depends": [], "conflicts": [], "installer": true, "on_iso": false, "installer_default": false,
-                "data_paths": [".config/Moonlight Game Streaming Project"], "terms": null, "builds_on_device": false,
-                "free": true, "redistributable": true, "status": "available", "status_reason": null, "state": "installed",
+                "box_features": [], "depends": [], "conflicts": [], "on_iso": false,
+                "data_paths": [".config/Moonlight Game Streaming Project"], "terms": null,
+                "unfree": false, "delivery": "download", "status": "available", "status_reason": null, "state": "installed",
                 "permissions": [{ "name": "gamepad", "required": true, "granted": true }, { "name": "mic", "required": false, "granted": false }],
                 "full_access": false, "has_data": true
               },
               {
                 "id": "steam", "name": "Steam", "summary": "Play your Steam library on the TV.",
                 "description": "Valve's game store and launcher.", "category": "games",
-                "homepage": "https://store.steampowered.com", "kind": "native", "size_mib": 1000,
+                "homepage": "https://store.steampowered.com", "size_mib": 1000,
                 "icon": { "desktop_id": "steam", "site_url": "https://store.steampowered.com", "firefox_profile": false },
-                "requires": ["graphics32"], "depends": [], "conflicts": [], "installer": true, "on_iso": false, "installer_default": false,
+                "box_features": ["graphics32", "steam-devices"], "depends": [], "conflicts": [], "on_iso": false,
                 "data_paths": [".local/share/Steam", ".steam"],
                 "terms": { "title": "Steam Subscriber Agreement", "version": "2026-09-10", "url": "https://store.steampowered.com/subscriber_agreement/", "retrieved": "2026-10-06", "file": "/run/current-system/sw/share/hinteros/terms/steam-2026-09-10.txt" },
-                "builds_on_device": false, "free": false, "redistributable": true, "status": "available", "status_reason": null, "state": "available",
+                "unfree": true, "delivery": "download", "status": "available", "status_reason": null, "state": "available",
                 "permissions": [],
                 "full_access": true, "has_data": false
               }
@@ -5966,7 +5966,7 @@
     "SwitchStage": { "enum": ["closing_apps", "closing_steam", "ending", "cancelled"] },
     "ProfileInfo": {"type": "object", "required": ["id", "name", "color", "user", "admin", "locked", "locked_until", "active", "last_used_at", "usage", "pin_set"], "additionalProperties": false, "properties": {"id": {"$ref": "#/$defs/ProfileId"}, "name": {"$ref": "#/$defs/ProfileName"}, "color": {"$ref": "#/$defs/ProfileColor"}, "user": {"type": "string", "maxLength": 32}, "admin": {"type": "boolean"}, "locked": {"type": "boolean"}, "locked_until": {"oneOf": [{"type": "integer"}, {"type": "null"}]}, "active": {"type": "boolean"}, "last_used_at": {"oneOf": [{"type": "integer"}, {"type": "null"}]}, "usage": {"oneOf": [{"$ref": "#/$defs/ProfileUsage"}, {"type": "null"}]}, "pin_set": {"type": "boolean"}}},
     "BoxFeature": {
-      "description": "A box feature (catalog format 3): box-wide configuration an app needs, turned on when any owner has such an app.",
+      "description": "A box feature: box-wide configuration an app needs, turned on when any owner has such an app.",
       "enum": ["graphics32", "steam-devices"]
     },
     "CatalogId": { "description": "Catalog app id (state.json apps).", "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
@@ -5991,13 +5991,18 @@
     "AuthOutcome": { "enum": ["authorized", "failed", "cancelled"] },
     "StoreState": { "enum": ["available", "installed", "installing", "removing", "retired", "unavailable"] },
     "CatalogStatus": { "enum": ["available", "retired", "removed"] },
+    "Delivery": {
+      "description": "How an app reaches the box. download: from the binary cache. build: fetched from the vendor and prepared on this box during install (a few minutes, needs internet).",
+      "enum": ["download", "build"]
+    },
+
     "StoreApp": {
-      "description": "A catalog entry (hinteros-catalog index version 2, fields in snake_case) with its state on this box. Removed entries (tombstones) only have id, name and status_reason; the other fields are empty.",
+      "description": "A catalog entry (hinteros-catalog index version 4, fields in snake_case) with its state on this box. Removed entries (tombstones) only have id, name and status_reason; the other fields are empty.",
       "type": "object",
       "required": [
-        "id", "name", "summary", "description", "category", "homepage", "kind", "size_mib", "icon", "requires", "depends",
-        "conflicts", "installer", "on_iso", "installer_default", "data_paths", "terms", "builds_on_device", "free",
-        "redistributable", "status", "status_reason", "state", "permissions", "full_access", "has_data"
+        "id", "name", "summary", "description", "category", "homepage", "size_mib", "icon", "box_features", "depends",
+        "conflicts", "on_iso", "data_paths", "terms", "unfree", "delivery",
+        "status", "status_reason", "state", "permissions", "full_access", "has_data"
       ],
       "additionalProperties": false,
       "properties": {
@@ -6007,7 +6012,6 @@
         "description": { "type": "string", "maxLength": 1000 },
         "category": { "description": "games, video, music, photos, utilities; anything else: Other.", "type": "string", "maxLength": 32 },
         "homepage": { "type": "string" },
-        "kind": { "$ref": "#/$defs/AppKind" },
         "size_mib": { "description": "Approximate download plus disk use.", "type": "integer", "minimum": 0 },
         "icon": {
           "description": "Where the real icon is (HinterOS ships no logos): the installed app's desktop file, the vendor's logo URL, discovery on site_url, or the kiosk profile's favicon.",
@@ -6022,12 +6026,10 @@
             "path": { "description": "The resolved icon on this box (absolute path to an image), when there is one: the installed app's desktop file and icon theme, or downloaded from icon_url / site_url and cached (https only; same cache, size limits and refresh as apps.list icons). Absent until resolved; store_changed is sent when it appears.", "type": "string" }
           }
         },
-        "requires": { "type": "array", "items": { "type": "string" } },
+        "box_features": { "description": "Box features the app needs.", "type": "array", "items": { "type": "string" } },
         "depends": { "type": "array", "items": { "$ref": "#/$defs/CatalogId" } },
         "conflicts": { "type": "array", "items": { "$ref": "#/$defs/CatalogId" } },
-        "installer": { "type": "boolean" },
         "on_iso": { "type": "boolean" },
-        "installer_default": { "type": "boolean" },
         "data_paths": { "description": "Deleted in every profile's home by system.apps.remove {delete_data: true}.", "type": "array", "items": { "type": "string", "maxLength": 200 } },
         "terms": {
           "description": "The vendor's terms, shown in full before install; null if none.",
@@ -6058,9 +6060,8 @@
             "file": { "description": "Absolute path of the Markdown file on this box.", "type": "string" }
           }
         },
-        "builds_on_device": { "description": "Fetched from the vendor and prepared on this box during install (a few minutes, needs internet).", "type": "boolean" },
-        "free": { "type": "boolean" },
-        "redistributable": { "type": "boolean" },
+        "unfree": { "description": "Not free software: vendor terms are required.", "type": "boolean" },
+        "delivery": { "$ref": "#/$defs/Delivery" },
         "status": { "$ref": "#/$defs/CatalogStatus" },
         "status_reason": { "oneOf": [{ "type": "string", "maxLength": 200 }, { "type": "null" }] },
         "state": { "$ref": "#/$defs/StoreState" },
@@ -6558,7 +6559,7 @@
         "library": { "$ref": "#/$defs/SubjectLibrary" }
       }
     },
-    "Setup": { "description": "A service's setup flow in the Server section (catalog setup).", "enum": ["jellyfin", "plex", "tailscale", "cloudflare"] },
+    "Setup": { "description": "A service's setup flow in the Server section (catalog setup).", "enum": ["jellyfin-server", "plex-media-server", "tailscale", "cloudflare-tunnel"] },
     "UnitState": { "description": "Systemd's ActiveState of a service's unit (unknown: a value this daemon does not know).", "enum": ["active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance", "refreshing", "unknown"] },
     "ServiceTerms": {
       "description": "A service's vendor terms; file is the absolute path of the text on the box.",

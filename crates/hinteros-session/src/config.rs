@@ -75,7 +75,7 @@
 //!                              # needs Delegate=yes and the system's filter; off: no lan permission
 //!
 //! [[apps]]                     # apps.list entries; launchable with apps.launch {id}
-//! id = "jellyfin"
+//! id = "jellyfin-desktop"
 //! name = "Jellyfin"
 //! command = ["jellyfin-desktop"]
 //! desktop_id = "org.jellyfin.JellyfinDesktop"  # icon from its .desktop file and icon theme
@@ -86,7 +86,7 @@
 //! kind = "web"
 //! command = ["firefox", "--kiosk", "https://www.youtube.com/tv"]
 //! site_url = "https://www.youtube.com/tv"  # icon from the site's manifest/favicon (or icon_url)
-//! # icon_sha256 = "<64 hex digits>"  # with icon_url: keep the download only if it has this SHA-256
+//! # icon_sha256 = "<64 hex digits>"  # required with icon_url: keep the download only if it has this SHA-256
 //! # firefox_profile = "~/.local/share/hinteros/firefox/youtube"  # fallback: the favicon Firefox stored
 //! input = "keyboard"           # controller -> key presses (default "gamepad": the pad itself)
 //! back_key = "escape"          # what B sends [default: escape]
@@ -982,7 +982,8 @@ pub struct AppConfig {
     pub desktop_id: Option<String>,
     /// Web apps: an https URL of the icon image.
     pub icon_url: Option<String>,
-    /// Hex SHA-256 of the `icon_url` file: a download with another hash is refused.
+    /// Hex SHA-256 of the `icon_url` file, required with it: a download with another hash is
+    /// refused.
     pub icon_sha256: Option<String>,
     /// Web apps: an https page whose manifest, apple-touch-icon or favicon is the icon.
     pub site_url: Option<String>,
@@ -1389,6 +1390,11 @@ impl Config {
                     );
                 }
             }
+            ensure!(
+                app.icon_url.is_none() || app.icon_sha256.is_some(),
+                "app '{}': icon_url needs icon_sha256",
+                app.id
+            );
             if let Some(hash) = &app.icon_sha256 {
                 ensure!(
                     app.icon_url.is_some() && crate::icons::web::is_sha256_hex(hash),
@@ -1752,7 +1758,7 @@ mod tests {
             [input]
             repeat_delay_ms = 300
             [[apps]]
-            id = "jellyfin"
+            id = "jellyfin-desktop"
             name = "Jellyfin"
             command = ["jellyfin-desktop"]
             [[apps]]
@@ -1869,7 +1875,7 @@ mod tests {
             accept = "space"
             right = "none"
             [[apps]]
-            id = "jellyfin"
+            id = "jellyfin-desktop"
             name = "Jellyfin"
             command = ["jellyfin-desktop"]
             "#,
@@ -2064,6 +2070,7 @@ mod tests {
         assert!(!Config::default().input.dev_gamepad);
         for bad in [
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nicon_url = \"http://x.test/i.png\"",
+            "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nicon_url = \"https://x.test/i.png\"",
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\ndesktop_id = \"a/b\"",
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nfirefox_profile = \"/p\"",
             "[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"x\"]\nicon_sha256 = \"00\"\nicon_url = \"https://x.test/i.png\"",

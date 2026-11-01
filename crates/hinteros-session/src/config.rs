@@ -63,7 +63,6 @@
 //! speed_pps = 1000             # pixels per second at full deflection
 //! curve = 2.5                  # speed = speed_pps * m^curve (m: deflection past the deadzone); 1 = linear
 //! activity_deadzone = 0.25     # stick movement that counts as using the pointer
-//! # idle_ms                    # ignored (older configs): A never clicks, the pointer never idles out
 //! hide_command = ["gamescopectl", "paint_cursor_plane", "0"]  # on D-pad/left stick use
 //! show_command = ["gamescopectl", "paint_cursor_plane", "1"]
 //!
@@ -861,7 +860,6 @@ pub struct OskConfig {
 pub enum FieldSummon {
     /// A (accept) on a focused text field shows the keyboard instead of pressing Enter.
     #[default]
-    #[serde(alias = "accept-on-field")]
     Accept,
     None,
 }
@@ -893,9 +891,6 @@ pub struct PointerConfig {
     pub curve: f64,
     /// How far the right stick must move to count as "using the pointer" (0..1).
     pub activity_deadzone: f64,
-    /// Ignored, accepted so that older configs still load. (A clicked while the right stick
-    /// had moved this recently; now A never clicks and the pointer never hides on inactivity.)
-    pub idle_ms: Option<u64>,
     /// Run to hide the pointer at once when the D-pad or left stick is used.
     pub hide_command: Vec<String>,
     /// Run to show it again.
@@ -909,7 +904,6 @@ impl Default for PointerConfig {
             speed_pps: 1000,
             curve: 2.5,
             activity_deadzone: 0.25,
-            idle_ms: None,
             hide_command: ["gamescopectl", "paint_cursor_plane", "0"]
                 .map(String::from)
                 .into(),
@@ -1952,7 +1946,6 @@ mod tests {
         assert!(!c.osk.auto_show);
         assert_eq!(c.osk.field_summon, FieldSummon::Accept);
         assert!(c.pointer.enable);
-        assert_eq!(c.pointer.idle_ms, None);
         assert_eq!(c.inputplumber.call_timeout(), Duration::from_secs(2));
         assert_eq!(c.inputplumber.watchdog(), Duration::from_secs(5));
         assert_eq!(
@@ -1970,7 +1963,6 @@ mod tests {
             enable = false
             speed_pps = 1500
             curve = 1.5
-            idle_ms = 1500
             hide_command = []
             [input]
             direction_debounce_ms = 0
@@ -1988,18 +1980,14 @@ mod tests {
         assert_eq!(c.osk.field_summon, FieldSummon::None);
         assert!(c.osk.auto_show && !c.pointer.enable);
         assert!(!c.input.keyboard_home);
-        assert_eq!((c.pointer.speed_pps, c.pointer.idle_ms), (1500, Some(1500)));
+        assert_eq!(c.pointer.speed_pps, 1500);
         assert_eq!(c.pointer.curve, 1.5);
         assert!(c.pointer.hide_command.is_empty());
         assert!(c.apps[0].address_bar);
         assert_eq!(c.apps[0].pointer, Some(false));
-        assert_eq!(
-            Config::parse("[osk]\nfield_summon = \"accept-on-field\"\n")
-                .unwrap()
-                .osk
-                .field_summon,
-            FieldSummon::Accept
-        );
+        // The old names are gone.
+        assert!(Config::parse("[osk]\nfield_summon = \"accept-on-field\"\n").is_err());
+        assert!(Config::parse("[pointer]\nidle_ms = 1500\n").is_err());
         for bad in [
             "[osk]\nfield_summon = \"focus\"\n",
             "[pointer]\nactivity_deadzone = 1.5\n",

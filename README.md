@@ -369,7 +369,6 @@ enable = true
 speed_pps = 1000               # pixels per second at full deflection (InputPlumber profile)
 curve = 2.5                    # speed = speed_pps * m^curve, m = deflection past the deadzone; 1 = linear
 activity_deadzone = 0.25       # right stick movement that counts as using the pointer
-# idle_ms                      # ignored, still accepted (older configs): A never clicks, no idle hiding
 hide_command = ["gamescopectl", "paint_cursor_plane", "0"]  # D-pad/left stick used: hide at once
 show_command = ["gamescopectl", "paint_cursor_plane", "1"]  # right stick moved again
 

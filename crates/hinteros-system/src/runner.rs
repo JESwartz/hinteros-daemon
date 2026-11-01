@@ -17,6 +17,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use hinteros_api::common::check_version;
 use hinteros_api::system::{
     AppliedResult, CatalogApp, ChannelCheckResult, JobResult, JobState, JobSubject, RemovedApp,
     Stage, UpdateCheckResult, is_job_id,
@@ -24,7 +25,7 @@ use hinteros_api::system::{
 use hinteros_api::{ErrorCode, ErrorObject};
 use rustix::fs::{FlockOperation, flock};
 use rustix::process::{Pid, Signal, kill_process_group};
-use serde_json::json;
+use serde_json::{Value, json};
 use tracing::{error, info, warn};
 
 use crate::flake;
@@ -41,6 +42,9 @@ mod storage;
 
 /// Files of a config dir that belong to a generation (the snapshot; device-config.nix).
 pub const MANAGED: &[&str] = &["flake.nix", "flake.lock", "state.json"];
+
+/// Format of `terms-accepted.json`.
+pub const TERMS_VERSION: u32 = 1;
 
 /// Progress lines within a stage at most this often.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -643,7 +647,7 @@ impl Runner {
             available,
             checked_at: job::now(),
         };
-        if let Ok(bytes) = serde_json::to_vec(&result) {
+        if let Ok(bytes) = fsutil::cache_bytes(&result) {
             let _ = fs::create_dir_all(&self.spec.paths.state_dir);
             if let Err(e) = fsutil::write_atomic(&self.spec.paths.last_check(), &bytes, 0o600) {
                 warn!("cannot store the check result: {e}");
@@ -701,7 +705,7 @@ impl Runner {
             older,
             checked_at: job::now(),
         };
-        let bytes = serde_json::to_vec(&result)
+        let bytes = fsutil::cache_bytes(&result)
             .map_err(|e| self.fail(format!("encoding the check result: {e}")))?;
         let _ = fs::create_dir_all(&self.spec.paths.state_dir);
         // channel.set accepts only this revision: without the file the switch cannot go on.
@@ -1221,21 +1225,53 @@ fn delete_data(d: &job::DeleteData) {
     }
 }
 
-/// Add accepted terms to `terms-accepted.json` (root-only):
-/// `{"<id>": [{"version", "accepted_at" (RFC 3339 UTC), "by"}]}`, a list per id so that
-/// accepting a new version keeps the history. Written atomically; the installer writes the
-/// same format.
-pub fn record_terms(path: &Path, records: &[job::TermsRecord]) -> std::io::Result<()> {
-    let mut doc: serde_json::Map<String, serde_json::Value> = match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("{} is not a JSON object: {e}", path.display()),
-            )
-        })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+/// Read `terms-accepted.json` as a JSON object (other fields stay in it). Missing: `None`. A
+/// damaged or newer file is an error: these records must not be lost.
+pub fn read_terms(path: &Path) -> std::io::Result<Option<serde_json::Map<String, Value>>> {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
+    check_version(path, &bytes, TERMS_VERSION)?;
+    let invalid = |e: String| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is not a terms file: {e}", path.display()),
+        )
+    };
+    let doc: serde_json::Map<String, Value> =
+        serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+    if !doc.get("accepted").is_some_and(Value::is_object) {
+        return Err(invalid("no accepted".into()));
+    }
+    Ok(Some(doc))
+}
+
+/// Write `terms-accepted.json` (root-only, atomically); the installer writes the same format.
+pub fn write_terms(path: &Path, doc: &serde_json::Map<String, Value>) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
+    }
+    let mut bytes = serde_json::to_vec_pretty(doc)?;
+    bytes.push(b'\n');
+    fsutil::write_atomic(path, &bytes, 0o600)
+}
+
+/// Add accepted terms to `terms-accepted.json`: `{"version": 1, "accepted": {"<id>":
+/// [{"version", "accepted_at" (RFC 3339 UTC), "by"}]}}`, a list per id so that accepting a new
+/// version keeps the history.
+pub fn record_terms(path: &Path, records: &[job::TermsRecord]) -> std::io::Result<()> {
+    let mut doc = read_terms(path)?.unwrap_or_else(|| {
+        let mut doc = serde_json::Map::new();
+        doc.insert("version".into(), json!(TERMS_VERSION));
+        doc.insert("accepted".into(), json!({}));
+        doc
+    });
+    let accepted = doc["accepted"].as_object_mut().expect("read_terms checked");
     for r in records {
         let mut entry = json!({
             "version": r.version,
@@ -1245,31 +1281,30 @@ pub fn record_terms(path: &Path, records: &[job::TermsRecord]) -> std::io::Resul
         if let Some(p) = &r.profile {
             entry["profile"] = json!(p);
         }
-        match doc.entry(r.id.clone()).or_insert_with(|| json!([])) {
-            serde_json::Value::Array(list) => list.push(entry),
+        match accepted.entry(r.id.clone()).or_insert_with(|| json!([])) {
+            Value::Array(list) => list.push(entry),
             other => *other = json!([entry]),
         }
     }
-    if let Some(parent) = path.parent() {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)?;
-    }
-    let mut bytes = serde_json::to_vec_pretty(&doc)?;
-    bytes.push(b'\n');
-    fsutil::write_atomic(path, &bytes, 0o600)
+    write_terms(path, &doc)
 }
 
-/// The acceptances in `terms-accepted.json`: (id, version, by, profile).
+/// The acceptances in `terms-accepted.json`: (id, version, by, profile). A file this daemon
+/// cannot read has none (logged).
 pub fn accepted_terms(path: &Path) -> Vec<(String, String, String, Option<String>)> {
-    let Some(doc) = fs::read(path).ok().and_then(|b| {
-        serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&b).ok()
-    }) else {
-        return Vec::new();
+    let doc = match read_terms(path) {
+        Ok(Some(doc)) => doc,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            warn!("{e}");
+            return Vec::new();
+        }
     };
-    let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
-    doc.iter()
+    let s = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
+    doc["accepted"]
+        .as_object()
+        .into_iter()
+        .flatten()
         .flat_map(|(id, list)| {
             list.as_array().into_iter().flatten().filter_map(move |r| {
                 Some((
@@ -1475,7 +1510,7 @@ mod tests {
         // What the installer may already have written.
         fs::write(
             &path,
-            r#"{"youtube":[{"version":"1","accepted_at":"2026-01-01T00:00:00Z","by":"installer"}]}"#,
+            r#"{"version":1,"later":1,"accepted":{"youtube":[{"version":"1","accepted_at":"2026-01-01T00:00:00Z","by":"installer"}]}}"#,
         )
         .unwrap();
         let rec = |v: &str| job::TermsRecord {
@@ -1488,9 +1523,10 @@ mod tests {
         record_terms(&path, &[rec("2026-09-10")]).unwrap();
         record_terms(&path, &[rec("2027-01-01")]).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(v["youtube"][0]["by"], "installer");
+        assert_eq!(v["accepted"]["youtube"][0]["by"], "installer");
+        assert_eq!(v["later"], 1);
         assert_eq!(
-            v["steam"],
+            v["accepted"]["steam"],
             json!([
                 {"version": "2026-09-10", "accepted_at": "2026-10-06T15:20:00Z", "by": "hinteros-p1"},
                 {"version": "2027-01-01", "accepted_at": "2026-10-06T15:20:00Z", "by": "hinteros-p1"}
@@ -1504,5 +1540,12 @@ mod tests {
         // A damaged file is not overwritten.
         fs::write(&path, "[]").unwrap();
         assert!(record_terms(&path, &[rec("x")]).is_err());
+        // A newer file is read as no acceptances, and not overwritten either.
+        let newer = r#"{"version":2,"accepted":{"steam":[{"version":"1"}]}}"#;
+        fs::write(&path, newer).unwrap();
+        assert!(accepted_terms(&path).is_empty());
+        let e = record_terms(&path, &[rec("x")]).unwrap_err();
+        assert!(e.to_string().contains("has version 2"), "{e}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), newer);
     }
 }

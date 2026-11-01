@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use hinteros_api::catalog::{Need, PERMISSIONS};
+use hinteros_api::common::check_version;
 use hinteros_api::session::AppPermission;
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde::{Deserialize, Serialize};
@@ -91,11 +92,16 @@ impl Default for Permissions {
 }
 
 impl Permissions {
-    /// Read `path` (missing: nothing denied; unreadable: logged, nothing denied).
+    /// Read `path` (missing: nothing denied; unreadable: logged, nothing denied). A newer file
+    /// is not understood: nothing denied, and changes stay in memory so that it is not saved
+    /// over.
     pub fn new(path: Option<PathBuf>, enforced: Vec<&'static str>) -> Self {
-        let denied = path.as_deref().map(load).unwrap_or_default();
+        let (denied, keep) = match path.as_deref() {
+            Some(p) => load(p),
+            None => (BTreeMap::new(), true),
+        };
         Self {
-            path,
+            path: path.filter(|_| keep),
             enforced,
             denied: Arc::new(Mutex::new(denied)),
         }
@@ -198,24 +204,25 @@ impl Permissions {
     }
 }
 
-fn load(path: &Path) -> BTreeMap<String, BTreeSet<String>> {
+/// What `path` denies, and whether it may be saved over.
+fn load(path: &Path) -> (BTreeMap<String, BTreeSet<String>>, bool) {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return BTreeMap::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (BTreeMap::new(), true),
         Err(e) => {
             warn!(file = %path.display(), "ignoring app permissions: {e}");
-            return BTreeMap::new();
+            return (BTreeMap::new(), true);
         }
     };
+    if let Err(e) = check_version(path, &bytes, VERSION) {
+        warn!("ignoring app permissions: {e}");
+        return (BTreeMap::new(), false);
+    }
     match serde_json::from_slice::<File>(&bytes) {
-        Ok(f) if f.version == VERSION => f.denied,
-        Ok(f) => {
-            warn!(file = %path.display(), version = f.version, "ignoring app permissions: unknown version");
-            BTreeMap::new()
-        }
+        Ok(f) => (f.denied, true),
         Err(e) => {
             warn!(file = %path.display(), "ignoring app permissions: {e}");
-            BTreeMap::new()
+            (BTreeMap::new(), true)
         }
     }
 }
@@ -444,5 +451,12 @@ mod tests {
             let p = Permissions::new(Some(path.clone()), enforced(&on()));
             assert!(p.grants("app", &d).mic, "{bad}");
         }
+        // A newer file is not saved over; a change holds in memory.
+        let newer = r#"{"version":2,"denied":{"app":["mic"]}}"#;
+        std::fs::write(&path, newer).unwrap();
+        let p = Permissions::new(Some(path.clone()), enforced(&on()));
+        assert!(p.set("app", Some(&d), "mic", false).unwrap());
+        assert!(!p.grants("app", &d).mic);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
     }
 }

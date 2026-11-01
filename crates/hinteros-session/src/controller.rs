@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use hinteros_api::common::check_version;
 use hinteros_api::session::{
     CONTROLLER_ACTIONS, ControllerButton, ControllerDefaults, ControllerSettings, KEY_ACTIONS, Key,
     KeyboardApp, Modifier, NavAction, POINTER_SPEED_DEFAULT, POINTER_SPEED_MAX, POINTER_SPEED_MIN,
@@ -437,11 +438,8 @@ impl ControllerStore {
                 return store;
             }
         };
-        let version = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v["version"].as_u64());
-        if let Some(version) = version.filter(|v| *v > u64::from(FILE_VERSION)) {
-            warn!(file = %path.display(), version, "controller settings are from a newer version, using the defaults");
+        if let Err(e) = check_version(path, text.as_bytes(), FILE_VERSION) {
+            warn!("controller settings use the defaults: {e}");
             store.file = None;
             return store;
         }

@@ -8,6 +8,8 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{CWD, RenameFlags, renameat_with};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 /// Copy the regular files and directories of `from` into a fresh `to` (symlinks and other file
 /// types are skipped: a config dir has none).
@@ -85,9 +87,48 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
     fs::File::open(dir)?.sync_all()
 }
 
+/// Format of the files that only hold what can be had again: `{"version": 1, "data": ...}`.
+pub const CACHE_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct Cache<T> {
+    version: u32,
+    data: T,
+}
+
+/// The data of a cache file. Damaged, newer or missing: `None`, and the next write replaces it.
+pub fn read_cache<T: DeserializeOwned>(path: &Path) -> Option<T> {
+    parse_cache(&std::fs::read(path).ok()?)
+}
+
+pub fn parse_cache<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+    let c: Cache<T> = serde_json::from_slice(bytes).ok()?;
+    (c.version == CACHE_VERSION).then_some(c.data)
+}
+
+pub fn cache_bytes<T: Serialize>(data: &T) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(&Cache {
+        version: CACHE_VERSION,
+        data,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cache_of_another_version_is_gone() {
+        let bytes = cache_bytes(&vec![1, 2]).unwrap();
+        assert_eq!(parse_cache::<Vec<u32>>(&bytes), Some(vec![1, 2]));
+        assert_eq!(
+            parse_cache::<Vec<u32>>(br#"{"version":2,"data":[1]}"#),
+            None
+        );
+        assert_eq!(parse_cache::<Vec<u32>>(b"not json"), None);
+        let later = br#"{"version":1,"data":[1],"later":true}"#;
+        assert_eq!(parse_cache::<Vec<u32>>(later), Some(vec![1]));
+    }
 
     #[test]
     fn replaces_a_directory() {

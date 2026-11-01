@@ -10,6 +10,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::config::Paths;
 use crate::fsutil;
+use crate::runner::{read_terms, write_terms};
 use crate::state::GUEST_USER;
 use crate::users::{User, Users};
 
@@ -85,18 +86,12 @@ pub fn unmark(paths: &Paths) {
 /// Remove the terms acceptances the guest made (`by: hinteros-guest`, no profile), so the next
 /// guest is asked again. Returns how many went. The audit journal keeps the history.
 pub fn drop_terms(path: &Path) -> std::io::Result<usize> {
-    let mut doc: serde_json::Map<String, serde_json::Value> = match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("{}: {e}", path.display()),
-            )
-        })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(e),
+    let Some(mut doc) = read_terms(path)? else {
+        return Ok(0);
     };
+    let accepted = doc["accepted"].as_object_mut().expect("read_terms checked");
     let mut dropped = 0;
-    for list in doc.values_mut() {
+    for list in accepted.values_mut() {
         if let serde_json::Value::Array(entries) = list {
             let before = entries.len();
             entries.retain(|r| {
@@ -106,11 +101,9 @@ pub fn drop_terms(path: &Path) -> std::io::Result<usize> {
             dropped += before - entries.len();
         }
     }
-    doc.retain(|_, v| v.as_array().is_none_or(|a| !a.is_empty()));
+    accepted.retain(|_, v| v.as_array().is_none_or(|a| !a.is_empty()));
     if dropped > 0 {
-        let mut bytes = serde_json::to_vec_pretty(&doc)?;
-        bytes.push(b'\n');
-        fsutil::write_atomic(path, &bytes, 0o600)?;
+        write_terms(path, &doc)?;
     }
     Ok(dropped)
 }
@@ -188,15 +181,15 @@ mod tests {
         let p = d.path().join("terms.json");
         std::fs::write(
             &p,
-            r#"{"steam": [{"version": "1", "by": "hinteros-guest"}, {"version": "1", "by": "hinteros-p1", "profile": "p1"}],
-                "plex": [{"version": "2", "by": "hinteros-guest"}]}"#,
+            r#"{"version": 1, "later": 1, "accepted": {"steam": [{"version": "1", "by": "hinteros-guest"}, {"version": "1", "by": "hinteros-p1", "profile": "p1"}],
+                "plex": [{"version": "2", "by": "hinteros-guest"}]}}"#,
         )
         .unwrap();
         assert_eq!(drop_terms(&p).unwrap(), 2);
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
         assert_eq!(
             v,
-            serde_json::json!({"steam": [{"version": "1", "by": "hinteros-p1", "profile": "p1"}]})
+            serde_json::json!({"version": 1, "later": 1, "accepted": {"steam": [{"version": "1", "by": "hinteros-p1", "profile": "p1"}]}})
         );
         assert_eq!(drop_terms(&p).unwrap(), 0);
         assert_eq!(drop_terms(&d.path().join("none")).unwrap(), 0);

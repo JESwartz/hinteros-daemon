@@ -186,8 +186,8 @@ async fn profile_apps_install_remove_rollback() {
     assert_eq!(env_of(root, &p1_link(root)).unwrap(), "env-moonlight+steam");
     let terms: Value =
         serde_json::from_str(&root.read("var/lib/hinteros/terms-accepted.json")).unwrap();
-    assert_eq!(terms["steam"][0]["profile"], "p1");
-    assert_eq!(terms["steam"][0]["by"], "hinteros-p1");
+    assert_eq!(terms["accepted"]["steam"][0]["profile"], "p1");
+    assert_eq!(terms["accepted"]["steam"][0]["by"], "hinteros-p1");
     let l = apps_list(&mut c).await;
     assert_eq!(l["ids"], json!(["moonlight", "steam"]));
     assert_eq!(l["needs_terms"], json!([]));

@@ -260,10 +260,11 @@ impl Pins {
         flock(&file, FlockOperation::LockExclusive)?;
         let mut text = String::new();
         file.read_to_string(&mut text)?;
-        let before: T = serde_json::from_str(&text).unwrap_or_default();
+        // Counters: a file this daemon cannot read starts them again.
+        let before: T = fsutil::parse_cache(text.as_bytes()).unwrap_or_default();
         let after = f(before.clone());
         if after != before || text.is_empty() {
-            let bytes = serde_json::to_vec(&after)?;
+            let bytes = fsutil::cache_bytes(&after)?;
             file.set_len(0)?;
             file.seek(SeekFrom::Start(0))?;
             file.write_all(&bytes)?;

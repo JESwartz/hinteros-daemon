@@ -3,8 +3,9 @@
 //! hint. PINs are checked here with the shared backoff (never logged; the audit records which
 //! PIN was checked and the outcome).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use hinteros_api::common::{check_file_version, check_version};
 use hinteros_api::system::{
     AudioSaveOutputParams, CallerInfo, DisplaySaveModeParams, Empty, GuestInfo, GuestSetParams,
     JobKind, JobSubject, PinParams, ProfileIdResult, ProfileInfo, ProfileUsage,
@@ -528,6 +529,7 @@ impl Service {
                     created_at: job::now(),
                     last_used_at: None,
                     appearance: Appearance::default(),
+                    extra: Default::default(),
                 };
                 let subject_name = meta.name.clone();
                 let spec = self.spec(
@@ -580,6 +582,7 @@ impl Service {
                         created_at: job::now(),
                         last_used_at: Some(job::now()),
                         appearance: Appearance::default(),
+                        extra: Default::default(),
                     },
                 );
                 self.save_file(&file)?;
@@ -1047,32 +1050,65 @@ impl Service {
         }
     }
 
+    /// Change the runtime settings. A newer `runtime.json` stays as it is: the change holds until
+    /// the next boot.
     fn save_runtime(&self, f: impl FnOnce(&mut Runtime)) -> Result<(), ErrorObject> {
         let path = self.paths.runtime_json();
-        let mut r: Runtime = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let mut r = Runtime::load(&path);
         f(&mut r);
-        crate::fsutil::write_atomic(
-            &path,
-            &serde_json::to_vec_pretty(&r).map_err(internal)?,
-            0o600,
-        )
-        .map_err(internal)?;
+        match check_file_version(&path, RUNTIME_VERSION) {
+            Ok(()) => crate::fsutil::write_atomic(
+                &path,
+                &serde_json::to_vec_pretty(&r).map_err(internal)?,
+                0o600,
+            )
+            .map_err(internal)?,
+            Err(e) => warn!("{e}"),
+        }
         publish_runtime(&self.paths, &r);
         Ok(())
     }
 }
 
+/// Format of `runtime.json`.
+pub const RUNTIME_VERSION: u32 = 1;
+
 /// `runtime.json`: the box's display mode and audio output (shared by every profile).
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Runtime {
+    pub version: u32,
     /// Display name → `WxH@R`.
     #[serde(default)]
-    pub display_modes: std::collections::BTreeMap<String, String>,
+    pub display_modes: BTreeMap<String, String>,
     #[serde(default)]
     pub audio_output: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Self {
+            version: RUNTIME_VERSION,
+            display_modes: BTreeMap::new(),
+            audio_output: None,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+impl Runtime {
+    /// Read it; a missing, damaged or newer file is the defaults.
+    pub fn load(path: &std::path::Path) -> Self {
+        let Ok(bytes) = std::fs::read(path) else {
+            return Self::default();
+        };
+        if let Err(e) = check_version(path, &bytes, RUNTIME_VERSION) {
+            warn!("{e}");
+            return Self::default();
+        }
+        serde_json::from_slice(&bytes).unwrap_or_default()
+    }
 }
 
 /// `/run/hinteros/gamescope-modes` and `/run/hinteros/audio-output` (0644).
@@ -1101,9 +1137,33 @@ pub fn publish_runtime(paths: &crate::config::Paths, r: &Runtime) {
 
 /// Re-publish what `runtime.json` holds (at start).
 pub fn republish_runtime(paths: &crate::config::Paths) {
-    let r: Runtime = std::fs::read(paths.runtime_json())
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
+    let r = Runtime::load(&paths.runtime_json());
     publish_runtime(paths, &r);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_file() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("runtime.json");
+        assert_eq!(Runtime::load(&path).version, RUNTIME_VERSION);
+        std::fs::write(
+            &path,
+            r#"{"version":1,"display_modes":{"HDMI-1":"1920x1080@60"},"later":1}"#,
+        )
+        .unwrap();
+        let r = Runtime::load(&path);
+        assert_eq!(r.display_modes["HDMI-1"], "1920x1080@60");
+        assert_eq!(serde_json::to_value(&r).unwrap()["later"], 1);
+        std::fs::write(
+            &path,
+            r#"{"version":2,"display_modes":{"HDMI-1":"1920x1080@60"}}"#,
+        )
+        .unwrap();
+        assert!(Runtime::load(&path).display_modes.is_empty());
+        assert!(check_file_version(&path, RUNTIME_VERSION).is_err());
+    }
 }

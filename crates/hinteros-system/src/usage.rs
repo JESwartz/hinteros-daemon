@@ -1,5 +1,5 @@
 //! `hinteros-system usage` (`hinteros-usage.service`, root, read-only homes, idle I/O): disk use
-//! per profile into `/var/lib/hinteros/usage.json` (`{id|guest: {total_bytes,
+//! per profile into `/var/lib/hinteros/usage.json`, a cache (`{id|guest: {total_bytes,
 //! steam_games_bytes, at}}`). The walk never follows a symlink and stays on the home's
 //! filesystem. App store paths are shared and not counted here.
 
@@ -24,10 +24,12 @@ pub struct Usage {
 pub type UsageFile = BTreeMap<String, Usage>;
 
 pub fn load(path: &Path) -> UsageFile {
-    std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    fsutil::read_cache(path).unwrap_or_default()
+}
+
+pub fn save(path: &Path, usage: &UsageFile) -> std::io::Result<()> {
+    let bytes = fsutil::cache_bytes(usage).map_err(std::io::Error::other)?;
+    fsutil::write_atomic(path, &bytes, 0o600)
 }
 
 /// Bytes under `dir` (allocated blocks), not following symlinks, on `dev` only.
@@ -86,8 +88,7 @@ pub fn main(paths: &Paths) -> std::process::ExitCode {
             out.insert(key, usage);
         }
     }
-    let bytes = serde_json::to_vec_pretty(&out).unwrap_or_default();
-    match fsutil::write_atomic(&paths.usage_json(), &bytes, 0o600) {
+    match save(&paths.usage_json(), &out) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             warn!("cannot write usage.json: {e}");

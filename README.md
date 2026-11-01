@@ -1156,8 +1156,8 @@ delete_data}` (polkit `org.hinteros.system.apps`, seat check, rate limit, audit)
   `sizeMiB` on top of the rebuild margin (`insufficient_resources`).
 - Accepted terms are audited (`HINTEROS_TERMS_ID`, `_TERMS_VERSION`, `_USER`, `_PROFILE`,
   `_JOB_ID`) and the job records them before building in `/var/lib/hinteros/terms-accepted.json`
-  (0600, written atomically): `{"<id>": [{"version", "accepted_at" (RFC 3339 UTC), "by" (user name
-  or "installer")}]}`, a list per id so re-acceptance keeps the history (the installer writes the
+  (0600, written atomically): `{"version": 1, "accepted": {"<id>": [{"version", "accepted_at" (RFC 3339 UTC), "by" (user name
+  or "installer")}]}}`, a list per id so re-acceptance keeps the history (the installer writes the
   same format).
 - `apps.remove`: every id must be installed (`not_found`); an app an installed app depends on
   cannot go alone (`app_conflict`, naming the dependent). Removing works without a usable index
@@ -1701,8 +1701,8 @@ Before 0.9 `channel.set {acknowledge_downgrade: true}` (needed for every beta â†
 locked whatever signed commit the target branch pointed at: a server that served an old
 release with a known hole on that branch got it installed.
 
-- **Newest verified tips** (`/var/lib/hinteros/channel-tips.json`, root only, `{"<branch>":
-  "<rev>"}`): every job that verifies a channel tip records it there, but only forward (a
+- **Newest verified tips** (`/var/lib/hinteros/channel-tips.json`, root only, `{"version": 1, "tips": {"<branch>":
+  "<rev>"}}`): every job that verifies a channel tip records it there, but only forward (a
   revision that descends from the recorded one). `update.check` also fetches and verifies the
   other branches of the channel table (one extra `git fetch` each; failures are only logged), so
   the record exists before a switch. Rollbacks and switches never lower it.
@@ -2129,6 +2129,28 @@ to ignore bumps `schemaVersion`. Bad values of known fields are errors. `check-s
 Hello with session API 0.21. `system.settings.get`: no `settings.apps`; `settings.requirements`
 is always there. `migrate_apps` is gone from `JobKind`. The `unavailable` `service` value
 `profiles` is gone (`base` takes its place). Profile users are `hinteros-p<N>` for p1 too.
+
+## Persisted JSON files
+
+Every JSON file the daemons keep has a top-level `version`, today 1 (`common::check_version`).
+Unknown fields are ignored. A newer file is not understood; what follows depends on the file:
+
+| File | Newer file | Unknown fields on a rewrite |
+|---|---|---|
+| `profiles.json`, `services/jellyfin-server/users.json` | load and save are errors; the file stays | kept |
+| `terms-accepted.json` | reads as no acceptances; recording is an error; the file stays | kept |
+| `starter.json` | reads as none; saving is an error (the job fails); the file stays | dropped (always written whole) |
+| `channel-tips.json` | reads as empty; saving fails with a warning; the file stays | kept |
+| `runtime.json` | defaults; a change holds until the next boot; the file stays | kept |
+| `permissions.json`, `controller.json` (session) | defaults; a change holds in memory; the file stays | dropped |
+| `apps/registry.json`, `storage.json` | discarded and overwritten (rebuilt from the env manifests, the next measure) | dropped |
+| `usage.json`, `update-check.json`, `channel-check.json`, `libraries.json`, `pins/<id>.state`, `pins/<id>.tries` | discarded and overwritten | dropped |
+
+`{"version":1,"accepted":{"<id>":[{version, accepted_at, by, profile?}]}}` is
+`terms-accepted.json`; `{"version":1,"tips":{"<branch>":"<rev>"}}` is `channel-tips.json`;
+`{"version":1,"display_modes":{...},"audio_output":...}` is `runtime.json`. The files in the last
+row are caches, `{"version":1,"data":...}`. In `/run` and gone at boot, so left out:
+`lan-filter.json`, `switch.json`, `profiles-public.json`, job specs and status.
 
 ## Development
 

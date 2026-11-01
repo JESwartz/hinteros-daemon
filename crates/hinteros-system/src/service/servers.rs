@@ -251,10 +251,7 @@ fn jellyfin_detail(c: &DetailCtx) -> JellyfinDetail {
             jellyfin::write_cache(&files, &f);
             f
         }
-        Err(_) => std::fs::read(files.libraries_cache())
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default(),
+        Err(_) => crate::fsutil::read_cache(&files.libraries_cache()).unwrap_or_default(),
     };
     let users = jellyfin::UsersFile::load(&files.users_json()).unwrap_or_default();
     JellyfinDetail {

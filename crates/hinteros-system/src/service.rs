@@ -1210,7 +1210,7 @@ impl Service {
 
     /// The last update check, if it is for the channel and revision the box is on.
     fn last_check(&self, channel: system::Channel, rev: Option<&str>) -> Option<UpdateCheckResult> {
-        let r: UpdateCheckResult = job::read_json(&self.paths.last_check())?;
+        let r: UpdateCheckResult = crate::fsutil::read_cache(&self.paths.last_check())?;
         (r.channel == channel && r.current_rev.as_deref() == rev).then_some(r)
     }
 
@@ -1220,7 +1220,7 @@ impl Service {
         channel: system::Channel,
         rev: Option<&str>,
     ) -> Option<ChannelCheckResult> {
-        let r: ChannelCheckResult = job::read_json(&self.paths.channel_check())?;
+        let r: ChannelCheckResult = crate::fsutil::read_cache(&self.paths.channel_check())?;
         (r.channel == channel && r.current_rev.as_deref() == rev).then_some(r)
     }
 

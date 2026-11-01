@@ -106,10 +106,8 @@ impl Runner {
         }
         let _ = fs::remove_file(paths.apps_run_dir().join(&j.user));
         let mut u = usage::load(&paths.usage_json());
-        if u.remove(&j.id).is_some()
-            && let Ok(bytes) = serde_json::to_vec_pretty(&u)
-        {
-            let _ = crate::fsutil::write_atomic(&paths.usage_json(), &bytes, 0o600);
+        if u.remove(&j.id).is_some() {
+            let _ = usage::save(&paths.usage_json(), &u);
         }
         Registry::reconcile(&paths, &j.state);
         appreg::publish(&paths, &j.state);
@@ -214,10 +212,8 @@ impl Runner {
             Err(e) => problems.push(format!("terms: {e}")),
         }
         let mut u = usage::load(&paths.usage_json());
-        if u.remove("guest").is_some()
-            && let Ok(bytes) = serde_json::to_vec_pretty(&u)
-        {
-            let _ = crate::fsutil::write_atomic(&paths.usage_json(), &bytes, 0o600);
+        if u.remove("guest").is_some() {
+            let _ = usage::save(&paths.usage_json(), &u);
         }
         if public::SwitchHint::load(&paths.switch_json()).is_some_and(|h| h.target == "guest") {
             let _ = fs::remove_file(paths.switch_json());

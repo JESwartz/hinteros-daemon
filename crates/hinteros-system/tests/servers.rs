@@ -835,8 +835,11 @@ esac"#,
     .await;
     let terms: Value =
         serde_json::from_str(&root.read("var/lib/hinteros/terms-accepted.json")).unwrap();
-    assert_eq!(terms["plex-media-server"][0]["version"], "2025-10-30");
-    assert_eq!(terms["plex-media-server"][0]["profile"], "p1");
+    assert_eq!(
+        terms["accepted"]["plex-media-server"][0]["version"],
+        "2025-10-30"
+    );
+    assert_eq!(terms["accepted"]["plex-media-server"][0]["profile"], "p1");
 
     let list = call(&mut c, "services.list", json!({})).await.unwrap();
     check("services.list", &list);

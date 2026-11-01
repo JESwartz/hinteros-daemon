@@ -1090,7 +1090,8 @@ async fn updates_are_verified() {
 
 /// The newest verified tips the box recorded (`channel-tips.json`).
 fn tips(root: &Root) -> Value {
-    serde_json::from_str(&root.read("var/lib/hinteros/channel-tips.json")).unwrap()
+    let v: Value = serde_json::from_str(&root.read("var/lib/hinteros/channel-tips.json")).unwrap();
+    v["tips"].clone()
 }
 
 /// Run a channel check; returns its `job_finished`.
@@ -1384,11 +1385,12 @@ async fn store_install_and_remove() {
     // The acceptance is recorded (root-only file) and audited.
     let terms: Value =
         serde_json::from_str(&root.read("var/lib/hinteros/terms-accepted.json")).unwrap();
-    let rec = &terms["plex-htpc"][0];
+    let rec = &terms["accepted"]["plex-htpc"][0];
     assert_eq!(rec["version"], "2025-10-30");
     assert!(rec["accepted_at"].as_str().unwrap().ends_with('Z'));
     assert!(!rec["by"].as_str().unwrap().is_empty());
-    assert_eq!(terms.as_object().unwrap().len(), 1);
+    assert_eq!(terms["accepted"].as_object().unwrap().len(), 1);
+    assert_eq!(terms["version"], 1);
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(
         std::fs::metadata(root.p("var/lib/hinteros/terms-accepted.json"))

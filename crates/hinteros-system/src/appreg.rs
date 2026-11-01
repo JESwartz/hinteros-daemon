@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{DirBuilderExt, symlink};
 use std::path::{Path, PathBuf};
 
+use hinteros_api::common::{check_file_version, check_version};
 use hinteros_api::manifest::Manifest;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -191,9 +192,11 @@ impl Default for Registry {
 }
 
 impl Registry {
+    /// Read it; a damaged or newer file is discarded: [`Registry::scan`] makes it again.
     pub fn load(path: &Path) -> Self {
         std::fs::read(path)
             .ok()
+            .filter(|b| check_version(path, b, REGISTRY_VERSION).is_ok())
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default()
     }
@@ -337,13 +340,18 @@ pub struct StarterFile {
 }
 
 impl StarterFile {
+    /// Read it. A newer file counts as none, and [`StarterFile::save`] leaves it alone.
     pub fn load(path: &Path) -> Option<Self> {
-        std::fs::read(path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+        let bytes = std::fs::read(path).ok()?;
+        if let Err(e) = check_version(path, &bytes, STARTER_VERSION) {
+            warn!("{e}");
+            return None;
+        }
+        serde_json::from_slice(&bytes).ok()
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        check_file_version(path, STARTER_VERSION)?;
         let mut bytes = serde_json::to_vec_pretty(self)?;
         bytes.push(b'\n');
         fsutil::write_atomic(path, &bytes, 0o600)
@@ -359,6 +367,29 @@ pub fn normalize(ids: impl IntoIterator<Item = String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newer_files() {
+        let d = tempfile::tempdir().unwrap();
+        // The registry is rebuilt: discarded, and overwritten.
+        let path = d.path().join("registry.json");
+        std::fs::write(&path, r#"{"version":2,"owners":{"p1":{"ids":["x"]}}}"#).unwrap();
+        assert_eq!(Registry::load(&path), Registry::default());
+        Registry::default().save(&path).unwrap();
+        // The starter set is not.
+        let path = d.path().join("starter.json");
+        let newer = r#"{"version":2,"ids":["x"]}"#;
+        std::fs::write(&path, newer).unwrap();
+        assert_eq!(StarterFile::load(&path), None);
+        let f = StarterFile {
+            version: STARTER_VERSION,
+            ids: Vec::new(),
+            updated_at: None,
+            by: None,
+        };
+        assert!(f.save(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+    }
     use crate::users::Users;
 
     pub fn env(store: &Path, ids: &[&str], features: &[&str]) -> PathBuf {

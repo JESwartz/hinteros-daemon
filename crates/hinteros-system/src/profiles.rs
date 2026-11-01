@@ -9,9 +9,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use hinteros_api::common::{check_file_version, check_version};
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::fsutil;
 use crate::state::{self, Account, State};
@@ -33,6 +34,8 @@ pub struct Appearance {
     pub text_scale: f64,
     pub high_contrast: bool,
     pub reduce_motion: bool,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl Default for Appearance {
@@ -41,6 +44,7 @@ impl Default for Appearance {
             text_scale: 1.0,
             high_contrast: false,
             reduce_motion: false,
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -60,6 +64,8 @@ pub struct Meta {
     pub last_used_at: Option<i64>,
     #[serde(default)]
     pub appearance: Appearance,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,6 +74,8 @@ pub struct ProfilesFile {
     /// The next profile number (never goes back).
     pub next: u32,
     pub profiles: BTreeMap<String, Meta>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl Default for ProfilesFile {
@@ -76,21 +84,25 @@ impl Default for ProfilesFile {
             version: FILE_VERSION,
             next: 1,
             profiles: BTreeMap::new(),
+            extra: BTreeMap::new(),
         }
     }
 }
 
 impl ProfilesFile {
-    /// Read it (a missing file is an empty one). A damaged file is an error: nothing must
-    /// overwrite it blindly.
+    /// Read it (a missing file is an empty one). A damaged file or a newer one is an error:
+    /// nothing must overwrite it blindly.
     pub fn load(path: &Path) -> std::io::Result<Self> {
         match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("{}: {e}", path.display()),
-                )
-            }),
+            Ok(bytes) => {
+                check_version(path, &bytes, FILE_VERSION)?;
+                serde_json::from_slice(&bytes).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("{}: {e}", path.display()),
+                    )
+                })
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e),
         }
@@ -101,6 +113,7 @@ impl ProfilesFile {
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        check_file_version(path, FILE_VERSION)?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -294,6 +307,7 @@ pub fn test_file(state: &State) -> ProfilesFile {
             created_at: 0,
             last_used_at: None,
             appearance: Appearance::default(),
+            extra: BTreeMap::new(),
         };
         f.profiles.insert(a.id, meta);
     }
@@ -356,6 +370,34 @@ mod tests {
         assert_eq!(f.take_id(&state, &Users::default()), "p10");
     }
 
+    #[test]
+    fn a_newer_file_is_refused_and_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("profiles.json");
+        let newer = r#"{"version":2,"next":1,"profiles":{}}"#;
+        std::fs::write(&path, newer).unwrap();
+        let e = ProfilesFile::load(&path).unwrap_err();
+        assert!(e.to_string().contains("has version 2"), "{e}");
+        assert!(ProfilesFile::default().save(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+    }
+
+    #[test]
+    fn unknown_fields_are_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("profiles.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"next":2,"later":1,"profiles":{"p1":{"name":"A","color":"teal","mood":"ok",
+                "appearance":{"text_scale":1.0,"high_contrast":false,"reduce_motion":false,"zoom":2}}}}"#,
+        )
+        .unwrap();
+        ProfilesFile::load(&path).unwrap().save(&path).unwrap();
+        let v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["later"], 1);
+        assert_eq!(v["profiles"]["p1"]["mood"], "ok");
+        assert_eq!(v["profiles"]["p1"]["appearance"]["zoom"], 2);
+    }
     #[test]
     fn callers() {
         let d = tempfile::tempdir().unwrap();

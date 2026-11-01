@@ -1138,13 +1138,13 @@ async fn end_guest_session_wipes_now() {
     std::fs::write(root.p("tmp/guest-file"), "x").unwrap();
     std::fs::write(
         root.p("var/lib/hinteros/terms-accepted.json"),
-        r#"{"steam": [{"version": "1", "accepted_at": "2026-10-01T00:00:00Z", "by": "hinteros-guest"},
-                      {"version": "1", "accepted_at": "2026-10-01T00:00:00Z", "by": "hinteros-p1", "profile": "p1"}]}"#,
+        r#"{"version": 1, "accepted": {"steam": [{"version": "1", "accepted_at": "2026-10-01T00:00:00Z", "by": "hinteros-guest"},
+                      {"version": "1", "accepted_at": "2026-10-01T00:00:00Z", "by": "hinteros-p1", "profile": "p1"}]}}"#,
     )
     .unwrap();
     std::fs::write(
         root.p("var/lib/hinteros/usage.json"),
-        r#"{"guest": {"total_bytes": 5, "steam_games_bytes": 0, "at": 1}}"#,
+        r#"{"version": 1, "data": {"guest": {"total_bytes": 5, "steam_games_bytes": 0, "at": 1}}}"#,
     )
     .unwrap();
     // This is a new boot for the service: the boot clean-up must not run before the test.
@@ -1202,10 +1202,10 @@ async fn end_guest_session_wipes_now() {
     );
     let terms: Value =
         serde_json::from_str(&root.read("var/lib/hinteros/terms-accepted.json")).unwrap();
-    assert_eq!(terms["steam"].as_array().unwrap().len(), 1);
-    assert_eq!(terms["steam"][0]["by"], "hinteros-p1");
+    assert_eq!(terms["accepted"]["steam"].as_array().unwrap().len(), 1);
+    assert_eq!(terms["accepted"]["steam"][0]["by"], "hinteros-p1");
     let usage: Value = serde_json::from_str(&root.read("var/lib/hinteros/usage.json")).unwrap();
-    assert!(usage.get("guest").is_none());
+    assert!(usage["data"].get("guest").is_none());
     assert!(!root.p("run/switch.json").exists());
     assert!(!root.p("run/guest-ending").exists());
     assert_eq!(public(root)["guest"]["enabled"], true, "the guest is back");

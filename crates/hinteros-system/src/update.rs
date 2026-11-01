@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use hinteros_api::common::{check_file_version, check_version};
 use hinteros_api::system::{AvailableUpdate, Severity, is_rev};
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde::{Deserialize, Serialize};
@@ -286,17 +287,35 @@ impl std::fmt::Display for Rejection {
     }
 }
 
+/// Format of `channel-tips.json`.
+pub const TIPS_VERSION: u32 = 1;
+
 /// The newest verified tip of each channel branch (`<state-dir>/channel-tips.json`, root only):
-/// `{"<branch>": "<rev>"}`. Only verified revisions go in, and only forward (a revision that
-/// descends from the recorded one), so nothing the update server serves later can lower it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SeenTips(BTreeMap<String, String>);
+/// `{"version": 1, "tips": {"<branch>": "<rev>"}}`. Only verified revisions go in, and only
+/// forward (a revision that descends from the recorded one), so nothing the update server
+/// serves later can lower it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeenTips {
+    version: u32,
+    tips: BTreeMap<String, String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl Default for SeenTips {
+    fn default() -> Self {
+        Self {
+            version: TIPS_VERSION,
+            tips: BTreeMap::new(),
+            extra: BTreeMap::new(),
+        }
+    }
+}
 
 impl SeenTips {
-    /// Read the record; a missing file is an empty record. An unreadable one is too (logged):
-    /// only jobs write it, atomically, so that is damage, and the locked revision's
-    /// fast-forward rule still holds within a channel.
+    /// Read the record; a missing file is an empty record. An unreadable or newer one is too
+    /// (logged): only jobs write it, atomically, so that is damage or a downgrade, and the
+    /// locked revision's fast-forward rule still holds within a channel.
     pub fn load(path: &Path) -> Self {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
@@ -306,9 +325,14 @@ impl SeenTips {
                 return Self::default();
             }
         };
+        if let Err(e) = check_version(path, &bytes, TIPS_VERSION) {
+            tracing::warn!("{e}");
+            return Self::default();
+        }
         match serde_json::from_slice::<SeenTips>(&bytes) {
             Ok(mut s) => {
-                s.0.retain(|b, r| crate::flake::is_branch(b) && is_rev(r));
+                s.tips
+                    .retain(|b, r| crate::flake::is_branch(b) && is_rev(r));
                 s
             }
             Err(e) => {
@@ -318,7 +342,9 @@ impl SeenTips {
         }
     }
 
+    /// Write the record; never over a newer file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        check_file_version(path, TIPS_VERSION)?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -328,7 +354,7 @@ impl SeenTips {
 
     /// The newest verified tip seen on `branch`.
     pub fn get(&self, branch: &str) -> Option<&str> {
-        self.0.get(branch).map(String::as_str)
+        self.tips.get(branch).map(String::as_str)
     }
 
     /// Record `rev` (already verified) as `branch`'s newest tip if it descends from the
@@ -342,7 +368,7 @@ impl SeenTips {
         {
             return Ok(false);
         }
-        self.0.insert(branch.to_owned(), rev.to_owned());
+        self.tips.insert(branch.to_owned(), rev.to_owned());
         Ok(true)
     }
 }
@@ -884,7 +910,7 @@ mod tests {
         let rev = "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5";
         std::fs::write(
             &path,
-            format!(r#"{{"stable":"{rev}","beta":"HEAD","../x":"{rev}"}}"#),
+            format!(r#"{{"version":1,"later":1,"tips":{{"stable":"{rev}","beta":"HEAD","../x":"{rev}"}}}}"#),
         )
         .unwrap();
         let tips = SeenTips::load(&path);
@@ -895,6 +921,22 @@ mod tests {
         assert_eq!(SeenTips::load(&path), SeenTips::default());
     }
 
+    #[test]
+    fn seen_tips_keep_unknown_fields_and_a_newer_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("channel-tips.json");
+        std::fs::write(&path, r#"{"version":1,"later":1,"tips":{}}"#).unwrap();
+        SeenTips::load(&path).save(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["later"], 1);
+        let rev = "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5";
+        let newer = format!(r#"{{"version":2,"tips":{{"stable":"{rev}"}}}}"#);
+        std::fs::write(&path, &newer).unwrap();
+        let tips = SeenTips::load(&path);
+        assert_eq!(tips, SeenTips::default());
+        assert!(tips.save(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+    }
     #[test]
     fn older_than_seen_reason() {
         let e = Rejection::OlderThanSeen.error();

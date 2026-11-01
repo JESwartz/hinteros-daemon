@@ -19,6 +19,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use hinteros_api::common::{check_file_version, check_version};
 use hinteros_api::system::{JellyfinLibrary, LibraryKind, LibraryKindShown};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -180,7 +181,7 @@ pub fn libraries(folders: &[VirtualFolder], media_dir: &Path) -> Vec<JellyfinLib
 
 /// The libraries as Jellyfin last listed them, for `services.list` while Jellyfin restarts.
 pub fn write_cache(files: &Files, folders: &[VirtualFolder]) {
-    if let Ok(bytes) = serde_json::to_vec(folders)
+    if let Ok(bytes) = fsutil::cache_bytes(&folders)
         && let Err(e) = fsutil::write_atomic(&files.libraries_cache(), &bytes, 0o600)
     {
         warn!("cannot cache the Jellyfin libraries: {e}");
@@ -357,7 +358,6 @@ impl Api for Client {
 
 /// One profile's Jellyfin user (`users.json`).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Record {
     pub jellyfin_user_id: String,
     pub name: String,
@@ -365,6 +365,8 @@ pub struct Record {
     /// The access token `jellyfin.client_token` made for device `hinteros-<profile id>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_token: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl std::fmt::Debug for Record {
@@ -376,21 +378,30 @@ impl std::fmt::Debug for Record {
     }
 }
 
+/// Format of `users.json`.
+pub const USERS_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct UsersFile {
     pub version: u32,
     /// Profile id → its user.
     pub users: BTreeMap<String, Record>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl UsersFile {
+    /// Read it (missing: empty). A newer file is an error, and `save` leaves it alone: the
+    /// passwords in it are not to be had again.
     pub fn load(path: &Path) -> io::Result<Self> {
         match std::fs::read(path) {
-            Ok(b) => serde_json::from_slice(&b)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
+            Ok(b) => {
+                check_version(path, &b, USERS_VERSION)?;
+                serde_json::from_slice(&b)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self {
-                version: 1,
+                version: USERS_VERSION,
                 ..Default::default()
             }),
             Err(e) => Err(e),
@@ -398,6 +409,7 @@ impl UsersFile {
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        check_file_version(path, USERS_VERSION)?;
         let mut bytes = serde_json::to_vec_pretty(self)?;
         bytes.push(b'\n');
         fsutil::write_atomic(path, &bytes, 0o600)
@@ -631,6 +643,7 @@ pub fn sync(api: &dyn Api, files: &Files, profiles: &[Profile]) -> Result<Synced
                         name: name.clone(),
                         password,
                         access_token: None,
+                        extra: Default::default(),
                     },
                 );
                 done.created += 1;
@@ -853,7 +866,28 @@ mod tests {
             name: name.into(),
             password: "pw".into(),
             access_token: None,
+            extra: Default::default(),
         }
+    }
+
+    #[test]
+    fn users_file_keeps_unknown_fields_and_refuses_a_newer_one() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("users.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"later":1,"users":{"p1":{"jellyfin_user_id":"a","name":"A","password":"pw","mood":"ok"}}}"#,
+        )
+        .unwrap();
+        UsersFile::load(&path).unwrap().save(&path).unwrap();
+        let v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["later"], 1);
+        assert_eq!(v["users"]["p1"]["mood"], "ok");
+        let newer = r#"{"version":2,"users":{}}"#;
+        std::fs::write(&path, newer).unwrap();
+        assert!(UsersFile::load(&path).is_err());
+        assert!(UsersFile::default().save(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
     }
 
     fn hex(n: u8) -> String {

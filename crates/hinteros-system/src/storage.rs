@@ -23,12 +23,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::fsutil;
 
-/// Format of `storage.json`.
+/// Format of `storage.json`, a cache: any other version is discarded.
 pub const STORED_VERSION: u32 = 1;
 
 /// What the measure job writes and the service reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Stored {
     pub version: u32,
     /// The public view (`storage.get`).

@@ -104,7 +104,7 @@
 //! steam_app_id = 620
 //! ```
 //!
-//! Per-profile apps (M7, state.json schema 2): instead of `[[apps]]`, the `apps` key is a
+//! Per-profile apps (M7): instead of `[[apps]]`, the `apps` key is a
 //! table naming the profile's app env; its manifest (`share/hinteros/apps.json`) holds the
 //! entries (the same keys as `[[apps]]`) and Steam's path:
 //!
@@ -352,7 +352,7 @@ impl Default for GreeterSection {
 /// The `apps` key of session.toml.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum AppsKey {
-    /// `[[apps]]` entries (schema-1 boxes and development).
+    /// `[[apps]]` entries (development).
     List(Vec<AppConfig>),
     /// `[apps] profile = "…"`: the app env (link) whose manifest has the apps; `%u` is the
     /// daemon's user name.

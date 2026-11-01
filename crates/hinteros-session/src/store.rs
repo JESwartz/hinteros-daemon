@@ -1,7 +1,7 @@
 //! The App Store as the launcher sees it (`store.list`, `store_changed`).
 //!
 //! `store.list` merges the running generation's catalog index ([`hinteros_api::catalog`]) with
-//! the installed apps from the system service (`settings.get`, relayed). Installing and
+//! the caller's installed apps from the system service (`apps.list`, relayed). Installing and
 //! removing are the relayed `system.apps.install` / `system.apps.remove`; this module watches
 //! their results and the job events to mark apps `installing`/`removing` and to send
 //! `store_changed`. `more_after_update` comes from the last update check's `new_apps`.
@@ -175,14 +175,9 @@ impl Store {
     }
 
     /// The profile's apps whose vendor terms it has not accepted (`system.apps.list`'s
-    /// `needs_terms` with the catalog's terms). Empty on a schema-1 box; `Err` while the system
-    /// service cannot say.
+    /// `needs_terms` with the catalog's terms). `Err` while the system service cannot say.
     pub async fn needs_terms(&self, relay: &Relay) -> Result<NeedsTerms, ErrorObject> {
-        let list = match relay.call(system::AppsList::NAME, None).await {
-            Ok(l) => l,
-            Err(e) if e.kind() == Some(ErrorCode::Unavailable) => return Ok(NeedsTerms::new()),
-            Err(e) => return Err(e),
-        };
+        let list = relay.call(system::AppsList::NAME, None).await?;
         let ids = strings(&list["needs_terms"]);
         if ids.is_empty() {
             return Ok(NeedsTerms::new());
@@ -270,12 +265,7 @@ impl Store {
     /// `store.list`.
     pub async fn list(&self, relay: &Relay) -> Result<Value, ErrorObject> {
         let index = Index::load(&self.inner.index).map_err(catalog_unavailable)?;
-        let settings = relay.call(system::SettingsGet::NAME, None).await?;
-        // Schema 1: the box-wide apps; schema 2: the caller's own profile's.
-        let installed: Vec<String> = match settings["settings"].get("apps") {
-            Some(apps) => strings(apps),
-            None => strings(&relay.call(system::AppsList::NAME, None).await?["ids"]),
-        };
+        let installed = strings(&relay.call(system::AppsList::NAME, None).await?["ids"]);
         let (installing, removing, more) = {
             let s = self.inner.state.lock().unwrap();
             let mut ins = BTreeSet::new();

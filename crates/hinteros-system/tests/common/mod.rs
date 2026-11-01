@@ -731,15 +731,22 @@ esac
 "#;
 
 pub const STATE: &str = r#"{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "base": "unstable",
+  "stateVersion": "26.11",
   "settings": {
     "ssh": { "enable": false }
   },
-  "apps": ["steam"],
-  "profiles": [{ "id": "p1", "name": "Dev", "user": "hinteros" }]
+  "requirements": [],
+  "services": [],
+  "profiles": [{ "id": "p1" }]
 }
 "#;
+
+/// p1 (the test's own uid) is the admin profile, without a PIN yet.
+pub const PROFILES: &str = r#"{"version": 1, "next": 2, "profiles": {
+  "p1": {"name": "Dev", "color": "teal", "admin": true, "locked": false, "created_at": 0, "last_used_at": null,
+         "appearance": {"text_scale": 1.0, "high_contrast": false, "reduce_motion": false}}}}"#;
 
 /// A few TZif files of tzdata and a `zone1970.tab` naming them (and one without a file).
 pub fn zoneinfo_fixtures() -> PathBuf {
@@ -820,15 +827,16 @@ impl Root {
         )
         .unwrap();
         std::fs::write(r.p("etc/hinteros/state.json"), STATE).unwrap();
+        std::fs::write(r.p("var/lib/hinteros/profiles.json"), PROFILES).unwrap();
         script(&r.p("bin/nix"), FAKE_NIX);
         script(&r.p("mkgen"), MKGEN);
         script(&r.p("bin/nix-env"), FAKE_NIX_ENV);
         script(&r.p("bin/nix-store"), FAKE_NIX_STORE);
-        // The test's own uid is the first account, `hinteros`.
+        // The test's own uid is the first account, `hinteros-p1`.
         std::fs::write(
             r.p("passwd"),
             format!(
-                "hinteros:x:{}:100::{}:/bin/sh\nhinteros-p2:x:20002:100::/nonexistent:/bin/sh\n\
+                "hinteros-p1:x:{}:100::{}:/bin/sh\nhinteros-p2:x:20002:100::/nonexistent:/bin/sh\n\
                  hinteros-guest:x:20000:100::/nonexistent:/bin/sh\n",
                 me(),
                 r.p("home").display()
@@ -838,7 +846,7 @@ impl Root {
         std::fs::write(
             r.p("group"),
             format!(
-                "hinteros:x:990:hinteros,hinteros-p2,hinteros-guest\nhinteros-greeter:x:{gid}:\n\
+                "hinteros:x:990:hinteros-p1,hinteros-p2,hinteros-guest\nhinteros-greeter:x:{gid}:\n\
                  hinteros-keyboard:x:{gid}:\n",
                 gid = rustix::process::getgid().as_raw()
             ),

@@ -164,10 +164,6 @@ pub struct Release {
     pub version: String,
     #[serde(default)]
     pub dev: bool,
-    /// The highest `state.json` schema the generation's `state.nix` reads (M7: 2). Absent:
-    /// 1.
-    #[serde(default, rename = "stateSchema")]
-    pub state_schema: Option<u32>,
 }
 
 impl Release {
@@ -182,7 +178,6 @@ impl Release {
         parsed.unwrap_or(Release {
             version: "unknown".into(),
             dev: false,
-            state_schema: None,
         })
     }
 }

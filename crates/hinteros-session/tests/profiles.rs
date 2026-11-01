@@ -21,12 +21,12 @@ use common::*;
 type Calls = Arc<Mutex<Vec<(String, Value)>>>;
 
 const LIST: &str = r#"{"profiles": [
-  {"id": "p1", "name": "James", "color": "teal", "user": "hinteros", "admin": true, "locked": true,
+  {"id": "p1", "name": "James", "color": "teal", "user": "hinteros-p1", "admin": true, "locked": true,
    "locked_until": null, "active": true, "last_used_at": null, "usage": null, "pin_set": true},
   {"id": "p3", "name": "Sam", "color": "orange", "user": "hinteros-p3", "admin": false, "locked": false,
    "locked_until": null, "active": false, "last_used_at": null, "usage": null, "pin_set": true}],
   "guest": {"enabled": true, "usage": null}, "max": 8, "first_boot": false,
-  "caller": {"id": "p1", "user": "hinteros", "guest": false, "spare": false}}"#;
+  "caller": {"id": "p1", "user": "hinteros-p1", "guest": false, "spare": false}}"#;
 
 /// A fake system service answering the profile methods; records calls; after `profiles.rename`
 /// it sends `profiles_changed`.
@@ -298,7 +298,7 @@ async fn switch_closes_apps_and_never_kills_silently() {
 }
 
 const GUEST_LIST: &str = r#"{"profiles": [
-  {"id": "p1", "name": "James", "color": "teal", "user": "hinteros", "admin": true, "locked": true,
+  {"id": "p1", "name": "James", "color": "teal", "user": "hinteros-p1", "admin": true, "locked": true,
    "locked_until": null, "active": false, "last_used_at": null, "usage": null, "pin_set": true}],
   "guest": {"enabled": true, "usage": null}, "max": 8, "first_boot": false,
   "caller": {"id": null, "user": "hinteros-guest", "guest": true, "spare": false}}"#;

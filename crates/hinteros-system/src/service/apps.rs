@@ -1,7 +1,6 @@
-//! Per-profile apps on schema-2 boxes (system API 0.4, apps.md "Install, remove, rollback"):
+//! Per-profile apps (system API 0.4, apps.md "Install, remove, rollback"):
 //! `apps.list`, `apps.generations`, `apps.install`, `apps.remove`, `apps.rollback`,
-//! `apps.accept_terms`, `apps.clear_data`, the box-feature bookkeeping of system jobs, and queueing the v1 → v2
-//! migration.
+//! `apps.accept_terms`, `apps.clear_data` and the box-feature bookkeeping of system jobs.
 
 use std::collections::BTreeSet;
 
@@ -16,11 +15,11 @@ use tracing::{info, warn};
 
 use super::{Service, internal, job_ref, state_conflict};
 use crate::appreg::{self, Owner, Registry};
-use crate::job::{self, Action, AppsJob, AppsOp, DeleteData, Home, MigrateJob, TermsRecord};
+use crate::job::{self, Action, AppsJob, AppsOp, DeleteData, Home, TermsRecord};
 use crate::peer::Peer;
 use crate::profiles::{self, Caller, ProfilesFile, Role};
 use crate::state::State;
-use crate::{flake, runner, store};
+use crate::{runner, store};
 
 const APPS_ACTION: &str = "org.hinteros.system.apps";
 
@@ -54,20 +53,16 @@ impl Service {
         Ok((caller, owner))
     }
 
-    /// The state an apply flow should write on a schema-2 box: `requirements` = the features
-    /// some env needs (unneeded ones are dropped by jobs that rebuild anyway). `None`: no
-    /// change.
+    /// The state an apply flow should write: `requirements` = the features some env needs
+    /// (unneeded ones are dropped by jobs that rebuild anyway). `None`: no change.
     pub(super) fn requirements_update(&self, state: &State) -> Option<State> {
-        if !state.is_schema2() {
-            return None;
-        }
         let needed: Vec<String> = Registry::scan(&self.paths, state)
             .needed_features()
             .into_iter()
             .collect();
-        (state.requirements() != needed.as_slice()).then(|| {
+        (state.requirements != needed).then(|| {
             let mut s = state.clone();
-            s.requirements = Some(needed);
+            s.requirements = needed;
             s
         })
     }
@@ -75,14 +70,14 @@ impl Service {
     /// The `box` stage's state when `wanted` features are not all on: requirements become every
     /// needed feature plus `wanted`.
     pub(super) fn box_state(&self, state: &State, wanted: &[String]) -> Option<State> {
-        let enabled: BTreeSet<&String> = state.requirements().iter().collect();
+        let enabled: BTreeSet<&String> = state.requirements.iter().collect();
         if wanted.iter().all(|f| enabled.contains(f)) {
             return None;
         }
         let mut needed = Registry::scan(&self.paths, state).needed_features();
         needed.extend(wanted.iter().cloned());
         let mut s = state.clone();
-        s.requirements = Some(needed.into_iter().collect());
+        s.requirements = needed.into_iter().collect();
         Some(s)
     }
 
@@ -111,9 +106,6 @@ impl Service {
 
     pub(super) fn apps_list(&self, peer: &Peer) -> Result<AppsListResult, ErrorObject> {
         let (state, _) = self.load_state()?;
-        if !state.is_schema2() {
-            return Err(profiles::schema1());
-        }
         let caller = self.caller(peer.uid, &state);
         if caller.role == Role::Spare {
             return Ok(AppsListResult {
@@ -144,9 +136,6 @@ impl Service {
         peer: &Peer,
     ) -> Result<AppsGenerationsResult, ErrorObject> {
         let (state, _) = self.load_state()?;
-        if !state.is_schema2() {
-            return Err(profiles::schema1());
-        }
         let (_, owner) = self.app_owner(peer.uid, &state)?;
         Ok(AppsGenerationsResult {
             generations: appreg::generations(&owner, &self.paths)
@@ -166,12 +155,12 @@ impl Service {
         })
     }
 
-    pub(super) async fn apps_install_v2(
+    pub(super) async fn apps_install(
         &self,
         peer: &Peer,
-        state: State,
         p: AppsInstallParams,
     ) -> Result<Value, ErrorObject> {
+        let (state, _) = self.load_state()?;
         let (caller, owner) = self.app_owner(peer.uid, &state)?;
         let cur = appreg::current(&owner, &self.paths);
         if p.revision != appreg::revision(cur.as_ref()) {
@@ -226,12 +215,12 @@ impl Service {
         job_ref(Some(id))
     }
 
-    pub(super) async fn apps_remove_v2(
+    pub(super) async fn apps_remove(
         &self,
         peer: &Peer,
-        state: State,
         p: AppsRemoveParams,
     ) -> Result<Value, ErrorObject> {
+        let (state, _) = self.load_state()?;
         let (caller, owner) = self.app_owner(peer.uid, &state)?;
         let cur = appreg::current(&owner, &self.paths);
         if p.revision != appreg::revision(cur.as_ref()) {
@@ -311,9 +300,6 @@ impl Service {
         p: AppsClearDataParams,
     ) -> Result<Value, ErrorObject> {
         let (state, _) = self.load_state()?;
-        if !state.is_schema2() {
-            return Err(profiles::schema1());
-        }
         let (caller, owner) = self.app_owner(peer.uid, &state)?;
         let index = self.catalog()?;
         if index.app(&p.id).is_none() {
@@ -346,9 +332,6 @@ impl Service {
         p: AppsRollbackParams,
     ) -> Result<Value, ErrorObject> {
         let (state, _) = self.load_state()?;
-        if !state.is_schema2() {
-            return Err(profiles::schema1());
-        }
         let (_, owner) = self.app_owner(peer.uid, &state)?;
         let gens = appreg::generations(&owner, &self.paths);
         let target = gens
@@ -402,9 +385,6 @@ impl Service {
         p: AppsAcceptTermsParams,
     ) -> Result<Value, ErrorObject> {
         let (state, _) = self.load_state()?;
-        if !state.is_schema2() {
-            return Err(profiles::schema1());
-        }
         let (caller, owner) = self.app_owner(peer.uid, &state)?;
         let ids = appreg::current(&owner, &self.paths)
             .map(|c| c.manifest.ids)
@@ -456,112 +436,13 @@ impl Service {
         serde_json::to_value(Empty {}).map_err(internal)
     }
 
-    /// Every id some owner has (schema 2), else schema 1's box-wide apps.
+    /// Every id some owner has.
     pub(super) fn installed_anywhere(&self, state: &State) -> Vec<String> {
-        if !state.is_schema2() {
-            return state.apps().to_vec();
-        }
         appreg::normalize(
             Registry::scan(&self.paths, state)
                 .owners
                 .into_values()
                 .flat_map(|o| o.ids),
         )
-    }
-
-    /// At start and every few seconds: a schema-1 box on a generation that reads schema 2
-    /// migrates (once per boot; it waits for any running job).
-    pub(super) async fn maybe_migrate(&self) {
-        let marker = self.paths.migrate_marker();
-        if marker.exists() || self.jobs.lock().unwrap().busy().is_some() {
-            return;
-        }
-        let Ok((state, _)) = State::load(&self.paths.state_json()) else {
-            return;
-        };
-        if state.is_schema2() {
-            return;
-        }
-        let release = flake::Release::load(&self.policy_dir());
-        if release.state_schema.unwrap_or(1) < 2 {
-            return;
-        }
-        // profiles.json first (no job needed): p1 is the admin profile, without a PIN yet.
-        let pf = self.paths.profiles_json();
-        if !pf.exists() {
-            let file = profiles::migrated_file(&state, job::now());
-            match file.save(&pf) {
-                Ok(()) => {
-                    info!("profiles.json created: p1 is the admin profile");
-                    // The public view at once: no longer first boot, while the job runs.
-                    self.profiles_changed();
-                }
-                Err(e) => warn!("cannot write {}: {e}", pf.display()),
-            }
-        }
-        let _ = std::fs::write(&marker, b"");
-        let index = self.catalog().ok();
-        let ids: Vec<String> = appreg::normalize(
-            state
-                .apps()
-                .iter()
-                .filter(|id| index.as_ref().is_none_or(|i| i.app(id).is_some()))
-                .cloned(),
-        );
-        let owners: Vec<Owner> = state
-            .accounts()
-            .into_iter()
-            .map(|a| Owner::Profile {
-                id: a.id,
-                user: a.user,
-            })
-            .collect();
-        // Acceptances of the migrated apps' current terms count for the accounts.
-        let accepted = runner::accepted_terms(&self.paths.terms_accepted());
-        let now = job::now();
-        let mut terms = Vec::new();
-        if let Some(index) = &index {
-            for id in &ids {
-                let Some(t) = index.app(id).and_then(|e| e.terms.as_ref()) else {
-                    continue;
-                };
-                if accepted
-                    .iter()
-                    .any(|(a, v, _, _)| a == id && *v == t.version)
-                {
-                    for o in &owners {
-                        if let Owner::Profile { id: pid, user } = o {
-                            terms.push(TermsRecord {
-                                id: id.clone(),
-                                version: t.version.clone(),
-                                accepted_at: now,
-                                by: user.clone(),
-                                profile: Some(pid.clone()),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        let subject = JobSubject {
-            apps: Some(self.subject_apps(&ids)),
-            ..Default::default()
-        };
-        let spec = self
-            .spec(
-                JobKind::MigrateApps,
-                0,
-                Action::MigrateApps(MigrateJob {
-                    ids,
-                    owners,
-                    from: state,
-                    terms,
-                }),
-            )
-            .about(subject);
-        match self.start(spec).await {
-            Ok(id) => info!(job = %id, "migrating to per-profile apps (state.json schema 2)"),
-            Err(e) => warn!("cannot start the migration: {}", e.message),
-        }
     }
 }

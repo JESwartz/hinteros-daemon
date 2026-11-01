@@ -580,7 +580,7 @@ mod tests {
         fs::create_dir_all(d.join("run")).unwrap();
         fs::write(
             d.join("etc/state.json"),
-            r#"{"schemaVersion":1,"settings":{"ssh":{"enable":true}}}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"}],"settings":{"ssh":{"enable":true}}}"#,
         )
         .unwrap();
         p
@@ -657,11 +657,10 @@ mod tests {
     #[test]
     fn the_live_zone_survives_a_job() {
         let d = tempfile::tempdir().unwrap();
-        let base = r#"{"schemaVersion":1,"settings":{"ssh":{"enable":true}}}"#;
+        let base = r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"}],"settings":{"ssh":{"enable":true}}}"#;
         let live = d.path().join("live.json");
         let staged = d.path().join("staged.json");
-        let with_zone =
-            r#"{"schemaVersion":1,"settings":{"ssh":{"enable":true},"timeZone":"Asia/Tokyo"}}"#;
+        let with_zone = r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"}],"settings":{"ssh":{"enable":true},"timeZone":"Asia/Tokyo"}}"#;
         fs::write(&live, with_zone).unwrap();
         fs::write(&staged, base).unwrap();
         assert!(carry_live_zone(&live, &staged).unwrap());

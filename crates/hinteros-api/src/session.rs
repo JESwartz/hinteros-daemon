@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 20);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 21);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/session-api.json");
@@ -1589,7 +1589,7 @@ pub struct ProfileCurrentResult {
     /// A spare account in first-boot mode: the launcher runs the first-boot wizard, which
     /// creates the admin profile (`system.profiles.setup_admin`).
     pub setup_required: bool,
-    /// false: a migrated profile without a PIN yet ("Set your PIN").
+    /// false: a profile without a PIN yet ("Set your PIN").
     pub pin_set: bool,
     /// The sleep lock is up right now.
     pub screen_locked: bool,

@@ -313,11 +313,8 @@ impl Service {
     }
 
     fn service_enabled(&self, id: &str) -> bool {
-        self.load_state().is_ok_and(|(s, _)| {
-            s.services
-                .as_ref()
-                .is_some_and(|v| v.iter().any(|i| i == id))
-        })
+        self.load_state()
+            .is_ok_and(|(s, _)| s.services.iter().any(|i| i == id))
     }
 
     /// A unit's `ActiveState` (`inactive` when not loaded; `None` without systemd).
@@ -335,7 +332,7 @@ impl Service {
 
     pub(super) async fn services_list(&self) -> Result<ServicesListResult, ErrorObject> {
         let (state, revision) = self.load_state()?;
-        let enabled: Vec<String> = state.services.clone().unwrap_or_default();
+        let enabled = state.services.clone();
         let index: Option<Index> = self.catalog().ok();
         let mut ids: Vec<String> = index
             .iter()
@@ -453,16 +450,13 @@ impl Service {
         &self,
         peer: &Peer,
     ) -> Result<JellyfinClientTokenResult, ErrorObject> {
-        let (state, _) = self.require_schema2()?;
+        let (state, _) = self.load_state()?;
         let caller = self.caller(peer.uid, &state);
         let id = match (caller.role, caller.id) {
             (crate::profiles::Role::Profile, Some(id)) => id,
             _ => return Err(crate::profiles::not_a_profile(SERVICES_ACTION)),
         };
-        let on = state
-            .services
-            .as_ref()
-            .is_some_and(|v| v.iter().any(|i| i == jellyfin::ID));
+        let on = state.services.iter().any(|i| i == jellyfin::ID);
         self.jellyfin_ready(on)?;
         let paths = self.paths.clone();
         let profile = id.clone();
@@ -499,14 +493,9 @@ impl Service {
     ) -> Result<Value, ErrorObject> {
         let uid = peer.uid;
         let method = r.method();
-        let (state, revision) = self.require_schema2()?;
+        let (state, revision) = self.load_state()?;
         self.check_box_admin(uid, method, Some(r.pin())).await?;
-        let on = |id: &str| {
-            state
-                .services
-                .as_ref()
-                .is_some_and(|v| v.iter().any(|i| i == id))
-        };
+        let on = |id: &str| state.services.iter().any(|i| i == id);
         match r {
             ServersRequest::Enable(p) => {
                 if p.revision != revision {
@@ -575,9 +564,7 @@ impl Service {
                 }
                 self.preflight()?;
                 let mut next = state.clone();
-                next.services
-                    .get_or_insert_with(Vec::new)
-                    .extend(new.iter().cloned());
+                next.services.extend(new.iter().cloned());
                 let next = self.requirements_update(&next).unwrap_or(next);
                 let spec = self
                     .spec(
@@ -645,9 +632,7 @@ impl Service {
                 }
                 self.preflight()?;
                 let mut next = state.clone();
-                if let Some(v) = next.services.as_mut() {
-                    v.retain(|i| !p.ids.contains(i));
-                }
+                next.services.retain(|i| !p.ids.contains(i));
                 let next = self.requirements_update(&next).unwrap_or(next);
                 let names = match &index {
                     Some(i) => self.subject_services(i, &p.ids),

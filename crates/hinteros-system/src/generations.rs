@@ -65,7 +65,7 @@ pub fn current_generation(profile: &Path) -> Option<u32> {
 }
 
 /// `generations.list`. `profiles_json` gives the profiles' current names; `needed`, the box
-/// features the profiles' apps need now (schema 2), gives `readds_features`.
+/// features the profiles' apps need now, gives `readds_features`.
 pub fn list(
     profile: &Path,
     current_system: &Path,
@@ -90,10 +90,10 @@ pub fn list(
                 .and_then(|t| State::load(&t.join("hinteros/state.json")).ok())
                 .map(|(s, _)| s);
             let readds_features = needed
-                .zip(state.as_ref().filter(|s| s.is_schema2()))
+                .zip(state.as_ref())
                 .map(|(n, s)| {
                     n.iter()
-                        .filter(|f| !s.requirements().contains(f))
+                        .filter(|f| !s.requirements.contains(f))
                         .cloned()
                         .collect::<Vec<_>>()
                 })
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(current_generation(&profile), Some(2));
         std::fs::write(
             d.join("store/gen2/hinteros/state.json"),
-            r#"{"schemaVersion":2,"base":"stable","settings":{"ssh":{"enable":false}},"requirements":[],"services":[],"profiles":[{"id":"p1","user":"hinteros"},{"id":"p2","user":"hinteros-p2"}]}"#,
+            r#"{"schemaVersion":2,"base":"stable","stateVersion":"26.11","settings":{"ssh":{"enable":false}},"requirements":[],"services":[],"profiles":[{"id":"p1"},{"id":"p2"}]}"#,
         )
         .unwrap();
         std::fs::write(

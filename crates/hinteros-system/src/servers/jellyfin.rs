@@ -807,11 +807,8 @@ pub fn profiles(paths: &crate::config::Paths) -> Vec<Profile> {
 
 /// Jellyfin is on in `state.json`.
 pub fn enabled(paths: &crate::config::Paths) -> bool {
-    crate::state::State::load(&paths.state_json()).is_ok_and(|(s, _)| {
-        s.services
-            .as_ref()
-            .is_some_and(|v| v.iter().any(|i| i == ID))
-    })
+    crate::state::State::load(&paths.state_json())
+        .is_ok_and(|(s, _)| s.services.iter().any(|i| i == ID))
 }
 
 /// A sync when Jellyfin is on and set up; failures are logged only (best effort: after profile

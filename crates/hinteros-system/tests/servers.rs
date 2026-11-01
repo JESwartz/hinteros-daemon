@@ -20,10 +20,11 @@ use common::*;
 const STATE2: &str = r#"{
   "schemaVersion": 2,
   "base": "unstable",
+  "stateVersion": "26.11",
   "settings": { "ssh": { "enable": false }, "admin": { "user": "admin" } },
   "requirements": [],
   "services": [],
-  "profiles": [{ "id": "p1", "user": "hinteros" }]
+  "profiles": [{ "id": "p1" }]
 }
 "#;
 
@@ -370,7 +371,7 @@ fn root() -> Root {
     )
     .unwrap();
     std::fs::create_dir_all(root.p("nixprofiles/apps")).unwrap();
-    for link in ["nixprofiles/starter", "nixprofiles/apps/hinteros"] {
+    for link in ["nixprofiles/starter", "nixprofiles/apps/hinteros-p1"] {
         std::os::unix::fs::symlink(&env, root.p(link)).unwrap();
     }
     std::fs::create_dir_all(root.p("proc/net")).unwrap();

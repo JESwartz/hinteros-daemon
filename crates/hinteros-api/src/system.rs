@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::common::{Hello, Ping};
 use crate::{ApiInfo, ApiVersion, ErrorCode, ErrorObject, Event, EventInfo, Method, MethodInfo};
 
-pub const VERSION: ApiVersion = ApiVersion::new(0, 11);
+pub const VERSION: ApiVersion = ApiVersion::new(0, 12);
 
 /// The schema document this module implements.
 pub const SCHEMA: &str = include_str!("../../../schema/system-api.json");
@@ -94,8 +94,6 @@ pub enum JobKind {
     AppsRollback,
     /// 0.4: a new starter env.
     StarterSet,
-    /// 0.4: the one-time move from box-wide apps (state.json schema 1) to per-profile apps.
-    MigrateApps,
     /// 0.4: a new account (a rebuild).
     ProfilesCreate,
     /// 0.4: an account and its home removed (a rebuild).
@@ -151,7 +149,6 @@ impl JobKind {
         JobKind::AppsRemove,
         JobKind::AppsRollback,
         JobKind::StarterSet,
-        JobKind::MigrateApps,
         JobKind::ProfilesCreate,
         JobKind::ProfilesRemove,
         JobKind::GuestSet,
@@ -383,13 +380,8 @@ pub struct SshSettings {
 pub struct Settings {
     pub base: Base,
     pub ssh: SshSettings,
-    /// Schema-1 boxes: catalog app ids installed box-wide from the Store (`state.json` `apps`),
-    /// in install order. Absent on schema-2 boxes (0.4: apps are per profile, `apps.list`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub apps: Option<Vec<String>>,
-    /// Schema-2 boxes (0.4): the box features that are on (read-only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requirements: Option<Vec<String>>,
+    /// 0.4: the box features that are on (read-only).
+    pub requirements: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,7 +486,7 @@ impl Method for Rebuild {
 
 /// 0.5: the admin profile's PIN guards the box-wide actions (`hardware.redetect`, `rollback`,
 /// `update.apply`, `channel.set`, `base.set`): `pin_required {pin: admin}` without it or when it is wrong, on a
-/// schema-2 box whose caller is not root.
+/// caller that is not root.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HardwareRedetectParams {
@@ -737,7 +729,7 @@ impl Method for AppsRemove {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppsListResult {
     /// Stands for the caller's current app generation (64 hex); `apps.install`/`apps.remove`
-    /// take it as `revision` on schema-2 boxes.
+    /// take it as `revision`.
     pub revision: String,
     /// The Nix profile generation (null: no apps yet, or the guest's single link).
     #[serde(deserialize_with = "nullable")]
@@ -869,7 +861,7 @@ pub struct ProfileInfo {
     pub last_used_at: Option<i64>,
     #[serde(deserialize_with = "nullable")]
     pub usage: Option<ProfileUsage>,
-    /// false: a migrated profile without a PIN yet ("Set your PIN").
+    /// false: a profile without a PIN yet ("Set your PIN").
     pub pin_set: bool,
 }
 
@@ -2255,7 +2247,7 @@ pub struct JobSubject {
     /// The profile the job is for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<SubjectProfile>,
-    /// Apps installed (the new ones), removed, the new starter set or the migrated apps.
+    /// Apps installed (the new ones), removed or the new starter set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apps: Option<Vec<CatalogApp>>,
     /// Apps remove: their data is deleted too.

@@ -72,7 +72,7 @@ fn public(dir: &Path, next: Value) {
     std::fs::write(
         dir.join("public.json"),
         json!({"version": 1, "profiles": [
-            {"id": "p1", "user": "hinteros", "name": "James", "color": "teal", "locked": false, "admin": true, "locked_until": null},
+            {"id": "p1", "user": "hinteros-p1", "name": "James", "color": "teal", "locked": false, "admin": true, "locked_until": null},
             {"id": "p3", "user": "hinteros-p3", "name": "Sam", "color": "orange", "locked": true, "admin": false, "locked_until": null}],
           "guest": {"enabled": true, "user": "hinteros-guest"}, "first_boot": false, "spare": null,
           "last_used": "p3", "next": next,
@@ -234,7 +234,7 @@ fn greet_takes_the_fast_path_or_runs_the_picker() {
         log.lock()
             .unwrap()
             .iter()
-            .any(|r| r["type"] == "create_session" && r["username"] == "hinteros")
+            .any(|r| r["type"] == "create_session" && r["username"] == "hinteros-p1")
     );
     // The guest: no PIN ever, the fast path.
     public(

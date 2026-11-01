@@ -827,7 +827,7 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.11 (0.11: the Server section, see "Server section" below; 0.10: a build's own percent, `building.percent`, see "Job progress" below, and `lan_filter.set`/`lan_filter.clear`, see "Local network filter" below; 0.9: `keyboard_home`, see "Keyboard Home" below; channel switches to a verified, confirmed revision, see "Channel switches" below, and the admin PIN is refused until a reboot after 10 wrong tries, `pin_required {reboot_required}`, see "Admin PIN limit" below; 0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
+`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 0.12 (0.12: `state.json` is schema 2 only, see "state.json" below; 0.11: the Server section, see "Server section" below; 0.10: a build's own percent, `building.percent`, see "Job progress" below, and `lan_filter.set`/`lan_filter.clear`, see "Local network filter" below; 0.9: `keyboard_home`, see "Keyboard Home" below; channel switches to a verified, confirmed revision, see "Channel switches" below, and the admin PIN is refused until a reboot after 10 wrong tries, `pin_required {reboot_required}`, see "Admin PIN limit" below; 0.8: the time zone, see "Time zone" below; 0.7: job progress and what a job is about, see "Job progress" below; 0.6: storage and clean-up, see "Storage and clean-up" below; 0.4: profiles and per-profile apps; 0.5: the admin PIN for
 box-wide actions, `guest.end`, rollback re-adds box features; see "Profiles and per-profile apps" below)
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
@@ -975,8 +975,7 @@ Ctrl + Super + D (see "Keyboard Home"; the `hinteros-keyboard` unit's `ExecStart
 
 `hinteros-system check-state FILE...` parses each file with the same `State::parse` the service
 uses, without starting the service (no root, sockets or D-Bus). It prints `ok <file>` or
-`invalid <file>: <reason>` per file (an unknown field says "daemon and system repo are out of
-sync"). Exit status: 0 if all files are valid, 1 if any is invalid, 2 for usage errors or a file
+`invalid <file>: <reason>` per file. Exit status: 0 if all files are valid, 1 if any is invalid, 2 for usage errors or a file
 that cannot be read (that file is reported as `invalid <file>: reading: ...`). The system repo
 runs it in a Nix check over every state.json the installer can write.
 
@@ -1302,7 +1301,7 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   `/run/hinteros/apps/<user>` → the profile's Nix profile at start and after every job.
   `/run/hinteros/apps` is 0750 root:hinteros, not the 0755 of the M7 design (D4): every
   session account is in `hinteros`, and other users cannot list who has which apps. Whoever
-  publishes (a job runs as root:root: the migration is the first to publish on a schema-1 box)
+  publishes (a job runs as root:root)
   sets that mode and the group of `/run/hinteros` (the service's runtime directory). An env
   is built by `config.hinteros.appEnv.build ids` of `/etc/hinteros` (`nix eval --impure --json
   --expr` over a list of id lists, all of a job's envs in one evaluation, then `nix build
@@ -1314,8 +1313,7 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   `apps.install`/`apps.remove` on the caller's own profile (the profile's `revision` from
   `apps.list`; `delete_data` only in the caller's home), `apps.rollback {generation}`,
   `apps.accept_terms {id, version}` (records `{version, accepted_at, by, profile}`). A spare
-  account, root or the admin account gets `permission_denied {reason: profile}`; schema 1 gets
-  `unavailable {service: profiles, reason: schema1}` for the new methods.
+  account, root or the admin account gets `permission_denied {reason: profile}`.
 - **Box features**: an install or rollback whose apps need a feature that is off runs the `box`
   stage first (the apply flow with `requirements` = every needed feature plus the new ones).
   Every other job that rebuilds the system writes `requirements` = what the owners' envs need,
@@ -1326,13 +1324,6 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   the restored generation lacks are turned back on in a `box` stage (the apply flow on the restored
   configuration with `requirements` = what the envs need; a new generation). The result lists
   them in `features_readded`; `generations.list` entries name them beforehand (`readds_features`).
-- **v1 → v2** (`service/apps.rs` `maybe_migrate`, `runner/apps.rs` `migrate`): on a schema-1 box
-  whose running generation's `release.json` says `"stateSchema": 2`, the service creates
-  `profiles.json` (p1: the admin profile, name from schema 1 or "Profile 1", unlocked, no PIN)
-  and queues `migrate_apps` once per boot (`/run/hinteros/migrate-attempted`): one env for the
-  box-wide apps (tombstones dropped) for every account and the starter set, `starter.json`, the
-  terms of migrated apps copied to the accounts, then `state.json` schema 2 through the apply
-  flow. Idempotent (envs already set are not set again) and resumable; a failure leaves schema 1.
 
 ### Profiles, PINs, greeter (system service)
 
@@ -1362,9 +1353,9 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   without it, then deletes the home with `datadel`'s no-symlink walk, the PIN, the metadata and the
   app links. Profiles (and the guest) without an env get the starter env while the box is idle.
 - **Admin PIN for box-wide actions** (0.5): `rollback`, `update.apply`, `channel.set`, `base.set`
-  and `hardware.redetect` take `admin_pin`; on a schema-2 box it is checked first (`pin_required
+  and `hardware.redetect` take `admin_pin`; it is checked first (`pin_required
   {pin: admin}` when missing or wrong, or without an admin profile), from every profile, the
-  guest included (installing a system update always needs it). Not on schema 1, not for root; an
+  guest included (installing a system update always needs it). Not for root; an
   admin profile without a PIN yet passes. `update.check` stays open.
 - **End guest session** (0.5, `guest.rs`, `runner/profiles.rs`): `guest.end` (the guest only;
   job `guest_end`) checks the account (`hinteros-guest`, `--guest-uid` 20000, the uid maps back to
@@ -1438,7 +1429,7 @@ profile, the guest too), `system.channel.set`, `system.base.set` and `system.har
 "wiped now" for End guest session; show `readds_features` on the rollback screen. Everything of 0.10 stays. New: the methods and events above (schema:
 `schema/session-api.json`), all `system.*` profile, apps and starter-set relays; the first-boot
 wizard when `profile.current.setup_required`; "Set your PIN" when `!pin_set`; the terms dialog
-for `apps.list` entries with `needs_terms`; on schema-2 boxes pass `system.apps.list`'s
+for `apps.list` entries with `needs_terms`; pass `system.apps.list`'s
 `revision` to `system.apps.install/remove`.
 
 ## Storage and clean-up (system API 0.6, session API 0.14)
@@ -1478,7 +1469,7 @@ Design: `hinteros-docs/design/storage.md`. Every method below is relayed as `sys
   `finishing`. Result `{freed_bytes, generations_removed}` (free space after − before).
 - `storage.cleanup_profiles {keep, admin_pin?}` (job `cleanup_profiles`): the same over every
   profile's app Nix profile and the starter set's (never the current generation; the guest's
-  single link untouched), then GC. Schema 1: `unavailable {reason: schema1}`.
+  single link untouched), then GC.
 - Both serialise with the system's `nix-gc.service` through Nix's own GC and profile locks.
 
 ### Automatic clean-up setting
@@ -1576,10 +1567,9 @@ whole new `subject`, which `jobs.get` and `job_finished` keep). Fields, each opt
 | `base` | `base`, `from_base` |
 | `rollback` | `generation`, `from_generation` |
 | `apps_install` | `owner`, `profile` (a profile), `apps` (only the new ones); the automatic starter env of a new profile or the guest (uid 0): `owner`, `profile`?, `from_owner: starter` |
-| `apps_remove` | `owner`, `profile`?, `apps`, `delete_data` (schema 1: `apps`, `delete_data`) |
+| `apps_remove` | `owner`, `profile`?, `apps`, `delete_data` |
 | `apps_rollback` | `owner`, `profile`?, `generation`, `from_generation` |
 | `starter_set` | `owner: starter`, `apps` (the whole new set) |
-| `migrate_apps` | `apps` |
 | `profiles_create`, `profiles_remove` | `profile` |
 | `guest_end` | `owner: guest` |
 | `cleanup_system`, `cleanup_profiles` | `keep` |
@@ -1944,7 +1934,7 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   when the service has no loopback socket (the system repo allows `AF_INET` only while Jellyfin,
   Plex or Cloudflare is on) the fields fall back to false/null/cache.
 - **`services.enable {ids, pin, revision, accepted_terms?}` / `services.disable {ids, pin,
-  revision, delete_data}`** (jobs `services_enable`, `services_disable`): admin PIN, schema 2,
+  revision, delete_data}`** (jobs `services_enable`, `services_disable`): admin PIN,
   `state.json` `services` through the apply flow. Plex's terms as for apps (recorded by the
   caller's user with the admin profile's id). `delete_data`, after the switch: each `stateDirs`
   entry below `/var/lib`, for Jellyfin also `/var/cache/jellyfin` and
@@ -2120,6 +2110,26 @@ Hello with 0.20. Controller page: `input.settings.get`, edit the stored form, se
 with `input.settings.set`; press to assign with `input.capture` and `input_captured` (when the
 pressed button already has another action, swap the two); "Reset to defaults" sends `{}` (or
 drops one part).
+
+## state.json (system API 0.12, session API 0.21)
+
+`schemaVersion` is 2, the only value read or written; any other is an error that names what is
+supported. Required: `schemaVersion`, `base`, `stateVersion`, `requirements`, `services`,
+`profiles`. `profiles[]` is `{id}`: the user is `hinteros-<id>` (`hinteros-p1` too) and the uid
+20000 + N; the group stays `hinteros`.
+
+Unknown fields load, at every level, and are written back after the known ones, sorted: a box
+that switches to an older channel still has to read the newer file. A change that is not safe
+to ignore bumps `schemaVersion`. Bad values of known fields are errors. `check-state` follows.
+
+`base.set` to a base that is not built (`state::BUILT_BASES`, `unstable` only) is refused with
+`unavailable {service: base, reason: not_built}`, before the downgrade check.
+
+### What the launcher must do
+
+Hello with session API 0.21. `system.settings.get`: no `settings.apps`; `settings.requirements`
+is always there. `migrate_apps` is gone from `JobKind`. The `unavailable` `service` value
+`profiles` is gone (`base` takes its place). Profile users are `hinteros-p<N>` for p1 too.
 
 ## Development
 

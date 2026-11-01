@@ -99,7 +99,7 @@ impl Service {
         p: TimeZoneSetParams,
     ) -> Result<Value, ErrorObject> {
         let (state, _) = self.load_state()?;
-        let first_boot = state.is_schema2() && self.profiles_file().first_boot(&state);
+        let first_boot = self.profiles_file().first_boot(&state);
         if !first_boot {
             self.check_box_admin(peer.uid, system::TimeZoneSet::NAME, p.admin_pin.as_deref())
                 .await?;

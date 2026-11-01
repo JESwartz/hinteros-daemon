@@ -932,8 +932,8 @@ mod tests {
         let public = d.path().join("profiles-public.json");
         std::fs::write(
             &state,
-            r#"{"schemaVersion":2,"requirements":[],"services":[],"settings":{},
-               "profiles":[{"id":"p1","user":"hinteros"},{"id":"p2","user":"hinteros-p2"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"settings":{},
+               "profiles":[{"id":"p1"},{"id":"p2"}]}"#,
         )
         .unwrap();
         std::fs::write(
@@ -945,7 +945,7 @@ mod tests {
         .unwrap();
         let who = |user: &str, now: i64| identity_for(&state, &profiles, &public, user, now);
         let name = |user: &str, now: i64| who(user, now).map(|i| i.name);
-        let james = who("hinteros", 0).unwrap();
+        let james = who("hinteros-p1", 0).unwrap();
         assert_eq!(
             (james.name.as_str(), james.color.as_deref(), james.guest),
             ("James", Some("teal"), false)
@@ -959,7 +959,7 @@ mod tests {
         // A fast switch to James or the guest: the greeter already says "Loading James…".
         let view = |target: &str, fast: bool| {
             format!(
-                r#"{{"version":1,"profiles":[{{"id":"p1","user":"hinteros","name":"James","color":"teal",
+                r#"{{"version":1,"profiles":[{{"id":"p1","user":"hinteros-p1","name":"James","color":"teal",
                    "locked":true,"admin":true,"locked_until":null}}],
                    "guest":{{"enabled":true,"user":"hinteros-guest"}},"first_boot":false,"spare":null,
                    "last_used":"p1","next":{{"target":"{target}","fast":{fast},"expires":100}},

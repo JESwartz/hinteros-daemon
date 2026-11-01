@@ -548,10 +548,6 @@ impl Paths {
     pub fn switch_json(&self) -> PathBuf {
         self.run_dir.join("switch.json")
     }
-    /// Created once the service queued the v1 → v2 migration this boot.
-    pub fn migrate_marker(&self) -> PathBuf {
-        self.run_dir.join("migrate-attempted")
-    }
     pub fn jobs_dir(&self) -> PathBuf {
         self.run_dir.join("jobs")
     }

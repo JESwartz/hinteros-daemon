@@ -1,7 +1,7 @@
 {
   "$schema": "./api-doc.schema.json",
   "api": "system",
-  "version": "0.11",
+  "version": "0.12",
   "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. The lan_filter methods (0.10) are the session daemon's own (not relayed): they only restrict the caller's processes, so they need no seat or polkit check, but are rate limited and audited. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md.",
   "transport": {
     "protocol": "jsonrpc-2.0",
@@ -36,16 +36,16 @@
       "examples": [
         {
           "name": "accepted",
-          "params": { "api_version": "0.11", "client": { "name": "hinteros-session", "version": "0.1.0" } },
-          "result": { "api_version": "0.11", "server": { "name": "hinteros-system", "version": "0.1.0" } }
+          "params": { "api_version": "0.12", "client": { "name": "hinteros-session", "version": "0.1.0" } },
+          "result": { "api_version": "0.12", "server": { "name": "hinteros-system", "version": "0.1.0" } }
         },
         {
           "name": "mismatch",
           "params": { "api_version": "0.1", "client": { "name": "hinteros-session", "version": "0.0.9" } },
           "error": {
             "code": 1002,
-            "message": "API version mismatch: client 0.1, server 0.11",
-            "data": { "client_api_version": "0.1", "server_api_version": "0.11" }
+            "message": "API version mismatch: client 0.1, server 0.12",
+            "data": { "client_api_version": "0.1", "server_api_version": "0.12" }
           }
         }
       ]
@@ -150,17 +150,12 @@
           "revision": { "$ref": "#/$defs/Revision" },
           "settings": {
             "type": "object",
-            "required": ["base", "ssh"],
+            "required": ["base", "ssh", "requirements"],
             "additionalProperties": false,
             "properties": {
               "base": { "$ref": "#/$defs/Base" },
-              "apps": {
-                "description": "Schema-1 boxes: catalog app ids installed box-wide from the Store (state.json apps), in install order (since 0.3). Absent on schema-2 boxes (0.4: apps are per profile, see apps.list).",
-                "type": "array",
-                "items": { "$ref": "#/$defs/CatalogId" }
-              },
               "requirements": {
-                "description": "Schema-2 boxes (0.4): the box features that are on (read-only).",
+                "description": "0.4: the box features that are on (read-only).",
                 "type": "array",
                 "items": { "$ref": "#/$defs/BoxFeature" }
               },
@@ -181,7 +176,7 @@
           "params": {},
           "result": {
             "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
-            "settings": { "base": "unstable", "ssh": { "enabled": false }, "apps": ["steam"] }
+            "settings": { "base": "unstable", "ssh": { "enabled": false }, "requirements": [] }
           }
         }
       ]
@@ -291,7 +286,7 @@
     },
     "hardware.redetect": {
       "summary": "Regenerate facter.json with nixos-facter and apply it (job). Action org.hinteros.system.rebuild.",
-      "description": "On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root.",
+      "description": "The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root.",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -307,7 +302,7 @@
     },
     "rollback": {
       "summary": "Switch to an earlier generation (default: the one before the current), then restore /etc/hinteros from its snapshot (job). Action org.hinteros.system.rollback.",
-      "description": "On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root. After the switch and the apps stage (schema 2), box features that the owners' current app envs need and the restored generation lacks are turned back on in a box stage: the apply flow on the restored configuration with requirements = what the envs need (a second, mostly cached build; a new generation). The result then lists them in features_readded; generations.list names them beforehand per generation (readds_features). If that build fails the job fails at stage box (the rollback itself stays).",
+      "description": "The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root. After the switch and the apps stage, box features that the owners' current app envs need and the restored generation lacks are turned back on in a box stage: the apply flow on the restored configuration with requirements = what the envs need (a second, mostly cached build; a new generation). The result then lists them in features_readded; generations.list names them beforehand per generation (readds_features). If that build fails the job fails at stage box (the rollback itself stays).",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -368,7 +363,7 @@
     },
     "update.apply": {
       "summary": "Install the revision found by the last update.check (job). Action org.hinteros.system.update.apply.",
-      "description": "rev must equal the last verified check result's available.rev for the current channel and locked revision, else state_conflict. The job re-verifies it, locks the hinteros input to ?rev=<rev> (never re-fetching the branch) and runs the apply flow. On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin, from every profile (the guest's included): pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet; an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root. The PIN is checked before rev is compared with the last check. update.check needs no PIN.",
+      "description": "rev must equal the last verified check result's available.rev for the current channel and locked revision, else state_conflict. The job re-verifies it, locks the hinteros input to ?rev=<rev> (never re-fetching the branch) and runs the apply flow. The admin profile's PIN is needed in admin_pin, from every profile (the guest's included): pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet; an admin profile without a PIN yet passes. Not needed from root. The PIN is checked before rev is compared with the last check. update.check needs no PIN.",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -407,7 +402,7 @@
     },
     "channel.set": {
       "summary": "Follow another channel (job), at the revision channel.check verified. Action org.hinteros.system.channel.",
-      "description": "The URL comes from the running generation's channel table, never from params. Returns job_id null if the channel is already the current one. Otherwise (0.9) rev is needed and must equal the last channel.check result's target.rev for this channel and the locked revision, else state_conflict {reason: channel_rev}: the owner confirmed that version. The job re-verifies rev (an allowed signer; it must descend from the newest verified tip this box saw on the target branch, else update_verification_failed {reason: older_than_seen}), locks the hinteros input to it on the target branch and runs the apply flow. rev may be older than the locked revision (beta to stable). Before 0.9 the target was the branch tip and acknowledge_downgrade allowed any older signed tip. On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root. The PIN is checked first.",
+      "description": "The URL comes from the running generation's channel table, never from params. Returns job_id null if the channel is already the current one. Otherwise (0.9) rev is needed and must equal the last channel.check result's target.rev for this channel and the locked revision, else state_conflict {reason: channel_rev}: the owner confirmed that version. The job re-verifies rev (an allowed signer; it must descend from the newest verified tip this box saw on the target branch, else update_verification_failed {reason: older_than_seen}), locks the hinteros input to it on the target branch and runs the apply flow. rev may be older than the locked revision (beta to stable). Before 0.9 the target was the branch tip and acknowledge_downgrade allowed any older signed tip. The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root. The PIN is checked first.",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -432,8 +427,8 @@
       ]
     },
     "base.set": {
-      "summary": "Switch the nixpkgs base (job). Action org.hinteros.system.channel. unstable to stable needs acknowledge_downgrade: true.",
-      "description": "On a schema-2 box (0.5) the admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed on a schema-1 box or from root. The PIN is checked before anything else, also when the base is already the requested one.",
+      "summary": "Switch the nixpkgs base (job). Action org.hinteros.system.channel. A base that is not built is refused: unavailable {service: base, reason: not_built} (only unstable today). unstable to stable needs acknowledge_downgrade: true.",
+      "description": "The admin profile's PIN is needed in admin_pin (pin_required {pin: admin} when it is missing or wrong, or when there is no admin profile yet); an admin profile without a PIN yet passes. Not needed from root. The PIN is checked before anything else, also when the base is already the requested one.",
       "since": "0.2",
       "params": {
         "type": "object",
@@ -446,7 +441,7 @@
         }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
-      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "needs_acknowledgement", "pin_required"],
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "needs_acknowledgement", "pin_required", "unavailable"],
       "examples": [
         { "name": "to stable, acknowledged", "params": { "base": "stable", "acknowledge_downgrade": true, "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
         { "name": "already there", "params": { "base": "unstable" }, "result": { "job_id": null } },
@@ -455,7 +450,7 @@
     },
     "apps.install": {
       "summary": "Install Store apps (job). Action org.hinteros.system.apps.",
-      "description": "ids (1 to 8 catalog ids) must be in the running generation's catalog index (/run/current-system/sw/share/hinteros/catalog.json, never the caller's copy) with status available; their depends are added (transitively). Ids already installed are skipped; if nothing is left the result is job_id null. A conflict between a new app and an installed or requested one is app_conflict. Every new app with vendor terms needs accepted_terms[id] equal to the catalog's terms.version, else terms_required (the box records the acceptance: id, version, time, uid and profile, in the audit log and /var/lib/hinteros/terms-accepted.json). revision must be settings.get's (state_conflict otherwise); 0.4, schema-2 boxes: the app revision from apps.list, and the apps are installed into the caller's own profile (a new generation of its Nix profile, no system rebuild unless a box feature must be turned on first: stage box). Free disk space must cover the new apps' sizeMiB plus the usual rebuild margin (insufficient_resources). The job writes state.json's apps from the service's typed state and runs the apply flow.",
+      "description": "ids (1 to 8 catalog ids) must be in the running generation's catalog index (/run/current-system/sw/share/hinteros/catalog.json, never the caller's copy) with status available; their depends are added (transitively). Ids already installed are skipped; if nothing is left the result is job_id null. A conflict between a new app and an installed or requested one is app_conflict. Every new app with vendor terms needs accepted_terms[id] equal to the catalog's terms.version, else terms_required (the box records the acceptance: id, version, time, uid and profile, in the audit log and /var/lib/hinteros/terms-accepted.json). revision is the app revision from apps.list (state_conflict otherwise), and the apps are installed into the caller's own profile (a new generation of its Nix profile, no system rebuild unless a box feature must be turned on first: stage box). Free disk space must cover the new apps' sizeMiB plus the usual rebuild margin (insufficient_resources). The job writes state.json's apps from the service's typed state and runs the apply flow.",
       "since": "0.3",
       "params": {
         "type": "object",
@@ -524,8 +519,8 @@
       ]
     },
     "apps.list": {
-      "summary": "The caller's own apps (0.4, schema-2 boxes): its current app env.",
-      "description": "Read-only. The caller is resolved from its uid: a profile (or the guest). revision stands for the current app generation; pass it to apps.install/apps.remove as revision. needs_terms: ids whose vendor terms this profile has not accepted at the catalog's current version (apps that came with the starter set); the launcher shows the terms on first launch and calls apps.accept_terms. A spare account gets an empty list. Schema-1 boxes (not migrated yet): unavailable {service: profiles, reason: schema1}.",
+      "summary": "The caller's own apps (0.4): its current app env.",
+      "description": "Read-only. The caller is resolved from its uid: a profile (or the guest). revision stands for the current app generation; pass it to apps.install/apps.remove as revision. needs_terms: ids whose vendor terms this profile has not accepted at the catalog's current version (apps that came with the starter set); the launcher shows the terms on first launch and calls apps.accept_terms. A spare account gets an empty list.",
       "since": "0.4",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": {
@@ -540,10 +535,9 @@
           "box": { "type": "array", "items": { "$ref": "#/$defs/BoxFeature" } }
         }
       },
-      "errors": ["permission_denied", "unavailable"],
+      "errors": ["permission_denied"],
       "examples": [
-        { "name": "a profile with Steam from the starter set", "params": {}, "result": { "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "generation": 3, "ids": ["firefox", "steam", "youtube"], "needs_terms": ["steam"], "box": ["graphics32", "steam-devices"] } },
-        { "name": "not migrated yet", "params": {}, "error": { "code": 4001, "message": "this box has not moved to per-profile apps yet", "data": { "service": "profiles", "reason": "schema1" } } }
+        { "name": "a profile with Steam from the starter set", "params": {}, "result": { "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "generation": 3, "ids": ["firefox", "steam", "youtube"], "needs_terms": ["steam"], "box": ["graphics32", "steam-devices"] } }
       ]
     },
     "apps.generations": {
@@ -573,7 +567,7 @@
           }
         }
       },
-      "errors": ["permission_denied", "unavailable"],
+      "errors": ["permission_denied"],
       "examples": [
         { "name": "two generations", "params": {}, "result": { "generations": [
           { "generation": 2, "date": 1791300000, "ids": ["moonlight", "youtube"], "system_rev": "0f3c5a9e2b7d4c1a8e6f9b0d2c4e6a8b1d3f5a7c", "current": true },
@@ -591,7 +585,7 @@
         "properties": { "generation": { "type": "integer", "minimum": 1 } }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
-      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "not_found", "unavailable"],
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "not_found"],
       "examples": [
         { "name": "back to generation 1", "params": { "generation": 1 }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
         { "name": "the current one", "params": { "generation": 2 }, "error": { "code": 3010, "message": "app generation 2 is not on disk or is the current one" } }
@@ -608,7 +602,7 @@
         "properties": { "id": { "$ref": "#/$defs/CatalogId" }, "version": { "$ref": "#/$defs/TermsVersion" } }
       },
       "result": { "type": "object", "additionalProperties": false, "properties": {} },
-      "errors": ["permission_denied", "authentication_required", "rate_limited", "not_found", "unavailable"],
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "not_found"],
       "examples": [
         { "name": "Steam on first launch", "params": { "id": "steam", "version": "2026-09-10" }, "result": {} },
         { "name": "an older version", "params": { "id": "steam", "version": "2025-01-01" }, "error": { "code": -32602, "message": "the current terms version of steam is 2026-09-10", "data": { "field": "version", "reason": "not_current" } } }
@@ -625,7 +619,7 @@
         "properties": { "id": { "$ref": "#/$defs/CatalogId" } }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
-      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "not_found", "unavailable"],
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "not_found"],
       "examples": [
         { "name": "VacuumTube's data", "params": { "id": "vacuum-tube" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
         { "name": "not in the catalog", "params": { "id": "nope" }, "error": { "code": 3010, "message": "nope is not in the catalog" } }
@@ -633,7 +627,7 @@
     },
     "profiles.list": {
       "summary": "The profiles (0.4). Read-only; starts a usage scan when the data is older than an hour.",
-      "description": "Every account of the running state.json that has metadata, with the caller (spares are not listed; first_boot: no admin profile exists). On a schema-1 box, p1 as an implicit profile after the migration created profiles.json.",
+      "description": "Every account of the running state.json that has metadata, with the caller (spares are not listed; first_boot: no admin profile exists).",
       "since": "0.4",
       "params": {
         "type": "object",
@@ -726,7 +720,7 @@
                   ]
                 },
                 "pin_set": {
-                  "description": "false: a migrated profile without a PIN yet (show 'Set your PIN'). Always true on a schema-1 box (before the migration there are no PINs).",
+                  "description": "false: a profile without a PIN yet (show 'Set your PIN').",
                   "type": "boolean"
                 }
               }
@@ -904,8 +898,7 @@
         "job_busy",
         "insufficient_resources",
         "state_conflict",
-        "profile_limit",
-        "unavailable"
+        "profile_limit"
       ],
       "examples": [
         {
@@ -982,8 +975,7 @@
       "errors": [
         "permission_denied",
         "authentication_required",
-        "rate_limited",
-        "unavailable"
+        "rate_limited"
       ],
       "examples": [
         {
@@ -1034,8 +1026,7 @@
         "authentication_required",
         "rate_limited",
         "not_found",
-        "pin_required",
-        "unavailable"
+        "pin_required"
       ],
       "examples": [
         {
@@ -1096,8 +1087,7 @@
       "errors": [
         "permission_denied",
         "authentication_required",
-        "rate_limited",
-        "unavailable"
+        "rate_limited"
       ],
       "examples": [
         {
@@ -1110,7 +1100,7 @@
       ]
     },
     "profiles.set_pin": {
-      "summary": "Change the caller's PIN (0.4). current_pin is required once a PIN is set (a migrated profile sets its first PIN without it).",
+      "summary": "Change the caller's PIN (0.4). current_pin is required once a PIN is set (a profile without one sets its first PIN without it).",
       "description": "pin_required {pin: self} for a missing or wrong current_pin (with the backoff).",
       "since": "0.4",
       "params": {
@@ -1138,12 +1128,11 @@
         "permission_denied",
         "authentication_required",
         "rate_limited",
-        "pin_required",
-        "unavailable"
+        "pin_required"
       ],
       "examples": [
         {
-          "name": "first PIN after the migration",
+          "name": "first PIN",
           "params": {
             "pin": "2468"
           },
@@ -1194,8 +1183,7 @@
         "permission_denied",
         "authentication_required",
         "rate_limited",
-        "pin_required",
-        "unavailable"
+        "pin_required"
       ],
       "examples": [
         {
@@ -1242,8 +1230,7 @@
         "authentication_required",
         "rate_limited",
         "not_found",
-        "pin_required",
-        "unavailable"
+        "pin_required"
       ],
       "examples": [
         {
@@ -1311,8 +1298,7 @@
         "insufficient_resources",
         "state_conflict",
         "not_found",
-        "pin_required",
-        "unavailable"
+        "pin_required"
       ],
       "examples": [
         {
@@ -1383,7 +1369,6 @@
         "authentication_required",
         "rate_limited",
         "not_found",
-        "unavailable",
         "pin_required"
       ],
       "examples": [
@@ -1444,8 +1429,7 @@
       "errors": [
         "permission_denied",
         "authentication_required",
-        "rate_limited",
-        "unavailable"
+        "rate_limited"
       ],
       "examples": [
         {
@@ -1481,8 +1465,7 @@
         "permission_denied",
         "authentication_required",
         "rate_limited",
-        "pin_required",
-        "unavailable"
+        "pin_required"
       ],
       "examples": [
         {
@@ -1538,8 +1521,7 @@
         "rate_limited",
         "job_busy",
         "insufficient_resources",
-        "pin_required",
-        "unavailable"
+        "pin_required"
       ],
       "examples": [
         {
@@ -1560,7 +1542,7 @@
       "since": "0.5",
       "params": { "type": "object", "additionalProperties": false },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
-      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "unavailable"],
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy"],
       "examples": [
         { "name": "started", "params": {}, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
         { "name": "not the guest", "params": {}, "error": { "code": 3002, "message": "only the guest can end the guest session", "data": { "action": "org.hinteros.system.profiles", "reason": "profile" } } }
@@ -1699,7 +1681,6 @@
         }
       },
       "errors": [
-        "unavailable"
       ],
       "examples": [
         {
@@ -1749,8 +1730,7 @@
         "rate_limited",
         "job_busy",
         "insufficient_resources",
-        "pin_required",
-        "unavailable"
+        "pin_required"
       ],
       "examples": [
         {
@@ -1870,7 +1850,7 @@
     },
     "storage.tree": {
       "summary": "0.6: one home's detailed tree from the last measurement: its folders and its Steam games. The caller's own home: open; another profile's or the guest's: the admin PIN. Action org.hinteros.system.settings.",
-      "description": "id: a profile id or guest (else invalid_params {field: id, reason: bad_format}). The caller's own account (or the guest asking for guest) needs no PIN; anything else needs admin_pin, checked like every box-wide action (pin_required {pin: admin} when missing or wrong, or without an admin profile; an admin profile without a PIN yet passes; schema-1 boxes and root are exempt). not_found: nothing measured yet, or that home was not measured (measure again). The root is kind profile (with id) or guest; its bytes equal the top level's. Children: steam (its children: steam_game, one per installed game, named from appmanifest_<appid>.acf in each Steam library folder inside the home; the game folders are not counted again among the folders), dir (recursively) and files (files directly in a folder, and folders too small or deep to show). At most 6 folder levels, folders of at least max(1 MiB, 0.5 % of the home), at most 16 per folder, at most 400 nodes; names at most 128 characters, control characters replaced by U+FFFD.",
+      "description": "id: a profile id or guest (else invalid_params {field: id, reason: bad_format}). The caller's own account (or the guest asking for guest) needs no PIN; anything else needs admin_pin, checked like every box-wide action (pin_required {pin: admin} when missing or wrong, or without an admin profile; an admin profile without a PIN yet passes; root is exempt). not_found: nothing measured yet, or that home was not measured (measure again). The root is kind profile (with id) or guest; its bytes equal the top level's. Children: steam (its children: steam_game, one per installed game, named from appmanifest_<appid>.acf in each Steam library folder inside the home; the game folders are not counted again among the folders), dir (recursively) and files (files directly in a folder, and folders too small or deep to show). At most 6 folder levels, folders of at least max(1 MiB, 0.5 % of the home), at most 16 per folder, at most 400 nodes; names at most 128 characters, control characters replaced by U+FFFD.",
       "since": "0.6",
       "params": {
         "type": "object",
@@ -1942,11 +1922,11 @@
     },
     "storage.cleanup_profiles": {
       "summary": "0.6: clean up profiles (job cleanup_profiles): in every profile's app env and the starter set's, remove the generations older than the newest keep (never the current one), then collect garbage. Admin PIN every time. Action org.hinteros.system.rebuild.",
-      "description": "keep: 1 to 10. The guest's env (a single link) is not touched. Stages preparing, cleaning, collecting, finishing; result {freed_bytes, generations_removed}. Schema-1 boxes: unavailable {service: profiles, reason: schema1}. The estimate comes from storage.get's estimates.profiles. Below 2 the launcher warns that app rollback in those profiles is gone.",
+      "description": "keep: 1 to 10. The guest's env (a single link) is not touched. Stages preparing, cleaning, collecting, finishing; result {freed_bytes, generations_removed}. The estimate comes from storage.get's estimates.profiles. Below 2 the launcher warns that app rollback in those profiles is gone.",
       "since": "0.6",
       "params": { "$ref": "#/$defs/CleanupParams", "type": "object" },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
-      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required", "unavailable"],
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required"],
       "examples": [{ "name": "keep 2", "params": { "keep": 2, "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
     },
     "cleanup.get": {
@@ -2159,7 +2139,7 @@
     },
     "services.enable": {
       "summary": "0.11: turn services on (job services_enable, a rebuild). Admin PIN. Action org.hinteros.system.services.",
-      "description": "ids: 1 to 8 different catalog ids, each kind service with status available in the running generation's catalog (not_found: not in the catalog; invalid_params {field: ids, reason: not_a_service | not_available}). Ids already on are skipped; job_id null when nothing is left. revision: services.list's (state_conflict otherwise). A service with vendor terms (Plex) needs accepted_terms[id] equal to the catalog's terms.version (terms_required {id, version}; terms for ids not being turned on: invalid_params {field: accepted_terms, reason: not_requested}); the acceptance is audited and recorded in /var/lib/hinteros/terms-accepted.json by the caller's user, with the admin profile's id. Schema-1 boxes: unavailable {service: profiles, reason: schema1}. The job writes state.json's services and runs the apply flow (stages preparing, evaluating, downloading, building, activating, finishing); for jellyfin-server it then waits up to 3 minutes for HinterOS's first-run setup (stage configuring) and makes each profile's Jellyfin user (best effort: jellyfin.users.reveal and every Jellyfin job make missing users too). Result: the applied generation.",
+      "description": "ids: 1 to 8 different catalog ids, each kind service with status available in the running generation's catalog (not_found: not in the catalog; invalid_params {field: ids, reason: not_a_service | not_available}). Ids already on are skipped; job_id null when nothing is left. revision: services.list's (state_conflict otherwise). A service with vendor terms (Plex) needs accepted_terms[id] equal to the catalog's terms.version (terms_required {id, version}; terms for ids not being turned on: invalid_params {field: accepted_terms, reason: not_requested}); the acceptance is audited and recorded in /var/lib/hinteros/terms-accepted.json by the caller's user, with the admin profile's id. The job writes state.json's services and runs the apply flow (stages preparing, evaluating, downloading, building, activating, finishing); for jellyfin-server it then waits up to 3 minutes for HinterOS's first-run setup (stage configuring) and makes each profile's Jellyfin user (best effort: jellyfin.users.reveal and every Jellyfin job make missing users too). Result: the applied generation.",
       "since": "0.11",
       "params": {
         "type": "object",
@@ -2905,13 +2885,13 @@
     "unavailable": {
       "code": 4001,
       "since": "0.4",
-      "summary": "0.4: the per-profile methods on a box that still has box-wide apps (state.json schema 1, before the migration job): service profiles, reason schema1. 0.11: the Server section: service jellyfin, plex, tailscale or cloudflare with reason off (the service is not on) or not_ready (Jellyfin's first-run setup is not done).",
+      "summary": "0.11: the Server section: service jellyfin, plex, tailscale or cloudflare with reason off (the service is not on) or not_ready (Jellyfin's first-run setup is not done).",
       "data": {
         "type": "object",
         "required": ["service", "reason"],
         "additionalProperties": false,
         "properties": {
-          "service": { "enum": ["networkmanager", "bluez", "audio", "display", "logind", "catalog", "polkit", "profiles", "jellyfin", "plex", "tailscale", "cloudflare"] },
+          "service": { "enum": ["networkmanager", "bluez", "audio", "display", "logind", "catalog", "polkit", "base", "jellyfin", "plex", "tailscale", "cloudflare"] },
           "reason": { "type": "string", "maxLength": 300 }
         }
       }
@@ -2980,7 +2960,7 @@
     "PolkitAction": { "type": "string", "pattern": "^org\\.hinteros\\.system\\.[a-z.]+$" },
     "Channel": { "enum": ["stable", "beta"] },
     "Base": { "enum": ["stable", "unstable"] },
-    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "migrate_apps", "profiles_create", "profiles_remove", "guest_set", "guest_end", "storage_measure", "cleanup_system", "cleanup_profiles", "cleanup_set", "channel_check", "services_enable", "services_disable", "jellyfin_library_add", "jellyfin_library_remove", "plex_claim", "tailscale_login", "tailscale_logout", "cloudflare_set_token", "cloudflare_clear_token", "apps_clear_data"] },
+    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "profiles_create", "profiles_remove", "guest_set", "guest_end", "storage_measure", "cleanup_system", "cleanup_profiles", "cleanup_set", "channel_check", "services_enable", "services_disable", "jellyfin_library_add", "jellyfin_library_remove", "plex_claim", "tailscale_login", "tailscale_logout", "cloudflare_set_token", "cloudflare_clear_token", "apps_clear_data"] },
     "ProfileId": { "description": "A profile id.", "type": "string", "pattern": "^p[1-9][0-9]{0,2}$" },
     "ProfileName": { "description": "A display name: 1 to 32 characters, trimmed, no control or format characters.", "type": "string", "minLength": 1, "maxLength": 128 },
     "ProfileColor": { "enum": ["teal", "blue", "purple", "pink", "red", "orange", "yellow", "green"] },
@@ -3314,7 +3294,7 @@
       "properties": {
         "owner": { "description": "Apps jobs: whose apps (a profile id, guest or starter).", "type": "string", "maxLength": 32 },
         "profile": { "$ref": "#/$defs/SubjectProfile" },
-        "apps": { "description": "Apps installed (the new ones), removed, the new starter set or the migrated apps; names from the running catalog.", "type": "array", "items": { "$ref": "#/$defs/CatalogApp" } },
+        "apps": { "description": "Apps installed (the new ones), removed or the new starter set; names from the running catalog.", "type": "array", "items": { "$ref": "#/$defs/CatalogApp" } },
         "delete_data": { "type": "boolean" },
         "from_owner": { "description": "An app env copied from another owner (starter).", "type": "string", "maxLength": 32 },
         "generation": { "description": "Rollbacks: the target generation.", "type": "integer", "minimum": 0 },

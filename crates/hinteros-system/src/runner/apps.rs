@@ -1,6 +1,6 @@
 //! Jobs on app envs (apps.md): build envs from the running system's
 //! `config.hinteros.appEnv.build`, set an owner's Nix profile, the `box` stage, the final `apps`
-//! stage of system jobs, and the v1 → v2 migration.
+//! stage of system jobs.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use super::{Failure, Outcome, Runner, record_terms};
 use crate::appreg::{self, Owner, Registry};
-use crate::job::{self, Apply, AppsJob, AppsOp, MigrateJob};
+use crate::job::{self, Apply, AppsJob, AppsOp};
 use crate::nixlog;
 use crate::state::State;
 use crate::{fsutil, generations};
@@ -324,7 +324,7 @@ impl Runner {
     /// owner's env against it, in one evaluation. An env that fails keeps its generation (it
     /// still works) and is reported.
     pub(super) fn apps_stage(&mut self) -> Result<Option<Vec<AppNotUpdated>>, Failure> {
-        let Some(state) = self.config_state().filter(State::is_schema2) else {
+        let Some(state) = self.config_state() else {
             return Ok(None);
         };
         self.set_stage(Stage::Apps);
@@ -379,75 +379,6 @@ impl Runner {
         self.refresh_registry();
         Ok(Some(not_updated).filter(|v| !v.is_empty()))
     }
-
-    pub(super) fn migrate(&mut self, m: &MigrateJob) -> Outcome {
-        self.set_stage(Stage::Preparing);
-        self.inhibit("delay");
-        let paths = self.spec.paths.clone();
-        match State::load(&paths.state_json()) {
-            Ok((s, _)) if s == m.from => {}
-            Ok((s, _)) if s.is_schema2() => {
-                info!("state.json is already schema 2; nothing to migrate");
-                return Ok((Some(self.applied(None)), false));
-            }
-            _ => return Err(self.fail("state.json changed since the migration was queued")),
-        }
-        // 1. One env for the box-wide apps (everything is in the store: an evaluation and a
-        //    local buildEnv).
-        let env = match self.build_envs(std::slice::from_ref(&m.ids))?.pop() {
-            Some(Ok(env)) => env,
-            Some(Err(why)) => return Err(self.fail(why)),
-            None => return Err(self.fail("no env")),
-        };
-        // 2. Every account and the starter set get it (idempotent: already set is skipped).
-        self.set_stage(Stage::Activating);
-        for owner in m.owners.iter().chain([&Owner::Starter]) {
-            self.set_env(owner, &env)?;
-        }
-        if appreg::StarterFile::load(&paths.starter_json()).is_none() {
-            appreg::StarterFile {
-                version: appreg::STARTER_VERSION,
-                ids: m.ids.clone(),
-                updated_at: Some(job::now()),
-                by: Some("migration".into()),
-            }
-            .save(&paths.starter_json())
-            .map_err(|e| self.fail(format!("writing starter.json: {e}")))?;
-        }
-        if !m.terms.is_empty() {
-            let accepted = super::accepted_terms(&paths.terms_accepted());
-            let missing: Vec<job::TermsRecord> = m
-                .terms
-                .iter()
-                .filter(|t| {
-                    !accepted.iter().any(|(id, v, _, p)| {
-                        id == &t.id && v == &t.version && p.as_deref() == t.profile.as_deref()
-                    })
-                })
-                .cloned()
-                .collect();
-            if !missing.is_empty() {
-                record_terms(&paths.terms_accepted(), &missing)
-                    .map_err(|e| self.fail(format!("recording terms: {e}")))?;
-            }
-        }
-        let manifest =
-            hinteros_api::manifest::Manifest::load(&env).map_err(|e| self.fail(e.to_string()))?;
-        let reg = Registry::scan(&paths, &m.from.migrated(Vec::new()));
-        reg.save(&paths.registry())
-            .map_err(|e| self.fail(format!("writing the registry: {e}")))?;
-        appreg::publish(&paths, &m.from);
-        // 3. state.json schema 2 through the apply flow. A failure leaves schema 1.
-        let mut requirements = reg.needed_features();
-        requirements.extend(manifest.box_features.iter().cloned());
-        let new = m.from.migrated(requirements.into_iter().collect());
-        let outcome = self.apply(&Apply {
-            state: Some(new),
-            ..Default::default()
-        })?;
-        self.refresh_registry();
-        Ok(outcome)
-    }
 }
 
 impl Runner {
@@ -470,10 +401,10 @@ impl Runner {
     /// After a system rollback (and its `apps` stage): box features the owners' current envs
     /// need that the restored generation lacks are turned back on in a `box` stage, the apply
     /// flow on the restored configuration with `requirements` = what the envs need (a second
-    /// build, mostly cached; apps.md open question 2). Nothing to do on a schema-1 target or
+    /// build, mostly cached; apps.md open question 2). Nothing to do
     /// when every needed feature is on (features nobody needs stay until the next rebuild).
     pub(super) fn readd_features(&mut self, outcome: (Option<JobResult>, bool)) -> Outcome {
-        let Some(state) = self.config_state().filter(State::is_schema2) else {
+        let Some(state) = self.config_state() else {
             return Ok(outcome);
         };
         let needed = Registry::scan(&self.spec.paths, &state).needed_features();
@@ -483,7 +414,7 @@ impl Runner {
         }
         info!(features = ?missing, "the rolled-back generation lacks box features the apps need; re-adding them");
         let mut new = state.clone();
-        new.requirements = Some(needed.into_iter().collect());
+        new.requirements = needed.into_iter().collect();
         self.override_stage(Stage::Box);
         let applied = self.apply(&Apply {
             state: Some(new),
@@ -520,7 +451,7 @@ impl Runner {
 pub fn missing_features(state: &State, needed: &std::collections::BTreeSet<String>) -> Vec<String> {
     needed
         .iter()
-        .filter(|f| !state.requirements().contains(f))
+        .filter(|f| !state.requirements.contains(f))
         .cloned()
         .collect()
 }

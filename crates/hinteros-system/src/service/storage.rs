@@ -18,7 +18,7 @@ use super::{Service, internal, job_ref};
 use crate::appreg;
 use crate::job::{self, Action, CleanupJob, CleanupTarget, MeasureHome, MeasureJob};
 use crate::peer::Peer;
-use crate::profiles::{self, Role};
+use crate::profiles::Role;
 use crate::state::{self, CleanupState, State};
 use crate::storage::Stored;
 
@@ -198,9 +198,6 @@ impl Service {
                 self.check_box_admin(uid, method, p.admin_pin.as_deref())
                     .await?;
                 let (state, _) = self.load_state()?;
-                if !state.is_schema2() {
-                    return Err(profiles::schema1());
-                }
                 let spec = self.spec(
                     JobKind::CleanupProfiles,
                     uid,
@@ -231,12 +228,13 @@ impl Service {
                     frequency: p.frequency,
                     keep_system: p.keep_system,
                     keep_profiles: p.keep_profiles,
+                    extra: state.cleanup().extra,
                 };
                 if state.cleanup() == wanted {
                     return job_ref(None);
                 }
                 let mut new = state.clone();
-                new.settings.cleanup = Some(wanted);
+                new.settings.cleanup = Some(wanted.clone());
                 let new = self.requirements_update(&new).unwrap_or(new);
                 self.preflight()?;
                 let spec = self.spec(
@@ -286,11 +284,7 @@ impl Service {
         MeasureJob {
             store_dir: self.args.store_dir.clone(),
             homes,
-            owners: if state.is_schema2() {
-                appreg::owners(state)
-            } else {
-                Vec::new()
-            },
+            owners: appreg::owners(state),
         }
     }
 }

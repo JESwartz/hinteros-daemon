@@ -81,8 +81,8 @@ impl Users {
         }
     }
 
-    /// Every user name in the database whose name is `hinteros-p<N>` or `hinteros`, with N
-    /// (for the profile counter: numbers are never reused).
+    /// The N of every user name in the database that is `hinteros-p<N>` (for the profile
+    /// counter: numbers are never reused).
     pub fn profile_numbers(&self) -> Vec<u32> {
         let names: Vec<String> = match &self.passwd {
             Some(p) => Self::file_users(p).into_iter().map(|u| u.name).collect(),
@@ -93,12 +93,8 @@ impl Users {
         names
             .iter()
             .filter_map(|n| {
-                if n == crate::state::P1_USER {
-                    Some(1)
-                } else {
-                    n.strip_prefix("hinteros-")
-                        .and_then(crate::state::profile_number)
-                }
+                n.strip_prefix("hinteros-")
+                    .and_then(crate::state::profile_number)
             })
             .collect()
     }
@@ -156,20 +152,20 @@ mod tests {
         let group = d.path().join("group");
         std::fs::write(
             &passwd,
-            "root:x:0:0::/root:/bin/sh\nhinteros:x:1000:100::/home/hinteros:/bin/sh\n\
+            "root:x:0:0::/root:/bin/sh\nhinteros-p1:x:1000:100::/home/hinteros-p1:/bin/sh\n\
              hinteros-p3:x:20003:100::/home/hinteros-p3:/bin/sh\nbad line\n",
         )
         .unwrap();
         std::fs::write(
             &group,
-            "users:x:100:\nhinteros:x:990:hinteros,hinteros-p3\n",
+            "users:x:100:\nhinteros:x:990:hinteros-p1,hinteros-p3\n",
         )
         .unwrap();
         let u = Users {
             passwd: Some(passwd),
             group: Some(group),
         };
-        assert_eq!(u.by_uid(1000).unwrap().name, "hinteros");
+        assert_eq!(u.by_uid(1000).unwrap().name, "hinteros-p1");
         assert_eq!(
             u.by_name("hinteros-p3").unwrap().home,
             Path::new("/home/hinteros-p3")
@@ -178,7 +174,7 @@ mod tests {
         let mut n = u.profile_numbers();
         n.sort();
         assert_eq!(n, [1, 3]);
-        assert_eq!(u.group_members("hinteros"), ["hinteros", "hinteros-p3"]);
+        assert_eq!(u.group_members("hinteros"), ["hinteros-p1", "hinteros-p3"]);
         assert_eq!(u.group_gid("hinteros"), Some(990));
         assert!(u.group_members("nope").is_empty());
     }

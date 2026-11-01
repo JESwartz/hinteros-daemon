@@ -196,7 +196,7 @@ pub fn publish(paths: &Paths, state: &State, file: &ProfilesFile, now: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profiles::{Meta, migrated_file};
+    use crate::profiles::{Meta, test_file};
 
     fn paths(root: &Path) -> Paths {
         Paths {
@@ -222,11 +222,11 @@ mod tests {
         let p = paths(d.path());
         std::fs::create_dir_all(&p.run_dir).unwrap();
         let state = State::parse(
-            br#"{"schemaVersion":2,"requirements":[],"services":[],
-               "profiles":[{"id":"p1","user":"hinteros"},{"id":"p2","user":"hinteros-p2"},{"id":"p3","user":"hinteros-p3"}]}"#,
+            br#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],
+               "profiles":[{"id":"p1"},{"id":"p2"},{"id":"p3"}]}"#,
         )
         .unwrap();
-        let mut file = migrated_file(&state, 0);
+        let mut file = test_file(&state);
         file.profiles.remove("p3");
         let p2: &mut Meta = file.profiles.get_mut("p2").unwrap();
         p2.locked = true;
@@ -255,7 +255,7 @@ mod tests {
         assert!(!view(&p, &state, &file, 100).next.unwrap().fast);
         grant_token(&p, "p2", "hinteros-p2", 100).unwrap();
         assert!(view(&p, &state, &file, 100).next.unwrap().fast);
-        assert!(!take_token(&p.switch_json(), "hinteros", 100));
+        assert!(!take_token(&p.switch_json(), "hinteros-p1", 100));
         assert!(!take_token(&p.switch_json(), "hinteros-p2", 500), "expired");
         assert!(take_token(&p.switch_json(), "hinteros-p2", 100));
         assert!(!take_token(&p.switch_json(), "hinteros-p2", 100), "used up");

@@ -43,8 +43,8 @@ pub enum Service {
     Catalog,
     /// polkit: the authentication agent's helper (`auth.respond`).
     Polkit,
-    /// 0.4/0.12: per-profile apps and profiles (`unavailable {service: profiles, reason: schema1}`).
-    Profiles,
+    /// `base.set` to a base that is not built (`not_built`).
+    Base,
     /// 0.19 (system API 0.11): the Server section's services (`off`, `not_ready`).
     Jellyfin,
     Plex,
@@ -61,7 +61,7 @@ impl Service {
         Service::Logind,
         Service::Catalog,
         Service::Polkit,
-        Service::Profiles,
+        Service::Base,
         Service::Jellyfin,
         Service::Plex,
         Service::Tailscale,
@@ -76,7 +76,7 @@ impl Service {
             Service::Display => "display",
             Service::Logind => "logind",
             Service::Catalog => "catalog",
-            Service::Profiles => "profiles",
+            Service::Base => "base",
             Service::Polkit => "polkit",
             Service::Jellyfin => "jellyfin",
             Service::Plex => "plex",

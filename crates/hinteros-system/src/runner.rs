@@ -101,7 +101,6 @@ fn run(dir: &Path) -> anyhow::Result<()> {
         Action::UpdateCheck(_) => r.update_check(),
         Action::ChannelCheck(_) => r.channel_check(),
         Action::Apps(j) => r.apps_job(&j),
-        Action::MigrateApps(m) => r.migrate(&m),
         Action::ProfileCreate(j) => r.profile_create(&j),
         Action::ProfileRemove(j) => r.profile_remove(&j),
         Action::GuestEnd(j) => r.guest_end(&j),
@@ -1483,7 +1482,7 @@ mod tests {
             id: "steam".into(),
             version: v.into(),
             accepted_at: 1_791_300_000,
-            by: "hinteros".into(),
+            by: "hinteros-p1".into(),
             profile: None,
         };
         record_terms(&path, &[rec("2026-09-10")]).unwrap();
@@ -1493,8 +1492,8 @@ mod tests {
         assert_eq!(
             v["steam"],
             json!([
-                {"version": "2026-09-10", "accepted_at": "2026-10-06T15:20:00Z", "by": "hinteros"},
-                {"version": "2027-01-01", "accepted_at": "2026-10-06T15:20:00Z", "by": "hinteros"}
+                {"version": "2026-09-10", "accepted_at": "2026-10-06T15:20:00Z", "by": "hinteros-p1"},
+                {"version": "2027-01-01", "accepted_at": "2026-10-06T15:20:00Z", "by": "hinteros-p1"}
             ])
         );
         use std::os::unix::fs::PermissionsExt;

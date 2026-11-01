@@ -78,7 +78,7 @@ impl Site {
     }
 }
 
-/// A fake system service that only answers `settings.get` with no installed apps.
+/// A fake system service that only answers `apps.list` with no installed apps.
 fn fake_system(path: &Path) -> tokio::task::JoinHandle<()> {
     fake_system_with(path, |_| None)
 }
@@ -105,9 +105,9 @@ fn fake_system_with(path: &Path, more: fn(&str) -> Option<Value>) -> tokio::task
                             let outcome = match req.method.as_str() {
                                 m if more(m).is_some() => Ok(more(m).unwrap()),
                                 "subscribe" => Ok(req.params.clone().unwrap_or(json!({}))),
-                                "settings.get" => Ok(json!({
+                                "apps.list" => Ok(json!({
                                     "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
-                                    "settings": {"base": "unstable", "ssh": {"enabled": false}, "apps": []}
+                                    "generation": null, "ids": [], "needs_terms": [], "box": []
                                 })),
                                 m => Err(hinteros_api::server::method_not_found(m)),
                             };

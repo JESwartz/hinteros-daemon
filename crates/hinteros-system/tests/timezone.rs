@@ -15,10 +15,11 @@ use common::*;
 const STATE2: &str = r#"{
   "schemaVersion": 2,
   "base": "unstable",
+  "stateVersion": "26.11",
   "settings": { "ssh": { "enable": false }, "admin": { "user": "admin" } },
   "requirements": [],
   "services": [],
-  "profiles": [{ "id": "p1", "user": "hinteros" }]
+  "profiles": [{ "id": "p1" }]
 }
 "#;
 
@@ -28,11 +29,13 @@ const PROFILES: &str = r#"{"version": 1, "next": 2, "profiles": {
 
 const ADMIN_PIN: &str = "2468";
 
-/// A schema-2 root; with an admin profile (PIN [`ADMIN_PIN`]) unless `first_boot`.
+/// A root with an admin profile (PIN [`ADMIN_PIN`]) unless `first_boot`.
 fn root2(first_boot: bool) -> Root {
     let root = Root::create();
     std::fs::write(root.p("etc/hinteros/state.json"), STATE2).unwrap();
-    if !first_boot {
+    if first_boot {
+        root.rm("var/lib/hinteros/profiles.json");
+    } else {
         std::fs::write(root.p("var/lib/hinteros/profiles.json"), PROFILES).unwrap();
         hinteros_system::pins::Pins::new(root.p("var/lib/hinteros/pins"))
             .set("p1", ADMIN_PIN)

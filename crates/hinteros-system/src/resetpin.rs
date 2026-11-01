@@ -44,9 +44,6 @@ pub struct Done {
 fn load(paths: &Paths) -> Result<(State, ProfilesFile), String> {
     let (state, _) = State::load(&paths.state_json())
         .map_err(|e| format!("cannot read {}: {e}", paths.state_json().display()))?;
-    if !state.is_schema2() {
-        return Err("this box has no profiles or PINs yet (state.json schema 1)".into());
-    }
     let file = ProfilesFile::load(&paths.profiles_json())
         .map_err(|e| format!("cannot read {}: {e}", paths.profiles_json().display()))?;
     Ok((state, file))

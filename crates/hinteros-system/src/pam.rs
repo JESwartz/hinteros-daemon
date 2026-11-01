@@ -443,21 +443,21 @@ pub fn paths(state_dir: PathBuf, run_dir: PathBuf, config_dir: PathBuf, users: U
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profiles::migrated_file;
+    use crate::profiles::test_file;
 
     fn ctx(root: &Path) -> Ctx {
         std::fs::create_dir_all(root.join("etc")).unwrap();
         std::fs::create_dir_all(root.join("run")).unwrap();
         std::fs::write(
             root.join("passwd"),
-            "hinteros:x:1000:100::/h:/bin/sh\nhinteros-p2:x:20002:100::/h2:/bin/sh\n\
+            "hinteros-p1:x:1000:100::/h:/bin/sh\nhinteros-p2:x:20002:100::/h2:/bin/sh\n\
              hinteros-p3:x:20003:100::/h3:/bin/sh\nhinteros-guest:x:20000:100::/g:/bin/sh\n\
              admin:x:1001:100::/a:/bin/sh\nnobody:x:65534:65534::/:/bin/sh\nsys:x:900:900::/:/bin/sh\n",
         )
         .unwrap();
         std::fs::write(
             root.join("group"),
-            "hinteros:x:990:hinteros,hinteros-p2,hinteros-p3,hinteros-guest,admin,sys\n",
+            "hinteros:x:990:hinteros-p1,hinteros-p2,hinteros-p3,hinteros-guest,admin,sys\n",
         )
         .unwrap();
         let users = Users {
@@ -477,9 +477,9 @@ mod tests {
         }
     }
 
-    const STATE: &str = r#"{"schemaVersion":2,"requirements":[],"services":[],
+    const STATE: &str = r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],
       "settings":{"admin":{"user":"admin"}},
-      "profiles":[{"id":"p1","user":"hinteros"},{"id":"p2","user":"hinteros-p2"},{"id":"p3","user":"hinteros-p3"}]}"#;
+      "profiles":[{"id":"p1"},{"id":"p2"},{"id":"p3"}]}"#;
 
     #[test]
     fn verbs_against_a_temp_root() {
@@ -489,14 +489,14 @@ mod tests {
         let state = State::parse(STATE.as_bytes()).unwrap();
         // No profiles.json: first-boot mode, every account is a spare and may enter.
         assert!(unlocked(&c, "hinteros-p3", 0));
-        let mut file = migrated_file(&state, 0);
+        let mut file = test_file(&state);
         file.profiles.remove("p3");
         file.profiles.get_mut("p2").unwrap().locked = true;
         file.profiles.get_mut("p2").unwrap().admin = false;
         file.save(&c.paths.profiles_json()).unwrap();
         let pins = Pins::new(c.paths.pins_dir());
         // p1 unlocked; p2 locked but no PIN yet → enters; with a PIN → asks.
-        assert!(unlocked(&c, "hinteros", 0));
+        assert!(unlocked(&c, "hinteros-p1", 0));
         assert!(unlocked(&c, "hinteros-p2", 0));
         pins.set("p2", "2468").unwrap();
         assert!(!unlocked(&c, "hinteros-p2", 0));
@@ -511,7 +511,7 @@ mod tests {
         assert!(unlocked(&c, "hinteros-p2", 1));
         assert!(!unlocked(&c, "hinteros-p2", 1));
         // The hint is dropped once its target's session opens (and only then).
-        fulfil_hint(&c, "hinteros", 1);
+        fulfil_hint(&c, "hinteros-p1", 1);
         assert!(c.paths.switch_json().exists());
         fulfil_hint(&c, "hinteros-p2", 1);
         assert!(!c.paths.switch_json().exists());
@@ -558,22 +558,22 @@ mod tests {
         }
         for _ in 0..8 {
             assert_eq!(
-                verify(&c, "hinteros", "0000", 12),
+                verify(&c, "hinteros-p1", "0000", 12),
                 (false, Some("hinteros:wrong".into()))
             );
         }
-        assert_eq!(verify(&c, "hinteros", "1357", 12), (true, None));
+        assert_eq!(verify(&c, "hinteros-p1", "1357", 12), (true, None));
         assert_eq!(verify(&c, "admin", "2468", 12), (false, None));
         // Ten wrong tries this boot: refused until a restart, even the right PIN.
         for _ in 0..pins::ADMIN_TRIES - 1 {
             assert_eq!(
-                verify(&c, "hinteros", "0000", 12),
+                verify(&c, "hinteros-p1", "0000", 12),
                 (false, Some("hinteros:wrong".into()))
             );
         }
         for pin in ["0000", "1357"] {
             assert_eq!(
-                verify(&c, "hinteros", pin, 12),
+                verify(&c, "hinteros-p1", pin, 12),
                 (false, Some("hinteros:reboot".into()))
             );
         }
@@ -585,7 +585,7 @@ mod tests {
             .into_iter()
             .map(|(n, _)| n)
             .collect();
-        assert_eq!(o, ["hinteros", "hinteros-guest", "hinteros-p3"]);
+        assert_eq!(o, ["hinteros-guest", "hinteros-p1", "hinteros-p3"]);
     }
 
     #[test]

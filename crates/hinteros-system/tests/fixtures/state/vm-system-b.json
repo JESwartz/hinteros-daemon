@@ -1,1 +1,1 @@
-{"schemaVersion":1,"base":"stable","settings":{"ssh":{"enable":false}},"apps":[],"profiles":[]}
+{"schemaVersion":2,"base":"stable","stateVersion":"26.11","settings":{"ssh":{"enable":false}},"requirements":[],"services":[],"profiles":[{"id":"p1"}]}

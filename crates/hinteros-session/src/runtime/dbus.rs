@@ -136,7 +136,7 @@ pub fn service_name(service: Service) -> &'static str {
         Service::Logind => "logind",
         Service::Catalog => "the app catalog",
         Service::Polkit => "polkit",
-        Service::Profiles => "profiles",
+        Service::Base => "the base",
         Service::Jellyfin => "Jellyfin",
         Service::Plex => "Plex",
         Service::Tailscale => "Tailscale",

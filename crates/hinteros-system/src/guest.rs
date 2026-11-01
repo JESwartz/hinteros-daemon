@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn only_the_expected_guest_account() {
-        let good = "hinteros:x:1000:100::/home/hinteros:/bin/sh\n\
+        let good = "hinteros-p1:x:1000:100::/home/hinteros-p1:/bin/sh\n\
                     hinteros-guest:x:20000:100::/home/hinteros-guest:/bin/sh\n";
         let (_d, u) = users(good);
         assert_eq!(account(&u, 20000).unwrap().uid, 20000);
@@ -188,7 +188,7 @@ mod tests {
         let p = d.path().join("terms.json");
         std::fs::write(
             &p,
-            r#"{"steam": [{"version": "1", "by": "hinteros-guest"}, {"version": "1", "by": "hinteros", "profile": "p1"}],
+            r#"{"steam": [{"version": "1", "by": "hinteros-guest"}, {"version": "1", "by": "hinteros-p1", "profile": "p1"}],
                 "plex": [{"version": "2", "by": "hinteros-guest"}]}"#,
         )
         .unwrap();
@@ -196,7 +196,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
         assert_eq!(
             v,
-            serde_json::json!({"steam": [{"version": "1", "by": "hinteros", "profile": "p1"}]})
+            serde_json::json!({"steam": [{"version": "1", "by": "hinteros-p1", "profile": "p1"}]})
         );
         assert_eq!(drop_terms(&p).unwrap(), 0);
         assert_eq!(drop_terms(&d.path().join("none")).unwrap(), 0);

@@ -264,7 +264,7 @@ pub const APPS_RUN_DIR_MODE: u32 = 0o750;
 /// it loses it, and other users cannot list who has which apps. The service's `UMask=0007`
 /// would make a 0755 request 0750 anyway; asking for 0750 says it on purpose.
 ///
-/// A job publishes too (the v1 -> v2 migration is the first to, on a schema-1 box), and a job
+/// A job publishes too, and a job
 /// runs as root:root with another umask: the group is taken from the run directory (the
 /// service's `RuntimeDirectory`, root:hinteros) and the mode set, on every call, so the sessions
 /// can read the directory whoever made it.
@@ -412,8 +412,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = paths(d.path());
         let state = State::parse(
-            br#"{"schemaVersion":2,"requirements":[],"services":[],
-               "profiles":[{"id":"p1","user":"hinteros"},{"id":"p3","user":"hinteros-p3"}]}"#,
+            br#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],
+               "profiles":[{"id":"p1"},{"id":"p3"}]}"#,
         )
         .unwrap();
         let store = d.path().join("store");
@@ -423,8 +423,8 @@ mod tests {
             &["graphics32", "steam-devices"],
         );
         let b = env(&store, &["youtube"], &[]);
-        set(&p.app_profile("hinteros"), 1, &b);
-        set(&p.app_profile("hinteros"), 2, &a);
+        set(&p.app_profile("hinteros-p1"), 1, &b);
+        set(&p.app_profile("hinteros-p1"), 2, &a);
         set(&p.starter_profile(), 1, &b);
         // A stale registry is rewritten from the manifests.
         Registry {
@@ -446,7 +446,7 @@ mod tests {
         let gens = generations(
             &Owner::Profile {
                 id: "p1".into(),
-                user: "hinteros".into(),
+                user: "hinteros-p1".into(),
             },
             &p,
         );
@@ -458,8 +458,8 @@ mod tests {
         symlink("/x", p.apps_run_dir().join("hinteros-p7")).unwrap();
         publish(&p, &state);
         assert_eq!(
-            std::fs::read_link(p.apps_run_dir().join("hinteros")).unwrap(),
-            p.app_profile("hinteros")
+            std::fs::read_link(p.apps_run_dir().join("hinteros-p1")).unwrap(),
+            p.app_profile("hinteros-p1")
         );
         assert_eq!(
             std::fs::read_link(p.apps_run_dir().join("hinteros-p3")).unwrap(),
@@ -468,7 +468,7 @@ mod tests {
         assert!(!p.apps_run_dir().join("hinteros-p7").exists());
         // The session sees the env through the published link.
         assert_eq!(
-            Manifest::load(&p.apps_run_dir().join("hinteros"))
+            Manifest::load(&p.apps_run_dir().join("hinteros-p1"))
                 .unwrap()
                 .ids,
             ["steam", "youtube"]
@@ -501,7 +501,7 @@ mod tests {
         let c = current(
             &Owner::Profile {
                 id: "p1".into(),
-                user: "hinteros".into(),
+                user: "hinteros-p1".into(),
             },
             &p,
         );

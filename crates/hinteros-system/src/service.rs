@@ -198,12 +198,10 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
 }
 
 /// Before serving: the registry is checked against the env manifests and the session links are
-/// published (schema 2).
+/// published.
 fn startup(args: &ServeArgs) {
     let paths = args.paths();
-    if let Ok((state, _)) = State::load(&paths.state_json())
-        && state.is_schema2()
-    {
+    if let Ok((state, _)) = State::load(&paths.state_json()) {
         crate::appreg::Registry::reconcile(&paths, &state);
         crate::appreg::publish(&paths, &state);
     }
@@ -216,9 +214,6 @@ async fn monitor(svc: Arc<Service>) {
     let mut n: u64 = 0;
     loop {
         tick.tick().await;
-        if n.is_multiple_of(20) {
-            svc.maybe_migrate().await;
-        }
         if n.is_multiple_of(4) {
             svc.ensure_envs().await;
         }
@@ -502,21 +497,18 @@ async fn dispatch(
                     ssh: SshSettings {
                         enabled: state.settings.ssh.enable,
                     },
-                    apps: (!state.is_schema2()).then(|| state.apps().to_vec()),
-                    requirements: state.is_schema2().then(|| state.requirements().to_vec()),
+                    requirements: state.requirements,
                 },
             })
         }
         GenerationsList::NAME => {
             decode::<GenerationsList>(params)?;
             let p = &svc.paths;
-            // The box features the profiles' apps need now (schema 2): a rollback re-adds those a
+            // The box features the profiles' apps need now: a rollback re-adds those a
             // generation lacks.
             let needed = State::load(&p.state_json())
                 .ok()
-                .map(|(s, _)| s)
-                .filter(State::is_schema2)
-                .map(|s| crate::appreg::Registry::scan(p, &s).needed_features());
+                .map(|(s, _)| crate::appreg::Registry::scan(p, &s).needed_features());
             encode::<GenerationsList>(GenerationsListResult {
                 generations: generations::list(
                     &p.profile,
@@ -1020,7 +1012,6 @@ impl Service {
                 | JobKind::ProfilesRemove
                 | JobKind::GuestSet
                 | JobKind::GuestEnd
-                | JobKind::MigrateApps
                 | JobKind::Rollback
         ) {
             self.profiles_changed();
@@ -1341,7 +1332,7 @@ impl Service {
                         JobKind::Base,
                         uid,
                         Action::Apply(Apply {
-                            rebuild_apps: state.is_schema2(),
+                            rebuild_apps: true,
                             state: Some(state),
                             ..Default::default()
                         }),
@@ -1495,7 +1486,7 @@ impl Service {
                         Action::Apply(Apply {
                             update: Some(update),
                             state: state.as_ref().and_then(|s| self.requirements_update(s)),
-                            rebuild_apps: state.as_ref().is_some_and(State::is_schema2),
+                            rebuild_apps: state.is_some(),
                             ..Default::default()
                         }),
                     )
@@ -1582,130 +1573,15 @@ impl Service {
                         Action::Apply(Apply {
                             update: Some(update),
                             state: state.as_ref().and_then(|s| self.requirements_update(s)),
-                            rebuild_apps: state.as_ref().is_some_and(State::is_schema2),
+                            rebuild_apps: state.is_some(),
                             ..Default::default()
                         }),
                     )
                     .about(subject);
                 job_ref(Some(self.start(spec).await?))
             }
-            Request::AppsInstall(p) => {
-                let (mut state, revision) = self.load_state()?;
-                if state.is_schema2() {
-                    return self.apps_install_v2(peer, state, p).await;
-                }
-                if p.revision != revision {
-                    return Err(state_conflict());
-                }
-                let index = self.catalog()?;
-                let plan = store::plan_install(&index, state.apps(), &p.ids, &p.accepted_terms)?;
-                if plan.new.is_empty() {
-                    return job_ref(None);
-                }
-                self.preflight_with(plan.size_mib.saturating_mul(1 << 20))?;
-                let who = user_of(uid);
-                let by = who
-                    .as_ref()
-                    .map_or_else(|| uid.to_string(), |u| u.0.clone());
-                let profile = state
-                    .profiles
-                    .iter()
-                    .find(|pr| Some(&pr.user) == who.as_ref().map(|u| &u.0))
-                    .map(|pr| pr.id.clone());
-                let now = job::now();
-                let terms: Vec<job::TermsRecord> = plan
-                    .terms
-                    .iter()
-                    .map(|(id, version)| job::TermsRecord {
-                        id: id.clone(),
-                        version: version.clone(),
-                        accepted_at: now,
-                        by: by.clone(),
-                        profile: None,
-                    })
-                    .collect();
-                state
-                    .apps
-                    .get_or_insert_with(Vec::new)
-                    .extend(plan.new.iter().cloned());
-                let subject = system::JobSubject {
-                    profile: profile.as_deref().map(|p| self.subject_profile(p)),
-                    apps: Some(self.subject_apps(&plan.new)),
-                    ..Default::default()
-                };
-                let spec = self
-                    .spec(
-                        JobKind::AppsInstall,
-                        uid,
-                        Action::Apply(Apply {
-                            state: Some(state),
-                            terms: terms.clone(),
-                            ..Default::default()
-                        }),
-                    )
-                    .about(subject);
-                let id = self.start(spec).await?;
-                for t in &terms {
-                    self.audit
-                        .terms_accepted(uid, &by, profile.as_deref(), &t.id, &t.version, &id);
-                }
-                info!(job = %id, apps = ?plan.new, "installing apps");
-                job_ref(Some(id))
-            }
-            Request::AppsRemove(p) => {
-                let (mut state, revision) = self.load_state()?;
-                if state.is_schema2() {
-                    return self.apps_remove_v2(peer, state, p).await;
-                }
-                if p.revision != revision {
-                    return Err(state_conflict());
-                }
-                // An index is needed for dependents and data paths; without one (a broken
-                // generation) removing is still possible, without data deletion.
-                let index = match self.catalog() {
-                    Ok(i) => Some(i),
-                    Err(e) if p.delete_data => return Err(e),
-                    Err(_) => None,
-                };
-                let removing = store::plan_remove(index.as_ref(), state.apps(), &p.ids)?;
-                if let Some(apps) = state.apps.as_mut() {
-                    apps.retain(|a| !removing.contains(a));
-                }
-                let delete_data = match (&index, p.delete_data) {
-                    (Some(index), true) => Some(job::DeleteData {
-                        homes: match &self.args.test_profile_home {
-                            Some(dir) => vec![job::Home {
-                                user: "test".into(),
-                                uid,
-                                dir: dir.clone(),
-                            }],
-                            None => profile_homes(uid, &state),
-                        },
-                        paths: store::data_paths(index, &removing),
-                    }),
-                    _ => None,
-                };
-                self.preflight()?;
-                let subject = system::JobSubject {
-                    apps: Some(self.subject_apps(&removing)),
-                    delete_data: Some(p.delete_data),
-                    ..Default::default()
-                };
-                let spec = self
-                    .spec(
-                        JobKind::AppsRemove,
-                        uid,
-                        Action::Apply(Apply {
-                            state: Some(state),
-                            delete_data,
-                            ..Default::default()
-                        }),
-                    )
-                    .about(subject);
-                let id = self.start(spec).await?;
-                info!(job = %id, apps = ?removing, delete_data = p.delete_data, "removing apps");
-                job_ref(Some(id))
-            }
+            Request::AppsInstall(p) => self.apps_install(peer, p).await,
+            Request::AppsRemove(p) => self.apps_remove(peer, p).await,
             Request::Storage(r) => self.storage_request(peer, r).await,
             Request::Servers(r) => self.servers_request(peer, r).await,
             Request::TimeZoneSet(p) => self.time_zone_set(peer, p).await,
@@ -1732,37 +1608,6 @@ impl Service {
             )
         })
     }
-}
-
-/// The caller's user name and home, from the system's user database.
-fn user_of(uid: u32) -> Option<(String, std::path::PathBuf)> {
-    let u = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
-    Some((u.name, u.dir))
-}
-
-/// Every profile's home: today the caller's (the session user's), plus the users named in
-/// `state.json`'s profiles (M7). Never root's, never `/`, only absolute paths.
-fn profile_homes(uid: u32, state: &State) -> Vec<job::Home> {
-    let mut users: Vec<nix::unistd::User> = Vec::new();
-    if let Ok(Some(u)) = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)) {
-        users.push(u);
-    }
-    for p in &state.profiles {
-        if let Ok(Some(u)) = nix::unistd::User::from_name(&p.user)
-            && !users.iter().any(|x| x.uid == u.uid)
-        {
-            users.push(u);
-        }
-    }
-    users
-        .into_iter()
-        .filter(|u| !u.uid.is_root() && u.dir.is_absolute() && u.dir != Path::new("/"))
-        .map(|u| job::Home {
-            user: u.name,
-            uid: u.uid.as_raw(),
-            dir: u.dir,
-        })
-        .collect()
 }
 
 fn mem_available() -> Option<u64> {

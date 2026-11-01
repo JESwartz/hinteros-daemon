@@ -7,6 +7,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use std::os::unix::fs::symlink;
+
 use hinteros_api::client::{Client, ClientError};
 use hinteros_api::common::Peer;
 use hinteros_api::conformance::ApiSchema;
@@ -110,7 +112,7 @@ async fn read_only_methods_and_denials() {
     let settings = call(&mut c, "settings.get", json!({})).await.unwrap();
     assert_eq!(
         settings["settings"],
-        json!({"base": "unstable", "ssh": {"enabled": false}, "apps": ["steam"]})
+        json!({"base": "unstable", "ssh": {"enabled": false}, "requirements": []})
     );
     let gens = call(&mut c, "generations.list", json!({})).await.unwrap();
     assert_eq!(gens["generations"][0]["generation"], 1);
@@ -405,8 +407,8 @@ async fn settings_ssh_rebuild_rollback() {
     assert_eq!(done["session_restart_required"], false);
     assert_eq!(root.etc_state()["settings"]["ssh"]["enable"], true);
     // Everything else in state.json survives, written canonically by the service.
-    assert_eq!(root.etc_state()["apps"], json!(["steam"]));
-    assert_eq!(root.etc_state()["profiles"][0]["user"], "hinteros");
+    assert_eq!(root.etc_state()["stateVersion"], "26.11");
+    assert_eq!(root.etc_state()["profiles"], json!([{"id": "p1"}]));
     assert_eq!(root.current(), root.p("store/gen2"));
     assert!(
         root.read("switch.log")
@@ -471,28 +473,34 @@ async fn settings_ssh_rebuild_rollback() {
     .unwrap();
     assert_eq!(r, json!({"job_id": null}));
 
-    // base.set: unstable → stable is a downgrade.
-    let e = call(&mut c, "base.set", json!({"base": "stable"}))
-        .await
-        .unwrap_err();
-    assert_eq!(code(&e), ErrorCode::NeedsAcknowledgement.code());
-    let r = call(
-        &mut c,
-        "base.set",
+    // base.set: stable is not built, acknowledged or not.
+    for params in [
+        json!({"base": "stable"}),
         json!({"base": "stable", "acknowledge_downgrade": true}),
-    )
-    .await
-    .unwrap();
+    ] {
+        let e = call(&mut c, "base.set", params).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::Unavailable.code());
+        assert_eq!(e["data"], json!({"service": "base", "reason": "not_built"}));
+    }
+    assert_eq!(root.etc_state()["base"], "unstable");
+    // A file on stable moves back with a job.
+    let stable = root
+        .read("etc/hinteros/state.json")
+        .replace(r#""base": "unstable""#, r#""base": "stable""#);
+    std::fs::write(root.p("etc/hinteros/state.json"), stable).unwrap();
+    let r = call(&mut c, "base.set", json!({"base": "unstable"}))
+        .await
+        .unwrap();
     let id = r["job_id"].as_str().unwrap().to_owned();
     let events = until_finished(&mut c, &id).await;
     assert_eq!(
         events[0].1["subject"],
-        json!({"base": "stable", "from_base": "unstable"})
+        json!({"base": "unstable", "from_base": "stable"})
     );
     assert_eq!(finished(&events)["ok"], true);
-    assert_eq!(root.etc_state()["base"], "stable");
+    assert_eq!(root.etc_state()["base"], "unstable");
     assert_eq!(
-        call(&mut c, "base.set", json!({"base": "stable"}))
+        call(&mut c, "base.set", json!({"base": "unstable"}))
             .await
             .unwrap()["job_id"],
         Value::Null
@@ -750,6 +758,17 @@ async fn build_progress_heartbeat_and_reconnect() {
 #[tokio::test(flavor = "multi_thread")]
 async fn updates_are_verified() {
     let root = Root::create();
+    // p1 has Steam.
+    let env = root.p("store/env-steam");
+    std::fs::create_dir_all(env.join("share/hinteros")).unwrap();
+    std::fs::write(
+        env.join("share/hinteros/apps.json"),
+        r#"{"version":1,"ids":["steam"],"apps":[],"box":[]}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.p("nixprofiles/apps")).unwrap();
+    symlink(&env, root.p("nixprofiles/apps/hinteros-p1-1-link")).unwrap();
+    symlink("hinteros-p1-1-link", root.p("nixprofiles/apps/hinteros-p1")).unwrap();
     let Some(up) = Upstream::create(&root) else {
         return;
     };
@@ -1247,6 +1266,10 @@ const CATALOG: &str = r#"{"indexVersion": 2, "apps": [
   {"id": "old", "name": "Old", "status": "retired", "statusReason": "Discontinued."}
 ]}"#;
 
+async fn installed(c: &mut Client) -> Value {
+    call(c, "apps.list", json!({})).await.unwrap()["ids"].clone()
+}
+
 /// apps.install / apps.remove against a catalog index in the fake generation: validation,
 /// dependencies, conflicts, terms (recorded and audited), the job, and data deletion in the
 /// (test) profile home without following symlinks.
@@ -1261,12 +1284,24 @@ async fn store_install_and_remove() {
     let mut c = sys.subscriber().await;
     let revision = || async {
         let mut c = sys.client().await;
-        call(&mut c, "settings.get", json!({})).await.unwrap()["revision"]
+        call(&mut c, "apps.list", json!({})).await.unwrap()["revision"]
             .as_str()
             .unwrap()
             .to_owned()
     };
+    // Steam is there first.
+    let r = call(
+        &mut c,
+        "apps.install",
+        json!({"ids": ["steam"], "revision": revision().await}),
+    )
+    .await
+    .unwrap();
+    let id = r["job_id"].as_str().unwrap().to_owned();
+    let events = until_finished(&mut c, &id).await;
+    assert_eq!(finished(&events)["ok"], true, "{}", sys.job_log(&id));
     let rev = revision().await;
+    let units = sys.fakes.lock().unwrap().units.len();
 
     // Refusals, none of which start a job or touch state.json.
     let cases = [
@@ -1317,7 +1352,7 @@ async fn store_install_and_remove() {
     .await
     .unwrap_err();
     assert_eq!(e["data"], json!({"id": "kodi", "conflicts_with": "steam"}));
-    assert!(sys.fakes.lock().unwrap().units.is_empty());
+    assert_eq!(sys.fakes.lock().unwrap().units.len(), units);
     assert_eq!(root.read("etc/hinteros/state.json"), STATE);
     // Already installed: nothing to do.
     let r = call(
@@ -1343,13 +1378,8 @@ async fn store_install_and_remove() {
     assert_eq!(events[0].1["kind"], "apps_install");
     assert_eq!(finished(&events)["ok"], true, "{}", sys.job_log(&id));
     assert_eq!(
-        root.etc_state()["apps"],
-        json!(["steam", "youtube", "plex-htpc", "firefox"])
-    );
-    let settings = call(&mut c, "settings.get", json!({})).await.unwrap();
-    assert_eq!(
-        settings["settings"]["apps"],
-        json!(["steam", "youtube", "plex-htpc", "firefox"])
+        installed(&mut c).await,
+        json!(["firefox", "plex-htpc", "steam", "youtube"])
     );
     // The acceptance is recorded (root-only file) and audited.
     let terms: Value =
@@ -1430,7 +1460,7 @@ async fn store_install_and_remove() {
     let events = until_finished(&mut c, &id).await;
     assert_eq!(events[0].1["kind"], "apps_remove");
     assert_eq!(finished(&events)["ok"], true, "{}", sys.job_log(&id));
-    assert_eq!(root.etc_state()["apps"], json!(["steam", "plex-htpc"]));
+    assert_eq!(installed(&mut c).await, json!(["plex-htpc", "steam"]));
     assert!(!home.join(".local/share/hinteros/firefox/youtube").exists());
     assert!(home.join(".local/share/hinteros/firefox").exists());
     assert!(std::fs::symlink_metadata(home.join(".mozilla")).is_err());
@@ -1474,12 +1504,16 @@ mod check_state {
     }
 
     #[test]
-    fn unknown_field_is_invalid() {
+    fn unknown_field_is_ok_and_another_schema_is_not() {
         let dir = tempfile::tempdir().unwrap();
         let mut v: serde_json::Value =
             serde_json::from_slice(&std::fs::read(fixture("device-devbox.json")).unwrap()).unwrap();
         v["surprise"] = serde_json::json!(1);
         let f = dir.path().join("state.json");
+        std::fs::write(&f, serde_json::to_vec(&v).unwrap()).unwrap();
+        let o = run(&[&f]);
+        assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+        v["schemaVersion"] = serde_json::json!(3);
         std::fs::write(&f, serde_json::to_vec(&v).unwrap()).unwrap();
         let o = run(&[&f]);
         assert_eq!(o.status.code(), Some(1));
@@ -1488,8 +1522,7 @@ mod check_state {
             out.starts_with(&format!("invalid {}: ", f.display())),
             "{out}"
         );
-        assert!(out.contains("out of sync"), "{out}");
-        assert!(out.contains("surprise"), "{out}");
+        assert!(out.contains("unsupported schemaVersion 3"), "{out}");
     }
 
     #[test]
@@ -1501,8 +1534,8 @@ mod check_state {
         assert!(stdout(&o).starts_with(&format!("invalid {}: ", f.display())));
     }
 
-    /// `settings.cleanup` (storage.md): accepted with its defaults filled in, refused out of range,
-    /// with an unknown frequency or an unknown field.
+    /// `settings.cleanup` (storage.md): accepted with its defaults filled in, refused out of range
+    /// or with an unknown frequency; a field it does not know is kept.
     #[test]
     fn cleanup_setting() {
         let dir = tempfile::tempdir().unwrap();
@@ -1522,6 +1555,7 @@ mod check_state {
             ),
             with("empty.json", serde_json::json!({})),
             with("some.json", serde_json::json!({"frequency": "daily"})),
+            with("extra.json", serde_json::json!({"enable": true, "keep": 3})),
         ];
         for f in &good {
             let o = run(&[f]);
@@ -1531,7 +1565,6 @@ mod check_state {
             ("zero.json", serde_json::json!({"keepSystem": 0})),
             ("eleven.json", serde_json::json!({"keepProfiles": 11})),
             ("hourly.json", serde_json::json!({"frequency": "hourly"})),
-            ("extra.json", serde_json::json!({"enable": true, "keep": 3})),
             ("string.json", serde_json::json!({"keepSystem": "5"})),
         ] {
             let f = with(name, bad);

@@ -553,7 +553,7 @@ mod tests {
     fn fast_path_choices() {
         let v: PublicView = serde_json::from_str(
             r#"{"version":1,"profiles":[
-                 {"id":"p1","user":"hinteros","name":"J","color":"teal","locked":false,"admin":true,"locked_until":null},
+                 {"id":"p1","user":"hinteros-p1","name":"J","color":"teal","locked":false,"admin":true,"locked_until":null},
                  {"id":"p3","user":"hinteros-p3","name":"S","color":"red","locked":true,"admin":false,"locked_until":null}],
                "guest":{"enabled":true,"user":"hinteros-guest"},"first_boot":false,"spare":null,
                "last_used":"p1","next":{"target":"p3","fast":false,"expires":100},
@@ -567,8 +567,8 @@ mod tests {
         assert_eq!(fast.fast_path(200), None, "expired");
         let mut first = v.clone();
         first.first_boot = true;
-        first.spare = Some("hinteros".into());
-        assert_eq!(first.fast_path(0).as_deref(), Some("hinteros"));
+        first.spare = Some("hinteros-p1".into());
+        assert_eq!(first.fast_path(0).as_deref(), Some("hinteros-p1"));
         assert_eq!(v.user_of("guest").as_deref(), Some("hinteros-guest"));
         assert_eq!(PublicView::default().fast_path(0), None);
     }

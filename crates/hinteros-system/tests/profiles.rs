@@ -16,10 +16,11 @@ use common::*;
 const STATE2: &str = r#"{
   "schemaVersion": 2,
   "base": "unstable",
+  "stateVersion": "26.11",
   "settings": { "ssh": { "enable": false }, "admin": { "user": "admin" } },
   "requirements": [],
   "services": [],
-  "profiles": [{ "id": "p1", "user": "hinteros" }, { "id": "p2", "user": "hinteros-p2" }]
+  "profiles": [{ "id": "p1" }, { "id": "p2" }]
 }
 "#;
 
@@ -36,6 +37,7 @@ const UPDATE_REV: &str = "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5";
 fn root_with(profiles: Option<&str>) -> Root {
     let root = Root::create();
     std::fs::write(root.p("etc/hinteros/state.json"), STATE2).unwrap();
+    root.rm("var/lib/hinteros/profiles.json");
     if let Some(p) = profiles {
         std::fs::write(root.p("var/lib/hinteros/profiles.json"), p).unwrap();
         hinteros_system::pins::Pins::new(root.p("var/lib/hinteros/pins"))
@@ -145,7 +147,7 @@ async fn profiles_lifecycle_and_pins() {
     assert_eq!(l["profiles"][0]["active"], true);
     assert_eq!(
         l["caller"],
-        json!({"id": "p1", "user": "hinteros", "guest": false, "spare": false})
+        json!({"id": "p1", "user": "hinteros-p1", "guest": false, "spare": false})
     );
     assert_eq!(l["first_boot"], false);
     assert_eq!(l["max"], 8);
@@ -181,10 +183,7 @@ async fn profiles_lifecycle_and_pins() {
         json!({"profile": {"id": "p3", "name": "Sam"}})
     );
     let state = root.etc_state();
-    assert_eq!(
-        state["profiles"][2],
-        json!({"id": "p3", "user": "hinteros-p3"})
-    );
+    assert_eq!(state["profiles"][2], json!({"id": "p3"}));
     let pf: Value = serde_json::from_str(&root.read("var/lib/hinteros/profiles.json")).unwrap();
     assert_eq!(pf["profiles"]["p3"]["name"], "Sam");
     assert_eq!(pf["profiles"]["p3"]["locked"], true);
@@ -374,7 +373,7 @@ async fn profiles_lifecycle_and_pins() {
         .await
         .unwrap();
     let hint: Value = serde_json::from_str(&root.read("run/switch.json")).unwrap();
-    assert_eq!(hint["token"]["user"], "hinteros");
+    assert_eq!(hint["token"]["user"], "hinteros-p1");
     assert_eq!(public(root)["next"]["fast"], true);
     let e = call(&mut c, "profiles.switch", json!({"id": "p2"}))
         .await
@@ -594,7 +593,7 @@ async fn first_boot_and_the_greeter_socket() {
     assert_eq!(l["first_boot"], true);
     assert_eq!(l["caller"]["spare"], true);
     assert_eq!(public(root)["first_boot"], true);
-    assert_eq!(public(root)["spare"], "hinteros");
+    assert_eq!(public(root)["spare"], "hinteros-p1");
     // A spare may not install apps.
     let e = call(
         &mut c,
@@ -626,7 +625,7 @@ async fn first_boot_and_the_greeter_socket() {
     assert_eq!(code(&e), ErrorCode::PermissionDenied.code());
     // The new admin profile gets the starter env (a short job when the box is idle).
     eventually("the starter env for p1", || {
-        std::fs::canonicalize(root.p("nixprofiles/apps/hinteros")).ok()
+        std::fs::canonicalize(root.p("nixprofiles/apps/hinteros-p1")).ok()
             == Some(root.p("store/env-youtube"))
     })
     .await;
@@ -702,27 +701,33 @@ fn pam_helper_verbs() {
         )
     };
     // p1 is unlocked; p2 is a spare outside first-boot mode; root and the admin account never.
-    assert!(pin("unlocked", "hinteros", "").0);
+    assert!(pin("unlocked", "hinteros-p1", "").0);
     assert!(!pin("unlocked", "hinteros-p2", "").0);
     assert!(!pin("unlocked", "root", "").0);
     assert!(!pin("unlocked", "admin", "").0);
     assert!(pin("unlocked", "hinteros-guest", "").0);
     // verify: the PIN from pam_exec (NUL-terminated).
-    assert_eq!(pin("verify", "hinteros", "2468\0"), (true, String::new()));
     assert_eq!(
-        pin("verify", "hinteros", "0000\0"),
+        pin("verify", "hinteros-p1", "2468\0"),
+        (true, String::new())
+    );
+    assert_eq!(
+        pin("verify", "hinteros-p1", "0000\0"),
         (false, "hinteros:wrong\n".into())
     );
     // p1 is the admin profile: no backoff, wrong stays just wrong (DECISIONS J4).
     for _ in 0..5 {
         assert_eq!(
-            pin("verify", "hinteros", "0000\0"),
+            pin("verify", "hinteros-p1", "0000\0"),
             (false, "hinteros:wrong\n".into())
         );
     }
-    assert_eq!(pin("verify", "hinteros", "2468\0"), (true, String::new()));
+    assert_eq!(
+        pin("verify", "hinteros-p1", "2468\0"),
+        (true, String::new())
+    );
     // end-others with nobody else running: succeeds, touches last_used_at.
-    assert!(pin("end-others", "hinteros", "").0);
+    assert!(pin("end-others", "hinteros-p1", "").0);
     let pf: Value = serde_json::from_str(&root.read("var/lib/hinteros/profiles.json")).unwrap();
     assert!(pf["profiles"]["p1"]["last_used_at"].is_i64());
 }
@@ -784,7 +789,7 @@ async fn reset_pin_from_the_terminal() {
         assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{e}");
     }
     assert_eq!(pins.backoff("p1").failures, 0);
-    assert!(!pam_ok(root, "unlocked", "hinteros"));
+    assert!(!pam_ok(root, "unlocked", "hinteros-p1"));
 
     // Not root: the binary refuses (and changes nothing).
     if !rustix::process::geteuid().is_root() {
@@ -841,7 +846,7 @@ async fn reset_pin_from_the_terminal() {
     }
 
     // The picker: enterable without a PIN although still locked.
-    assert!(pam_ok(root, "unlocked", "hinteros"));
+    assert!(pam_ok(root, "unlocked", "hinteros-p1"));
     // The session: "Set your PIN" (pin_set false); set_pin needs no current PIN.
     let l = call(&mut c, "profiles.list", json!({})).await.unwrap();
     assert_eq!(l["profiles"][0]["pin_set"], false);
@@ -852,7 +857,7 @@ async fn reset_pin_from_the_terminal() {
     let l = call(&mut c, "profiles.list", json!({})).await.unwrap();
     assert_eq!(l["profiles"][0]["pin_set"], true);
     // From now on the new PIN is the one, and the picker asks for it again.
-    assert!(!pam_ok(root, "unlocked", "hinteros"));
+    assert!(!pam_ok(root, "unlocked", "hinteros-p1"));
     call(
         &mut c,
         "profiles.set_locked",
@@ -895,7 +900,7 @@ async fn the_admin_pin_locks_until_a_reboot() {
             .arg("--journal-socket")
             .arg(root.p("no-journal.sock"))
             .env_clear()
-            .env("PAM_USER", "hinteros")
+            .env("PAM_USER", "hinteros-p1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -1059,7 +1064,7 @@ async fn box_wide_actions_need_the_admin_pin() {
         );
     }
 
-    // An admin profile without a PIN yet (migrated p1) passes without one.
+    // An admin profile without a PIN yet passes without one.
     std::fs::remove_file(root.p("var/lib/hinteros/pins/p1")).unwrap();
     let r = call(&mut c, "base.set", json!({"base": "unstable"}))
         .await
@@ -1099,8 +1104,11 @@ fn become_the_guest(root: &Root) -> std::path::PathBuf {
         .read("passwd")
         .lines()
         .map(|l| {
-            if l.starts_with("hinteros:") {
-                format!("hinteros:x:20001:100::{}:/bin/sh", root.p("home").display())
+            if l.starts_with("hinteros-p1:") {
+                format!(
+                    "hinteros-p1:x:20001:100::{}:/bin/sh",
+                    root.p("home").display()
+                )
             } else if l.starts_with("hinteros-guest:") {
                 format!("hinteros-guest:x:{}:100::{}:/bin/sh", me(), home.display())
             } else {
@@ -1131,7 +1139,7 @@ async fn end_guest_session_wipes_now() {
     std::fs::write(
         root.p("var/lib/hinteros/terms-accepted.json"),
         r#"{"steam": [{"version": "1", "accepted_at": "2026-10-01T00:00:00Z", "by": "hinteros-guest"},
-                      {"version": "1", "accepted_at": "2026-10-01T00:00:00Z", "by": "hinteros", "profile": "p1"}]}"#,
+                      {"version": "1", "accepted_at": "2026-10-01T00:00:00Z", "by": "hinteros-p1", "profile": "p1"}]}"#,
     )
     .unwrap();
     std::fs::write(
@@ -1195,7 +1203,7 @@ async fn end_guest_session_wipes_now() {
     let terms: Value =
         serde_json::from_str(&root.read("var/lib/hinteros/terms-accepted.json")).unwrap();
     assert_eq!(terms["steam"].as_array().unwrap().len(), 1);
-    assert_eq!(terms["steam"][0]["by"], "hinteros");
+    assert_eq!(terms["steam"][0]["by"], "hinteros-p1");
     let usage: Value = serde_json::from_str(&root.read("var/lib/hinteros/usage.json")).unwrap();
     assert!(usage.get("guest").is_none());
     assert!(!root.p("run/switch.json").exists());

@@ -35,7 +35,7 @@ const CATALOG: &str = r#"{"indexVersion": 2, "apps": [
   {"id": "old", "name": "Old", "status": "removed", "statusReason": "Gone."}
 ]}"#;
 
-/// A fake system service: `settings.get` with the shared installed apps, `apps.install` that
+/// A fake system service: `apps.list` with the shared installed apps, `apps.install` that
 /// starts a job (job_started now, job_finished shortly after, adding the apps), and a cached
 /// `update.check` result naming a new app.
 fn fake_system(path: &Path, installed: Arc<Mutex<Vec<String>>>) -> tokio::task::JoinHandle<()> {
@@ -62,10 +62,12 @@ fn fake_system(path: &Path, installed: Arc<Mutex<Vec<String>>>) -> tokio::task::
                             let params = req.params.clone().unwrap_or(json!({}));
                             let outcome = match req.method.as_str() {
                                 "subscribe" => Ok(params.clone()),
-                                "settings.get" => Ok(json!({
+                                "apps.list" => Ok(json!({
                                     "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d",
-                                    "settings": {"base": "unstable", "ssh": {"enabled": false},
-                                                 "apps": *installed.lock().unwrap()}
+                                    "generation": null,
+                                    "ids": *installed.lock().unwrap(),
+                                    "needs_terms": [],
+                                    "box": []
                                 })),
                                 "apps.install" => {
                                     let ids: Vec<String> = serde_json::from_value(params["ids"].clone()).unwrap();

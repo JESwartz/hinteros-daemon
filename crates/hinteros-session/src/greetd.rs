@@ -101,12 +101,12 @@ mod tests {
     #[test]
     fn wire_format() {
         let v = serde_json::to_value(Request::CreateSession {
-            username: "hinteros".into(),
+            username: "hinteros-p1".into(),
         })
         .unwrap();
         assert_eq!(
             v,
-            serde_json::json!({"type": "create_session", "username": "hinteros"})
+            serde_json::json!({"type": "create_session", "username": "hinteros-p1"})
         );
         let v = serde_json::to_value(Request::PostAuthMessageResponse { response: None }).unwrap();
         assert_eq!(

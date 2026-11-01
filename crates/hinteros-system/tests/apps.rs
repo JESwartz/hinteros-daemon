@@ -1,9 +1,6 @@
 //! Per-profile apps (system API 0.4, apps.md) against the real binary, a fake root and fake
 //! `nix`/`nix-env`/`nix-store`: install, remove and rollback in the caller's own Nix profile,
-//! the box stage, the registry, the final apps stage of system jobs, and the v1 → v2
-//! migration.
-
-use std::time::{Duration, Instant};
+//! the box stage, the registry and the final apps stage of system jobs.
 
 use hinteros_api::ErrorCode;
 use hinteros_api::client::Client;
@@ -16,10 +13,11 @@ use common::*;
 const STATE2: &str = r#"{
   "schemaVersion": 2,
   "base": "unstable",
+  "stateVersion": "26.11",
   "settings": { "ssh": { "enable": false } },
   "requirements": [],
   "services": [],
-  "profiles": [{ "id": "p1", "user": "hinteros" }, { "id": "p2", "user": "hinteros-p2" }]
+  "profiles": [{ "id": "p1" }, { "id": "p2" }]
 }
 "#;
 
@@ -42,7 +40,7 @@ const CATALOG3: &str = r#"{"indexVersion": 3, "apps": [
 
 /// Profile p1's (the test user's) app profile.
 fn p1_link(root: &Root) -> std::path::PathBuf {
-    root.p("nixprofiles/apps/hinteros")
+    root.p("nixprofiles/apps/hinteros-p1")
 }
 
 fn env_of(root: &Root, link: &std::path::Path) -> Option<String> {
@@ -93,7 +91,7 @@ async fn profile_apps_install_remove_rollback() {
 
     // The session link is published at start, before any app exists.
     assert_eq!(
-        std::fs::read_link(root.p("run/apps/hinteros")).unwrap(),
+        std::fs::read_link(root.p("run/apps/hinteros-p1")).unwrap(),
         p1_link(root)
     );
     assert!(root.p("run/apps/hinteros-p2").is_symlink());
@@ -101,7 +99,7 @@ async fn profile_apps_install_remove_rollback() {
     assert_eq!(l["generation"], Value::Null);
     assert_eq!(l["ids"], json!([]));
     let rev0 = l["revision"].as_str().unwrap().to_owned();
-    // schema 2: settings.get has requirements, no apps.
+    // settings.get has requirements, no apps.
     let s = call(&mut c, "settings.get", json!({})).await.unwrap();
     assert_eq!(s["settings"]["requirements"], json!([]));
     assert!(s["settings"].get("apps").is_none());
@@ -189,7 +187,7 @@ async fn profile_apps_install_remove_rollback() {
     let terms: Value =
         serde_json::from_str(&root.read("var/lib/hinteros/terms-accepted.json")).unwrap();
     assert_eq!(terms["steam"][0]["profile"], "p1");
-    assert_eq!(terms["steam"][0]["by"], "hinteros");
+    assert_eq!(terms["steam"][0]["by"], "hinteros-p1");
     let l = apps_list(&mut c).await;
     assert_eq!(l["ids"], json!(["moonlight", "steam"]));
     assert_eq!(l["needs_terms"], json!([]));
@@ -363,7 +361,11 @@ async fn registry_recovers_from_the_manifests() {
 #[tokio::test(flavor = "multi_thread")]
 async fn apps_stage_after_a_switch() {
     let root = Root::create();
-    std::fs::write(root.p("etc/hinteros/state.json"), STATE2).unwrap();
+    std::fs::write(
+        root.p("etc/hinteros/state.json"),
+        STATE2.replace(r#""base": "unstable""#, r#""base": "stable""#),
+    )
+    .unwrap();
     std::fs::write(root.p("var/lib/hinteros/profiles.json"), PROFILES).unwrap();
     std::fs::write(root.p("policy/catalog.json"), CATALOG3).unwrap();
     let Some(sys) = System::start(root, &[]).await else {
@@ -402,13 +404,7 @@ async fn apps_stage_after_a_switch() {
         ),
     )
     .unwrap();
-    let r = run_job(
-        &sys,
-        &mut c,
-        "base.set",
-        json!({"base": "stable", "acknowledge_downgrade": true}),
-    )
-    .await;
+    let r = run_job(&sys, &mut c, "base.set", json!({"base": "unstable"})).await;
     assert!(
         r["stages"].as_array().unwrap().contains(&json!("apps")),
         "{r}"
@@ -430,165 +426,6 @@ async fn apps_stage_after_a_switch() {
     );
 }
 
-const STATE1: &str = r#"{
-  "schemaVersion": 1,
-  "base": "unstable",
-  "settings": { "ssh": { "enable": false } },
-  "apps": ["youtube", "steam", "old"],
-  "profiles": [{ "id": "p1", "name": "Dev", "user": "hinteros" }]
-}
-"#;
-
-async fn wait_for_job(sys: &System, kind: &str, not: Option<&Value>) -> Value {
-    let deadline = Instant::now() + TIMEOUT;
-    loop {
-        let mut c = sys.client().await;
-        let jobs = call(&mut c, "jobs.list", json!({})).await.unwrap();
-        if let Some(j) = jobs["jobs"].as_array().unwrap().iter().find(|j| {
-            j["kind"] == kind
-                && j["state"] != "running"
-                && not.is_none_or(|n| n["job_id"] != j["job_id"])
-        }) {
-            return j.clone();
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no finished {kind} job: {jobs}\n{}",
-            sys.log()
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-/// v1 → v2: at start a schema-1 box on a generation that reads schema 2 migrates by itself. A
-/// failure leaves schema 1; the next boot retries, and what was done is not done again.
-#[tokio::test(flavor = "multi_thread")]
-async fn migration_is_resumable_and_idempotent() {
-    let root = Root::create();
-    std::fs::write(root.p("etc/hinteros/state.json"), STATE1).unwrap();
-    std::fs::write(root.p("policy/catalog.json"), CATALOG3).unwrap();
-    std::fs::write(
-        root.p("policy/release.json"),
-        r#"{"version":"0.2.0-test","dev":true,"stateSchema":2}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        root.p("var/lib/hinteros/terms-accepted.json"),
-        r#"{"steam":[{"version":"2026-09-10","accepted_at":"2026-01-01T00:00:00Z","by":"installer"}]}"#,
-    )
-    .unwrap();
-    root.touch("switch-fail");
-    // The switch waits until this is gone: the job is running meanwhile.
-    root.touch("switch-hold");
-    let Some(sys) = System::start(root, &[]).await else {
-        return;
-    };
-    // While the job runs, the public view already follows the new profiles.json: no longer
-    // first boot, p1 listed (the greeter must not offer first-boot setup meanwhile).
-    let deadline = Instant::now() + TIMEOUT;
-    loop {
-        let public: Value =
-            serde_json::from_str(&sys.root.read("run/profiles-public.json")).unwrap_or_default();
-        if public["first_boot"] == false && public["profiles"][0]["id"] == "p1" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "public view during the migration: {public}\n{}",
-            sys.log()
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let mut c = sys.client().await;
-    let jobs = call(&mut c, "jobs.list", json!({})).await.unwrap();
-    assert!(
-        jobs["jobs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|j| j["kind"] == "migrate_apps" && j["state"] == "running"),
-        "{jobs}"
-    );
-    drop(c);
-    sys.root.rm("switch-hold");
-    let first = wait_for_job(&sys, "migrate_apps", None).await;
-    assert_eq!(first["state"], "failed", "{first}");
-    let root = &sys.root;
-    // Still schema 1, but p1 already has its env and profiles.json exists.
-    assert_eq!(root.etc_state()["schemaVersion"], 1);
-    assert_eq!(env_of(root, &p1_link(root)).unwrap(), "env-steam+youtube");
-    let profiles: Value =
-        serde_json::from_str(&root.read("var/lib/hinteros/profiles.json")).unwrap();
-    assert_eq!(profiles["profiles"]["p1"]["admin"], true);
-    assert_eq!(profiles["profiles"]["p1"]["locked"], false);
-    assert_eq!(profiles["profiles"]["p1"]["name"], "Dev");
-    // Schema 1: the per-profile methods are unavailable.
-    let mut c = sys.client().await;
-    let e = call(&mut c, "apps.list", json!({})).await.unwrap_err();
-    assert_eq!(code(&e), ErrorCode::Unavailable.code());
-    assert_eq!(
-        e["data"],
-        json!({"service": "profiles", "reason": "schema1"})
-    );
-    // No PINs before the migration: the launcher must not ask for one yet.
-    let l = call(&mut c, "profiles.list", json!({})).await.unwrap();
-    assert_eq!(l["profiles"][0]["pin_set"], true, "{l}");
-    drop(c);
-
-    // "Next boot": a new service, the marker gone, the switch works now.
-    let root_dir = {
-        let mut sys = sys;
-        let _ = sys.child.kill();
-        let _ = sys.child.wait();
-        std::mem::replace(&mut sys.root, Root::create())
-    };
-    root_dir.rm("run/migrate-attempted");
-    root_dir.rm("journal.sock");
-    root_dir.rm("switch-fail");
-    let Some(sys) = System::start(root_dir, &[]).await else {
-        return;
-    };
-    let job = wait_for_job(&sys, "migrate_apps", Some(&first)).await;
-    assert_eq!(job["state"], "succeeded", "{job}\n{}", sys.log());
-    let root = &sys.root;
-    let state = root.etc_state();
-    assert_eq!(state["schemaVersion"], 2);
-    assert!(state.get("apps").is_none());
-    assert_eq!(
-        state["requirements"],
-        json!(["graphics32", "steam-devices"])
-    );
-    assert_eq!(state["services"], json!([]));
-    assert_eq!(state["profiles"], json!([{"id": "p1", "user": "hinteros"}]));
-    // Now p1 has no PIN yet: "Set your PIN".
-    let mut c = sys.client().await;
-    let l = call(&mut c, "profiles.list", json!({})).await.unwrap();
-    assert_eq!(l["profiles"][0]["pin_set"], false, "{l}");
-    drop(c);
-    // p1's env was set once only; the starter set is the box's apps.
-    let sets = root
-        .read("nix-env.log")
-        .lines()
-        .filter(|l| l.contains("apps/hinteros --set"))
-        .count();
-    assert_eq!(sets, 1, "{}", root.read("nix-env.log"));
-    assert_eq!(
-        env_of(root, &root.p("nixprofiles/starter")).unwrap(),
-        "env-steam+youtube"
-    );
-    let starter: Value = serde_json::from_str(&root.read("var/lib/hinteros/starter.json")).unwrap();
-    assert_eq!(starter["ids"], json!(["steam", "youtube"]));
-    // The installer's acceptance of Steam's terms counts for p1.
-    let mut c = sys.client().await;
-    let l = apps_list(&mut c).await;
-    assert_eq!(l["ids"], json!(["steam", "youtube"]));
-    assert_eq!(l["needs_terms"], json!([]));
-    assert_eq!(
-        std::fs::read_link(root.p("run/apps/hinteros")).unwrap(),
-        p1_link(root)
-    );
-}
-
 /// A system rollback to a generation from before Steam's box features (apps.md open question
 /// 2): the job switches back, rebuilds the envs, then turns the features the envs still need
 /// back on in a `box` stage (a new generation). generations.list says so beforehand.
@@ -596,7 +433,7 @@ async fn migration_is_resumable_and_idempotent() {
 async fn rollback_readds_needed_box_features() {
     let root = Root::create();
     std::fs::write(root.p("etc/hinteros/state.json"), STATE2).unwrap();
-    // Generation 1 already had schema 2, without box features.
+    // Generation 1 had no box features.
     std::fs::write(root.p("store/gen1/hinteros/state.json"), STATE2).unwrap();
     std::fs::write(root.p("var/lib/hinteros/profiles.json"), PROFILES).unwrap();
     std::fs::write(root.p("policy/catalog.json"), CATALOG3).unwrap();

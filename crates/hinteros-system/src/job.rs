@@ -82,7 +82,7 @@ pub enum Action {
     /// Switch to an existing generation, then restore `/etc/hinteros` from its snapshot.
     Rollback {
         generation: u32,
-        /// Then rebuild every app env against the restored system (schema 2).
+        /// Then rebuild every app env against the restored system.
         #[serde(default)]
         rebuild_apps: bool,
     },
@@ -93,9 +93,6 @@ pub enum Action {
     ChannelCheck(UpdateSource),
     /// Change one owner's app env (install, remove, rollback, starter set, new profile).
     Apps(AppsJob),
-    /// The v1 → v2 migration (apps.md): per-profile envs from the box-wide apps, then
-    /// `state.json` schema 2 through the apply flow.
-    MigrateApps(MigrateJob),
     /// A new account (apply flow), then its metadata, PIN hash and starter env.
     ProfileCreate(ProfileCreateJob),
     /// An account's processes ended, the apply flow without it, then its home, PIN, metadata
@@ -308,20 +305,6 @@ pub struct AppsJob {
     pub starter: Option<StarterFile>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MigrateJob {
-    /// The box-wide apps that become every account's (and the starter set's) env.
-    pub ids: Vec<String>,
-    /// The accounts.
-    pub owners: Vec<Owner>,
-    /// The schema-1 state the job migrates from (it fails if `state.json` changed).
-    pub from: State,
-    /// Terms records copied to the profiles (existing acceptances of the migrated apps).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub terms: Vec<TermsRecord>,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Apply {
@@ -338,7 +321,7 @@ pub struct Apply {
     /// App data to delete after a successful switch (`apps.remove {delete_data: true}`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delete_data: Option<DeleteData>,
-    /// After the switch, rebuild every app env against the new system (schema 2: update,
+    /// After the switch, rebuild every app env against the new system (update,
     /// channel and base switches).
     #[serde(default)]
     pub rebuild_apps: bool,
@@ -354,7 +337,7 @@ pub struct TermsRecord {
     pub accepted_at: i64,
     /// The unix user who accepted (the caller).
     pub by: String,
-    /// The profile id (schema 2; the guest has none).
+    /// The profile id (the guest has none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
 }

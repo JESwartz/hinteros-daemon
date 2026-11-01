@@ -18,10 +18,11 @@ use common::*;
 const STATE2: &str = r#"{
   "schemaVersion": 2,
   "base": "unstable",
+  "stateVersion": "26.11",
   "settings": { "ssh": { "enable": false }, "admin": { "user": "admin" } },
   "requirements": [],
   "services": [],
-  "profiles": [{ "id": "p1", "user": "hinteros" }, { "id": "p2", "user": "hinteros-p2" }]
+  "profiles": [{ "id": "p1" }, { "id": "p2" }]
 }
 "#;
 
@@ -104,9 +105,9 @@ fn as_p2(root: &Root) {
     std::fs::write(
         root.p("passwd"),
         format!(
-            "hinteros:x:20001:100::{}:/bin/sh\nhinteros-p2:x:{}:100::{}:/bin/sh\n\
+            "hinteros-p1:x:20001:100::{}:/bin/sh\nhinteros-p2:x:{}:100::{}:/bin/sh\n\
              hinteros-guest:x:20000:100::{}:/bin/sh\n",
-            root.p("homes/hinteros").display(),
+            root.p("homes/hinteros-p1").display(),
             me(),
             root.p("home").display(),
             root.p("homes/hinteros-guest").display(),
@@ -114,7 +115,7 @@ fn as_p2(root: &Root) {
     )
     .unwrap();
     // p1: a big secret folder and a Steam game.
-    let p1 = root.p("homes/hinteros");
+    let p1 = root.p("homes/hinteros-p1");
     write(&p1.join(SECRET_DIR).join("movie"), 3 << 20);
     let steam = p1.join(".local/share/Steam/steamapps");
     write(&steam.join("common/SG/data.pak"), 2 << 20);
@@ -473,13 +474,13 @@ async fn clean_up_profiles() {
     let apps = sys.root.p("nixprofiles/apps");
     let env = sys.root.p("store/env-youtube");
     for n in 2..=4 {
-        let link = apps.join(format!("hinteros-{n}-link"));
+        let link = apps.join(format!("hinteros-p1-{n}-link"));
         if !link.is_symlink() {
             symlink(&env, link).unwrap();
         }
     }
-    std::fs::remove_file(apps.join("hinteros")).unwrap();
-    symlink("hinteros-2-link", apps.join("hinteros")).unwrap();
+    std::fs::remove_file(apps.join("hinteros-p1")).unwrap();
+    symlink("hinteros-p1-2-link", apps.join("hinteros-p1")).unwrap();
 
     let e = call(&mut c, "storage.cleanup_profiles", json!({"keep": 2}))
         .await
@@ -501,13 +502,13 @@ async fn clean_up_profiles() {
     assert!(
         log.contains(&format!(
             "-p {} --delete-generations 1",
-            apps.join("hinteros").display()
+            apps.join("hinteros-p1").display()
         )),
         "{log}"
     );
-    assert!(!apps.join("hinteros-1-link").exists());
+    assert!(!apps.join("hinteros-p1-1-link").exists());
     for n in 2..=4 {
-        assert!(apps.join(format!("hinteros-{n}-link")).is_symlink());
+        assert!(apps.join(format!("hinteros-p1-{n}-link")).is_symlink());
     }
     // keep 1: the current (2) stays although 4 is the newest; 3 goes.
     let events = job(
@@ -518,24 +519,14 @@ async fn clean_up_profiles() {
     )
     .await;
     assert_eq!(finished(&events)["result"]["generations_removed"], 1);
-    assert!(apps.join("hinteros-2-link").is_symlink() && apps.join("hinteros-4-link").is_symlink());
-    assert!(!apps.join("hinteros-3-link").exists());
+    assert!(
+        apps.join("hinteros-p1-2-link").is_symlink()
+            && apps.join("hinteros-p1-4-link").is_symlink()
+    );
+    assert!(!apps.join("hinteros-p1-3-link").exists());
     // The system's generations are not touched, and no boot menu is written.
     assert!(sys.root.p("profiles/system-1-link").is_symlink());
     assert!(!sys.root.read("switch.log").contains(" boot"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn clean_up_profiles_needs_schema_2() {
-    let Some(sys) = System::start(Root::create(), &[]).await else {
-        return;
-    };
-    let mut c = sys.client().await;
-    let e = call(&mut c, "storage.cleanup_profiles", json!({"keep": 2}))
-        .await
-        .unwrap_err();
-    assert_eq!(code(&e), ErrorCode::Unavailable.code(), "{e}");
-    assert_eq!(e["data"]["reason"], "schema1");
 }
 
 #[tokio::test(flavor = "multi_thread")]

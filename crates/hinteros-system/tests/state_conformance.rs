@@ -40,12 +40,12 @@ fn every_valid_fixture_round_trips() {
 #[test]
 fn installer_file_keeps_its_fields() {
     let s = State::parse(&fixture("installer-real-box.json")).unwrap();
-    assert_eq!(s.state_version.as_deref(), Some("26.11"));
+    assert_eq!(s.state_version, "26.11");
     assert_eq!(s.disk.as_ref().unwrap().layout, "gpt-esp-ext4");
     assert_eq!(s.settings.hostname.as_deref(), Some("hinteros"));
     assert_eq!(s.settings.admin.as_ref().unwrap().user, "james");
     assert!(s.settings.ssh.enable);
-    assert_eq!(s.apps().len(), 5);
+    assert_eq!(s.requirements, ["graphics32"]);
 }
 
 /// The VM test's config-sync snapshot is a marker file for the sync test, not a device state:
@@ -53,6 +53,5 @@ fn installer_file_keeps_its_fields() {
 #[test]
 fn config_sync_marker_is_not_a_state() {
     let e = State::parse(&fixture("vm-config-sync.json")).unwrap_err();
-    assert!(e.to_string().contains("marker"), "{e}");
-    assert!(e.to_string().contains("out of sync"), "{e}");
+    assert!(e.to_string().contains("missing field"), "{e}");
 }

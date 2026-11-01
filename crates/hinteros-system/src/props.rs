@@ -2,6 +2,8 @@
 //! must never panic, and accepted input must keep its invariants. They run in `cargo test`, so
 //! in `nix flake check`.
 
+use std::collections::BTreeMap;
+
 use hinteros_api::system::{self, Base, Severity};
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -78,22 +80,25 @@ proptest! {
     fn accepted_states_round_trip(
         enable in any::<bool>(),
         stable in any::<bool>(),
-        apps in prop::collection::vec("[a-z0-9][a-z0-9-]{0,31}", 0..5),
+        services in prop::collection::vec("[a-z0-9][a-z0-9-]{0,31}", 0..5),
         host in prop::option::of("[a-z][a-z0-9-]{0,10}"),
-        users in prop::collection::vec(("[a-z0-9-]{1,8}", "[^\\p{Cc}]{1,20}", "[a-z_][a-z0-9_-]{0,10}"), 0..3),
+        ids in prop::collection::btree_set(1u32..=999, 1..4),
         cleanup in prop::option::of((any::<bool>(), 0usize..3, 1u32..=10, 1u32..=10)),
         zone in prop::option::of("[A-Z][A-Za-z0-9_+-]{0,11}(/[A-Z][A-Za-z0-9_+-]{0,11}){0,2}"),
+        extra in prop::collection::btree_map("[a-z]{1,8}x", any::<u32>(), 0..3),
     ) {
+        let extra: BTreeMap<String, Value> =
+            extra.into_iter().map(|(k, v)| (k, Value::from(v))).collect();
         let s = State {
-            schema_version: 1,
+            schema_version: 2,
             base: if stable { Base::Stable } else { Base::Unstable },
-            state_version: host.clone().map(|_| "26.11".to_string()),
-            settings: StateSettings { hostname: host, ssh: SshState { enable }, admin: None, guest: None, cleanup: cleanup.map(|(enable, f, keep_system, keep_profiles)| crate::state::CleanupState { enable, frequency: hinteros_api::system::CleanupFrequency::ALL[f], keep_system, keep_profiles }), time_zone: zone },
+            state_version: "26.11".to_string(),
+            settings: StateSettings { hostname: host, ssh: SshState { enable, extra: extra.clone() }, admin: None, guest: None, cleanup: cleanup.map(|(enable, f, keep_system, keep_profiles)| crate::state::CleanupState { enable, frequency: hinteros_api::system::CleanupFrequency::ALL[f], keep_system, keep_profiles, extra: extra.clone() }), time_zone: zone, extra: extra.clone() },
             disk: None,
-            apps: Some(apps),
-            requirements: None,
-            services: None,
-            profiles: users.into_iter().map(|(id, name, user)| Profile { id, name: Some(name), user }).collect(),
+            requirements: Vec::new(),
+            services,
+            profiles: ids.into_iter().map(|n| Profile { id: format!("p{n}"), extra: extra.clone() }).collect(),
+            extra,
         };
         prop_assume!(s.validate().is_ok());
         let bytes = s.to_canonical_json();

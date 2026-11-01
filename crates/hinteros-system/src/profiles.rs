@@ -280,53 +280,23 @@ pub fn not_a_profile(action: &str) -> ErrorObject {
     )
 }
 
-/// `unavailable {service: profiles, reason: schema1}`: the box still has box-wide apps.
-pub fn schema1() -> ErrorObject {
-    ErrorObject::with_data(
-        ErrorCode::Unavailable,
-        "this box has not moved to per-profile apps yet",
-        json!({ "service": "profiles", "reason": "schema1" }),
-    )
-}
-
-/// The `profiles.json` the move to schema 2 creates on a box that has none: p1 is the admin
-/// profile, named after schema 1's `name` (else "Profile 1"), unlocked, without a PIN yet.
-pub fn migrated_file(state: &State, now: i64) -> ProfilesFile {
+/// For tests: every account is a profile, unlocked, without a PIN; the first is the admin.
+#[cfg(test)]
+pub fn test_file(state: &State) -> ProfilesFile {
     let mut f = ProfilesFile::default();
-    let accounts = state.accounts();
-    for a in &accounts {
-        let name = state
-            .profiles
-            .iter()
-            .find(|p| p.id == a.id)
-            .and_then(|p| p.name.clone())
-            .and_then(|n| check_name(&n).ok())
-            .unwrap_or_else(|| {
-                format!(
-                    "Profile {}",
-                    state::profile_number(&a.id).unwrap_or_default()
-                )
-            });
-        f.profiles.insert(
-            a.id.clone(),
-            Meta {
-                name,
-                color: COLORS[0].into(),
-                admin: a.id == "p1"
-                    || (accounts.iter().all(|x| x.id != "p1") && a.id == accounts[0].id),
-                locked: false,
-                created_at: now,
-                last_used_at: None,
-                appearance: Appearance::default(),
-            },
-        );
+    for (i, a) in state.accounts().into_iter().enumerate() {
+        f.next = state::profile_number(&a.id).unwrap_or_default() + 1;
+        let meta = Meta {
+            name: format!("Profile {}", i + 1),
+            color: COLORS[0].into(),
+            admin: i == 0,
+            locked: false,
+            created_at: 0,
+            last_used_at: None,
+            appearance: Appearance::default(),
+        };
+        f.profiles.insert(a.id, meta);
     }
-    f.next = accounts
-        .iter()
-        .filter_map(|a| state::profile_number(&a.id))
-        .max()
-        .unwrap_or(0)
-        + 1;
     f
 }
 
@@ -357,8 +327,10 @@ mod tests {
 
     #[test]
     fn counter_never_goes_back() {
-        let state = st(r#"{"schemaVersion":2,"requirements":[],"services":[],
-               "profiles":[{"id":"p1","user":"hinteros"},{"id":"p4","user":"hinteros-p4"}]}"#);
+        let state = st(
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],
+               "profiles":[{"id":"p1"},{"id":"p4"}]}"#,
+        );
         let d = tempfile::tempdir().unwrap();
         let passwd = d.path().join("passwd");
         std::fs::write(
@@ -380,26 +352,8 @@ mod tests {
         assert_eq!(f.take_id(&state, &users), "p20");
         let mut f = ProfilesFile::default();
         f.profiles
-            .insert("p9".into(), migrated_file(&state, 0).profiles["p1"].clone());
+            .insert("p9".into(), test_file(&state).profiles["p1"].clone());
         assert_eq!(f.take_id(&state, &Users::default()), "p10");
-    }
-
-    #[test]
-    fn migration_makes_p1_the_unlocked_admin() {
-        let s1 = st(
-            r#"{"schemaVersion":1,"apps":[],"profiles":[{"id":"p1","name":"Dev","user":"hinteros"}]}"#,
-        );
-        let f = migrated_file(&s1, 5);
-        let p1 = &f.profiles["p1"];
-        assert!(p1.admin && !p1.locked);
-        assert_eq!(p1.name, "Dev");
-        assert_eq!(f.next, 2);
-        let f = migrated_file(&st(r#"{"schemaVersion":1,"profiles":[]}"#), 5);
-        assert_eq!(f.profiles["p1"].name, "Profile 1");
-        let s2 = s1.migrated(vec![]);
-        assert!(!f.first_boot(&s2));
-        assert!(ProfilesFile::default().first_boot(&s2));
-        assert_eq!(ProfilesFile::default().spares(&s2)[0].user, "hinteros");
     }
 
     #[test]
@@ -408,7 +362,7 @@ mod tests {
         let passwd = d.path().join("passwd");
         std::fs::write(
             &passwd,
-            "hinteros:x:1000:100::/home/hinteros:/bin/sh\n\
+            "hinteros-p1:x:1000:100::/home/hinteros-p1:/bin/sh\n\
              hinteros-p2:x:20002:100::/home/hinteros-p2:/bin/sh\n\
              hinteros-guest:x:20000:100::/home/hinteros-guest:/bin/sh\n\
              admin:x:1001:100::/home/admin:/bin/sh\n",
@@ -418,11 +372,13 @@ mod tests {
             passwd: Some(passwd),
             group: None,
         };
-        let state = st(r#"{"schemaVersion":2,"requirements":[],"services":[],
-               "profiles":[{"id":"p1","user":"hinteros"},{"id":"p2","user":"hinteros-p2"}]}"#);
+        let state = st(
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],
+               "profiles":[{"id":"p1"},{"id":"p2"}]}"#,
+        );
         let mut f = ProfilesFile::default();
         f.profiles
-            .insert("p1".into(), migrated_file(&state, 0).profiles["p1"].clone());
+            .insert("p1".into(), test_file(&state).profiles["p1"].clone());
         let c = resolve(1000, &state, &f, &users);
         assert_eq!((&c.role, c.id.as_deref()), (&Role::Profile, Some("p1")));
         assert_eq!(c.owner_key().as_deref(), Some("p1"));

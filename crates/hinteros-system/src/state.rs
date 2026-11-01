@@ -1,35 +1,33 @@
-//! `state.json`: the typed device state, mirroring the system repo's `state.nix` allowlist.
+//! `state.json`: the typed device state, mirroring the system repo's `state.nix`.
 //!
-//! The service reads the file into [`State`] (unknown fields are an error, as in `state.nix`),
-//! changes it through typed operations only, and writes it back from the struct with
-//! [`State::to_canonical_json`]. Client JSON never reaches the file.
+//! The service reads the file into [`State`], changes it through typed operations only, and
+//! writes it back from the struct with [`State::to_canonical_json`]. Client JSON never reaches
+//! the file.
 //!
-//! Two schemas are read (device-config.md, apps.md "Migration"):
-//! - **1** (before M7): box-wide `apps`, `profiles: [{id, name, user}]` (`[]` means p1 =
-//!   `hinteros`).
-//! - **2** (M7): no `apps` (apps are per profile, in Nix profiles), `requirements` (box
-//!   features), `services`, `profiles: [{id, user}]` (the accounts; names live in
-//!   `profiles.json`), `settings.guest.enable`.
+//! Only schema 2 exists (device-config.md): `requirements` (box features), `services`,
+//! `profiles: [{id}]` (the accounts; names live in `profiles.json`), `settings.guest.enable`.
+//!
+//! Fields this daemon does not know load and are written back (each struct's `extra`): a box
+//! that switches to an older channel still has to read the newer file. A change that is not
+//! safe to ignore bumps `schemaVersion`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use hinteros_api::system::{Base, CleanupFrequency, MAX_KEEP};
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-/// The schema the service writes when it migrates (and for every new state).
+/// The only `schemaVersion` the service reads and writes.
 pub const SCHEMA_VERSION: u32 = 2;
 
-/// Schemas the service reads.
-pub const SCHEMA_VERSIONS: &[u32] = &[1, 2];
+/// The bases the system repo builds; `base.set` refuses others.
+pub const BUILT_BASES: &[Base] = &[Base::Unstable];
 
 /// Most accounts `state.json` may declare (the guest does not count).
 pub const MAX_PROFILES: usize = 8;
-
-/// The first account's user on every box.
-pub const P1_USER: &str = "hinteros";
 
 /// The guest account.
 pub const GUEST_USER: &str = "hinteros-guest";
@@ -38,39 +36,29 @@ pub const GUEST_USER: &str = "hinteros-guest";
 pub const GUEST_UID: u32 = 20000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct State {
     pub schema_version: u32,
-    #[serde(default = "default_base")]
     pub base: Base,
     /// NixOS `system.stateVersion`, installer-written; never settable through the API.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_version: Option<String>,
+    pub state_version: String,
     #[serde(default)]
     pub settings: StateSettings,
     /// Disk layout, installer-written; never settable through the API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<DiskState>,
-    /// Schema 1: catalog app ids installed box-wide from the Store (M8).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub apps: Option<Vec<String>>,
-    /// Schema 2: box features that are on (apps.md "Box requirements").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requirements: Option<Vec<String>>,
-    /// Schema 2: enabled services (M10).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub services: Option<Vec<String>>,
-    /// The accounts (schema 2: `{id, user}`; schema 1 also had `name`).
-    #[serde(default)]
+    /// Box features that are on (apps.md "Box requirements").
+    pub requirements: Vec<String>,
+    /// Enabled services (M10).
+    pub services: Vec<String>,
+    /// The accounts.
     pub profiles: Vec<Profile>,
-}
-
-fn default_base() -> Base {
-    Base::Unstable
+    /// Fields this daemon does not know, here and in the structs below.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct StateSettings {
     /// Installer-written; not settable through `settings.set`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,7 +68,7 @@ pub struct StateSettings {
     /// The admin account (installer-written; not settable through `settings.set`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin: Option<AdminState>,
-    /// Schema 2: the guest account (`guest.set`).
+    /// The guest account (`guest.set`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest: Option<GuestState>,
     /// The automatic clean-up (`cleanup.set`; storage.md). Absent: [`CleanupState::default`].
@@ -90,12 +78,14 @@ pub struct StateSettings {
     /// in place by the service, without a rebuild: the system reads it at activation time.
     #[serde(default, rename = "timeZone", skip_serializing_if = "Option::is_none")]
     pub time_zone: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 /// `settings.cleanup` (storage.md): every field optional, these defaults (the policy before the
 /// setting existed: weekly, 5 system generations).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CleanupState {
     #[serde(default = "yes")]
     pub enable: bool,
@@ -105,6 +95,8 @@ pub struct CleanupState {
     pub keep_system: u32,
     #[serde(default = "default_keep")]
     pub keep_profiles: u32,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl Default for CleanupState {
@@ -114,6 +106,7 @@ impl Default for CleanupState {
             frequency: default_frequency(),
             keep_system: default_keep(),
             keep_profiles: default_keep(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -141,10 +134,11 @@ impl CleanupState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GuestState {
     #[serde(default = "yes")]
     pub enable: bool,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 fn yes() -> bool {
@@ -152,35 +146,36 @@ fn yes() -> bool {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SshState {
     #[serde(default)]
     pub enable: bool,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AdminState {
     pub user: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DiskState {
     pub layout: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
+/// A `profiles[]` entry: the id says the account ([`user_for`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Profile {
     pub id: String,
-    /// Schema 1 only (names live in `profiles.json` from schema 2 on).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub user: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
-/// An account: a `state.json` profile entry (schema 1's `[]` is p1 = `hinteros`).
+/// An account: a `state.json` profile entry and its user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub id: String,
@@ -201,13 +196,9 @@ pub fn profile_number(id: &str) -> Option<u32> {
     is_profile_id(id).then(|| id[1..].parse().ok()).flatten()
 }
 
-/// The user name of profile `p<N>`: `hinteros` for p1, `hinteros-p<N>` otherwise.
+/// The user name of profile `p<N>`: `hinteros-p<N>`, with uid 20000 + N (profiles.nix).
 pub fn user_for(id: &str) -> String {
-    if id == "p1" {
-        P1_USER.into()
-    } else {
-        format!("hinteros-{id}")
-    }
+    format!("hinteros-{id}")
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -218,30 +209,27 @@ pub enum StateError {
     Invalid(String),
 }
 
-/// Turn a serde error into [`StateError`]; an unknown field is logged by name, since it means the
-/// daemon and the system repo (`state.nix`) disagree about the schema.
-fn explain(e: serde_json::Error) -> StateError {
-    let msg = e.to_string();
-    let field = msg
-        .split_once("unknown field `")
-        .and_then(|(_, rest)| rest.split_once('`'))
-        .map(|(f, _)| printable(f));
-    if let Some(field) = field {
-        tracing::error!(
-            field = %field,
-            "state.json has a field this daemon does not know; the daemon and the system repo \
-             are out of sync (update the daemon, or the installer wrote a newer schema)"
-        );
-        return StateError::Invalid(format!(
-            "{msg} (daemon and system repo are out of sync: unknown field {field:?})"
-        ));
+fn check_schema(version: u32) -> Result<(), String> {
+    if version == SCHEMA_VERSION {
+        return Ok(());
     }
-    StateError::Invalid(msg)
+    Err(format!(
+        "unsupported schemaVersion {version} (supported: {SCHEMA_VERSION})"
+    ))
 }
 
 impl State {
     pub fn parse(bytes: &[u8]) -> Result<Self, StateError> {
-        let state: State = serde_json::from_slice(bytes).map_err(explain)?;
+        // The schema first: a newer file should say so, not that a field is missing.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Header {
+            schema_version: u32,
+        }
+        let invalid = |e: serde_json::Error| StateError::Invalid(e.to_string());
+        let header: Header = serde_json::from_slice(bytes).map_err(invalid)?;
+        check_schema(header.schema_version).map_err(StateError::Invalid)?;
+        let state: State = serde_json::from_slice(bytes).map_err(invalid)?;
         state.validate().map_err(StateError::Invalid)?;
         Ok(state)
     }
@@ -255,6 +243,10 @@ impl State {
 
     /// Invariants the service relies on (and `state.nix` checks again).
     pub fn validate(&self) -> Result<(), String> {
+        check_schema(self.schema_version)?;
+        if self.state_version.is_empty() {
+            return Err("stateVersion is empty".into());
+        }
         if let Some(c) = &self.settings.cleanup {
             c.validate()?;
         }
@@ -266,31 +258,13 @@ impl State {
                 printable(z)
             ));
         }
-        match self.schema_version {
-            1 => self.validate_1(),
-            2 => self.validate_2(),
-            v => Err(format!(
-                "unsupported schemaVersion {v} (supported: {SCHEMA_VERSIONS:?})"
-            )),
-        }
-    }
-
-    fn validate_2(&self) -> Result<(), String> {
-        if self.apps.is_some() {
-            return Err("schema 2 has no apps (apps are per profile)".into());
-        }
-        let requirements = self
-            .requirements
-            .as_ref()
-            .ok_or("schema 2 needs requirements")?;
-        let mut seen = std::collections::BTreeSet::new();
-        for f in requirements {
+        let mut seen = BTreeSet::new();
+        for f in &self.requirements {
             if !hinteros_api::catalog::is_box_feature(f) || !seen.insert(f) {
                 return Err(format!("bad requirement {f:?}"));
             }
         }
-        let services = self.services.as_ref().ok_or("schema 2 needs services")?;
-        for s in services {
+        for s in &self.services {
             if !is_app_id(s) {
                 return Err(format!("bad service id {s:?}"));
             }
@@ -298,9 +272,9 @@ impl State {
         if self.profiles.is_empty() || self.profiles.len() > MAX_PROFILES {
             return Err(format!("1 to {MAX_PROFILES} profiles"));
         }
-        let mut ids = std::collections::BTreeSet::new();
+        let mut ids = BTreeSet::new();
         for p in &self.profiles {
-            if !is_profile_id(&p.id) || p.user != user_for(&p.id) || p.name.is_some() {
+            if !is_profile_id(&p.id) {
                 return Err(format!("bad profile {:?}", p.id));
             }
             if !ids.insert(&p.id) {
@@ -310,72 +284,20 @@ impl State {
         Ok(())
     }
 
-    fn validate_1(&self) -> Result<(), String> {
-        if self.requirements.is_some() || self.services.is_some() || self.settings.guest.is_some() {
-            return Err("requirements, services and settings.guest need schema 2".into());
-        }
-        for app in self.apps.iter().flatten() {
-            if !is_app_id(app) {
-                return Err(format!("bad app id {app:?}"));
-            }
-        }
-        for p in &self.profiles {
-            let id_ok = !p.id.is_empty()
-                && p.id.len() <= 32
-                && p.id
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-            let user_ok = !p.user.is_empty()
-                && p.user.len() <= 32
-                && p.user.bytes().enumerate().all(|(i, b)| {
-                    b.is_ascii_lowercase()
-                        || b == b'_'
-                        || (i > 0 && (b.is_ascii_digit() || b == b'-'))
-                });
-            let name_ok = p.name.as_ref().is_some_and(|n| {
-                (1..=64).contains(&n.chars().count()) && !n.chars().any(char::is_control)
-            });
-            if !(id_ok && user_ok && name_ok) {
-                return Err(format!("bad profile {:?}", p.id));
-            }
-        }
-        Ok(())
-    }
-
-    pub fn is_schema2(&self) -> bool {
-        self.schema_version >= 2
-    }
-
-    /// Schema 1's box-wide apps (empty on schema 2).
-    pub fn apps(&self) -> &[String] {
-        self.apps.as_deref().unwrap_or(&[])
-    }
-
-    /// Schema 2's enabled box features (empty on schema 1).
-    pub fn requirements(&self) -> &[String] {
-        self.requirements.as_deref().unwrap_or(&[])
-    }
-
-    /// The accounts this state declares (schema 1's `[]` is p1 = `hinteros`).
+    /// The accounts this state declares.
     pub fn accounts(&self) -> Vec<Account> {
-        if self.profiles.is_empty() {
-            return vec![Account {
-                id: "p1".into(),
-                user: P1_USER.into(),
-            }];
-        }
         self.profiles
             .iter()
             .map(|p| Account {
                 id: p.id.clone(),
-                user: p.user.clone(),
+                user: user_for(&p.id),
             })
             .collect()
     }
 
     /// The automatic clean-up setting (defaults when absent).
     pub fn cleanup(&self) -> CleanupState {
-        self.settings.cleanup.unwrap_or_default()
+        self.settings.cleanup.clone().unwrap_or_default()
     }
 
     /// The time zone `state.json` names (`UTC` when absent). The system's tzdata may not have
@@ -387,29 +309,9 @@ impl State {
             .unwrap_or(hinteros_api::system::DEFAULT_TIME_ZONE)
     }
 
-    /// Whether the guest account exists (schema 2, `settings.guest.enable`, default true).
+    /// Whether the guest account exists (`settings.guest.enable`, default true).
     pub fn guest_enabled(&self) -> bool {
-        self.is_schema2() && self.settings.guest.as_ref().is_none_or(|g| g.enable)
-    }
-
-    /// The schema-2 state a schema-1 state migrates to (apps.md "The v1 → v2 migration"):
-    /// `apps` removed, `requirements` as given, no services, the accounts as `{id, user}`.
-    pub fn migrated(&self, requirements: Vec<String>) -> State {
-        let mut s = self.clone();
-        s.schema_version = 2;
-        s.apps = None;
-        s.requirements = Some(requirements);
-        s.services = Some(Vec::new());
-        s.profiles = self
-            .accounts()
-            .into_iter()
-            .map(|a| Profile {
-                id: a.id,
-                name: None,
-                user: a.user,
-            })
-            .collect();
-        s
+        self.settings.guest.as_ref().is_none_or(|g| g.enable)
     }
 
     /// The bytes the service writes: pretty JSON with a trailing newline, fields in a fixed
@@ -515,10 +417,27 @@ fn printable(s: &str) -> String {
         .collect()
 }
 
-/// `base.set`: `Ok(None)` if `to` is the current base; unstable → stable is a downgrade.
+/// `base.set`: `Ok(None)` if `to` is the current base; a base that is not built is refused;
+/// unstable → stable is a downgrade.
 pub fn base_change(from: Base, to: Base, acknowledged: bool) -> Result<Option<Base>, ErrorObject> {
+    base_change_within(BUILT_BASES, from, to, acknowledged)
+}
+
+fn base_change_within(
+    built: &[Base],
+    from: Base,
+    to: Base,
+    acknowledged: bool,
+) -> Result<Option<Base>, ErrorObject> {
     if from == to {
         return Ok(None);
+    }
+    if !built.contains(&to) {
+        return Err(ErrorObject::with_data(
+            ErrorCode::Unavailable,
+            "this base is not built",
+            json!({ "service": "base", "reason": "not_built" }),
+        ));
     }
     if from == Base::Unstable && to == Base::Stable && !acknowledged {
         return Err(ErrorObject::new(
@@ -547,105 +466,171 @@ pub fn serde_error(msg: &str) -> ErrorObject {
 mod tests {
     use super::*;
 
+    /// A minimal valid file, without its closing brace.
+    const BASE: &str = r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"}]"#;
+
     const DEVBOX: &str = r#"{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "base": "unstable",
+  "stateVersion": "26.11",
   "settings": {
     "ssh": { "enable": true }
   },
-  "apps": ["steam"],
-  "profiles": [{ "id": "p1", "name": "Dev", "user": "hinteros" }]
+  "requirements": ["graphics32"],
+  "services": ["jellyfin-server"],
+  "profiles": [{ "id": "p1" }, { "id": "p12" }]
 }"#;
+
+    fn parse(tail: &str) -> Result<State, StateError> {
+        State::parse(format!("{BASE}{tail}}}").as_bytes())
+    }
 
     #[test]
     fn reads_the_real_schema_and_round_trips() {
         let s = State::parse(DEVBOX.as_bytes()).unwrap();
         assert!(s.settings.ssh.enable);
-        assert_eq!(s.apps(), ["steam"]);
+        assert_eq!(s.requirements, ["graphics32"]);
+        assert_eq!(s.services, ["jellyfin-server"]);
+        assert_eq!(s.state_version, "26.11");
         let out = s.to_canonical_json();
         let again = State::parse(&out).unwrap();
         assert_eq!(again, s);
         assert_eq!(again.to_canonical_json(), out, "canonical form is stable");
         // Minimal file: defaults.
-        let s = State::parse(br#"{"schemaVersion":1}"#).unwrap();
-        assert_eq!(s.base, Base::Unstable);
+        let s = parse("").unwrap();
         assert!(!s.settings.ssh.enable);
+        assert!(s.guest_enabled());
+    }
+
+    #[test]
+    fn accounts_come_from_the_id() {
+        let s = State::parse(DEVBOX.as_bytes()).unwrap();
+        assert_eq!(
+            s.accounts(),
+            [
+                Account {
+                    id: "p1".into(),
+                    user: "hinteros-p1".into()
+                },
+                Account {
+                    id: "p12".into(),
+                    user: "hinteros-p12".into()
+                }
+            ]
+        );
+        let text = String::from_utf8(s.to_canonical_json()).unwrap();
+        assert!(!text.contains("\"user\""), "{text}");
+        let s = parse(r#","settings":{"guest":{"enable":false}}"#).unwrap();
+        assert!(!s.guest_enabled());
     }
 
     #[test]
     fn rejects_what_state_nix_rejects() {
         for bad in [
-            r#"{"schemaVersion":3}"#,
-            r#"{"schemaVersion":2}"#,
-            r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[]}"#,
-            r#"{"schemaVersion":2,"requirements":[],"services":[],"apps":[],"profiles":[{"id":"p1","user":"hinteros"}]}"#,
-            r#"{"schemaVersion":2,"requirements":["x86"],"services":[],"profiles":[{"id":"p1","user":"hinteros"}]}"#,
-            r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[{"id":"p2","user":"hinteros"}]}"#,
-            r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[{"id":"p1","name":"x","user":"hinteros"}]}"#,
-            r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[{"id":"p1","user":"hinteros"},{"id":"p1","user":"hinteros"}]}"#,
-            r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[{"id":"p01","user":"hinteros-p01"}]}"#,
-            r#"{"schemaVersion":1,"requirements":[]}"#,
-            r#"{"schemaVersion":1,"settings":{"guest":{"enable":true}}}"#,
-            r#"{"schemaVersion":1,"profiles":[{"id":"p1","user":"hinteros"}]}"#,
-            r#"{"schemaVersion":1,"extra":1}"#,
-            r#"{"schemaVersion":1,"disk":{"layout":"x","size":1}}"#,
-            r#"{"schemaVersion":1,"settings":{"admin":{}}}"#,
-            r#"{"schemaVersion":1,"settings":{"ssh":{"authorizedKeys":[]}}}"#,
-            r#"{"schemaVersion":1,"settings":{"nix":{}}}"#,
-            r#"{"schemaVersion":1,"settings":{"ssh":{"enable":true,"port":22}}}"#,
-            r#"{"schemaVersion":1,"base":"23.11"}"#,
-            r#"{"schemaVersion":1,"apps":["../x"]}"#,
-            r#"{"schemaVersion":1,"apps":["Steam"]}"#,
-            r#"{"schemaVersion":1,"profiles":[{"id":"p1","name":"x","user":"root;rm"}]}"#,
-            r#"{"schemaVersion":1,"profiles":[{"id":"p1","name":"x","user":"u","uid":0}]}"#,
             r#"[]"#,
+            r#"{}"#,
+            // Required fields.
+            r#"{"schemaVersion":2,"stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","requirements":[],"services":[],"profiles":[{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","services":[],"profiles":[{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"profiles":[{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[]}"#,
+            // Bad values of known fields.
+            r#"{"schemaVersion":2,"base":"23.11","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"","requirements":[],"services":[],"profiles":[{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":26,"requirements":[],"services":[],"profiles":[{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":["x86"],"services":[],"profiles":[{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":["graphics32","graphics32"],"services":[],"profiles":[{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":["../x"],"profiles":[{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"},{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p01"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"user":"root"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"}],"settings":{"ssh":{"enable":1}}}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"}],"settings":{"admin":{}}}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"}],"disk":{"size":1}}"#,
         ] {
             assert!(State::parse(bad.as_bytes()).is_err(), "{bad}");
         }
     }
 
     #[test]
-    fn schema_2_and_the_migration() {
-        let s1 = State::parse(DEVBOX.as_bytes()).unwrap();
-        assert!(!s1.is_schema2() && !s1.guest_enabled());
-        assert_eq!(
-            s1.accounts(),
-            [Account {
-                id: "p1".into(),
-                user: "hinteros".into()
-            }]
+    fn another_schema_is_an_error_that_says_so() {
+        for (bad, version) in [
+            (r#"{"schemaVersion":3}"#, 3),
+            (r#"{"schemaVersion":1,"apps":[],"profiles":[]}"#, 1),
+            (
+                r#"{"schemaVersion":3,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"}]}"#,
+                3,
+            ),
+        ] {
+            let e = State::parse(bad.as_bytes()).unwrap_err().to_string();
+            assert!(
+                e.contains(&format!("unsupported schemaVersion {version}"))
+                    && e.contains("supported: 2"),
+                "{e}"
+            );
+        }
+        let mut s = parse("").unwrap();
+        s.schema_version = 1;
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn unknown_fields_load_and_are_written_back() {
+        let file = br#"{"zeta":{"b":1,"a":[true]},"schemaVersion":2,"alpha":"new",
+            "base":"unstable","stateVersion":"26.11","requirements":[],"services":[],
+            "disk":{"layout":"x","size":1},
+            "settings":{"future":3,
+                "ssh":{"enable":true,"port":22},
+                "admin":{"user":"james","shell":"zsh"},
+                "guest":{"enable":false,"idle":5},
+                "cleanup":{"keepSystem":2,"keep_system":9}},
+            "profiles":[{"id":"p1","user":"hinteros-p1","color":"teal"}]}"#;
+        let s = State::parse(file).unwrap();
+        assert_eq!(s.extra["alpha"], "new");
+        assert_eq!(s.settings.extra["future"], 3);
+        assert_eq!(s.settings.ssh.extra["port"], 22);
+        assert_eq!(s.settings.admin.as_ref().unwrap().extra["shell"], "zsh");
+        assert_eq!(s.settings.guest.as_ref().unwrap().extra["idle"], 5);
+        assert_eq!(s.cleanup().extra["keep_system"], 9);
+        assert_eq!(s.cleanup().keep_system, 2);
+        assert_eq!(s.disk.as_ref().unwrap().extra["size"], 1);
+        assert_eq!(s.profiles[0].extra["color"], "teal");
+        // Every one of them survives a rewrite, in a fixed place: extras after known fields,
+        // sorted, whatever the file's order was.
+        let out = s.to_canonical_json();
+        let written: Value = serde_json::from_slice(&out).unwrap();
+        let mut original: Value = serde_json::from_slice(file).unwrap();
+        original["settings"]["ssh"]["enable"] = json!(true);
+        original["settings"]["cleanup"] = json!({"enable": true, "frequency": "weekly", "keepSystem": 2, "keepProfiles": 5, "keep_system": 9});
+        assert_eq!(written, original);
+        let again = State::parse(&out).unwrap();
+        assert_eq!(again, s);
+        assert_eq!(again.to_canonical_json(), out);
+        let text = String::from_utf8(out).unwrap();
+        let (alpha, zeta) = (
+            text.find("\"alpha\"").unwrap(),
+            text.find("\"zeta\"").unwrap(),
         );
-        let s2 = s1.migrated(vec!["graphics32".into()]);
-        s2.validate().unwrap();
-        let text = String::from_utf8(s2.to_canonical_json()).unwrap();
         assert!(
-            !text.contains("apps") && !text.contains("\"name\""),
+            text.find("\"profiles\"").unwrap() < alpha && alpha < zeta,
             "{text}"
         );
-        let again = State::parse(text.as_bytes()).unwrap();
-        assert_eq!(again, s2);
-        assert!(again.guest_enabled());
-        assert_eq!(again.requirements(), ["graphics32"]);
-        // profiles: [] (every box the old installer made) is p1 = hinteros.
-        let empty = State::parse(br#"{"schemaVersion":1,"apps":["youtube"],"profiles":[]}"#)
-            .unwrap()
-            .migrated(Vec::new());
-        assert_eq!(empty.profiles[0].user, "hinteros");
-        empty.validate().unwrap();
-        let s = State::parse(
-            br#"{"schemaVersion":2,"requirements":[],"services":[],"settings":{"guest":{"enable":false}},
-                "profiles":[{"id":"p1","user":"hinteros"},{"id":"p12","user":"hinteros-p12"}]}"#,
-        )
-        .unwrap();
-        assert!(!s.guest_enabled());
-        assert_eq!(s.accounts()[1].user, "hinteros-p12");
+        // An edit through the struct keeps them too.
+        let mut edited = again;
+        edited.settings.ssh.enable = false;
+        let text = String::from_utf8(edited.to_canonical_json()).unwrap();
+        assert!(
+            text.contains("\"port\": 22") && text.contains("\"alpha\""),
+            "{text}"
+        );
     }
 
     #[test]
     fn cleanup_setting() {
-        let base = r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[{"id":"p1","user":"hinteros"}]"#;
         // Absent: today's policy, and nothing is written.
-        let s = State::parse(format!("{base}}}").as_bytes()).unwrap();
+        let s = parse("").unwrap();
         assert_eq!(s.cleanup(), CleanupState::default());
         assert_eq!(
             (
@@ -662,11 +647,7 @@ mod tests {
                 .contains("cleanup")
         );
         // Partly given: the rest defaults; written back in full, camelCase.
-        let s = State::parse(
-            format!(r#"{base},"settings":{{"cleanup":{{"keepSystem":2,"frequency":"daily"}}}}}}"#)
-                .as_bytes(),
-        )
-        .unwrap();
+        let s = parse(r#","settings":{"cleanup":{"keepSystem":2,"frequency":"daily"}}"#).unwrap();
         let c = s.cleanup();
         assert_eq!(
             (c.enable, c.frequency, c.keep_system, c.keep_profiles),
@@ -678,42 +659,34 @@ mod tests {
             "{text}"
         );
         assert_eq!(State::parse(text.as_bytes()).unwrap(), s);
-        // Schema 1 too.
-        State::parse(br#"{"schemaVersion":1,"settings":{"cleanup":{"enable":false}}}"#).unwrap();
         for bad in [
             r#"{"keepSystem":0}"#,
             r#"{"keepProfiles":11}"#,
             r#"{"frequency":"yearly"}"#,
-            r#"{"keep_system":3}"#,
             r#"{"enable":"yes"}"#,
             r#"{"keepSystem":-1}"#,
         ] {
-            let text = format!(r#"{base},"settings":{{"cleanup":{bad}}}}}"#);
-            assert!(State::parse(text.as_bytes()).is_err(), "{bad}");
+            let tail = format!(r#","settings":{{"cleanup":{bad}}}"#);
+            assert!(parse(&tail).is_err(), "{bad}");
         }
     }
 
     #[test]
     fn time_zone_setting() {
         // Absent: UTC, and nothing is written.
-        let s = State::parse(br#"{"schemaVersion":1}"#).unwrap();
+        let s = parse("").unwrap();
         assert_eq!(s.time_zone(), "UTC");
         assert!(
             !String::from_utf8(s.to_canonical_json())
                 .unwrap()
                 .contains("timeZone")
         );
-        let base = r#"{"schemaVersion":2,"requirements":[],"services":[],"profiles":[{"id":"p1","user":"hinteros"}]"#;
-        let s = State::parse(
-            format!(r#"{base},"settings":{{"timeZone":"America/Chicago"}}}}"#).as_bytes(),
-        )
-        .unwrap();
+        let s = parse(r#","settings":{"timeZone":"America/Chicago"}"#).unwrap();
         assert_eq!(s.time_zone(), "America/Chicago");
         let text = String::from_utf8(s.to_canonical_json()).unwrap();
         assert!(text.contains(r#""timeZone": "America/Chicago""#), "{text}");
         // A well-formed name tzdata may not have is kept (UTC applies at run time).
-        State::parse(br#"{"schemaVersion":1,"settings":{"timeZone":"Mars/Olympus_Mons"}}"#)
-            .unwrap();
+        parse(r#","settings":{"timeZone":"Mars/Olympus_Mons"}"#).unwrap();
         for bad in [
             r#""../../etc/shadow""#,
             r#""/etc/localtime""#,
@@ -721,13 +694,9 @@ mod tests {
             "3",
             "null x",
         ] {
-            let text = format!(r#"{{"schemaVersion":1,"settings":{{"timeZone":{bad}}}}}"#);
-            assert!(State::parse(text.as_bytes()).is_err(), "{bad}");
+            let tail = format!(r#","settings":{{"timeZone":{bad}}}"#);
+            assert!(parse(&tail).is_err(), "{bad}");
         }
-        assert!(
-            State::parse(br#"{"schemaVersion":1,"settings":{"time_zone":"UTC"}}"#).is_err(),
-            "camelCase only"
-        );
     }
 
     #[test]
@@ -739,7 +708,7 @@ mod tests {
             assert!(!is_profile_id(bad), "{bad}");
         }
         assert_eq!(profile_number("p12"), Some(12));
-        assert_eq!(user_for("p1"), "hinteros");
+        assert_eq!(user_for("p1"), "hinteros-p1");
         assert_eq!(user_for("p3"), "hinteros-p3");
     }
 
@@ -781,14 +750,24 @@ mod tests {
             base_change(Base::Stable, Base::Unstable, false).unwrap(),
             Some(Base::Unstable)
         );
+        // Stable is not built: refused whatever was acknowledged, and it names why.
+        for ack in [false, true] {
+            let e = base_change(Base::Unstable, Base::Stable, ack).unwrap_err();
+            assert_eq!(e.kind(), Some(ErrorCode::Unavailable));
+            assert_eq!(
+                e.data.unwrap(),
+                json!({"service": "base", "reason": "not_built"})
+            );
+        }
+        // The day it is built, the downgrade needs acknowledging.
         assert_eq!(
-            base_change(Base::Unstable, Base::Stable, false)
+            base_change_within(Base::ALL, Base::Unstable, Base::Stable, false)
                 .unwrap_err()
                 .kind(),
             Some(ErrorCode::NeedsAcknowledgement)
         );
         assert_eq!(
-            base_change(Base::Unstable, Base::Stable, true).unwrap(),
+            base_change_within(Base::ALL, Base::Unstable, Base::Stable, true).unwrap(),
             Some(Base::Stable)
         );
     }

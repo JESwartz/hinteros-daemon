@@ -244,17 +244,8 @@ impl ProfilesRequest {
 }
 
 impl Service {
-    pub(super) fn require_schema2(&self) -> Result<(State, String), ErrorObject> {
-        let (state, rev) = self.load_state()?;
-        if !state.is_schema2() {
-            // Before the migration the box has one implicit profile; nothing to manage yet.
-            return Err(profiles::schema1());
-        }
-        Ok((state, rev))
-    }
-
     /// Check `pin` against profile `id`'s with the shared backoff. A profile without a PIN yet
-    /// (migrated p1) passes. The audit records which PIN and the outcome, never the PIN.
+    /// passes. The audit records which PIN and the outcome, never the PIN.
     pub(super) async fn check_pin(
         &self,
         uid: u32,
@@ -314,9 +305,8 @@ impl Service {
     /// action: `pin_required {pin: admin}` when it is missing or wrong (no backoff, J4; ten
     /// wrong tries a boot, then `reboot_required`), and
     /// when there is no admin profile (first-boot mode); an admin profile without a PIN yet
-    /// (migrated p1) passes. Exempt: a schema-1 box (no profiles or PINs before the
-    /// migration, I2) and root (the box's administrator, e.g. a terminal or a bootstrap tool;
-    /// root is past every other check too).
+    /// passes. Exempt: root (the box's administrator, e.g. a terminal or a bootstrap tool; root
+    /// is past every other check too).
     pub(super) async fn check_box_admin(
         &self,
         uid: u32,
@@ -327,9 +317,6 @@ impl Service {
             return Ok(());
         }
         let (state, _) = self.load_state()?;
-        if !state.is_schema2() {
-            return Ok(());
-        }
         let file = self.profiles_file();
         let admin = self.admin_id(&state, &file).ok_or_else(|| {
             self.audit
@@ -413,7 +400,7 @@ impl Service {
             at: u.at,
         };
         let active_uid = crate::authz::seat_owner(&self.bus).await.ok().flatten();
-        let mut list: Vec<ProfileInfo> = file
+        let list: Vec<ProfileInfo> = file
             .visible(&state)
             .into_iter()
             .map(|(a, m)| {
@@ -431,28 +418,10 @@ impl Service {
                     active: uid.is_some() && uid == active_uid,
                     last_used_at: m.last_used_at,
                     usage: usage.get(&a.id).map(to_api),
-                    // Schema 1 has no PINs yet: nothing to set until the migration ran.
-                    pin_set: pins.is_set(&a.id) || !state.is_schema2(),
+                    pin_set: pins.is_set(&a.id),
                 }
             })
             .collect();
-        // Schema 1 before profiles.json: p1 as an implicit profile.
-        if list.is_empty() && !state.is_schema2() {
-            let a = &state.accounts()[0];
-            list.push(ProfileInfo {
-                id: a.id.clone(),
-                name: "Profile 1".into(),
-                color: profiles::COLORS[0].into(),
-                user: a.user.clone(),
-                admin: true,
-                locked: false,
-                locked_until: None,
-                active: true,
-                last_used_at: None,
-                usage: usage.get(&a.id).map(to_api),
-                pin_set: true,
-            });
-        }
         Ok(ProfilesListResult {
             profiles: list,
             guest: GuestInfo {
@@ -460,7 +429,7 @@ impl Service {
                 usage: usage.get("guest").map(to_api),
             },
             max: MAX_PROFILES as u32,
-            first_boot: state.is_schema2() && file.first_boot(&state),
+            first_boot: file.first_boot(&state),
             caller: CallerInfo {
                 id: caller.id.clone(),
                 user: caller.user_name(),
@@ -485,10 +454,6 @@ impl Service {
     }
 
     pub(super) fn starter_get(&self) -> Result<StarterSetGetResult, ErrorObject> {
-        let (state, _) = self.load_state()?;
-        if !state.is_schema2() {
-            return Err(profiles::schema1());
-        }
         let f = StarterFile::load(&self.paths.starter_json());
         Ok(StarterSetGetResult {
             ids: f.as_ref().map(|f| f.ids.clone()).unwrap_or_default(),
@@ -521,7 +486,7 @@ impl Service {
                 empty()
             }
             R::Create(p) => {
-                let (state, revision) = self.require_schema2()?;
+                let (state, revision) = self.load_state()?;
                 if p.revision != revision {
                     return Err(state_conflict());
                 }
@@ -547,8 +512,7 @@ impl Service {
                 let mut new = state.clone();
                 new.profiles.push(Profile {
                     id: id.clone(),
-                    name: None,
-                    user: user.clone(),
+                    extra: Default::default(),
                 });
                 let new = self.requirements_update(&new).unwrap_or(new);
                 let pin = Zeroizing::new(p.pin.clone());
@@ -590,7 +554,7 @@ impl Service {
                 serde_json::to_value(ProfilesCreateResult { job_id, id }).map_err(internal)
             }
             R::SetupAdmin(p) => {
-                let (state, _) = self.require_schema2()?;
+                let (state, _) = self.load_state()?;
                 let caller = self.caller(uid, &state);
                 let mut file = self.profiles_file();
                 let (Role::Spare, Some(id)) = (&caller.role, &caller.id) else {
@@ -626,7 +590,7 @@ impl Service {
                 serde_json::to_value(ProfileIdResult { id: id.clone() }).map_err(internal)
             }
             R::Rename(p) => {
-                let (state, _) = self.require_schema2()?;
+                let (state, _) = self.load_state()?;
                 let caller = self.caller(uid, &state);
                 let mut file = self.profiles_file();
                 if !file.visible(&state).iter().any(|(a, _)| a.id == p.id) {
@@ -648,7 +612,7 @@ impl Service {
                 empty()
             }
             R::SetAppearance(p) => {
-                let (state, _) = self.require_schema2()?;
+                let (state, _) = self.load_state()?;
                 let (id, mut file) = self.own_profile(uid, &state)?;
                 let m = file.profiles.get_mut(&id).expect("own profile");
                 if let Some(c) = p.color {
@@ -668,7 +632,7 @@ impl Service {
                 empty()
             }
             R::SetPin(p) => {
-                let (state, _) = self.require_schema2()?;
+                let (state, _) = self.load_state()?;
                 let (id, _) = self.own_profile(uid, &state)?;
                 self.check_pin(uid, method, &id, p.current_pin.as_deref(), Which::Own)
                     .await?;
@@ -682,7 +646,7 @@ impl Service {
                 empty()
             }
             R::SetLocked(p) => {
-                let (state, _) = self.require_schema2()?;
+                let (state, _) = self.load_state()?;
                 let (id, mut file) = self.own_profile(uid, &state)?;
                 self.check_pin(uid, method, &id, Some(&p.pin), Which::Own)
                     .await?;
@@ -692,7 +656,7 @@ impl Service {
                 empty()
             }
             R::ResetPin(p) => {
-                let (state, _) = self.require_schema2()?;
+                let (state, _) = self.load_state()?;
                 let file = self.profiles_file();
                 let Some((_, meta)) = file.visible(&state).into_iter().find(|(a, _)| a.id == p.id)
                 else {
@@ -727,7 +691,7 @@ impl Service {
                 empty()
             }
             R::Remove(p) => {
-                let (state, revision) = self.require_schema2()?;
+                let (state, revision) = self.load_state()?;
                 if p.revision != revision {
                     return Err(state_conflict());
                 }
@@ -764,7 +728,7 @@ impl Service {
                     .filter_map(|o| appreg::current(o, &self.paths))
                     .flat_map(|c| c.manifest.box_features)
                     .collect();
-                new.requirements = Some(needed.into_iter().collect());
+                new.requirements = needed.into_iter().collect();
                 let user = self.users.by_name(&account.user);
                 let spec = self.spec(
                     JobKind::ProfilesRemove,
@@ -789,7 +753,7 @@ impl Service {
                 job_ref(Some(job_id))
             }
             R::Switch(p) => {
-                let (state, _) = self.require_schema2()?;
+                let (state, _) = self.load_state()?;
                 let file = self.profiles_file();
                 let caller = self.caller(uid, &state);
                 let (target_user, locked) = if p.id == "guest" {
@@ -859,7 +823,7 @@ impl Service {
                 empty()
             }
             R::SwitchCancel => {
-                let (state, _) = self.require_schema2()?;
+                let (state, _) = self.load_state()?;
                 let caller = self.caller(uid, &state);
                 let path = self.paths.switch_json();
                 let from = caller.owner_key();
@@ -875,14 +839,14 @@ impl Service {
                 empty()
             }
             R::Unlock(p) => {
-                let (state, _) = self.require_schema2()?;
+                let (state, _) = self.load_state()?;
                 let (id, _) = self.own_profile(uid, &state)?;
                 self.check_pin(uid, method, &id, Some(&p.pin), Which::Own)
                     .await?;
                 empty()
             }
             R::GuestSet(p) => {
-                let (state, _) = self.require_schema2()?;
+                let (state, _) = self.load_state()?;
                 let file = self.profiles_file();
                 let admin = self
                     .admin_id(&state, &file)
@@ -894,7 +858,11 @@ impl Service {
                 }
                 self.preflight()?;
                 let mut new = state.clone();
-                new.settings.guest = Some(state::GuestState { enable: p.enabled });
+                let extra = new.settings.guest.take().map(|g| g.extra);
+                new.settings.guest = Some(state::GuestState {
+                    enable: p.enabled,
+                    extra: extra.unwrap_or_default(),
+                });
                 let new = self.requirements_update(&new).unwrap_or(new);
                 let spec = self.spec(
                     JobKind::GuestSet,
@@ -911,7 +879,7 @@ impl Service {
                 job_ref(Some(self.start(spec).await?))
             }
             R::GuestEnd => {
-                let (state, _) = self.require_schema2()?;
+                let (state, _) = self.load_state()?;
                 let caller = self.caller(uid, &state);
                 if caller.role != Role::Guest {
                     return Err(ErrorObject::with_data(
@@ -956,7 +924,7 @@ impl Service {
                 job_ref(Some(job_id))
             }
             R::StarterSet(p) => {
-                let (state, _) = self.require_schema2()?;
+                let (state, _) = self.load_state()?;
                 let file = self.profiles_file();
                 let (admin, _) = file
                     .admin(&state)
@@ -1027,7 +995,7 @@ impl Service {
         let Ok((state, _)) = State::load(&self.paths.state_json()) else {
             return;
         };
-        if !state.is_schema2() || appreg::current(&Owner::Starter, &self.paths).is_none() {
+        if appreg::current(&Owner::Starter, &self.paths).is_none() {
             return;
         }
         let file = self.profiles_file();

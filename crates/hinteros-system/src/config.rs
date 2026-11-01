@@ -255,6 +255,9 @@ pub struct ServeArgs {
     /// Filesystem checked for free space
     #[arg(long, default_value = "/nix/store")]
     pub store_dir: PathBuf,
+    /// What the storage ring shows as Media
+    #[arg(long, default_value = "/srv")]
+    pub srv_dir: PathBuf,
 
     /// Mutating requests per minute and uid
     #[arg(long, default_value_t = 10, hide = true)]

@@ -4,8 +4,8 @@
 //! (statvfs), the NAR size of every store path and which are live, the closure of every system
 //! and app-env generation, and each home with [`measure_home`] (a walk that never follows a
 //! symlink, never leaves the home's filesystem and never reads a file; only Steam's
-//! `libraryfolders.vdf` and `appmanifest_*.acf` are read, to name the games). This module turns
-//! them into [`StorageNode`] trees whose children always add up to their parent, and writes the
+//! `libraryfolders.vdf` and `appmanifest_*.acf` are read, to name the games), and `/srv`. This
+//! module turns them into [`StorageNode`] trees whose children always add up to their parent, and writes the
 //! result to `/var/lib/hinteros/storage.json` (root, 0600): the public view (top level, every
 //! profile's total, the system/apps breakdown, the clean-up estimates) and the detailed trees
 //! of the homes, which only the service hands out (the profile itself, or with the admin PIN).
@@ -52,6 +52,8 @@ impl Stored {
 }
 
 /// statvfs of `dir`, like df: total, used (total minus free blocks), free (available blocks).
+/// On btrfs it is the whole filesystem from any subvolume; available is below free by what the
+/// filesystem holds back for metadata, which [`top_level`] counts as used.
 pub fn disk_usage(dir: &Path) -> Option<DiskUsage> {
     let s = rustix::fs::statvfs(dir).ok()?;
     let frsize = s.f_frsize.max(1);
@@ -64,9 +66,58 @@ pub fn disk_usage(dir: &Path) -> Option<DiskUsage> {
     })
 }
 
-/// The device a path is on (without following a final symlink).
-pub fn device_of(path: &Path) -> Option<u64> {
-    std::fs::symlink_metadata(path).ok().map(|m| m.dev())
+/// Write out what the kernel holds for the filesystem of `dir`. Btrfs gives freed space back when
+/// a transaction commits, so statvfs right after a garbage collection shows too little.
+pub fn sync_filesystem(dir: &Path) {
+    if let Ok(f) = std::fs::File::open(dir) {
+        let _ = rustix::fs::syncfs(&f);
+    }
+}
+
+/// The filesystem `path` is on, from `/proc/self/mountinfo`. `st_dev` and `f_fsid` do not say:
+/// every btrfs subvolume has its own, on one filesystem and one free space.
+pub fn filesystem_of(path: &Path) -> Option<String> {
+    let path = std::fs::canonicalize(path).ok()?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    filesystem_in(&mountinfo, &path)
+}
+
+/// [`filesystem_of`] an absolute, canonical `path`, given the text of `mountinfo`: the mount
+/// source of the longest mount point above it (of equal ones the last, which hides the others).
+/// A source without a device (tmpfs, overlay) says nothing: then `major:minor`.
+pub fn filesystem_in(mountinfo: &str, path: &Path) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    for line in mountinfo.lines() {
+        // id parent major:minor root mountpoint options [tags...] - type source superoptions
+        let fields: Vec<&str> = line.split(' ').collect();
+        let Some(dash) = fields.iter().position(|f| *f == "-") else {
+            continue;
+        };
+        let (Some(dev), Some(point), Some(source)) =
+            (fields.get(2), fields.get(4), fields.get(dash + 2))
+        else {
+            continue;
+        };
+        let point = unescape_mount(point);
+        if !path.starts_with(&point) || best.as_ref().is_some_and(|(len, _)| point.len() < *len) {
+            continue;
+        }
+        let id = if source.starts_with('/') {
+            (*source).to_owned()
+        } else {
+            format!("dev:{dev}")
+        };
+        best = Some((point.len(), id));
+    }
+    best.map(|(_, id)| id)
+}
+
+/// `mountinfo` writes space, tab, newline and backslash in octal.
+fn unescape_mount(s: &str) -> String {
+    s.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -166,7 +217,7 @@ impl Walk<'_> {
             // DirEntry::metadata does not follow a symlink.
             let Ok(m) = entry.metadata() else { continue };
             if m.dev() != self.dev {
-                // A mount point: another filesystem, not counted (nor its mount directory).
+                // A mount point or a nested subvolume: not counted (nor its directory).
                 continue;
             }
             if m.is_dir() {
@@ -354,22 +405,15 @@ pub fn steam_games(home: &Path) -> Vec<SteamGame> {
     games
 }
 
-/// One home, measured.
-#[derive(Debug, Clone)]
-pub struct Home {
-    /// The detailed tree (`kind` profile or guest).
-    pub tree: StorageNode,
-    pub dev: u64,
-}
-
 /// Measure `home` into a detailed tree of `kind` (profile or guest). `None`: not a folder, or
-/// cancelled (`cancel` is asked every few thousand entries).
+/// cancelled (`cancel` is asked every few thousand entries). Blocks are the uncompressed size on
+/// btrfs: see [`top_level`].
 pub fn measure_home(
     home: &Path,
     kind: NodeKind,
     limits: Limits,
     cancel: &dyn Fn() -> bool,
-) -> Option<Home> {
+) -> Option<StorageNode> {
     let meta = std::fs::symlink_metadata(home).ok()?;
     if !meta.is_dir() {
         return None;
@@ -403,10 +447,27 @@ pub fn measure_home(
     if walk.cancelled {
         return None;
     }
-    Some(Home {
-        tree: home_tree(kind, raw, game_nodes, limits),
-        dev,
-    })
+    Some(home_tree(kind, raw, game_nodes, limits))
+}
+
+/// The total of `/srv`, walked like a home, for the `media` node: no tree, nobody sees inside it
+/// here. `None`: not a folder, or cancelled.
+pub fn measure_media(dir: &Path, limits: Limits, cancel: &dyn Fn() -> bool) -> Option<StorageNode> {
+    let meta = std::fs::symlink_metadata(dir).ok()?;
+    if !meta.is_dir() {
+        return None;
+    }
+    let mut walk = Walk {
+        dev: meta.dev(),
+        exclude: HashSet::new(),
+        seen: HashSet::new(),
+        limits,
+        entries: 0,
+        cancel,
+        cancelled: false,
+    };
+    let raw = walk.dir(dir, &meta, limits.max_depth, false);
+    (!walk.cancelled).then(|| StorageNode::new(NodeKind::Media, raw.bytes))
 }
 
 /// Build the shown tree: the threshold is max(floor, permille of the total), raised until the
@@ -742,23 +803,80 @@ pub fn summary(tree: &StorageNode) -> StorageNode {
     n
 }
 
-/// The top-level tree: system, apps, the homes (in the given order), other, free. `on_disk`
-/// says which homes are on the store's filesystem (only those reduce `other`).
-pub fn top_level(disk: DiskUsage, store: &StoreTree, homes: &[(StorageNode, bool)]) -> StorageNode {
+/// `parts` scaled down to add up to exactly `target` (at most their sum): each gets its rounded
+/// down share, and what rounding left goes one byte each to the largest fractions.
+fn shares(parts: &[u64], target: u64) -> Vec<u64> {
+    let total: u128 = parts.iter().map(|&p| u128::from(p)).sum();
+    if total == 0 {
+        return vec![0; parts.len()];
+    }
+    let exact = parts.iter().map(|&p| u128::from(p) * u128::from(target));
+    let mut out: Vec<u64> = exact.clone().map(|e| (e / total) as u64).collect();
+    let mut order: Vec<usize> = (0..parts.len()).collect();
+    let fractions: Vec<u128> = exact.map(|e| e % total).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(fractions[i]));
+    let left = target.saturating_sub(out.iter().sum());
+    for &i in order.iter().take(left as usize) {
+        out[i] += 1;
+    }
+    out
+}
+
+/// `node` scaled down to `bytes`: its children get [`shares`] of it, all the way down, so they
+/// still add up. A child scaled to nothing goes.
+fn scale(node: &mut StorageNode, bytes: u64) {
+    node.bytes = bytes;
+    let sizes: Vec<u64> = node.children.iter().map(|c| c.bytes).collect();
+    for (c, b) in node.children.iter_mut().zip(shares(&sizes, bytes)) {
+        scale(c, b);
+    }
+    node.children.retain(|c| c.bytes > 0);
+}
+
+/// The top-level tree: system, apps, the homes (in the given order), media, other, free. The bool
+/// says whether a home or `/srv` is on the store's filesystem (only those reduce `other`).
+///
+/// NAR sizes and `st_blocks` are uncompressed, so on a compressed filesystem what is known can be
+/// more than the disk uses (total minus free). The known segments on the disk are then scaled
+/// down in proportion to fill exactly that, and `other` is 0: the ring still adds up to the disk.
+/// `homes` are scaled in place, with their detailed trees, so `storage.tree` agrees.
+pub fn top_level(
+    disk: DiskUsage,
+    store: &StoreTree,
+    homes: &mut [(StorageNode, bool)],
+    media: Option<(StorageNode, bool)>,
+) -> StorageNode {
+    let (mut system, mut apps) = (store.system.clone(), store.apps.clone());
+    let mut media = media.filter(|(m, _)| m.bytes > 0);
+    let used = disk.total_bytes.saturating_sub(disk.free_bytes);
+    {
+        let mut known: Vec<&mut StorageNode> = vec![&mut system, &mut apps];
+        known.extend(homes.iter_mut().filter(|(_, on)| *on).map(|(h, _)| h));
+        known.extend(media.iter_mut().filter(|(_, on)| *on).map(|(m, _)| m));
+        let sizes: Vec<u64> = known.iter().map(|n| n.bytes).collect();
+        if sizes.iter().sum::<u64>() > used {
+            for (n, b) in known.into_iter().zip(shares(&sizes, used)) {
+                scale(n, b);
+            }
+        }
+    }
+    let mut known = system.bytes + apps.bytes;
     let mut root = StorageNode::new(NodeKind::Disk, 0);
-    root.children.push(store.system.clone());
-    root.children.push(store.apps.clone());
-    let mut known = store.system.bytes + store.apps.bytes;
-    for (h, on_disk) in homes {
+    root.children.push(system);
+    root.children.push(apps);
+    for (h, on_disk) in homes.iter() {
         if *on_disk {
             known += h.bytes;
         }
         root.children.push(summary(h));
     }
-    let other = disk
-        .total_bytes
-        .saturating_sub(disk.free_bytes)
-        .saturating_sub(known);
+    if let Some((m, on_disk)) = media {
+        if on_disk {
+            known += m.bytes;
+        }
+        root.children.push(m);
+    }
+    let other = used.saturating_sub(known);
     root.children
         .retain(|c| c.bytes > 0 || matches!(c.kind, NodeKind::Profile | NodeKind::Guest));
     if other > 0 {
@@ -867,7 +985,7 @@ mod tests {
         symlink(&outside, home.join("link")).unwrap();
 
         let h = measure_home(&home, NodeKind::Profile, small(), &|| false).unwrap();
-        let t = &h.tree;
+        let t = &h;
         sum_ok(t);
         assert_eq!(t.kind, NodeKind::Profile);
         assert!(
@@ -920,16 +1038,16 @@ mod tests {
             ..Limits::default()
         };
         let h = measure_home(&home, NodeKind::Profile, limits, &|| false).unwrap();
-        sum_ok(&h.tree);
-        assert!(count(&h.tree) <= 60, "{}", count(&h.tree));
+        sum_ok(&h);
+        assert!(count(&h) <= 60, "{}", count(&h));
         // At most 16 folders per folder.
-        assert!(h.tree.children.len() <= 17);
+        assert!(h.children.len() <= 17);
         // Hard links are counted once.
         let one = d.path().join("one");
         write(&one.join("a"), MIB);
         std::fs::hard_link(one.join("a"), one.join("b")).unwrap();
         let h = measure_home(&one, NodeKind::Profile, limits, &|| false).unwrap();
-        assert!(h.tree.bytes < 2 * MIB as u64, "{}", h.tree.bytes);
+        assert!(h.bytes < 2 * MIB as u64, "{}", h.bytes);
     }
 
     #[test]
@@ -1064,7 +1182,7 @@ mod tests {
             n.id = Some("p2".into());
             n
         };
-        let top = top_level(disk, &t, &[(home, true), (empty, true)]);
+        let top = top_level(disk, &t, &mut [(home, true), (empty, true)], None);
         assert_eq!(top.bytes, 10_000);
         let kinds: Vec<NodeKind> = top.children.iter().map(|c| c.kind).collect();
         assert_eq!(
@@ -1083,5 +1201,177 @@ mod tests {
             "no names at the top level"
         );
         assert_eq!(top.children[4].bytes, 10_000 - 5_500 - 205 - 1057 - 2_000);
+    }
+
+    const BTRFS: &str = "\
+22 1 0:32 /root / rw,relatime shared:1 - btrfs /dev/nvme0n1p2 rw,compress=zstd:1,subvol=/root
+23 22 0:33 /nix /nix rw,relatime shared:2 - btrfs /dev/nvme0n1p2 rw,compress=zstd:1,subvol=/nix
+24 23 0:33 /nix/store /nix/store ro,relatime shared:3 - btrfs /dev/nvme0n1p2 rw,subvol=/nix
+25 22 0:34 /home /home rw,relatime shared:4 - btrfs /dev/nvme0n1p2 rw,subvol=/home
+26 22 0:35 /srv /srv rw,relatime shared:5 - btrfs /dev/nvme0n1p2 rw,subvol=/srv
+27 22 259:1 / /boot rw,relatime shared:6 - vfat /dev/nvme0n1p1 rw
+28 22 0:27 / /tmp rw shared:7 - tmpfs tmpfs rw
+29 22 0:28 / /run rw shared:8 - tmpfs tmpfs rw
+30 26 8:17 / /srv/usb\\040disk rw master:1 opt:2 - ext4 /dev/sdb1 rw
+";
+
+    fn fs(p: &str) -> Option<String> {
+        filesystem_in(BTRFS, Path::new(p))
+    }
+
+    #[test]
+    fn subvolumes_are_one_filesystem() {
+        let disk = Some("/dev/nvme0n1p2".to_owned());
+        for p in [
+            "/",
+            "/nix/store",
+            "/home/hinteros-p1",
+            "/srv/media",
+            "/var/lib",
+        ] {
+            assert_eq!(fs(p), disk, "{p}");
+        }
+        // Whole path components, tags before the dash, escapes, the last of equal mount points.
+        assert_eq!(fs("/boot"), Some("/dev/nvme0n1p1".to_owned()));
+        assert_eq!(fs("/bootleg"), disk);
+        assert_eq!(fs("/srv/usb disk/x"), Some("/dev/sdb1".to_owned()));
+        // tmpfs is no device: two of them are two filesystems.
+        assert_eq!(fs("/tmp/x"), Some("dev:0:27".to_owned()));
+        assert_eq!(fs("/run/x"), Some("dev:0:28".to_owned()));
+        let over = format!("{BTRFS}31 22 8:33 / /home rw - ext4 /dev/sdc1 rw\n");
+        assert_eq!(
+            filesystem_in(&over, Path::new("/home/a")),
+            Some("/dev/sdc1".to_owned())
+        );
+        assert_eq!(filesystem_in("nonsense\n", Path::new("/")), None);
+        assert_eq!(filesystem_in("", Path::new("/")), None);
+    }
+
+    #[test]
+    fn the_real_mounts_answer() {
+        let d = tempfile::tempdir().unwrap();
+        let id = filesystem_of(d.path()).unwrap();
+        assert_eq!(filesystem_of(&d.path().join(".")), Some(id));
+        assert_eq!(filesystem_of(&d.path().join("gone")), None);
+    }
+
+    #[test]
+    fn media_is_a_total() {
+        let d = tempfile::tempdir().unwrap();
+        write(&d.path().join("media/Movies/film"), 3 * MIB);
+        write(&d.path().join("backups/x"), MIB);
+        let m = measure_media(d.path(), small(), &|| false).unwrap();
+        assert_eq!(m.kind, NodeKind::Media);
+        assert!(m.bytes >= 4 * MIB as u64, "{}", m.bytes);
+        assert!(m.children.is_empty() && m.name.is_none());
+        assert!(measure_media(&d.path().join("gone"), small(), &|| false).is_none());
+    }
+
+    fn deep(kind: NodeKind, bytes: &[u64]) -> StorageNode {
+        let mut n = StorageNode::new(kind, bytes.iter().sum());
+        for b in bytes {
+            let mut c = StorageNode::new(NodeKind::Dir, *b);
+            c.children.push(StorageNode::new(NodeKind::Files, b / 3));
+            c.children
+                .push(StorageNode::new(NodeKind::Files, b - b / 3));
+            n.children.push(c);
+        }
+        n
+    }
+
+    fn store(system: StorageNode, apps: StorageNode) -> StoreTree {
+        StoreTree {
+            system,
+            apps,
+            garbage_bytes: 0,
+            estimates: CleanupEstimates::default(),
+        }
+    }
+
+    fn of_kind(top: &StorageNode, kind: NodeKind) -> Vec<u64> {
+        let found = top.children.iter().filter(|c| c.kind == kind);
+        found.map(|c| c.bytes).collect()
+    }
+
+    #[test]
+    fn compression_scales_the_known_segments_to_the_disk() {
+        // 12 000 known, 6 000 used: half of everything.
+        let disk = DiskUsage {
+            total_bytes: 10_000,
+            used_bytes: 5_900,
+            free_bytes: 4_000,
+        };
+        let s = store(
+            deep(NodeKind::System, &[3_001, 999]),
+            deep(NodeKind::Apps, &[1_000, 1_000]),
+        );
+        let mut homes = [
+            (deep(NodeKind::Profile, &[2_000, 1_000]), true),
+            (deep(NodeKind::Guest, &[1_001, 1]), true),
+            // Another disk: as it is, and none of this one's used space.
+            (deep(NodeKind::Profile, &[700]), false),
+        ];
+        let media = (StorageNode::new(NodeKind::Media, 1_998), true);
+        let top = top_level(disk, &s, &mut homes, Some(media));
+        sum_ok(&top);
+        for c in &top.children {
+            sum_ok(c);
+        }
+        for (h, _) in &homes {
+            sum_ok(h);
+        }
+        assert_eq!(of_kind(&top, NodeKind::Other), Vec::<u64>::new());
+        assert_eq!(of_kind(&top, NodeKind::System), [2_000]);
+        assert_eq!(of_kind(&top, NodeKind::Apps), [1_000]);
+        assert_eq!(of_kind(&top, NodeKind::Media), [999]);
+        assert_eq!(of_kind(&top, NodeKind::Guest), [501]);
+        assert_eq!(of_kind(&top, NodeKind::Profile), [1_500, 700]);
+        assert_eq!(top.bytes, 10_000 + 700);
+        // The trees agree with the top level, and the other disk's home is untouched.
+        assert_eq!(homes[0].0.bytes, 1_500);
+        assert_eq!(homes[2].0.bytes, 700);
+        assert_eq!(homes[2].0.children[0].bytes, 700);
+    }
+
+    #[test]
+    fn nothing_changes_while_the_known_fits() {
+        let disk = DiskUsage {
+            total_bytes: 10_000,
+            used_bytes: 6_000,
+            free_bytes: 4_000,
+        };
+        let s = store(
+            deep(NodeKind::System, &[3_000]),
+            deep(NodeKind::Apps, &[1_000]),
+        );
+        // Exactly the used space.
+        let mut homes = [(deep(NodeKind::Profile, &[1_500]), true)];
+        let media = (StorageNode::new(NodeKind::Media, 500), true);
+        let top = top_level(disk, &s, &mut homes, Some(media));
+        assert_eq!(of_kind(&top, NodeKind::System), [3_000]);
+        assert_eq!(of_kind(&top, NodeKind::Media), [500]);
+        assert!(of_kind(&top, NodeKind::Other).is_empty());
+        assert_eq!(top.children[0], s.system);
+        // Below it: other is the rest. An empty or absent `/srv` is no segment.
+        let media = (StorageNode::new(NodeKind::Media, 0), true);
+        let top = top_level(disk, &s, &mut homes, Some(media));
+        assert_eq!(of_kind(&top, NodeKind::Other), [500]);
+        assert!(of_kind(&top, NodeKind::Media).is_empty());
+        assert_eq!(top.bytes, 10_000);
+    }
+
+    #[test]
+    fn shares_add_up_exactly() {
+        assert_eq!(shares(&[1, 1, 1], 2), [1, 1, 0]);
+        assert_eq!(shares(&[3, 1], 2), [2, 0]);
+        assert_eq!(shares(&[0, 0], 0), [0, 0]);
+        assert_eq!(shares(&[], 0), Vec::<u64>::new());
+        let big = [u64::MAX / 2, u64::MAX / 3, 7];
+        assert_eq!(shares(&big, 1 << 40).iter().sum::<u64>(), 1 << 40);
+        // A child scaled to nothing goes; what is left still adds up.
+        let mut n = deep(NodeKind::System, &[1_000, 1]);
+        scale(&mut n, 10);
+        sum_ok(&n);
+        assert_eq!(n.children.len(), 1);
     }
 }

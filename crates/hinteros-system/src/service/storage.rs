@@ -284,6 +284,7 @@ impl Service {
         MeasureJob {
             store_dir: self.args.store_dir.clone(),
             homes,
+            srv_dir: self.args.srv_dir.clone(),
             owners: appreg::owners(state),
         }
     }

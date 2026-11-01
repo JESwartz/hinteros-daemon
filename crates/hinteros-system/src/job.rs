@@ -208,6 +208,8 @@ pub struct MeasureJob {
     pub store_dir: PathBuf,
     /// The accounts in `state.json` order, then the guest (if on).
     pub homes: Vec<MeasureHome>,
+    /// Measured as the `media` node.
+    pub srv_dir: PathBuf,
     /// Every app-env owner.
     pub owners: Vec<Owner>,
 }

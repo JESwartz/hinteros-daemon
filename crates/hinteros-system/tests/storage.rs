@@ -128,6 +128,8 @@ fn as_p2(root: &Root) {
     write(&root.p("home/MyMusic/song"), 2 << 20);
     // The guest.
     write(&root.p("homes/hinteros-guest/Downloads/x"), 1 << 20);
+    // /srv.
+    write(&root.p("srv/media/Movies/SecretFilm.mkv"), 2 << 20);
 }
 
 /// NAR sizes for the fake store: the system generation and the starter env; one dead path.
@@ -200,6 +202,11 @@ async fn measuring_and_who_sees_what() {
     assert!(p1["bytes"].as_u64().unwrap() >= 5 << 20, "{p1}");
     assert_eq!(p1["children"], json!([]));
     assert!(top.iter().any(|n| n["kind"] == "guest"));
+    // Media: a total, after the homes.
+    let media = top.iter().find(|n| n["kind"] == "media").unwrap();
+    assert!(media["bytes"].as_u64().unwrap() >= 2 << 20, "{media}");
+    assert_eq!(media["children"], json!([]));
+    assert!(!text.contains("SecretFilm"), "{text}");
     assert_eq!(
         top.iter().find(|n| n["kind"] == "system").unwrap()["bytes"],
         5_000_000

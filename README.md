@@ -1441,12 +1441,21 @@ Design: `hinteros-docs/design/storage.md`. Every method below is relayed as `sys
   `nix-store -qR` of every system and app generation, and walks each home (`state.json`'s
   accounts, then the guest): no symlink followed, no other filesystem entered, no file read
   except Steam's `libraryfolders.vdf` and `appmanifest_*.acf` (games named one by one, each
-  library folder that is a real folder inside the home), hard links counted once.
+  library folder that is a real folder inside the home), hard links counted once. `--srv-dir`
+  (`/srv`) is walked the same way for its total only.
 - Trees: children always add up to their parent (remainders are `common`, `shared`, `files`,
   `other`); home trees are cut at 6 folder levels, max(1 MiB, 0.5 %) per folder, 16 folders per
   folder, 400 nodes; names at most 128 characters. Top level: `system` (generation / common),
   `apps` (`app_env` per owner outside the system, generation / common; `shared` = in two or more
-  owners' envs), one `profile` per account, `guest`, `other`, `free`.
+  owners' envs), one `profile` per account, `guest`, `media` (`/srv`, a total, when not empty),
+  `other`, `free`.
+- **Btrfs.** Whether a home or `/srv` is on the store's filesystem comes from the mount source in
+  `/proc/self/mountinfo` of the longest mount point above it: every subvolume has its own
+  `st_dev` and `f_fsid`. NAR sizes and `st_blocks` are uncompressed, so with `compress=zstd` the
+  known total can pass what the disk uses (total − free): the known segments on that filesystem,
+  with their children and detailed trees, are then scaled down in proportion to fill it exactly
+  (largest remainder, children still add up) and `other` is 0. Up to that, nothing is scaled.
+  The clean-up estimates, `garbage_bytes` and `profiles.list`'s `usage` stay uncompressed sizes.
 - The result goes to `/var/lib/hinteros/storage.json` (0600) with its time: `storage.get`
   (read-only, open) returns the public part (top level, every profile's total, garbage and the
   clean-up estimates for keep 1..10); `storage.tree {id, admin_pin?}` (through the mutating gate

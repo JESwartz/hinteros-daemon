@@ -1037,6 +1037,7 @@ impl System {
         // loopback ports nothing listens on, unless the test points them at its fakes.
         let defaults = [
             ("--media-dir", r("media")),
+            ("--srv-dir", r("srv")),
             ("--var-lib-dir", r("var/lib")),
             ("--var-cache-dir", r("var/cache")),
             ("--jellyfin-addr", "127.0.0.1:9".to_owned()),

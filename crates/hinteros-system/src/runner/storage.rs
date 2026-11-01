@@ -140,7 +140,9 @@ impl Runner {
         let paths = self.spec.paths.clone();
         let disk = storage::disk_usage(&j.store_dir)
             .ok_or_else(|| self.fail("cannot read the store's filesystem"))?;
-        let store_dev = storage::device_of(&j.store_dir);
+        let store_fs = storage::filesystem_of(&j.store_dir);
+        let on_store_fs =
+            |dir: &Path| store_fs.is_some() && storage::filesystem_of(dir) == store_fs;
         let mut system = self.system_gens();
         let mut owners: Vec<(String, Gens)> = j
             .owners
@@ -148,7 +150,7 @@ impl Runner {
             .map(|o| (o.key(), self.owner_gens(o)))
             .collect();
         let total =
-            2 + system.len() + owners.iter().map(|(_, g)| g.len()).sum::<usize>() + j.homes.len();
+            3 + system.len() + owners.iter().map(|(_, g)| g.len()).sum::<usize>() + j.homes.len();
         let mut done = 0;
         self.set_stage(Stage::Measuring);
         self.measuring(done, total);
@@ -185,7 +187,7 @@ impl Runner {
         let cancel_file = self.dir.join(job::CANCEL);
         let cancel = move || cancel_file.exists();
         let mut homes: Vec<(StorageNode, bool)> = Vec::new();
-        let mut detailed: BTreeMap<String, StorageNode> = BTreeMap::new();
+        let mut ids: Vec<String> = Vec::new();
         for h in &j.homes {
             self.check_cancel()?;
             let kind = if h.id == "guest" {
@@ -198,9 +200,9 @@ impl Runner {
                 .as_deref()
                 .and_then(|home| storage::measure_home(home, kind, Limits::default(), &cancel));
             self.check_cancel()?;
-            let (mut tree, on_disk) = match measured {
-                Some(m) => (m.tree, Some(m.dev) == store_dev),
-                None => (StorageNode::new(kind, 0), false),
+            let (mut tree, on_disk) = match (measured, h.home.as_deref()) {
+                (Some(tree), Some(home)) => (tree, on_store_fs(home)),
+                _ => (StorageNode::new(kind, 0), false),
             };
             if kind == NodeKind::Profile {
                 tree.id = Some(h.id.clone());
@@ -211,20 +213,35 @@ impl Runner {
                 shown = node_count(&tree),
                 "home measured"
             );
-            homes.push((tree.clone(), on_disk));
-            detailed.insert(h.id.clone(), tree);
+            homes.push((tree, on_disk));
+            ids.push(h.id.clone());
             done += 1;
             self.measuring(done, total);
         }
+        let media = storage::measure_media(&j.srv_dir, Limits::default(), &cancel)
+            .map(|m| (m, on_store_fs(&j.srv_dir)));
+        self.check_cancel()?;
+        info!(
+            bytes = media.as_ref().map(|(m, _)| m.bytes),
+            "/srv measured"
+        );
+        done += 1;
+        self.measuring(done, total);
 
         self.set_stage(Stage::Finishing);
         let measured_at = job::now();
+        // Scales `homes` too: the detailed trees stay equal to the top level.
+        let root = storage::top_level(disk, &store, &mut homes, media);
+        let detailed: BTreeMap<String, StorageNode> = ids
+            .into_iter()
+            .zip(homes.into_iter().map(|(h, _)| h))
+            .collect();
         let stored = Stored {
             version: storage::STORED_VERSION,
             measurement: Measurement {
                 measured_at,
                 disk,
-                root: storage::top_level(disk, &store, &homes),
+                root,
                 garbage_bytes: store.garbage_bytes,
                 estimates: store.estimates,
             },
@@ -317,6 +334,7 @@ impl Runner {
         cmd.arg("--gc");
         self.exec(cmd, false, &mut |_, _| {})?;
         self.set_stage(Stage::Finishing);
+        storage::sync_filesystem(&j.store_dir);
         let free_after = storage::disk_usage(&j.store_dir).map(|d| d.free_bytes);
         let freed = match (free_before, free_after) {
             (Some(b), Some(a)) => a.saturating_sub(b),

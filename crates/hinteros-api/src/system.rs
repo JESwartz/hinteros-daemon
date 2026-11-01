@@ -1217,6 +1217,8 @@ pub enum NodeKind {
     Profile,
     /// The guest's home.
     Guest,
+    /// `/srv`: its total only.
+    Media,
     /// What none of the others explains.
     Other,
     /// Free space.
@@ -1249,6 +1251,7 @@ impl NodeKind {
         NodeKind::Apps,
         NodeKind::Profile,
         NodeKind::Guest,
+        NodeKind::Media,
         NodeKind::Other,
         NodeKind::Free,
         NodeKind::Generation,
@@ -1263,7 +1266,8 @@ impl NodeKind {
 }
 
 /// One segment of the storage ring. Children add up exactly to `bytes` (remainders are nodes
-/// of their own), except at the `disk` root when the measured parts exceed the filesystem.
+/// of their own). The `disk` root is the filesystem, plus any home or `/srv` on another one. On a
+/// compressed filesystem the sizes can be scaled down to what the disk really uses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageNode {
     pub kind: NodeKind,
@@ -1333,7 +1337,7 @@ pub struct Measurement {
     /// When it finished (Unix seconds).
     pub measured_at: i64,
     pub disk: DiskUsage,
-    /// The top level (`kind: disk`); profile and guest nodes without children.
+    /// The top level (`kind: disk`); profile, guest and media nodes without children.
     pub root: StorageNode,
     /// Store paths no GC root reaches now.
     pub garbage_bytes: u64,

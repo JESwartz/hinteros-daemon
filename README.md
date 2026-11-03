@@ -1,6 +1,7 @@
 # HinterOS Daemon
 
-The Rust system services behind the launcher, built as two binaries:
+The Rust system services behind the launcher of [HinterOS](https://hinteros.org), built as two
+binaries:
 
 - **`hinteros-session`** (unprivileged, runs in the user's session): controller input and the
   global Home button, launching and focusing apps in gamescope, typing into apps and the
@@ -505,7 +506,7 @@ terminal, start the launcher against that socket:
 
 ```sh
 HINTEROS_SESSION_SOCKET=/run/user/1000/hinteros-preview.XXXXXX/session.sock \
-  nix run git+https://justsomeshed.com/JSwartz/HinterOS/hinteros-launcher.git -- --windowed
+  nix run git+https://git.hinteros.org/hinteros-launcher.git -- --windowed
 ```
 
 **Launching an app or game from the launcher starts it for real on your desktop** (Steam
@@ -1025,7 +1026,7 @@ For `daemon.nix` (and the VM tests) in the system repo:
 - **Files in every generation**, at `/run/current-system/sw/share/hinteros/` (a package in
   `environment.systemPackages`, `pathsToLink = ["/share/hinteros"]`):
   `release.json` = `{"version": "<HinterOS release>", "dev": <hinteros.dev.enable>}`;
-  `update/channels.json` = `{"repo": "https://justsomeshed.com/JSwartz/HinterOS/hinteros.git",
+  `update/channels.json` = `{"repo": "https://git.hinteros.org/hinteros.git",
   "branches": {"stable": "stable", "beta": "beta"}}`; `update/allowed_signers` (ssh-keygen
   format, `principal namespaces="git" ssh-ed25519 AAAA…`, primary and offline backup key).
 - **Both daemon packages in `environment.systemPackages`** (so `sw/bin/hinteros-session` and
@@ -2203,4 +2204,4 @@ and `kill -USR1` the daemon to emit `home_pressed` (after `subscribe`). Launch s
 
 The systemd units live in the system repo, which consumes `overlays.default`.
 
-Part of [HinterOS](https://justsomeshed.com/JSwartz/HinterOS/hinteros). Licensed under GPL-3.0-only, see [LICENSE](LICENSE).
+Part of [HinterOS](https://hinteros.org). Licensed under GPL-3.0-only, see [LICENSE](LICENSE).

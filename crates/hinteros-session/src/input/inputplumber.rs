@@ -15,6 +15,12 @@
 //! reaches an app. A new pad starts in `None` (all to the virtual pad), so its worker sets
 //! the mode before anything else.
 //!
+//! Input is taken only from InputPlumber itself: any process on the system bus can send an
+//! `InputEvent` signal (a media server's account, say), and a forged one would act like a pad
+//! press in the launcher. The match rule names InputPlumber as the sender (the bus enforces
+//! it), and each signal's sender is checked against the unique name that owns InputPlumber's
+//! bus name now (`NameOwnerChanged`).
+//!
 //! Every InputPlumber method and property read goes through polkit, so nothing here may cost a
 //! D-Bus round trip per input event: the signal loop forwards events at once, and the mapping
 //! from a D-Bus target to its pad is looked up once per target and cached (also when the
@@ -51,7 +57,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use zbus::fdo::{DBusProxy, ObjectManagerProxy};
 use zbus::message::Type as MessageType;
-use zbus::names::BusName;
+use zbus::names::{BusName, OwnedUniqueName};
 use zbus::proxy::CacheProperties;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, Value};
 use zbus::{Connection, MatchRule, MessageStream, Proxy};
@@ -269,8 +275,12 @@ async fn run(
         .await?;
     let mut added = objects.receive_interfaces_added().await?;
     let mut removed = objects.receive_interfaces_removed().await?;
+    // Only InputPlumber's own signals: anyone on the system bus may send an `InputEvent`, and
+    // a forged one would drive the launcher like a pad. The bus delivers only signals sent by
+    // the name's owner (`sender=`); each is checked against that owner's unique name too.
     let rule = MatchRule::builder()
         .msg_type(MessageType::Signal)
+        .sender(SERVICE)?
         .interface(DBUS_DEVICE_IFACE)?
         .member("InputEvent")?
         .path_namespace(ROOT)?
@@ -296,12 +306,17 @@ async fn run(
     )));
     let mut generation = 0;
     let service = BusName::try_from(SERVICE)?;
-    match dbus.name_has_owner(service).await {
-        Ok(true) => {
+    // InputPlumber's unique name: the only sender whose input is taken.
+    let mut owner: Option<OwnedUniqueName> = None;
+    match dbus.get_name_owner(service).await {
+        Ok(name) => {
+            owner = Some(name);
             generation += 1;
             presence.send_replace(Some(generation));
         }
-        Ok(false) => info!("waiting for InputPlumber ({SERVICE}) to appear on D-Bus"),
+        Err(zbus::fdo::Error::NameHasNoOwner(_)) => {
+            info!("waiting for InputPlumber ({SERVICE}) to appear on D-Bus")
+        }
         Err(e) => warn!("asking D-Bus for InputPlumber: {e}; waiting for it to appear"),
     }
 
@@ -311,6 +326,11 @@ async fn run(
             biased;
             Some(msg) = inputs.next() => {
                 let msg = msg?;
+                let sender = msg.header().sender().map(|s| s.as_str().to_owned());
+                if sender.is_none() || sender.as_deref() != owner.as_ref().map(|o| o.as_str()) {
+                    debug!(?sender, owner = ?owner.as_ref().map(|o| o.as_str()), "ignoring InputEvent not from InputPlumber");
+                    continue;
+                }
                 let source = msg.header().path().map(ToString::to_string).unwrap_or_default();
                 match msg.body().deserialize::<(String, f64)>() {
                     Ok((event, value)) => {
@@ -339,7 +359,9 @@ async fn run(
             Some(change) = owner_changes.next() => {
                 task.devices.clear();
                 task.targets.clear();
-                if change.args()?.new_owner().is_some() {
+                let args = change.args()?;
+                owner = args.new_owner().as_ref().map(|n| n.to_owned().into());
+                if owner.is_some() {
                     info!("InputPlumber appeared");
                     generation += 1;
                     presence.send_replace(Some(generation));

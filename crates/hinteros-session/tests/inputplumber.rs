@@ -1363,3 +1363,79 @@ async fn pointer_settings_reload_the_loaded_profile() {
     );
     assert_eq!(fake.profile(), "Default");
 }
+
+/// Settings for a test that runs the InputPlumber task on its own.
+fn task_settings(
+    bus: &Bus,
+    initial: hinteros_session::input::InterceptMode,
+) -> hinteros_session::input::inputplumber::Settings {
+    use hinteros_session::input::LabelSwap;
+    use hinteros_session::input::inputplumber::{PointerProfile, Settings};
+    Settings {
+        bus: Some(bus.address.clone()),
+        initial,
+        swap: LabelSwap::Off,
+        profile: PointerProfile {
+            speed_pps: 600,
+            curve: 2.5,
+            activity_deadzone: 0.1,
+        },
+        call_timeout: std::time::Duration::from_secs(5),
+        watchdog: std::time::Duration::from_secs(600),
+    }
+}
+
+/// The next input the task forwards (none within a moment: `None`).
+async fn next_input(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<hinteros_session::input::RawInput>,
+    within: std::time::Duration,
+) -> Option<(String, String, f64)> {
+    tokio::time::timeout(within, events.recv())
+        .await
+        .ok()
+        .flatten()
+        .map(|i| (i.source, i.event, i.value))
+}
+
+/// Anyone on the system bus can send an `InputEvent` signal. Only InputPlumber's count: a
+/// forged one, on InputPlumber's own target path, is not input.
+#[tokio::test(flavor = "multi_thread")]
+async fn input_from_others_on_the_bus_is_ignored() {
+    use hinteros_session::input::InterceptMode;
+    use hinteros_session::input::inputplumber;
+    use std::time::Duration;
+
+    let Some(bus) = Bus::start() else { return };
+    let fake = Fake::start(&bus.address).await;
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let _input = inputplumber::spawn(task_settings(&bus, InterceptMode::All), tx);
+    ready(&fake, 0, 2).await;
+
+    let stranger = zbus::connection::Builder::address(bus.address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    for event in ["ui_accept", "ui_guide"] {
+        stranger
+            .emit_signal(
+                None::<BusName<'_>>,
+                TARGET,
+                "org.shadowblip.Input.DBusDevice",
+                "InputEvent",
+                &(event, 1.0),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        next_input(&mut events, Duration::from_millis(300)).await,
+        None
+    );
+    // InputPlumber's own still comes through.
+    fake.press("ui_back", 1.0).await;
+    assert_eq!(
+        next_input(&mut events, Duration::from_secs(5)).await,
+        Some((TARGET.into(), "ui_back".into(), 1.0))
+    );
+}

@@ -36,6 +36,9 @@ const I_DEVICE: &str = "org.bluez.Device1";
 const I_BATTERY: &str = "org.bluez.Battery1";
 const I_AGENT_MANAGER: &str = "org.bluez.AgentManager1";
 pub const AGENT_PATH: &str = "/org/hinteros/BluetoothAgent";
+/// The most `pair_timeout_s` may give `Pair`, so that trusting and connecting afterwards still
+/// fit in the 90 s limit of `bluetooth.pair`.
+const PAIR_TIMEOUT_MAX_S: u64 = 60;
 
 /// What the methods, the watcher and the agent share.
 #[derive(Clone)]
@@ -76,6 +79,39 @@ impl Shared {
     /// Whether the agent may say yes to pairing requests from `address` now.
     fn pairing_allowed(&self, address: &str) -> bool {
         self.with(|i| i.scanning || i.pairing.contains(address))
+    }
+
+    /// Let the agent answer for `address` until the guard is dropped.
+    fn start_pairing(&self, address: &str) -> PairingGuard {
+        self.with(|i| i.pairing.insert(address.to_owned()));
+        PairingGuard {
+            shared: self.clone(),
+            address: address.to_owned(),
+            cancel: None,
+        }
+    }
+}
+
+/// Ends the agent's permission for one address when `bluetooth.pair` finishes, and also when
+/// its time limit drops the call halfway: otherwise the agent would keep saying yes (and PIN
+/// 0000) to that address for the rest of the session.
+struct PairingGuard {
+    shared: Shared,
+    address: String,
+    /// The device while its `Pair` call runs, to cancel it if the call is dropped.
+    cancel: Option<zbus::Proxy<'static>>,
+}
+
+impl Drop for PairingGuard {
+    fn drop(&mut self) {
+        self.shared.with(|i| i.pairing.remove(&self.address));
+        if let Some(dev) = self.cancel.take()
+            && let Ok(rt) = tokio::runtime::Handle::try_current()
+        {
+            rt.spawn(async move {
+                let _ = dev.call::<_, _, ()>("CancelPairing", &()).await;
+            });
+        }
     }
 }
 
@@ -412,11 +448,15 @@ pub async fn pair(ctx: &Arc<Ctx>, p: BtAddressParams) -> Result<BtDevice, ErrorO
     let d = find(&o, &p.address)?;
     let dev = device_proxy(&conn, d).await?;
     let paired = get::<bool>(&d.props, "Paired").unwrap_or(false);
-    ctx.bt.with(|i| i.pairing.insert(p.address.clone()));
+    let mut guard = ctx.bt.start_pairing(&p.address);
     let result = async {
         if !paired {
-            let limit = Duration::from_secs(ctx.bluetooth.pair_timeout_s);
-            match timeout(limit, dev.call::<_, _, ()>("Pair", &())).await {
+            // Leave room in the method's time limit for the steps after `Pair`.
+            let limit = Duration::from_secs(ctx.bluetooth.pair_timeout_s.min(PAIR_TIMEOUT_MAX_S));
+            guard.cancel = Some(dev.clone());
+            let outcome = timeout(limit, dev.call::<_, _, ()>("Pair", &())).await;
+            guard.cancel = None;
+            match outcome {
                 Ok(Ok(())) => {}
                 // Paired meanwhile (the device started it).
                 Ok(Err(zbus::Error::MethodError(n, _, _)))
@@ -448,7 +488,7 @@ pub async fn pair(ctx: &Arc<Ctx>, p: BtAddressParams) -> Result<BtDevice, ErrorO
         snapshot(&conn, &p.address).await
     }
     .await;
-    ctx.bt.with(|i| i.pairing.remove(&p.address));
+    drop(guard);
     if let Err(e) = &result {
         warn!(address = %p.address, code = e.code, "pairing failed: {}", e.message);
     }
@@ -852,5 +892,18 @@ mod tests {
         s.with(|i| i.scanning = false);
         s.with(|i| i.pairing.insert("AA:BB:CC:DD:EE:01".into()));
         assert!(s.pairing_allowed("AA:BB:CC:DD:EE:01"));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_pair_call_stops_the_agent_answering() {
+        let s = Shared::default();
+        let guard = s.start_pairing("AA:BB:CC:DD:EE:02");
+        let call = async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        };
+        // The method's time limit drops the call before it ends.
+        assert!(timeout(Duration::from_millis(10), call).await.is_err());
+        assert!(!s.pairing_allowed("AA:BB:CC:DD:EE:02"));
     }
 }

@@ -473,7 +473,7 @@ impl Default for DisplayConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BluetoothConfig {
-    /// `bluetooth.pair` gives up after this long.
+    /// `bluetooth.pair` gives up after this long (at most 60 s).
     pub pair_timeout_s: u64,
     /// A numeric comparison is rejected if `bluetooth.confirm` does not answer in this time.
     pub confirm_timeout_s: u64,

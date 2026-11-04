@@ -407,7 +407,7 @@ poll_ms = 2000                 # look for changes made elsewhere (only while a c
 apply_timeout_ms = 6000        # display.set_mode: how long gamescope gets to switch
 
 [bluetooth]
-pair_timeout_s = 45            # bluetooth.pair gives up
+pair_timeout_s = 45            # bluetooth.pair gives up (at most 60)
 confirm_timeout_s = 30         # a numeric comparison nobody answers is rejected
 
 [sandbox]                      # catalog apps in bwrap (not Steam); see "App sandbox and permissions"

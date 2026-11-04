@@ -110,3 +110,10 @@ if (document.readyState === "loading") {
 } else {
   settle();
 }
+// The background script dropped this tab's reports (the tab started loading): report again.
+browser.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.report === true) {
+    reported = "none";
+    settle();
+  }
+});

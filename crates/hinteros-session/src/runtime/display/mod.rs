@@ -60,6 +60,12 @@ pub struct Shared {
     op: tokio::sync::Mutex<()>,
     /// The mode the last un-kept `display.set_mode` replaced.
     pending: Mutex<Option<Mode>>,
+    /// The display that change is on (its description, the key in gamescope's save file) and
+    /// the mode it got.
+    pending_display: Mutex<Option<(String, Mode)>>,
+    /// The display of the last change `display.keep` kept, until the server takes it
+    /// ([`take_kept`]).
+    kept: Mutex<Option<(String, Mode)>>,
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -373,6 +379,8 @@ pub async fn set_mode(ctx: &Ctx, target: Mode) -> Result<DisplaySetResult, Error
             .unwrap_or_else(|e| e.into_inner());
         // A second change before the first was kept still reverts to the mode before both.
         revert_to = *pending.get_or_insert(previous);
+        *lock(&ctx.display_state.pending_display) =
+            info.display.as_ref().map(|d| (d.description(), target));
     }
     Ok(DisplaySetResult {
         previous: revert_to,
@@ -396,10 +404,22 @@ pub async fn keep(ctx: &Ctx) -> Result<Empty, ErrorObject> {
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .is_some();
+    let display = lock(&ctx.display_state.pending_display).take();
     if changed {
+        *lock(&ctx.display_state.kept) = display;
         restart_osk(ctx);
     }
     Ok(Empty {})
+}
+
+/// The display whose mode the last `display.keep` kept (its save file key) and that mode, once:
+/// the server saves it for every profile.
+pub fn take_kept(shared: &Shared) -> Option<(String, Mode)> {
+    lock(&shared.kept).take()
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub async fn revert(ctx: &Ctx) -> Result<DisplayRevertResult, ErrorObject> {
@@ -411,6 +431,7 @@ pub async fn revert(ctx: &Ctx) -> Result<DisplayRevertResult, ErrorObject> {
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .ok_or_else(|| failed("nothing_to_revert", "no display change to revert"))?;
+    lock(&ctx.display_state.pending_display).take();
     let info = query(ctx).await.ok_or_else(|| {
         unavailable(
             SVC,

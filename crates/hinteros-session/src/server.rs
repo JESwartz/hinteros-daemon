@@ -136,7 +136,10 @@ pub async fn handle(
                 if let (false, Some((version, client))) = (was_handshaken, conn.negotiated()) {
                     info!(client = %client.name, client_version = %client.version, api_version = %version, "handshake done");
                 }
-                // The line may have carried a password (auth.respond): wipe it.
+                // The line may have carried a password (auth.respond): wipe it. Best effort:
+                // auth.respond moves the parsed password into a Zeroizing string (never a copy
+                // of the params), but the socket's read buffer keeps the bytes until it is
+                // filled again.
                 zeroize::Zeroize::zeroize(&mut line.into_bytes());
             }
             Some(answer) = answers.recv() => write_message(&mut w, &answer).await?,
@@ -145,7 +148,12 @@ pub async fn handle(
                     write_message(&mut w, &jsonrpc::notification(name.wire_name(), params)).await?;
                 }
                 Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(n)) => warn!("client lagging, dropped {n} events"),
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    // It missed events (an app_exited, a focus_changed) and its state is wrong:
+                    // close, so that it connects again and reads the state anew.
+                    warn!("client lagging, dropped {n} events; closing the connection");
+                    break;
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
         }
@@ -182,7 +190,7 @@ async fn dispatch(
     if Runtime::handles(method) {
         let kept = params.clone();
         let result = runtime.call(method, params).await?;
-        persist_shared(method, kept.as_ref(), relay);
+        persist_shared(method, kept.as_ref(), runtime, relay);
         return Ok(result);
     }
     match method {
@@ -228,32 +236,24 @@ async fn shell_call(
 /// The display mode and the audio output are the box's, not the profile's (profiles.md): a kept
 /// mode and a chosen output are saved with the system service, which publishes them for every
 /// profile's session. Best effort, in the background.
-fn persist_shared(method: &str, params: Option<&Value>, relay: &Relay) {
+fn persist_shared(method: &str, params: Option<&Value>, runtime: &Runtime, relay: &Relay) {
     let calls: Vec<(&'static str, Value)> = match method {
-        "display.keep" => {
-            let Some(file) = std::env::var_os("GAMESCOPE_MODE_SAVE_FILE") else {
-                return;
-            };
-            let text = std::fs::read_to_string(file).unwrap_or_default();
-            text.lines()
-                .take(2)
-                .filter_map(|l| {
-                    let (display, mode) = l.split_once(':')?;
-                    let mode = mode.split_whitespace().next()?;
-                    let (wh, hz) = mode.split_once('@')?;
-                    let (w, h) = wh.split_once('x')?;
-                    Some((
-                        hinteros_api::system::DisplaySaveMode::NAME,
-                        serde_json::json!({
-                            "display": display,
-                            "width": w.parse::<u32>().ok()?,
-                            "height": h.parse::<u32>().ok()?,
-                            "refresh": hz.parse::<f64>().ok()?.round() as u32,
-                        }),
-                    ))
-                })
-                .collect()
-        }
+        // The display the kept change is on: gamescope's save file has a line for every
+        // display it has seen.
+        "display.keep" => runtime
+            .take_kept_display()
+            .map(|(display, mode)| {
+                vec![(
+                    hinteros_api::system::DisplaySaveMode::NAME,
+                    serde_json::json!({
+                        "display": display,
+                        "width": mode.width,
+                        "height": mode.height,
+                        "refresh": mode.refresh,
+                    }),
+                )]
+            })
+            .unwrap_or_default(),
         "audio.set_output" => params
             .and_then(|p| p.get("id"))
             .and_then(Value::as_str)
@@ -303,7 +303,12 @@ async fn slow(
             hinteros_api::server::decode_params::<session::SessionRestart>(params.clone())?;
             s.restarter.restart(params).await
         }
-        m if Runtime::waits(m) => s.runtime.call(m, params).await,
+        m if Runtime::waits(m) => {
+            let kept = params.clone();
+            let result = s.runtime.call(m, params).await?;
+            persist_shared(m, kept.as_ref(), &s.runtime, &s.relay);
+            Ok(result)
+        }
         m if crate::profile::METHODS.contains(&m) => s.profiles.call(m, params).await,
         m if crate::greeter::METHODS.contains(&m) => match &s.greeter {
             Some(g) => g.call(m, params, client).await,

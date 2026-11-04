@@ -763,3 +763,81 @@ async fn a_kept_mode_change_restarts_the_on_screen_keyboard() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(started(&d), 2);
 }
+
+/// A fake system service that answers every call with `{}` (`subscribe` with its params) and
+/// reports it.
+fn fake_system(path: &Path) -> std::sync::mpsc::Receiver<(String, Value)> {
+    use hinteros_api::codec::{LineReader, write_message};
+    use hinteros_api::server::{Connection, Step};
+    let _ = std::fs::remove_file(path);
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+    let (seen_tx, seen) = std::sync::mpsc::channel();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let seen_tx = seen_tx.clone();
+            tokio::spawn(async move {
+                let (r, mut w) = stream.into_split();
+                let mut reader = LineReader::new(r);
+                let mut conn = Connection::new(
+                    hinteros_api::system::VERSION,
+                    hinteros_api::common::Peer::new("fake-system", "0"),
+                );
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let reply = match conn.step(&line) {
+                        Step::Reply(v) | Step::ReplyAndClose(v) => v,
+                        Step::Ignore => continue,
+                        Step::Dispatch(req) => {
+                            let params = req.params.clone().unwrap_or(json!({}));
+                            let _ = seen_tx.send((req.method.clone(), params.clone()));
+                            let result = if req.method == "subscribe" {
+                                params
+                            } else {
+                                json!({})
+                            };
+                            hinteros_api::jsonrpc::response(&req.id.unwrap(), Ok(result))
+                        }
+                    };
+                    write_message(&mut w, &reply).await.unwrap();
+                }
+            });
+        }
+    });
+    seen
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keep_saves_the_changed_display_for_every_profile() {
+    let Some(gs) = FakeGamescope::start(true, false) else {
+        return;
+    };
+    // The TV is not among the first lines: gamescope adds displays at the end.
+    std::fs::write(
+        gs.save_file(),
+        "Desk 24:1920x1080@60\nAVR:1280x720@60\nSony TV:3840x2160@60 1\n",
+    )
+    .unwrap();
+    let d = gs.daemon(3000, true);
+    let seen = fake_system(&d.dir.path().join("system.sock"));
+    // The relay connects again after its backoff and subscribes; saves before that are lost.
+    eventually("the relay", async || {
+        seen.try_iter().find(|(m, _)| m == "subscribe")
+    })
+    .await;
+    let mut c = d.client().await;
+    call(&mut c, "display.set_mode", mode(1920, 1080, 120))
+        .await
+        .unwrap();
+    call(&mut c, "display.keep", json!({})).await.unwrap();
+    let saved = eventually("display.save_mode", async || {
+        seen.try_iter().find(|(m, _)| m == "display.save_mode")
+    })
+    .await;
+    assert_eq!(
+        saved.1,
+        json!({"display": "Sony TV", "width": 1920, "height": 1080, "refresh": 120})
+    );
+    // Only that one; and a keep with nothing changed saves nothing.
+    call(&mut c, "display.keep", json!({})).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(seen.try_iter().all(|(m, _)| m != "display.save_mode"));
+}

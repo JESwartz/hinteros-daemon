@@ -162,14 +162,18 @@ impl Runtime {
         session::METHODS.contains(&method)
     }
 
-    /// The methods that wait seconds for NetworkManager or BlueZ. The server answers them from a
-    /// task of their own: on the connection they would hold up the events, the controller input
-    /// included.
+    /// The methods the server answers from a task of their own: each may wait seconds for
+    /// NetworkManager, BlueZ, PipeWire, gamescope or logind (a mode switch, a hung service up to
+    /// its `time_limit`), and on the connection it would hold up the events, the controller
+    /// input included. Not the volume and mute: they are set in the order they come.
     pub fn waits(method: &str) -> bool {
-        matches!(
-            method,
-            "wifi.scan" | "wifi.connect" | "bluetooth.pair" | "bluetooth.connect"
-        )
+        Self::handles(method) && !matches!(method, "audio.volume" | "audio.mute")
+    }
+
+    /// The display whose mode the last `display.keep` kept and that mode, once (see
+    /// [`display::take_kept`]).
+    pub fn take_kept_display(&self) -> Option<(String, session::Mode)> {
+        display::take_kept(&self.ctx.display_state)
     }
 
     /// Run one runtime method.

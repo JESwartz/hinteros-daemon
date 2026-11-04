@@ -1261,7 +1261,9 @@ server, `--icon-allow-http`, a hidden test flag).
 ### What the launcher must do
 
 Say hello with client name `hinteros-launcher`, match responses by id (they may come out of
-order), and:
+order: `apps.launch`, relayed calls and the runtime methods except volume and mute are answered
+from tasks of their own), connect again and read the state anew when the daemon closes the
+connection (it does when the client falls 256 events behind), and:
 
 - Subscribe to `authentication_requested`/`authentication_finished`. On a request show the admin
   password dialog (`adminPasswordUi` on) with `message` and the first identity's name; send

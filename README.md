@@ -884,7 +884,9 @@ trust.
   → `nix-env -p <profile> --set` + `switch-to-configuration switch` → replace `/etc/hinteros`
   with the staging copy (`renameat2(RENAME_EXCHANGE)`). A failed switch puts the profile back
   and runs the old system's `switch-to-configuration boot`. `jobs.cancel` works until the job
-  enters `activating` (it then kills the job's process group; the box is unchanged). Jobs hold a
+  enters `activating` (it then kills the job's process group; the box is unchanged), and only for
+  the uid that started the job, root or the admin profile (else `permission_denied {reason:
+  profile}`: another profile or the guest does not undo an update the admin approved). Jobs hold a
   logind `shutdown:sleep` inhibitor: `delay`, then `block` while activating.
   `session_restart_required` is set when the new system's `sw/bin/hinteros-session` or
   `hinteros-system` resolves to a different store path.

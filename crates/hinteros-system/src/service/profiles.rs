@@ -347,6 +347,14 @@ impl Service {
         })
     }
 
+    /// Whether `uid` is the admin profile's account.
+    pub(super) fn caller_is_admin_profile(&self, uid: u32) -> bool {
+        self.load_state().is_ok_and(|(state, _)| {
+            let caller = self.caller(uid, &state);
+            caller.role == Role::Profile && caller.id.is_some_and(|id| self.is_admin_profile(&id))
+        })
+    }
+
     /// Whether `id` is the admin profile (of the running accounts).
     pub(super) fn is_admin_profile(&self, id: &str) -> bool {
         let Ok((state, _)) = self.load_state() else {

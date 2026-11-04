@@ -1160,6 +1160,43 @@ async fn an_admin_profile_without_a_pin_passes_only_for_itself() {
     }
 }
 
+/// `jobs.cancel` from a profile that neither started the job nor is the admin profile:
+/// `permission_denied`, and the job runs on.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_starter_or_the_admin_cancels_a_job() {
+    // p2 is the admin profile; the caller is p1. A job someone else started is running.
+    let profiles = r#"{"version": 1, "next": 3, "profiles": {
+      "p1": {"name": "Sam", "color": "teal"},
+      "p2": {"name": "James", "color": "blue", "admin": true}}}"#;
+    let root = root_with(Some(profiles));
+    let id = "0123456789abcdef";
+    let jd = root.p(&format!("run/jobs/{id}"));
+    std::fs::create_dir_all(&jd).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        jd.join("spec.json"),
+        json!({"id": id, "kind": "update_apply", "uid": 4242, "created_at": now}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(jd.join("progress.ndjson"), "").unwrap();
+    let lock = std::fs::File::create(jd.join("lock")).unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    let Some(sys) = System::start(root, &[]).await else {
+        return;
+    };
+    let mut c = sys.client().await;
+    let e = call(&mut c, "jobs.cancel", json!({"job_id": id}))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), ErrorCode::PermissionDenied.code(), "{e}");
+    assert_eq!(e["data"]["reason"], "profile");
+    assert!(!jd.join("cancel").exists());
+    drop(lock);
+}
+
 /// The test's uid as the guest (p1 moves to another uid), with a home under the root.
 fn become_the_guest(root: &Root) -> std::path::PathBuf {
     let home = root.p("guesthomes/hinteros-guest");

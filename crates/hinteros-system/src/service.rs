@@ -1588,6 +1588,20 @@ impl Service {
             Request::AppsAcceptTerms(p) => self.apps_accept_terms(peer, p),
             Request::AppsClearData(p) => self.apps_clear_data(peer, p).await,
             Request::JobsCancel(p) => {
+                // Only who started the job, root or the admin profile cancels it: an update the
+                // admin approved with the PIN is not undone from another profile or the guest.
+                let started_by = self.jobs.lock().unwrap().get(&p.job_id).map(|j| j.uid);
+                if let Some(owner) = started_by
+                    && uid != 0
+                    && uid != owner
+                    && !self.caller_is_admin_profile(uid)
+                {
+                    return Err(ErrorObject::with_data(
+                        ErrorCode::PermissionDenied,
+                        "only who started the job, or the admin profile, can cancel it",
+                        json!({ "action": system::polkit_action(system::JobsCancel::NAME), "reason": "profile" }),
+                    ));
+                }
                 self.jobs.lock().unwrap().cancel(&p.job_id)?;
                 info!(job = %p.job_id, uid, "cancel requested");
                 job_ref(Some(p.job_id))

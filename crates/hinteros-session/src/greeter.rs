@@ -21,7 +21,9 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
-use crate::greetd::{AuthMessageType, Greetd, Request, Response, locked_s, reboot_required};
+use crate::greetd::{
+    AuthMessageType, Greetd, Request, Response, Secret, locked_s, reboot_required,
+};
 use crate::{Audience, Broadcast};
 
 pub const METHODS: &[&str] = &[
@@ -402,7 +404,7 @@ impl Greeter {
                         });
                     };
                     let resp = c.request(&Request::PostAuthMessageResponse {
-                        response: Some(pin.to_string()),
+                        response: Some(Secret::new(pin)),
                     })?;
                     let outcome = advance(c, resp, cmd)?;
                     if outcome != Outcome::Prompt {

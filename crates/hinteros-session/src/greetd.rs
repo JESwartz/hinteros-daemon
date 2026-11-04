@@ -14,9 +14,31 @@ use zeroize::Zeroizing;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     CreateSession { username: String },
-    PostAuthMessageResponse { response: Option<String> },
+    PostAuthMessageResponse { response: Option<Secret> },
     StartSession { cmd: Vec<String>, env: Vec<String> },
     CancelSession,
+}
+
+/// An answer to a PAM prompt (the PIN): wiped when dropped, and never in `Debug` output.
+#[derive(Clone)]
+pub struct Secret(Zeroizing<String>);
+
+impl Secret {
+    pub fn new(s: Zeroizing<String>) -> Self {
+        Self(s)
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(..)")
+    }
+}
+
+impl Serialize for Secret {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -63,8 +85,10 @@ impl Greetd {
     }
 
     pub fn request(&mut self, r: &Request) -> std::io::Result<Response> {
-        // The PIN may be in it: keep the bytes in a wiped buffer.
-        let body = Zeroizing::new(serde_json::to_vec(r)?);
+        // The PIN may be in it: keep the bytes in a wiped buffer, big enough that growing it
+        // leaves no copy behind.
+        let mut body = Zeroizing::new(Vec::with_capacity(1024));
+        serde_json::to_writer(&mut *body, r)?;
         let len = u32::try_from(body.len()).map_err(std::io::Error::other)?;
         self.stream.write_all(&len.to_ne_bytes())?;
         self.stream.write_all(&body)?;
@@ -113,6 +137,14 @@ mod tests {
             v,
             serde_json::json!({"type": "post_auth_message_response", "response": null})
         );
+        let r = Request::PostAuthMessageResponse {
+            response: Some(Secret::new(Zeroizing::new("4711".into()))),
+        };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            serde_json::json!({"type": "post_auth_message_response", "response": "4711"})
+        );
+        assert!(!format!("{r:?}").contains("4711"), "the PIN is in Debug");
         let r: Response = serde_json::from_str(
             r#"{"type":"auth_message","auth_message_type":"secret","auth_message":"Password:"}"#,
         )

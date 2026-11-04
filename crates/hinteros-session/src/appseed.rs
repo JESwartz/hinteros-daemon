@@ -142,6 +142,16 @@ fn is_profile_id(s: &str) -> bool {
 /// only when regular (and small), written through a temporary file and `renameat` in the same
 /// directory. A symlink, or anything that is not what we expect, fails the seed.
 pub fn seed(home: &Path, t: &JellyfinClientTokenResult) -> io::Result<PathBuf> {
+    // On the first launch the sandbox home is not there yet (the launch makes it after the
+    // seed). Its parents are the profile's, out of every app's reach, so they are made by path,
+    // 0700 like `sandbox::prepare`; below `home` everything goes through `subdir`.
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(home)?;
+    }
     let home_fd = rustix::fs::open(home, DIR_FLAGS, Mode::empty())?;
     let mut base_fd = home_fd;
     for name in [".local", "share", "jellyfin-desktop"] {
@@ -366,6 +376,21 @@ mod tests {
         }
         assert_eq!(mode(&base), 0o700);
         assert_eq!(mode(conf.parent().unwrap()), 0o700);
+    }
+
+    #[test]
+    fn the_first_launch_makes_the_sandbox_home() {
+        // Before the first launch the sandbox home (and its parents) is not there yet.
+        let t = tempfile::tempdir().unwrap();
+        let home = crate::sandbox::home_of(t.path(), APP_ID);
+        let conf = seed(&home, &token()).unwrap();
+        assert!(conf.starts_with(&home));
+        assert_eq!(
+            read(&home.join(".local/share/jellyfin-desktop/profiles.json")),
+            json!({"defaultProfile": OUR_PROFILE})
+        );
+        assert_eq!(read(&conf)["sections"]["main"]["layout"], "tv");
+        assert_eq!(mode(&home), 0o700);
     }
 
     #[test]

@@ -217,6 +217,41 @@ pub fn wipe_owned(dir: &Path, uid: u32, dir_owned: bool) -> Result<Wiped, Refuse
     Ok(w)
 }
 
+/// Delete every entry of `home` (a removed account's home, which must belong to `uid`) with
+/// its whole tree, by its raw name: no name is refused (unlike a data path), no symlink is
+/// followed and nothing on another filesystem is touched. The home itself stays.
+pub fn empty_home(home: &Path, uid: u32) -> Result<Wiped, Refused> {
+    let shown = home.display().to_string();
+    if !home.is_absolute() || home == Path::new("/") {
+        return Err(Refused::BadHome(shown, "not an absolute home".into()));
+    }
+    let fd = rustix::fs::open(home, DIR_FLAGS, Mode::empty())
+        .map_err(|e| Refused::BadHome(shown.clone(), e.to_string()))?;
+    let st = fstat(&fd).map_err(|e| Refused::BadHome(shown.clone(), e.to_string()))?;
+    if st.st_uid != uid {
+        return Err(Refused::BadHome(shown, format!("not owned by uid {uid}")));
+    }
+    let mut w = Wiped::default();
+    let dev = st.st_dev;
+    for n in children(&fd, &shown)? {
+        let child = format!("{shown}/{}", n.to_string_lossy());
+        let result = match statat(&fd, n.as_c_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(st) if FileType::from_raw_mode(st.st_mode) == FileType::Directory => {
+                remove_tree(&fd, &n, dev, &child, &mut w.removed)
+            }
+            Ok(_) => unlinkat(&fd, n.as_c_str(), AtFlags::empty())
+                .map(|()| w.removed += 1)
+                .map_err(|e| Refused::Io(child, e)),
+            Err(Errno::NOENT) => Ok(()),
+            Err(e) => Err(Refused::Io(child, e)),
+        };
+        if let Err(e) = result {
+            w.failed.push(e.to_string());
+        }
+    }
+    Ok(w)
+}
+
 /// The entries of the open directory `fd`, without `.` and `..`.
 fn children(fd: &OwnedFd, shown: &str) -> Result<Vec<CString>, Refused> {
     let dup = rustix::io::dup(fd).map_err(|e| Refused::Io(shown.to_owned(), e))?;

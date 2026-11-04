@@ -233,26 +233,51 @@ impl Runner {
     }
 }
 
-/// Delete a removed account's home: every entry with the no-symlink walk of `datadel`, then the
-/// (now empty) directory itself.
+/// Delete a removed account's home: every entry by its raw name with the no-symlink walk of
+/// `datadel`, then the (now empty) directory itself.
 fn delete_home(home: &Path, uid: u32) {
-    let entries: Vec<String> = match fs::read_dir(home) {
-        Ok(e) => e
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect(),
-        Err(e) => {
-            warn!(home = %home.display(), "cannot read the home: {e}");
-            return;
+    match datadel::empty_home(home, uid) {
+        Ok(w) => {
+            for e in &w.failed {
+                warn!(home = %home.display(), "not deleted: {e}");
+            }
         }
-    };
-    for name in entries {
-        if let Err(e) = datadel::delete_in_home(home, uid, &name) {
-            warn!(home = %home.display(), entry = %name, "not deleted: {e}");
+        Err(e) => {
+            warn!(home = %home.display(), "cannot empty the home: {e}");
+            return;
         }
     }
     match fs::remove_dir(home) {
         Ok(()) => info!(home = %home.display(), "home deleted"),
         Err(e) => warn!(home = %home.display(), "home not removed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+
+    /// Names a data path would refuse (and names that are not UTF-8) go too, so the home
+    /// itself can go.
+    #[test]
+    fn delete_home_takes_every_name() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("hinteros-p2");
+        fs::create_dir_all(home.join("~backup/sub")).unwrap();
+        fs::write(home.join("~backup/sub/f"), "x").unwrap();
+        fs::write(home.join("notes[1].txt"), "x").unwrap();
+        fs::write(home.join(std::ffi::OsStr::from_bytes(b"caf\xe9")), "x").unwrap();
+        fs::write(home.join(".bashrc"), "x").unwrap();
+        let outside = d.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("link")).unwrap();
+        let uid = rustix::process::getuid().as_raw();
+        delete_home(&home, uid + 1);
+        assert!(home.join(".bashrc").exists(), "not the account's home");
+        delete_home(&home, uid);
+        assert!(!home.exists());
+        assert!(outside.join("keep").exists(), "links are not followed");
     }
 }

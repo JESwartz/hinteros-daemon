@@ -13,6 +13,7 @@ use crate::job::{self, Apply, GuestEndJob, ProfileCreateJob, ProfileRemoveJob};
 use crate::pins::Pins;
 use crate::profiles::ProfilesFile;
 use crate::state::{GUEST_USER, State};
+use crate::storage::Stored;
 use crate::{datadel, guest, pam, public, usage};
 
 impl Runner {
@@ -206,11 +207,15 @@ impl Runner {
         {
             warn!("the guest did not get the starter env again: {}", e.message);
         }
-        // Per-guest state: terms it accepted, its usage entry, a switch hint into it.
+        // Per-guest state: terms it accepted, its usage entry, its measured home tree, a switch
+        // hint into it.
         match guest::drop_terms(&paths.terms_accepted()) {
             Ok(n) if n > 0 => info!(dropped = n, "the guest's terms acceptances removed"),
             Ok(_) => {}
             Err(e) => problems.push(format!("terms: {e}")),
+        }
+        if let Err(e) = Stored::drop_home(&paths.storage_json(), "guest") {
+            problems.push(format!("storage: {e}"));
         }
         let mut u = usage::load(&paths.usage_json());
         if u.remove("guest").is_some() {

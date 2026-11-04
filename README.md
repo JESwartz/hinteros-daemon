@@ -1380,7 +1380,8 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   the name, home `…/hinteros-guest`), hides the guest from the picker and PAM while it runs, ends
   the guest's processes, then deletes what the uid owns in its home and in `--guest-tmp-dir`s
   (`/tmp`, `/var/tmp`, `/dev/shm`) with `datadel::wipe_owned` (no symlinks, one filesystem, other
-  uids left), resets its app link to the starter env and drops its terms, usage and switch hint.
+  uids left), resets its app link to the starter env and drops its terms, usage, measured home tree
+  (`storage.json`, also at boot) and switch hint.
 - `profiles.switch {id, pin?}`: a locked target (other than the caller's own) needs its PIN (`pin_required
   {pin: target}`, backoff unless it is the admin profile); right, the hint gets a one-time token for
   the target user (60 s, single use in `pin unlocked`), so `greet` enters it with no UI. Without

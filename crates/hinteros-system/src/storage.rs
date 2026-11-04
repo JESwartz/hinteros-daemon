@@ -49,6 +49,19 @@ impl Stored {
         let bytes = serde_json::to_vec(self).map_err(std::io::Error::other)?;
         fsutil::write_atomic(path, &bytes, 0o600)
     }
+
+    /// Remove the detailed tree of home `id` (the guest's, when its home is wiped: the next
+    /// guest must not see the folder names). Returns whether there was one.
+    pub fn drop_home(path: &Path, id: &str) -> std::io::Result<bool> {
+        let Some(mut s) = Self::load(path) else {
+            return Ok(false);
+        };
+        if s.homes.remove(id).is_none() {
+            return Ok(false);
+        }
+        s.save(path)?;
+        Ok(true)
+    }
 }
 
 /// statvfs of `dir`, like df: total, used (total minus free blocks), free (available blocks).

@@ -1224,7 +1224,8 @@ fn become_the_guest(root: &Root) -> std::path::PathBuf {
 
 /// End guest session: the guest ends its own session and the job wipes it now:
 /// its home (never following a link out of it), its entries in the shared temp directories,
-/// its app env (back to the starter env), its terms, usage entry and a switch hint into it.
+/// its app env (back to the starter env), its terms, usage entry, storage tree and a switch hint
+/// into it.
 #[tokio::test(flavor = "multi_thread")]
 async fn end_guest_session_wipes_now() {
     let root = root_with(Some(PROFILES));
@@ -1246,6 +1247,15 @@ async fn end_guest_session_wipes_now() {
     std::fs::write(
         root.p("var/lib/hinteros/usage.json"),
         r#"{"version": 1, "data": {"guest": {"total_bytes": 5, "steam_games_bytes": 0, "at": 1}}}"#,
+    )
+    .unwrap();
+    let node = |kind: &str| json!({"kind": kind, "bytes": 5, "children": []});
+    let measurement = json!({"measured_at": 1, "disk": {"total_bytes": 9, "used_bytes": 5, "free_bytes": 4},
+        "root": node("disk"), "garbage_bytes": 0, "estimates": {"system": [], "profiles": []}});
+    std::fs::write(
+        root.p("var/lib/hinteros/storage.json"),
+        json!({"version": 1, "measurement": measurement, "homes": {"guest": node("guest"), "p1": node("profile")}})
+            .to_string(),
     )
     .unwrap();
     // This is a new boot for the service: the boot clean-up must not run before the test.
@@ -1307,6 +1317,9 @@ async fn end_guest_session_wipes_now() {
     assert_eq!(terms["accepted"]["steam"][0]["by"], "hinteros-p1");
     let usage: Value = serde_json::from_str(&root.read("var/lib/hinteros/usage.json")).unwrap();
     assert!(usage["data"].get("guest").is_none());
+    let stored: Value = serde_json::from_str(&root.read("var/lib/hinteros/storage.json")).unwrap();
+    assert!(stored["homes"].get("guest").is_none(), "{stored}");
+    assert!(stored["homes"].get("p1").is_some());
     assert!(!root.p("run/switch.json").exists());
     assert!(!root.p("run/guest-ending").exists());
     assert_eq!(public(root)["guest"]["enabled"], true, "the guest is back");

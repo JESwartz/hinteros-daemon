@@ -110,8 +110,8 @@ pub fn drop_terms(path: &Path) -> std::io::Result<usize> {
     Ok(dropped)
 }
 
-/// Once per boot (a marker in the run dir): the guest's terms acceptances from before the boot
-/// go, as its home did (tmpfiles `D!`).
+/// Once per boot (a marker in the run dir): the guest's terms acceptances and storage tree from
+/// before the boot go, as its home did (tmpfiles `D!`).
 pub fn boot_cleanup(paths: &Paths) {
     let done = paths.run_dir.join("guest-boot-clean");
     if done.exists() {
@@ -124,6 +124,10 @@ pub fn boot_cleanup(paths: &Paths) {
             "the last boot's guest terms acceptances removed"
         ),
         Err(e) => tracing::warn!("cannot clear the guest's terms acceptances: {e}"),
+    }
+    // The measured tree of that home names its folders.
+    if let Err(e) = crate::storage::Stored::drop_home(&paths.storage_json(), "guest") {
+        tracing::warn!("cannot clear the guest's storage tree: {e}");
     }
     let _ = std::fs::write(done, b"");
 }

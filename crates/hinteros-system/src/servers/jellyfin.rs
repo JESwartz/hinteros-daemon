@@ -677,7 +677,7 @@ pub fn sync(api: &dyn Api, files: &Files, profiles: &[Profile]) -> Result<Synced
     let path = files.users_json();
     let mut stored =
         UsersFile::load(&path).map_err(|e| Error::Refused(format!("users.json: {e}")))?;
-    stored.version = 1;
+    stored.version = USERS_VERSION;
     // Every box has an admin profile: none at all means the profiles were not read, and the
     // plan would delete every user (their watch history goes with them).
     if profiles.is_empty() && !stored.users.is_empty() {

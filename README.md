@@ -1109,7 +1109,8 @@ The password is taken out of the request into a zeroizing buffer, the request li
 it is written only to the helper's stdin (or socket) and wiped; it is never logged (a test greps
 the debug log). Responses to `system.*`, `auth.*`, `store.list` and `session.restart` may come out
 of order on a connection (they run as tasks, so the launcher can send `auth.respond` while
-`system.ssh.set` waits; relayed interactive calls wait up to 330 s).
+`system.ssh.set` waits; relayed calls that may ask for the password, `system.ssh.set` and
+`system.profiles.reset_pin` (the admin profile's own), wait up to 330 s, others 60 s).
 
 Verified here: the agent against a fake polkit authority on a private bus that plays polkitd
 (registration subject, `BeginAuthentication`/`CancelAuthentication`, a caller that is not

@@ -2703,3 +2703,10 @@ pub const INTERACTIVE_ACTIONS: &[&str] = &[
     "org.hinteros.system.ssh",
     "org.hinteros.system.profiles.recover",
 ];
+
+/// Whether a call may wait for the admin password: its action is interactive, or it checks one
+/// (`profiles.reset_pin` of the admin profile checks `profiles.recover`).
+pub fn may_interact(method: &str) -> bool {
+    method == ProfilesResetPin::NAME
+        || polkit_action(method).is_some_and(|a| INTERACTIVE_ACTIONS.contains(&a))
+}

@@ -106,9 +106,7 @@ impl Relay {
             reply,
         })
         .map_err(|_| unavailable(Unavailable::Down))?;
-        let interactive =
-            system::polkit_action(method).is_some_and(|a| system::INTERACTIVE_ACTIONS.contains(&a));
-        let limit = if interactive {
+        let limit = if system::may_interact(method) {
             INTERACTIVE_CALL_TIMEOUT
         } else {
             CALL_TIMEOUT

@@ -27,7 +27,7 @@ use hinteros_api::session::{self, EventName, Service};
 use hinteros_api::{ErrorObject, Method};
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::{OnceCell, broadcast};
+use tokio::sync::broadcast;
 use tracing::{debug, info};
 use zbus::Connection;
 
@@ -46,7 +46,8 @@ pub struct Ctx {
     /// gamescope's Wayland display, for `gamescope_control`.
     pub wayland_display: String,
     events: broadcast::Sender<Broadcast>,
-    conn: OnceCell<Connection>,
+    /// The connection while it works; cleared when a watcher sees it close.
+    conn: tokio::sync::Mutex<Option<Connection>>,
     pub bt: bluetooth::Shared,
     pub display_state: display::Shared,
     /// Pid of the on-screen keyboard the daemon runs (0: none), restarted after a mode change.
@@ -56,7 +57,8 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    /// The D-Bus connection, made on first use (and again after a failure).
+    /// The D-Bus connection, made on first use, again after a failure, and again after the
+    /// bus closed it ([`Ctx::conn_lost`]).
     pub async fn conn(&self, service: Service) -> Result<Connection, ErrorObject> {
         if !self.enabled {
             return Err(dbus::unavailable(
@@ -64,11 +66,28 @@ impl Ctx {
                 "runtime settings are off ([runtime] enable = false)",
             ));
         }
-        self.conn
-            .get_or_try_init(|| dbus::connect(self.bus.as_deref()))
+        let mut slot = self.conn.lock().await;
+        if let Some(c) = &*slot {
+            return Ok(c.clone());
+        }
+        let c = dbus::connect(self.bus.as_deref())
             .await
-            .cloned()
-            .map_err(|e| dbus::unavailable(service, format!("no D-Bus connection ({e})")))
+            .map_err(|e| dbus::unavailable(service, format!("no D-Bus connection ({e})")))?;
+        *slot = Some(c.clone());
+        Ok(c)
+    }
+
+    /// `conn` is closed (its signal stream ended, as when the bus restarts): the next
+    /// [`Ctx::conn`] makes a new one. The network and Bluetooth watchers notice this first.
+    pub async fn conn_lost(&self, conn: &Connection) {
+        let mut slot = self.conn.lock().await;
+        if slot
+            .as_ref()
+            .is_some_and(|c| c.unique_name() == conn.unique_name())
+        {
+            info!("the D-Bus connection closed; connecting again");
+            *slot = None;
+        }
     }
 
     /// Send an event to the connected clients.
@@ -140,7 +159,7 @@ impl Runtime {
                 .then(|| config.gamescope_display_setting()),
             wayland_display: config.wayland_display(),
             events,
-            conn: OnceCell::new(),
+            conn: tokio::sync::Mutex::new(None),
             bt: bluetooth::Shared::default(),
             display_state: display::Shared::default(),
             osk_pid,

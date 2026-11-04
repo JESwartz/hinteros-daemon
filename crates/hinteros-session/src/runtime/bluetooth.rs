@@ -806,6 +806,7 @@ pub async fn watch(ctx: Arc<Ctx>) {
             continue;
         };
         let Ok(mut stream) = dbus::changes(&conn, BLUEZ).await else {
+            ctx.conn_lost(&conn).await;
             sleep(Duration::from_secs(10)).await;
             continue;
         };
@@ -845,6 +846,8 @@ pub async fn watch(ctx: Arc<Ctx>) {
             tick = stream.next().await.is_some();
             dbus::settle(&mut stream, Duration::from_millis(300)).await;
         }
+        // The stream ends only when the connection closes.
+        ctx.conn_lost(&conn).await;
         sleep(Duration::from_secs(1)).await;
     }
 }

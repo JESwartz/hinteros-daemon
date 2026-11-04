@@ -906,3 +906,32 @@ async fn scan_does_not_hold_up_the_connection() {
     assert_eq!(second["id"], 1, "{second}");
     assert!(second["result"]["networks"].is_array(), "{second}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_bus_is_joined_again() {
+    let Some(mut bus) = Bus::start() else { return };
+    let fake = Fake::start(&bus, true).await;
+    let address = bus.path_address();
+    let d = Daemon::start_with(|_| vec!["--runtime-bus".into(), address.into()]);
+    let mut c = d.client().await;
+    let status = call(&mut c, "network.status", json!({})).await.unwrap();
+    assert_eq!(status["wifi_ssid"], "Home");
+
+    drop(fake);
+    bus.restart();
+    let _fake = Fake::start(&bus, true).await;
+    // The watcher sees the old connection close; the next call uses a new one.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match call(&mut c, "network.status", json!({})).await {
+            Ok(status) => {
+                assert_eq!(status["wifi_ssid"], "Home");
+                break;
+            }
+            Err(e) => {
+                assert!(std::time::Instant::now() < deadline, "still failing: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+}

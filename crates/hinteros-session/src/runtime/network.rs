@@ -789,6 +789,7 @@ pub async fn watch(ctx: Arc<Ctx>) {
             continue;
         };
         let Ok(mut stream) = dbus::changes(&conn, NM).await else {
+            ctx.conn_lost(&conn).await;
             sleep(Duration::from_secs(10)).await;
             continue;
         };
@@ -818,6 +819,8 @@ pub async fn watch(ctx: Arc<Ctx>) {
                 Err(_) => last = None,
             }
         }
+        // The stream ends only when the connection closes.
+        ctx.conn_lost(&conn).await;
         sleep(Duration::from_secs(1)).await;
     }
 }

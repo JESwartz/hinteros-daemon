@@ -13,10 +13,23 @@ use zeroize::Zeroizing;
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    CreateSession { username: String },
-    PostAuthMessageResponse { response: Option<String> },
-    StartSession { cmd: Vec<String>, env: Vec<String> },
+    CreateSession {
+        username: String,
+    },
+    PostAuthMessageResponse {
+        /// The PIN: wiped when the request is dropped.
+        #[serde(serialize_with = "secret")]
+        response: Option<Zeroizing<String>>,
+    },
+    StartSession {
+        cmd: Vec<String>,
+        env: Vec<String>,
+    },
     CancelSession,
+}
+
+fn secret<S: serde::Serializer>(v: &Option<Zeroizing<String>>, s: S) -> Result<S::Ok, S::Error> {
+    v.as_deref().map(String::as_str).serialize(s)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -113,6 +126,11 @@ mod tests {
             v,
             serde_json::json!({"type": "post_auth_message_response", "response": null})
         );
+        let v = serde_json::to_value(Request::PostAuthMessageResponse {
+            response: Some(Zeroizing::new("1234".into())),
+        })
+        .unwrap();
+        assert_eq!(v["response"], "1234");
         let r: Response = serde_json::from_str(
             r#"{"type":"auth_message","auth_message_type":"secret","auth_message":"Password:"}"#,
         )

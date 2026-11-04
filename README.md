@@ -1098,7 +1098,13 @@ onto the launcher's `lib/src/system` repository interfaces:
    message, identities}` to connections named `hinteros-launcher` only (non-root identities first;
    it authenticates as the first) and waits up to `[auth] prompt_timeout_s` (120).
 5. The launcher answers `auth.respond {cookie, password}` (only a `hinteros-launcher` connection
-   may; others get `not_authorized`). The daemon runs polkit's helper for the identity: the
+   may; others get `not_authorized`; a helper failure after the password was sent counts as a
+   wrong one). The client name is what the client says in its handshake: it keeps the prompt
+   away from other clients (the on-screen keyboard, the CLI), but it is not a security
+   boundary. The boundary is `session.sock`: only our uid may connect, and sandboxed apps never
+   see it. Steam and `sandbox = false` apps run as the profile's user, can reach it, and could
+   claim the name (they could also read the launcher's memory). The daemon runs polkit's helper
+   for the identity: the
    socket-activated helper (`/run/polkit/agent-helper.socket`, `polkit-agent-helper.socket`) when
    it exists, else the setuid `polkit-agent-helper-1` (`[auth] helper`), writes the cookie, answers
    the first PAM prompt with the password, and reads `SUCCESS`/`FAILURE` (protocol of polkit 127's

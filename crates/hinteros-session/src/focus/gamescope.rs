@@ -739,7 +739,7 @@ fn watch_session(
         c.atoms.GAMESCOPECTRL_BASELAYER_APPID,
     ];
     let mut last = None;
-    let result = loop {
+    loop {
         let first = match c.conn.wait_for_event() {
             Ok(e) => e,
             Err(e) => break Err(e.into()),
@@ -750,7 +750,7 @@ fn watch_session(
             match c.conn.poll_for_event() {
                 Ok(Some(e)) => batch.push(e),
                 Ok(None) => break,
-                Err(e) => return finish(events, Err(e.into())),
+                Err(e) => return Err(e.into()),
             }
         }
         let mut focus_changed = false;
@@ -767,7 +767,7 @@ fn watch_session(
                 Event::PropertyNotify(ev) => rescan |= c.is_window_atom(ev.atom),
                 Event::CreateNotify(ev) if ev.parent == c.root => {
                     if let Err(e) = c.follow(ev.window) {
-                        return finish(events, Err(e));
+                        return Err(e);
                     }
                     rescan = true;
                 }
@@ -836,12 +836,7 @@ fn watch_session(
         {
             break Err(e);
         }
-    };
-    finish(events, result)
-}
-
-fn finish(_events: &mpsc::UnboundedSender<GamescopeEvent>, result: Result<()>) -> Result<()> {
-    result
+    }
 }
 
 #[cfg(test)]

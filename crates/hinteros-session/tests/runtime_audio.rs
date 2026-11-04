@@ -36,6 +36,7 @@ fn fake_pactl(dir: &Path) -> PathBuf {
             r#"S='{state}'
 echo "$@" >> "$S/calls"
 if [ -f "$S/broken" ]; then echo "Connection failure: Connection refused" >&2; exit 1; fi
+if [ -f "$S/noisy" ]; then head -c 200000 /dev/zero | tr '\0' w >&2; fi
 sink_json() {{
   vol=$(cat "$S/volume-$1"); mute=$(cat "$S/mute-$1")
   case $mute in yes) m=true;; *) m=false;; esac
@@ -347,6 +348,16 @@ async fn pactl_missing_or_the_sound_server_down() {
     // It comes up later.
     std::fs::remove_file(state.join("broken")).unwrap();
     call(&mut c, "audio.outputs", json!({})).await.unwrap();
+}
+
+#[tokio::test]
+async fn much_output_on_stderr_does_not_block_pactl() {
+    let (d, state) = start();
+    // More than a pipe holds, before pactl writes its answer.
+    std::fs::write(state.join("noisy"), "").unwrap();
+    let mut c = d.client().await;
+    let s = call(&mut c, "audio.outputs", json!({})).await.unwrap();
+    assert_eq!(output(&s, HDMI)["default"], true);
 }
 
 /// Start the daemon with the box-wide output file holding `content` (written before start).

@@ -58,9 +58,10 @@ async fn pactl(ctx: &Ctx, args: &[&str]) -> Result<String, ErrorObject> {
     let mut stderr = child.stderr.take().expect("piped");
     let run = async {
         let (mut out, mut err) = (String::new(), String::new());
-        // At most 1 MiB of either: a sink list is a few kilobytes.
-        let _ = (&mut stdout).take(1 << 20).read_to_string(&mut out).await;
-        let _ = (&mut stderr).take(1 << 20).read_to_string(&mut err).await;
+        // At most 1 MiB of either: a sink list is a few kilobytes. Both at once, so that a
+        // full stderr pipe cannot stop pactl before it closes stdout.
+        let (mut o, mut e) = ((&mut stdout).take(1 << 20), (&mut stderr).take(1 << 20));
+        let _ = tokio::join!(o.read_to_string(&mut out), e.read_to_string(&mut err));
         let status = child.wait().await;
         (status, out, err)
     };

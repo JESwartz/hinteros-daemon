@@ -2530,6 +2530,8 @@ impl Shell {
     }
 
     fn input(&mut self, input: RawInput, now: Instant) {
+        // Held-back direction releases whose time is up come first (a late tick).
+        self.release_due(now);
         if self.capture_input(&input, now) {
             return;
         }
@@ -2552,13 +2554,41 @@ impl Shell {
             }
             Intent::Nav(action) => self.remap(&input, action),
         };
-        if self
-            .debounce
-            .drop_event(action, &input.source, pressed, now)
-        {
-            debug!(?action, pressed, "stick chatter dropped");
-            return;
+        // Stick chatter ([`Debounce`]): a direction's release waits; a re-press in that time
+        // drops both, and the hold goes on.
+        if pressed {
+            if let Some(repeat) = self.debounce.chatter(action, &input.source) {
+                debug!(?action, "stick chatter dropped");
+                if let Some(next) = repeat
+                    && self.route() != Route::App
+                {
+                    self.repeat.resume(action, &input.source, next, now);
+                }
+                return;
+            }
+            for (action, release) in self.debounce.take_pad(&input.source) {
+                self.nav_input(&release, action, now);
+            }
+        } else {
+            // The repeat stops at once, whether or not the release waits.
+            let repeat = self.repeat.stop(action, &input.source);
+            if self.debounce.hold_release(action, &input, now, repeat) {
+                return;
+            }
         }
+        self.nav_input(&input, action, now);
+    }
+
+    /// Pass on the held-back direction releases whose time is up.
+    fn release_due(&mut self, now: Instant) {
+        for (action, release) in self.debounce.due(now) {
+            self.nav_input(&release, action, now);
+        }
+    }
+
+    /// A navigation press or release (`action`, after the profile's remapping).
+    fn nav_input(&mut self, input: &RawInput, action: NavAction, now: Instant) {
+        let pressed = input.pressed();
         if pressed {
             let guide_held = self
                 .guide
@@ -3018,6 +3048,7 @@ impl Shell {
             })
             .flatten()
             .chain(self.repeat.deadline())
+            .chain(self.debounce.deadline())
             .chain(self.focus_lost_at)
             .chain(self.focus_retry_at)
             .chain(self.order.at)
@@ -3055,6 +3086,7 @@ impl Shell {
                 self.set_osk(false, true);
             }
         }
+        self.release_due(now);
         if let Some(action) = self.repeat.tick(now) {
             match self.route() {
                 route @ (Route::Launcher | Route::Osk) => self.nav(action, NavPhase::Repeat, route),
@@ -5426,6 +5458,8 @@ mod tests {
         t.input("ui_right", 1.0);
         t.advance(MS(400));
         t.input("ui_right", 0.0);
+        // The release waits out the stick chatter window.
+        t.advance(MS(40));
         let to_osk = |action: &str, phase: &str| {
             (
                 EventName::InputNav,
@@ -6207,6 +6241,8 @@ mod tests {
             let want = if i % 2 == 0 { "left" } else { "right" };
             assert_eq!(k, &super::tests::keys(&[want]));
         }
+        // Only the last release waits (the chatter window); then nothing is pending.
+        t.advance(MS(40));
         assert_eq!(t.shell.deadline(), None, "no repeat pending");
         t.advance(Duration::from_secs(3));
         assert!(t.log.take().is_empty(), "nothing after the last release");
@@ -6261,6 +6297,40 @@ mod tests {
                 "up release"
             ]
         );
+    }
+
+    #[test]
+    fn stick_chatter_does_not_end_a_held_direction() {
+        let mut t = T::new();
+        t.events();
+        // Held near the threshold: a short dip sends release + press 8 ms apart.
+        t.input("ui_down", 1.0);
+        t.advance(MS(450));
+        t.input("ui_down", 0.0);
+        t.advance(MS(8));
+        t.input("ui_down", 1.0);
+        t.advance(MS(300));
+        // Let go.
+        t.input("ui_down", 0.0);
+        t.advance(MS(500));
+        let phases: Vec<String> = t
+            .events()
+            .into_iter()
+            .filter(|(n, _)| *n == EventName::InputNav)
+            .map(|(_, p)| {
+                format!(
+                    "{} {}",
+                    p["action"].as_str().unwrap(),
+                    p["phase"].as_str().unwrap()
+                )
+            })
+            .collect();
+        // One press, repeats on through the dip (none after the real release), one release.
+        assert_eq!(phases.first().map(String::as_str), Some("down press"));
+        assert_eq!(phases.last().map(String::as_str), Some("down release"));
+        let repeats = phases.iter().filter(|p| *p == "down repeat").count();
+        assert!(repeats >= 3, "{phases:?}");
+        assert_eq!(phases.len(), repeats + 2, "{phases:?}");
     }
 
     #[test]

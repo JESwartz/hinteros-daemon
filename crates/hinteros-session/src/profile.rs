@@ -589,16 +589,21 @@ impl Profiles {
             }
             None => zbus::Connection::system().await?,
         };
+        const LOGIND: &str = "org.freedesktop.login1";
+        // Only logind's: any client on the bus can send a signal by that name.
         let rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
+            .sender(LOGIND)?
+            .path("/org/freedesktop/login1")?
             .interface("org.freedesktop.login1.Manager")?
             .member("PrepareForSleep")?
             .build();
         let mut stream = zbus::MessageStream::for_match_rule(rule, &conn, None).await?;
+        let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
         let inhibit = |conn: zbus::Connection| async move {
             let reply = conn
                 .call_method(
-                    Some("org.freedesktop.login1"),
+                    Some(LOGIND),
                     "/org/freedesktop/login1",
                     Some("org.freedesktop.login1.Manager"),
                     "Inhibit",
@@ -611,6 +616,16 @@ impl Profiles {
         let mut held = inhibit(conn.clone()).await.ok();
         while let Some(msg) = stream.next().await {
             let Ok(msg) = msg else { continue };
+            // The bus checks the rule's sender too; zbus cannot match a well-known name itself.
+            let owner = dbus
+                .get_name_owner(zbus::names::BusName::try_from(LOGIND)?)
+                .await
+                .ok();
+            let sender = msg.header().sender().map(|s| s.as_str().to_owned());
+            if owner.is_none_or(|o| sender.as_deref() != Some(o.as_str())) {
+                warn!("PrepareForSleep not from logind; ignored");
+                continue;
+            }
             let Ok(going) = msg.body().deserialize::<bool>() else {
                 continue;
             };

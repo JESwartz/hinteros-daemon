@@ -58,6 +58,8 @@ struct Shared {
     /// Whether a nudge makes it re-read the save file (false: started with -W/-H/-r).
     honours: AtomicBool,
     internal: AtomicBool,
+    /// No `wl_output` mode is flagged current.
+    no_current: AtomicBool,
     stop: AtomicBool,
 }
 
@@ -111,12 +113,12 @@ impl GlobalDispatch<WlOutput, bool> for Compositor {
         );
         out.name("HDMI-A-1".into());
         let M(w, h, r) = *state.shared.current.lock().unwrap();
-        out.mode(
-            wl_output::Mode::Current | wl_output::Mode::Preferred,
-            w as i32,
-            h as i32,
-            (r * 1000) as i32,
-        );
+        let flags = if state.shared.no_current.load(Ordering::SeqCst) {
+            wl_output::Mode::Preferred
+        } else {
+            wl_output::Mode::Current | wl_output::Mode::Preferred
+        };
+        out.mode(flags, w as i32, h as i32, (r * 1000) as i32);
         out.done();
     }
 }
@@ -214,6 +216,7 @@ impl FakeGamescope {
             nudges: AtomicU32::new(0),
             honours: AtomicBool::new(honours),
             internal: AtomicBool::new(internal),
+            no_current: AtomicBool::new(false),
             stop: AtomicBool::new(false),
         });
         let wayland = dir.path().join("gamescope-0");
@@ -598,6 +601,47 @@ async fn gamescope_that_ignores_the_nudge_gets_its_file_back() {
     // And nothing is left to revert.
     let e = call(&mut c, "display.revert", json!({})).await.unwrap_err();
     assert_eq!(e["data"]["reason"], "nothing_to_revert");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_revert_can_be_tried_again() {
+    let Some(gs) = FakeGamescope::start(true, false) else {
+        return;
+    };
+    let d = gs.daemon(700, true);
+    let mut c = d.client().await;
+    call(&mut c, "display.set_mode", mode(1280, 720, 60))
+        .await
+        .unwrap();
+    // gamescope does not follow the revert this time.
+    gs.shared.honours.store(false, Ordering::SeqCst);
+    let e = call(&mut c, "display.revert", json!({})).await.unwrap_err();
+    assert_eq!(e["data"]["reason"], "not_applied", "{e}");
+    assert_eq!(gs.current(), M(1280, 720, 60));
+    // The change is still there to revert.
+    gs.shared.honours.store(true, Ordering::SeqCst);
+    let r = call(&mut c, "display.revert", json!({})).await.unwrap();
+    assert_eq!(r, json!({"current": mode(3840, 2160, 60)}));
+    assert_eq!(gs.current(), M(3840, 2160, 60));
+    let e = call(&mut c, "display.revert", json!({})).await.unwrap_err();
+    assert_eq!(e["data"]["reason"], "nothing_to_revert");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_current_mode_is_not_a_success() {
+    let Some(gs) = FakeGamescope::start(true, false) else {
+        return;
+    };
+    gs.shared.no_current.store(true, Ordering::SeqCst);
+    let d = gs.daemon(700, true);
+    let mut c = d.client().await;
+    let e = call(&mut c, "display.set_mode", mode(1920, 1080, 60))
+        .await
+        .unwrap_err();
+    assert_eq!(e["code"], 4001, "{e}");
+    assert_eq!(e["data"]["service"], "display");
+    assert_eq!(gs.nudges(), 0);
+    assert!(!gs.save_file().exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]

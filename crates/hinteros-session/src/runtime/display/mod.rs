@@ -362,7 +362,17 @@ pub async fn set_mode(ctx: &Ctx, target: Mode) -> Result<DisplaySetResult, Error
             mode_text(target)
         )));
     }
-    let previous = info.mode.unwrap_or(target);
+    // Without the mode in use there is nothing to compare with (a change could not be seen)
+    // and nothing to revert to.
+    let previous = info.mode.ok_or_else(|| {
+        unavailable(
+            SVC,
+            format!(
+                "gamescope reports no current mode ({})",
+                info.describe_outputs()
+            ),
+        )
+    })?;
     let mut revert_to = previous;
     if previous != target {
         apply(ctx, &info, target).await?;
@@ -404,12 +414,12 @@ pub async fn keep(ctx: &Ctx) -> Result<Empty, ErrorObject> {
 
 pub async fn revert(ctx: &Ctx) -> Result<DisplayRevertResult, ErrorObject> {
     let _one = ctx.display_state.op.lock().await;
+    // Forgotten only once the old mode is back: a failed revert can be tried again.
     let previous = ctx
         .display_state
         .pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .take()
         .ok_or_else(|| failed("nothing_to_revert", "no display change to revert"))?;
     let info = query(ctx).await.ok_or_else(|| {
         unavailable(
@@ -424,6 +434,11 @@ pub async fn revert(ctx: &Ctx) -> Result<DisplayRevertResult, ErrorObject> {
         apply(ctx, &info, previous).await?;
         restart_osk(ctx);
     }
+    ctx.display_state
+        .pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
     Ok(DisplayRevertResult { current: previous })
 }
 

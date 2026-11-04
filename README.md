@@ -2155,10 +2155,13 @@ Both APIs are 1.0. A client works with a server of the same major and an equal o
   `greeter.create`, `wifi.connect`, `input.settings.set`, the runtime methods without params
   (`power.reboot {force: true}` must not reboot anyway), and `hello` in both APIs.
 - **Enums a client also sends are closed:** a new value of `Channel`, `Base`,
-  `CleanupFrequency`, `LibraryKind`, `Key`, `Modifier`, `KeyAction`, `ControllerButton`,
-  `ProfileColor` or either `EventName` is a new major. A catch-all there would let an unknown value
-  through to the server or into `state.json`. (`ControllerButton` is a pattern string in the session
-  schema, so the launcher has no enum for it.)
+  `CleanupFrequency`, `LibraryKind`, `Key`, `Modifier`, `KeyAction`, `ControllerButton` or either
+  `EventName` is a new major. A catch-all there would let an unknown value through to the server or
+  into `state.json`. (`ControllerButton` is a pattern string in the session schema, so the launcher
+  has no enum for it.)
+- **`ProfileColor` is sent but open on purpose:** a minor may add a colour. A client reads one it
+  does not know as `unknown` (the launcher shows teal) and sends only names it knows, and the daemon
+  answers `invalid_params` for a name that is not in its list. A colour is not a security boundary.
 
 The schema documents list exactly what their version sends (`additionalProperties: false`), so
 the conformance tests catch a server that sends what is not documented. An item a later minor

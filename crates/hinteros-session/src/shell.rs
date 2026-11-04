@@ -133,6 +133,12 @@ pub enum Msg {
         focus: FieldFocus,
         clicked: bool,
     },
+    /// A text field reporter's connection closed: its fields no longer have focus. By
+    /// `reporter`, not by pid (its process has usually exited, so it is in no app's tree any
+    /// more).
+    TextFocusClosed {
+        reporter: u64,
+    },
 }
 
 /// The methods the shell answers (the connection handles the rest).
@@ -474,6 +480,9 @@ pub struct Shell {
     /// The text fields with focus in each keyboard-profile app, per reporter (the Firefox
     /// extension for the page, Firefox's chrome code for the address bar). No entry: none.
     text_fields: BTreeMap<String, BTreeMap<u64, FieldFocus>>,
+    /// The app each text field reporter (with a pid) runs in, looked up once per connection
+    /// (`None`: in no keyboard-profile app): finding it scans all of `/proc`.
+    reporter_apps: BTreeMap<u64, Option<String>>,
     /// Stick chatter filter for directions.
     debounce: Debounce,
     /// The right-stick pointer: in use or not, hidden by us or not.
@@ -514,6 +523,7 @@ impl Shell {
         let pointer = PointerState::new();
         Self {
             text_fields: BTreeMap::new(),
+            reporter_apps: BTreeMap::new(),
             debounce,
             pointer,
             pointer_profile: false,
@@ -657,6 +667,7 @@ impl Shell {
                 focus,
                 clicked,
             } => self.text_focus(pid, reporter, focus, clicked, now),
+            Msg::TextFocusClosed { reporter } => self.text_focus_closed(reporter, now),
         }
     }
 
@@ -1993,25 +2004,19 @@ impl Shell {
         clicked: bool,
         now: Instant,
     ) {
-        let keyboard_apps: Vec<(String, Option<u32>)> = self
-            .apps
-            .values()
-            .filter(|a| a.keymap.is_some())
-            .map(|a| (a.info.id.clone(), a.info.pid))
-            .collect();
         let owner = match pid {
             None => self
                 .focused
                 .clone()
-                .filter(|id| keyboard_apps.iter().any(|(a, _)| a == id)),
-            Some(pid) => keyboard_apps
-                .iter()
-                .find(|(_, root)| {
-                    root.is_some_and(|root| {
-                        root == pid || self.procs.descendants(root).contains(&pid)
-                    })
-                })
-                .map(|(id, _)| id.clone()),
+                .filter(|id| self.apps.get(id).is_some_and(|a| a.keymap.is_some())),
+            Some(pid) => match self.reporter_apps.get(&reporter) {
+                Some(app) => app.clone(),
+                None => {
+                    let app = self.reporter_app(pid);
+                    self.reporter_apps.insert(reporter, app.clone());
+                    app
+                }
+            },
         };
         let Some(id) = owner else {
             debug!(
@@ -2021,6 +2026,48 @@ impl Shell {
             );
             return;
         };
+        self.field_focus(&id, reporter, focus, clicked, now);
+    }
+
+    /// The keyboard-profile app whose process tree `pid` is in (a scan of `/proc`).
+    fn reporter_app(&mut self, pid: u32) -> Option<String> {
+        let keyboard_apps: Vec<(String, Option<u32>)> = self
+            .apps
+            .values()
+            .filter(|a| a.keymap.is_some())
+            .map(|a| (a.info.id.clone(), a.info.pid))
+            .collect();
+        keyboard_apps
+            .into_iter()
+            .find(|(_, root)| {
+                root.is_some_and(|root| root == pid || self.procs.descendants(root).contains(&pid))
+            })
+            .map(|(id, _)| id)
+    }
+
+    /// A reporter's connection closed: whatever field it reported no longer has focus.
+    fn text_focus_closed(&mut self, reporter: u64, now: Instant) {
+        self.reporter_apps.remove(&reporter);
+        let app = self
+            .text_fields
+            .iter()
+            .find(|(_, fields)| fields.contains_key(&reporter))
+            .map(|(id, _)| id.clone());
+        if let Some(id) = app {
+            self.field_focus(&id, reporter, FieldFocus::None, false, now);
+        }
+    }
+
+    /// `reporter` in the app `id` reported `focus` (see [`Self::text_focus`]).
+    fn field_focus(
+        &mut self,
+        id: &str,
+        reporter: u64,
+        focus: FieldFocus,
+        clicked: bool,
+        now: Instant,
+    ) {
+        let id = id.to_string();
         let fields = self.text_fields.entry(id.clone()).or_default();
         if focus.editable() {
             fields.insert(reporter, focus);
@@ -2715,6 +2762,8 @@ impl Shell {
     /// An app ended (`closed` instead of `reason` if apps.close asked it to).
     fn exited(&mut self, id: &str, reason: ExitReason, exit_code: Option<i32>) {
         self.text_fields.remove(id);
+        self.reporter_apps
+            .retain(|_, app| app.as_deref() != Some(id));
         let Some(app) = self.apps.remove(id) else {
             return;
         };
@@ -3298,6 +3347,8 @@ mod tests {
         steam_clients: Vec<u32>,
         /// Reapers left on an X display (by display).
         display_users: BTreeMap<String, Vec<u32>>,
+        /// How often a process tree was listed (a scan of /proc on a real box).
+        scans: u32,
     }
 
     struct MockProcs {
@@ -3309,13 +3360,9 @@ mod tests {
             self.log.push(Call::Signal(pid, sig));
         }
         fn descendants(&mut self, pid: u32) -> Vec<u32> {
-            self.table
-                .lock()
-                .unwrap()
-                .trees
-                .get(&pid)
-                .cloned()
-                .unwrap_or_default()
+            let mut table = self.table.lock().unwrap();
+            table.scans += 1;
+            table.trees.get(&pid).cloned().unwrap_or_default()
         }
         fn steam_reapers(&mut self, app_id: u32) -> Vec<u32> {
             let t = self.table.lock().unwrap();
@@ -6214,6 +6261,45 @@ mod tests {
                 "up release"
             ]
         );
+    }
+
+    #[test]
+    fn a_reporter_that_died_is_cleared_by_its_connection() {
+        let mut t = firefox_with_host(auto_show);
+        let root = t.shell.apps["youtube"].info.pid.unwrap();
+        t.text_focus(555, FieldFocus::Password);
+        assert!(t.shell.osk_visible());
+        // The host crashed with the field focused; its process is gone before the shell hears
+        // that its connection closed, so it is in no app's tree any more.
+        t.procs.lock().unwrap().trees.insert(root, vec![root + 1]);
+        t.shell.handle(Msg::TextFocusClosed { reporter: 1 }, t.now);
+        assert!(t.shell.text_fields.is_empty());
+        assert!(!t.shell.field_focused());
+        assert!(!t.shell.password_field());
+        t.advance(OSK_AUTO_HIDE_DELAY);
+        assert!(!t.shell.osk_visible());
+        // Closing a reporter that never reported anything is harmless.
+        t.shell.handle(Msg::TextFocusClosed { reporter: 7 }, t.now);
+    }
+
+    #[test]
+    fn a_reporter_is_looked_up_once_per_connection() {
+        let mut t = firefox_with_host(auto_show);
+        t.procs.lock().unwrap().scans = 0;
+        for _ in 0..20 {
+            t.text_focus(555, FieldFocus::Text);
+            t.text_focus(555, FieldFocus::None);
+        }
+        assert_eq!(t.procs.lock().unwrap().scans, 1);
+        // One from outside every keyboard-profile app: also looked up once.
+        for _ in 0..20 {
+            t.text_focus_from(999, 2, FieldFocus::Text);
+        }
+        assert_eq!(t.procs.lock().unwrap().scans, 2);
+        // A new connection is looked up again.
+        t.shell.handle(Msg::TextFocusClosed { reporter: 1 }, t.now);
+        t.text_focus(555, FieldFocus::Text);
+        assert_eq!(t.procs.lock().unwrap().scans, 3);
     }
 
     #[test]

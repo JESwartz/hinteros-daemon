@@ -595,8 +595,9 @@ preview or CI sees. Every call has a time limit (30 s; `wifi.connect` 60 s, `blu
 password, a new password replaces the stored one. WPA/WPA2 (`wpa-psk`) and WPA3 (`sae`) and open
 networks work; WEP and 802.1X are refused (`invalid_params {reason: unsupported_security}`). The
 call waits for the device to be activated; a rejected key (NetworkManager asking for secrets it
-has no agent for, or reason `NO_SECRETS`) is `wrong_password`, and a connection it created is
-deleted again. Passwords go only into the D-Bus call; they are never logged (the `Debug` of the
+has no agent for, or reason `NO_SECRETS`) is `wrong_password`, and then a replaced password is
+put back. A connection it created is deleted again after any failure, also when the time limit
+ends the call. Passwords go only into the D-Bus call; they are never logged (the `Debug` of the
 params hides them, and a test greps the daemon's debug log). `wifi.scan` returns after the scan
 (NetworkManager refuses scans right after another one; the current list comes back then).
 

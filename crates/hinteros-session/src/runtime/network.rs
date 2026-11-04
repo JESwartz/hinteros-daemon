@@ -661,6 +661,33 @@ async fn wait_activated(
     }
 }
 
+/// A connection `wifi.connect` created and has not proven yet. When the method's time limit
+/// drops the call halfway, the guard deletes it: otherwise a network with a wrong password
+/// would stay stored. `connect` disarms it and cleans up itself when it gets to the end.
+struct Unproven {
+    conn: Connection,
+    target: String,
+    armed: bool,
+}
+
+impl Drop for Unproven {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let conn = self.conn.clone();
+        let target = std::mem::take(&mut self.target);
+        rt.spawn(async move {
+            if let Ok(c) = proxy(&conn, NM, &target, I_CONNECTION).await {
+                let _ = c.call::<_, _, ()>("Delete", &()).await;
+            }
+        });
+    }
+}
+
 pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, ErrorObject> {
     let conn = ctx.conn(SVC).await?;
     let devices = devices(&conn).await?;
@@ -752,7 +779,14 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
     };
 
     // Every error from here on must reach the clean-up below: the connection or password just
-    // stored is not proven yet.
+    // stored is not proven yet. A dropped call skips it; then the guard deletes a connection
+    // made here. A changed password stays: the call ran out of time, so there is no proof
+    // that it is wrong.
+    let mut guard = Unproven {
+        conn: conn.clone(),
+        target: target.clone(),
+        armed: created,
+    };
     let result = async {
         let dev = proxy(&conn, NM, &device.path, I_DEVICE)
             .await
@@ -774,16 +808,21 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
         wait_activated(&conn, &device.path, &target, states, password.is_some()).await
     }
     .await;
+    guard.armed = false;
     if let Err(e) = &result {
         warn!(ssid = %p.ssid, code = e.code, "Wi-Fi connect failed: {}", e.message);
         if created && let Ok(c) = proxy(&conn, NM, &target, I_CONNECTION).await {
             // Do not leave a connection with a wrong password behind.
             let _ = c.call::<_, _, ()>("Delete", &()).await;
         }
-        if let Some(prev) = &previous
+        // Only a rejected password goes back to the stored one. After other failures (out of
+        // range, no address, timeout) the new password is the better guess: the launcher asks
+        // for one only after the stored one was rejected.
+        if e.code == ErrorCode::WrongPassword.code()
+            && let Some(prev) = &previous
             && let Ok(c) = proxy(&conn, NM, &target, I_CONNECTION).await
         {
-            // The new password is not proven: keep the one that was stored.
+            // The new password is wrong: keep the one that was stored.
             if let Err(e) = c
                 .call::<_, _, ()>("Update", &(as_settings(prev, None),))
                 .await

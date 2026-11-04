@@ -59,6 +59,8 @@ struct Model {
     refuse_scan: bool,
     /// Take scans and never finish them (LastScan stays).
     hold_scan: bool,
+    /// Fail every activation with "SSID not found", as when the network went out of range.
+    out_of_range: bool,
 }
 
 type Shared = Arc<Mutex<Model>>;
@@ -159,6 +161,12 @@ impl Root {
             };
             let old = model.lock().unwrap().wifi_state;
             emit_state(&conn, 40, old, 0).await;
+            if model.lock().unwrap().out_of_range {
+                model.lock().unwrap().wifi_state = 30;
+                emit_state(&conn, 120, 40, 53).await;
+                changed(&conn).await;
+                return;
+            }
             let secured =
                 model.lock().unwrap().aps[ap].rsn != 0 || model.lock().unwrap().aps[ap].wpa != 0;
             if !ssid_ok || (secured && psk.as_deref() != Some(RIGHT_PASSWORD)) {
@@ -511,6 +519,7 @@ impl Fake {
             scans: 0,
             refuse_scan: false,
             hold_scan: false,
+            out_of_range: false,
         }));
         let mut b = zbus::connection::Builder::address(bus.address.as_str())
             .unwrap()
@@ -703,6 +712,28 @@ async fn wrong_password_leaves_nothing_behind() {
         "the stored password was put back"
     );
     assert!(!d.log().contains("different wrong 1"));
+
+    // A failure that says nothing about the password keeps the new one: the stored one was
+    // already rejected when the launcher asks for a new one.
+    fake.model.lock().unwrap().out_of_range = true;
+    let e = call(
+        &mut c,
+        "wifi.connect",
+        json!({"ssid": "Home", "password": "new new new new"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["data"]["reason"], "not_in_range", "{e}");
+    assert_eq!(
+        fake.model.lock().unwrap().saved[0].psk.as_deref(),
+        Some("new new new new")
+    );
+    // ... but a new network that did not come up is still deleted.
+    let e = call(&mut c, "wifi.connect", json!({"ssid": "Cafe"}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["data"]["reason"], "not_in_range", "{e}");
+    assert_eq!(fake.model.lock().unwrap().saved.len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]

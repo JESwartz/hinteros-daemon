@@ -2057,6 +2057,9 @@ off (+ delete data when `has_data`, second confirmation); `job_failed.data.reaso
 Per profile (`controller.rs`), in `$XDG_STATE_HOME/hinteros/controller.json`: only what the user
 changed, exactly as `input.settings.set` got it (written atomically). A missing file is the
 defaults; an unreadable or wrong one too, with a warning (the session never fails on it).
+Unknown fields are ignored and written back on the next save. A new action, button or key name
+is not safe to ignore: a version that adds one bumps the file's version, so an older session
+leaves the file alone.
 
 ```json
 {
@@ -2146,13 +2149,13 @@ Both APIs are 1.0. A client works with a server of the same major and an equal o
   (`#[serde(other)]`; Jellyfin's library kind has `other`, `Connectivity` and `UnitState` their
   own `unknown`), `ServiceInfo.setup`, `ServiceInfo.detail` and `result` of a job read as null
   when they are not known, and an error code outside `ErrorCode` is `ErrorObject::kind() == None`.
-- **Results and events never deny unknown fields.** Only `input.settings.*` still does, in
-  `settings`: `ControllerSettings` is the `controller.json` format.
+- **Results and events never deny unknown fields.** Neither does `controller.json`
+  (`ControllerSettings`, also `input.settings.*`'s `settings`).
 - **Requests stay closed where that protects something.** A server's minor is never lower than
   its client's, so it sees only fields it knows. Every system API params type denies unknown
   fields (a root service). In the session API, so do the ones that carry a credential or choose
   an account: `session.switch_profile`, `session.unlock`, `greeter.pin`, `greeter.login`,
-  `greeter.create`, `wifi.connect`, `input.settings.set`, the runtime methods without params
+  `greeter.create`, `wifi.connect`, the runtime methods without params
   (`power.reboot {force: true}` must not reboot anyway), and `hello` in both APIs. `hello`
   reads `api_version` first: a client of another version gets `version_mismatch` whatever else
   its params hold, so a later major or minor may add `hello` fields.
@@ -2177,7 +2180,8 @@ Unknown fields are ignored. A newer file is not understood; what follows depends
 | `starter.json` | reads as none; saving is an error (the job fails); the file stays | dropped (always written whole) |
 | `channel-tips.json` | reads as empty; saving fails with a warning; the file stays | kept |
 | `runtime.json` | defaults; a change holds until the next boot; the file stays | kept |
-| `permissions.json`, `controller.json` (session) | defaults; a change holds in memory; the file stays | dropped |
+| `permissions.json` (session) | defaults; a change holds in memory; the file stays | dropped |
+| `controller.json` (session) | defaults; a change holds in memory; the file stays | kept |
 | `apps/registry.json`, `storage.json` | discarded and overwritten (rebuilt from the env manifests, the next measure) | dropped |
 | `usage.json`, `update-check.json`, `channel-check.json`, `libraries.json`, `pins/<id>.state`, `pins/<id>.tries` | discarded and overwritten | dropped |
 

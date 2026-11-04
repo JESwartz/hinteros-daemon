@@ -6633,11 +6633,15 @@ mod tests {
                     .is_some_and(|d| d["field"].is_string() && d["reason"].is_string())
             );
         }
-        let e = t
-            .call("input.settings.set", json!({"settings": {"x": 1}}))
-            .unwrap_err();
-        assert_eq!(e.code, ErrorCode::InvalidParams.code());
         assert!(t.log.take().is_empty());
+        // Unknown fields are ignored (controller.json is open, like every persisted file).
+        let mut grown = settings.clone();
+        grown["x"] = json!(1);
+        let r = t
+            .call("input.settings.set", json!({ "settings": grown }))
+            .unwrap();
+        assert_eq!(r["settings"], settings);
+        t.log.take();
         t.input("ui_accept", 1.0);
         t.input("ui_accept", 0.0);
         assert_eq!(t.log.take(), [keys(&["tab"])]);

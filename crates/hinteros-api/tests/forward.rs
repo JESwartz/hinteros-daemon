@@ -49,7 +49,7 @@ fn grown(v: &Value) -> Value {
 fn results_and_events_take_unknown_fields() {
     for (schema, info) in apis() {
         for m in info.methods {
-            // `settings` is the closed `controller.json` format; its maps have typed keys.
+            // Its maps have typed values: a new key with a new value is a closed `ControllerButton`.
             if m.name.starts_with("input.settings.") {
                 continue;
             }

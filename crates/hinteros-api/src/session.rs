@@ -1016,9 +1016,10 @@ pub const POINTER_SPEED_STEP: u32 = 25;
 pub const POINTER_SPEED_DEFAULT: u32 = 100;
 
 /// The profile's controller settings, only what the user changed (the stored form,
-/// `$XDG_STATE_HOME/hinteros/controller.json`).
+/// `$XDG_STATE_HOME/hinteros/controller.json`). Open, like every persisted file: unknown fields
+/// are ignored (the session keeps those of the file when it saves it again). A new name in a
+/// map (an action, button or key) is not safe to ignore and bumps the file's version.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ControllerSettings {
     /// Action -> button, over the defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1035,7 +1036,6 @@ pub struct ControllerSettings {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PointerSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<u32>,

@@ -766,9 +766,7 @@ fn watch_session(
                 }
                 Event::PropertyNotify(ev) => rescan |= c.is_window_atom(ev.atom),
                 Event::CreateNotify(ev) if ev.parent == c.root => {
-                    if let Err(e) = c.follow(ev.window) {
-                        return Err(e);
-                    }
+                    c.follow(ev.window)?;
                     rescan = true;
                 }
                 Event::MapNotify(_)

@@ -6253,6 +6253,8 @@ mod tests {
         t.events();
         t.advance(MS(100));
         sweep(&mut t, 10);
+        // The last release waits out the chatter window.
+        t.advance(MS(40));
         let nav: Vec<(String, String)> = t
             .events()
             .into_iter()

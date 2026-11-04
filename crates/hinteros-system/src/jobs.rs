@@ -818,9 +818,16 @@ mod tests {
         assert!(jobs.get("2123456789abcdef").is_none());
         assert!(jobs.poll().1.is_none());
         assert_eq!(jobs.busy(), Some("2123456789abcdef"));
-        // It ends: the box is free again.
+        // It ends: the box is free again. (A process another test is starting can hold a copy of
+        // the lock fd until its exec, so poll again like the monitor does.)
         drop(lock);
-        jobs.poll();
+        for _ in 0..100 {
+            jobs.poll();
+            if jobs.busy().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(jobs.busy().is_none());
         jobs.create(&spec(d.path(), "3123456789abcdef")).unwrap();
     }

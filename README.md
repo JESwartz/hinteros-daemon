@@ -1393,7 +1393,10 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
 ### Session daemon
 
 - `session.toml` `[apps] profile = "/run/hinteros/apps/%u"` (instead of `[[apps]]`): apps, Steam's
-  path and icons from the env; the whole link chain is watched. `apps.list` entries get
+  path and icons from the env; the whole link chain is watched. The env may be a newer system's
+  (a boot-menu rollback keeps it): unknown keys, keymap actions and keys are ignored, and an
+  entry the daemon cannot use is skipped alone (logged). `[[apps]]` in `session.toml` stays
+  strict. `apps.list` entries get
   `needs_terms`; `apps.launch` refuses them (`terms_required`); Steam's autostart waits for its
   terms. `store.list` uses the profile's ids and hides services.
 - `profile.current`, `session.switch_profile` (+ `switch_wait`, `switch_force_close`,

@@ -5,7 +5,8 @@
 //! InputPlumber forgets `ManageAllDevices`, the modes and loaded profiles when it restarts, so
 //! all are re-applied whenever its bus name gets a new owner, and applied to every composite
 //! device that appears later (one per pad). If there is no bus or no InputPlumber, this logs
-//! and waits; the rest of the daemon works without it.
+//! and waits; the rest of the daemon works without it. A bus connection that fails is made
+//! again (see [`spawn`]); a single bad message is skipped.
 //!
 //! The intercept mode is also what keeps controller input from sandboxed apps while HinterOS
 //! UI is in front (a PIN, a password): apps with the `gamepad` permission get `/dev/input`,
@@ -185,17 +186,47 @@ impl InputControl for InputPlumber {
     }
 }
 
-/// Start the InputPlumber task.
+/// The first wait before the integration connects again after it failed; doubles up to
+/// [`RECONNECT_MAX`].
+const RECONNECT_MIN: Duration = Duration::from_secs(1);
+const RECONNECT_MAX: Duration = Duration::from_secs(30);
+
+/// Start the InputPlumber task. If the integration fails (the bus connection broke), it
+/// connects again (1 s, doubling up to 30 s) and sets every pad up from scratch: without it
+/// nothing sets the intercept modes that keep the pads from apps while HinterOS UI is in front.
 pub fn spawn(settings: Settings, events: mpsc::UnboundedSender<RawInput>) -> InputPlumber {
     let (tx, rx) = watch::channel(Routing {
         mode: settings.initial,
         pointer: false,
         tuning: PointerTuning::default(),
     });
-    let (ctx, crx) = mpsc::unbounded_channel();
+    let (ctx, mut crx) = mpsc::unbounded_channel();
+    let settings = Arc::new(settings);
     tokio::spawn(async move {
-        if let Err(e) = run(settings, rx, crx, events).await {
-            warn!("InputPlumber integration stopped: {e:#}");
+        let mut retry = RECONNECT_MIN;
+        let mut failures = 0u32;
+        loop {
+            let started = std::time::Instant::now();
+            let Err(e) = run(settings.clone(), rx.clone(), &mut crx, &events).await else {
+                // Nobody takes input any more: the daemon is stopping.
+                return;
+            };
+            if events.is_closed() {
+                return;
+            }
+            if started.elapsed() >= RECONNECT_MAX {
+                // It ran for a while: a new failure starts the backoff over.
+                retry = RECONNECT_MIN;
+                failures = 0;
+            }
+            if failures == 0 {
+                warn!("InputPlumber integration failed: {e:#}; connecting again");
+            } else {
+                debug!(failures, "InputPlumber integration failed: {e:#}");
+            }
+            failures += 1;
+            tokio::time::sleep(retry).await;
+            retry = (retry * 2).min(RECONNECT_MAX);
         }
     });
     InputPlumber {
@@ -250,19 +281,17 @@ struct Task {
     targets: Targets,
 }
 
+/// Connect and run until the connection fails (`Err`, connect again) or nobody takes input any
+/// more (`Ok`). A bad single message is skipped, not a failure.
 async fn run(
-    settings: Settings,
+    settings: Arc<Settings>,
     routing: watch::Receiver<Routing>,
-    mut commands: mpsc::UnboundedReceiver<Command>,
-    events: mpsc::UnboundedSender<RawInput>,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+    events: &mpsc::UnboundedSender<RawInput>,
 ) -> Result<()> {
-    let conn = match connect(settings.bus.as_deref(), settings.call_timeout).await {
-        Ok(conn) => conn,
-        Err(e) => {
-            warn!("no D-Bus connection for InputPlumber ({e}); controller input is not managed");
-            return Ok(());
-        }
-    };
+    let conn = connect(settings.bus.as_deref(), settings.call_timeout)
+        .await
+        .context("no D-Bus connection for InputPlumber; controller input is not managed")?;
     let dbus = DBusProxy::new(&conn).await?;
     let mut owner_changes = dbus
         .receive_name_owner_changed_with_args(&[(0, SERVICE)])
@@ -289,7 +318,7 @@ async fn run(
 
     let mut task = Task {
         conn,
-        settings: Arc::new(settings),
+        settings,
         routing,
         devices: HashMap::new(),
         targets: HashMap::new(),
@@ -325,7 +354,15 @@ async fn run(
             // Input first: nothing else may hold it up.
             biased;
             Some(msg) = inputs.next() => {
-                let msg = msg?;
+                let msg = match msg {
+                    Ok(msg) => msg,
+                    // The connection is broken: connect again.
+                    Err(e @ zbus::Error::InputOutput(_)) => return Err(e.into()),
+                    Err(e) => {
+                        debug!("ignoring a bad message: {e}");
+                        continue;
+                    }
+                };
                 let sender = msg.header().sender().map(|s| s.as_str().to_owned());
                 if sender.is_none() || sender.as_deref() != owner.as_ref().map(|o| o.as_str()) {
                     debug!(?sender, owner = ?owner.as_ref().map(|o| o.as_str()), "ignoring InputEvent not from InputPlumber");
@@ -357,9 +394,15 @@ async fn run(
                 Command::GuideTap { source, mode } => task.guide_tap(&source, mode).await,
             },
             Some(change) = owner_changes.next() => {
+                let args = match change.args() {
+                    Ok(args) => args,
+                    Err(e) => {
+                        warn!("ignoring a bad NameOwnerChanged signal: {e}");
+                        continue;
+                    }
+                };
                 task.devices.clear();
                 task.targets.clear();
-                let args = change.args()?;
                 owner = args.new_owner().as_ref().map(|n| n.to_owned().into());
                 if owner.is_some() {
                     info!("InputPlumber appeared");
@@ -386,7 +429,13 @@ async fn run(
                 }
             }
             Some(signal) = added.next() => {
-                let args = signal.args()?;
+                let args = match signal.args() {
+                    Ok(args) => args,
+                    Err(e) => {
+                        debug!("ignoring a bad InterfacesAdded signal: {e}");
+                        continue;
+                    }
+                };
                 if args.interfaces_and_properties().keys().any(|i| i.as_str() == COMPOSITE_IFACE) {
                     let path: OwnedObjectPath = args.object_path().clone().into();
                     info!(device = %path, "new controller");
@@ -394,14 +443,20 @@ async fn run(
                 }
             }
             Some(signal) = removed.next() => {
-                let args = signal.args()?;
+                let args = match signal.args() {
+                    Ok(args) => args,
+                    Err(e) => {
+                        debug!("ignoring a bad InterfacesRemoved signal: {e}");
+                        continue;
+                    }
+                };
                 if args.interfaces().iter().any(|i| i.as_str() == COMPOSITE_IFACE) {
                     info!(device = %args.object_path(), "controller gone");
                     task.devices.remove(&OwnedObjectPath::from(args.object_path().clone()));
                     task.targets.clear();
                 }
             }
-            else => return Ok(()),
+            else => anyhow::bail!("the D-Bus connection closed"),
         }
     }
 }

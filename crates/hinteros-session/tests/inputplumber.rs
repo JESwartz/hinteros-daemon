@@ -1439,3 +1439,39 @@ async fn input_from_others_on_the_bus_is_ignored() {
         Some((TARGET.into(), "ui_back".into(), 1.0))
     );
 }
+
+/// A signal whose arguments do not parse is skipped: it used to end the integration for the
+/// rest of the session (no Home, no modes set any more).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_signal_does_not_end_the_integration() {
+    use hinteros_session::input::InterceptMode;
+    use hinteros_session::input::inputplumber;
+    use std::time::Duration;
+
+    let Some(bus) = Bus::start() else { return };
+    let mut fake = Fake::start(&bus.address).await;
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let _input = inputplumber::spawn(task_settings(&bus, InterceptMode::All), tx);
+    ready(&fake, 0, 2).await;
+
+    for member in ["InterfacesAdded", "InterfacesRemoved"] {
+        fake.conn
+            .emit_signal(
+                None::<BusName<'_>>,
+                ROOT,
+                "org.freedesktop.DBus.ObjectManager",
+                member,
+                &("not what it should be",),
+            )
+            .await
+            .unwrap();
+    }
+    fake.press("ui_accept", 1.0).await;
+    assert_eq!(
+        next_input(&mut events, Duration::from_secs(5)).await,
+        Some((TARGET.into(), "ui_accept".into(), 1.0))
+    );
+    // Pads that come later are still set up.
+    fake.add_device().await;
+    ready(&fake, 1, 2).await;
+}

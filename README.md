@@ -1965,14 +1965,17 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   " 2"… added; `Profile <n>` when nothing is left), not an administrator and without media
   deletion (the policy is posted back whole), renames it with the profile (the whole user with its
   `Configuration` is posted back), deletes it with the profile; dashboard-made users are left
-  alone. It runs after profile create/remove jobs, after a rename (in the background), at the end
-  of `services_enable`, in every Jellyfin job and in `jellyfin.users.reveal {pin}` (no job; the
+  alone. A new user is recorded first, with an empty `jellyfin_user_id` (pending): if Jellyfin
+  makes it but the answer is lost, the next sync takes that user over by name. It runs after
+  profile create/remove jobs, after a rename (in the background), at the end of `services_enable`, in every Jellyfin job and in `jellyfin.users.reveal {pin}` (no job; the
   admin's and each profile's password; never logged). `jellyfin.client_token` (no PIN, read-only
   for the caller): the caller's own profile only (from its uid; guest and spare accounts get
   `permission_denied {reason: profile}`): `{server_id, user_id, device_id: "hinteros-<id>",
   access_token}`, minted with `AuthenticateByName` as that device (Jellyfin ends the device's older
-  token), kept in `users.json`, minted again when `GET /System/Info` answers 401. The session
-  daemon signs the Jellyfin app in with it (below).
+  token), kept in `users.json`, minted again when `GET /System/Info` answers 401. A sign-in
+  refused with 401 (the user deleted, or its password changed, in the dashboard) runs `sync`
+  (which makes a missing user again), sets the recorded password back (`POST /Users/Password`)
+  and tries once more. The session daemon signs the Jellyfin app in with it (below).
 - **The Jellyfin app signs in by itself** (spike S1, session side, `appseed.rs`): before
   `apps.launch {id: "jellyfin-desktop"}` (not while it runs, not without `lan`) the session daemon calls
   `jellyfin.client_token` (10 s at most; `unavailable` = the server is off or not set up: nothing

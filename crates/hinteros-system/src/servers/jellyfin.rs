@@ -814,6 +814,17 @@ impl Client {
             .ok_or_else(|| Error::Refused("no server id".into()))
     }
 
+    /// Set a user's password (`POST /Users/Password`; the API key is an administrator, so no
+    /// current password is needed).
+    pub fn set_password(&self, id: &str, password: &str) -> Result<(), Error> {
+        self.call(
+            "POST",
+            &format!("/Users/Password?userId={id}"),
+            Some(&json!({ "NewPw": password, "ResetPassword": false })),
+        )
+        .map(drop)
+    }
+
     /// Whether Jellyfin still takes `token` (`GET /System/Info`: 401 when it does not).
     pub fn token_valid(&self, token: &str) -> Result<bool, Error> {
         let auth = format!("MediaBrowser Token=\"{token}\"");
@@ -889,40 +900,61 @@ pub fn client_token(
         sync(c, files, profiles)?;
     }
     let server_id = c.server_id()?;
-    let lock = crate::state::lock(&files.lock_path())
-        .map_err(|e| Error::Refused(format!("locking users.json: {e}")))?;
     let path = files.users_json();
-    let mut stored =
-        UsersFile::load(&path).map_err(|e| Error::Refused(format!("users.json: {e}")))?;
-    let Some(r) = stored.users.get_mut(id).filter(|r| !r.is_pending()) else {
-        return Err(Error::Refused("the profile has no Jellyfin user".into()));
-    };
     let device = device_id(id);
-    let kept = match &r.access_token {
-        Some(t) if c.token_valid(t)? => Some(t.clone()),
-        _ => None,
-    };
-    let token = match kept {
-        Some(t) => t,
-        None => {
-            let (t, user_id) = c.authenticate(&r.name, &r.password, &device)?;
-            r.jellyfin_user_id = user_id;
-            r.access_token = Some(t.clone());
-            stored
-                .save(&path)
-                .map_err(|e| Error::Refused(format!("writing users.json: {e}")))?;
-            info!(profile = %id, "Jellyfin token made");
-            t
-        }
-    };
-    let user_id = stored.users[id].jellyfin_user_id.clone();
-    drop(lock);
-    Ok(hinteros_api::system::JellyfinClientTokenResult {
-        server_id,
-        user_id,
-        device_id: device,
-        access_token: token,
-    })
+    let mut recovered = false;
+    loop {
+        let lock = crate::state::lock(&files.lock_path())
+            .map_err(|e| Error::Refused(format!("locking users.json: {e}")))?;
+        let mut stored =
+            UsersFile::load(&path).map_err(|e| Error::Refused(format!("users.json: {e}")))?;
+        let Some(r) = stored.users.get_mut(id).filter(|r| !r.is_pending()) else {
+            return Err(Error::Refused("the profile has no Jellyfin user".into()));
+        };
+        let kept = match &r.access_token {
+            Some(t) if c.token_valid(t)? => Some(t.clone()),
+            _ => None,
+        };
+        let token = match kept {
+            Some(t) => t,
+            None => match c.authenticate(&r.name, &r.password, &device) {
+                Ok((t, user_id)) => {
+                    r.jellyfin_user_id = user_id;
+                    r.access_token = Some(t.clone());
+                    stored
+                        .save(&path)
+                        .map_err(|e| Error::Refused(format!("writing users.json: {e}")))?;
+                    info!(profile = %id, "Jellyfin token made");
+                    t
+                }
+                // The user was deleted or its password changed in the dashboard: make it
+                // again (sync) or set the recorded password back, then try once more.
+                Err(Error::Refused(m)) if !recovered && m.contains("HTTP 401") => {
+                    drop(lock);
+                    recovered = true;
+                    warn!(profile = %id, "Jellyfin sign-in refused; repairing the user");
+                    sync(c, files, profiles)?;
+                    let _lock = crate::state::lock(&files.lock_path())
+                        .map_err(|e| Error::Refused(format!("locking users.json: {e}")))?;
+                    let stored = UsersFile::load(&path)
+                        .map_err(|e| Error::Refused(format!("users.json: {e}")))?;
+                    if let Some(r) = stored.users.get(id).filter(|r| !r.is_pending()) {
+                        c.set_password(&r.jellyfin_user_id, &r.password)?;
+                    }
+                    continue;
+                }
+                Err(e) => return Err(e),
+            },
+        };
+        let user_id = stored.users[id].jellyfin_user_id.clone();
+        drop(lock);
+        return Ok(hinteros_api::system::JellyfinClientTokenResult {
+            server_id,
+            user_id,
+            device_id: device,
+            access_token: token,
+        });
+    }
 }
 
 /// The profiles that get a Jellyfin user: every profile with metadata (not the guest, not a

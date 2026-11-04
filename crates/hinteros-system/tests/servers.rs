@@ -290,6 +290,18 @@ fn fake_jellyfin() -> (SocketAddr, Arc<Mutex<Jellyfin>>) {
                 }
                 (204, String::new())
             }
+            ("POST", "/Users/Password") => {
+                let id = query(&r.path, "userId").unwrap();
+                let b: Value = serde_json::from_slice(&r.body).unwrap();
+                assert_eq!(b["ResetPassword"], false);
+                match j.users.get_mut(&id) {
+                    Some(u) => {
+                        u.1 = b["NewPw"].as_str().unwrap().to_owned();
+                        (204, String::new())
+                    }
+                    None => (404, String::new()),
+                }
+            }
             ("POST", p) if p.ends_with("/Policy") => {
                 let b: Value = serde_json::from_slice(&r.body).unwrap();
                 assert_eq!(b["IsAdministrator"], false);
@@ -720,6 +732,37 @@ async fn services_jellyfin_and_delete_data() {
         .unwrap();
     assert_ne!(t3["access_token"], t["access_token"]);
     assert_eq!(jf.lock().unwrap().authentications, 2);
+    // Its password changed in the dashboard: the recorded one is set back.
+    {
+        let mut j = jf.lock().unwrap();
+        j.tokens.clear();
+        j.users
+            .values_mut()
+            .filter(|u| u.0 == "James")
+            .for_each(|u| u.1 = "changed".into());
+    }
+    let t4 = call(&mut c, "jellyfin.client_token", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(t4["user_id"], t["user_id"]);
+    assert!(
+        jf.lock()
+            .unwrap()
+            .users
+            .values()
+            .any(|u| u.0 == "James" && u.1 == pw)
+    );
+    // Deleted in the dashboard: made again.
+    {
+        let mut j = jf.lock().unwrap();
+        j.tokens.clear();
+        j.users.retain(|_, u| u.0 != "James");
+    }
+    let t5 = call(&mut c, "jellyfin.client_token", json!({}))
+        .await
+        .unwrap();
+    assert_ne!(t5["user_id"], t["user_id"]);
+    assert!(jf.lock().unwrap().users.values().any(|u| u.0 == "James"));
 
     // A rename follows (in the background).
     call(

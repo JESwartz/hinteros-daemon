@@ -101,7 +101,7 @@ fn daemon() -> Daemon {
     Daemon::start_with(|dir| {
         std::fs::write(
             dir.join("session.toml"),
-            "[switch]\nwait_s = 1\nsteam_wait_s = 1\n",
+            "[switch]\nwait_s = 1\nsteam_wait_s = 1\n[close]\ntimeout_ms = 500\n",
         )
         .unwrap();
         std::fs::create_dir_all(dir.join("proc")).unwrap();
@@ -261,6 +261,23 @@ async fn switch_closes_apps_and_never_kills_silently() {
         .await
         .unwrap_err();
     assert_eq!(e["data"]["reason"], "no_switch");
+    // Back to normal: apps.close works on the app the switch did not close (SIGKILL at the
+    // close timeout), and apps start again.
+    call(&mut c, "apps.close", json!({"id": stubborn}))
+        .await
+        .unwrap();
+    loop {
+        let ev = event_named(&mut c, "app_exited").await;
+        if ev["id"] == json!(stubborn) {
+            assert_eq!(ev["reason"], "closed");
+            break;
+        }
+    }
+    assert!(!alive(pid));
+    let (other, _) = launch(&mut c, "exec sleep 60").await;
+    call(&mut c, "apps.close", json!({"id": other}))
+        .await
+        .unwrap();
 
     // The sleep lock's PIN goes through the system service.
     let e = call(&mut c, "session.unlock", json!({"pin": "0000"}))

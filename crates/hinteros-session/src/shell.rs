@@ -105,10 +105,15 @@ pub enum Msg {
     SetSteam(Option<PathBuf>),
     /// Apps whose vendor terms this profile has not accepted (from `system.apps.list`).
     SetNeedsTerms(std::collections::BTreeMap<String, hinteros_api::session::StoreTerms>),
-    /// A profile switch: SIGTERM to every app, never followed by a SIGKILL on its own.
+    /// A profile switch: SIGTERM to every app, never followed by a SIGKILL on its own. From now
+    /// on `apps.launch` is refused, until [`Msg::CancelCloseAll`].
     CloseAll {
         reply: oneshot::Sender<()>,
     },
+    /// The profile switch was cancelled (or did not end the session): apps still running after
+    /// its `CloseAll` are no longer being closed (`apps.close` works on them again), and
+    /// launches work again.
+    CancelCloseAll,
     /// The apps still running (a profile switch waits for them).
     RunningApps {
         reply: oneshot::Sender<Vec<hinteros_api::session::AppRef>>,
@@ -348,6 +353,20 @@ struct Closing {
     /// SIGKILL was sent (or, for Steam, we stopped waiting).
     killed: bool,
     deadline: Instant,
+    /// Asked by a profile switch ([`Msg::CloseAll`]): no deadline of its own (the user
+    /// decides), and taken back when the switch is cancelled.
+    switch: bool,
+}
+
+/// An `apps.launch` of an app that is still closing: answered once it is gone.
+#[derive(Debug)]
+struct WaitingLaunch {
+    /// The closing app.
+    id: String,
+    params: Option<Value>,
+    reply: Reply,
+    /// Give up (the app did not go).
+    until: Instant,
 }
 
 #[derive(Debug)]
@@ -410,6 +429,10 @@ fn steam_client_app() -> RunningApp {
 
 /// How long to wait before writing the focus to gamescope again after a failure.
 const FOCUS_RETRY: Duration = Duration::from_secs(1);
+
+/// A launch of a closing app waits for it until its close deadline and this much more (the
+/// SIGKILL sent at the deadline takes a moment).
+const LAUNCH_AFTER_CLOSE_GRACE: Duration = Duration::from_secs(1);
 
 pub struct Shell {
     cfg: ShellConfig,
@@ -497,6 +520,10 @@ pub struct Shell {
     /// The action each held button (pad, `ui_*` name) was pressed as: its release goes with it,
     /// also when the settings changed meanwhile.
     pressed_as: BTreeMap<(String, String), NavAction>,
+    /// A profile switch closes every app ([`Msg::CloseAll`]): no launches.
+    switching: bool,
+    /// Launches of apps that are still closing.
+    waiting: Vec<WaitingLaunch>,
 }
 
 impl Shell {
@@ -525,6 +552,8 @@ impl Shell {
             capture: None,
             captured: BTreeSet::new(),
             pressed_as: BTreeMap::new(),
+            switching: false,
+            waiting: Vec::new(),
             cfg,
             focus,
             input,
@@ -607,6 +636,20 @@ impl Shell {
                 params,
                 reply,
             } => {
+                if method == AppsLaunch::NAME
+                    && let Some(id) = self.closing_target(params.as_ref())
+                {
+                    info!(app = %id, "still closing; launching it once it is gone");
+                    let until = self.apps[&id].closing.map_or(now, |c| c.deadline)
+                        + LAUNCH_AFTER_CLOSE_GRACE;
+                    self.waiting.push(WaitingLaunch {
+                        id,
+                        params,
+                        reply,
+                        until,
+                    });
+                    return;
+                }
                 let result = self.request(&method, params, now);
                 let _ = reply.send(result);
             }
@@ -618,23 +661,24 @@ impl Shell {
             Msg::SetSteam(path) => self.set_steam(path),
             Msg::SetNeedsTerms(map) => self.cfg.needs_terms = map,
             Msg::CloseAll { reply } => {
+                self.switching = true;
                 let ids: Vec<String> = self.apps.keys().cloned().collect();
                 for id in ids {
-                    let _ = self.close(
-                        AppsCloseParams {
-                            id: id.clone(),
-                            force: false,
-                        },
-                        now,
-                    );
-                    // No silent force-close: the user decides (switch_blocked).
-                    if let Some(app) = self.apps.get_mut(&id)
-                        && let Some(c) = app.closing.as_mut()
-                    {
-                        c.deadline = now + Duration::from_secs(365 * 24 * 3600);
+                    if self.apps.get(&id).is_some_and(|a| a.closing.is_none()) {
+                        self.close_app(&id, now, true);
                     }
                 }
                 let _ = reply.send(());
+            }
+            Msg::CancelCloseAll => {
+                self.switching = false;
+                for (id, app) in &mut self.apps {
+                    // Not one force-closed meanwhile: that one is going anyway.
+                    if app.closing.is_some_and(|c| c.switch && !c.killed) {
+                        info!(app = %id, "switch cancelled; no longer closing it");
+                        app.closing = None;
+                    }
+                }
             }
             Msg::RunningApps { reply } => {
                 let _ = reply.send(
@@ -657,6 +701,56 @@ impl Shell {
                 focus,
                 clicked,
             } => self.text_focus(pid, reporter, focus, clicked, now),
+        }
+        self.retry_launches(now);
+    }
+
+    /// The app an `apps.launch` with `params` would only focus, if that app is closing (not
+    /// during a switch: launches are refused then).
+    fn closing_target(&self, params: Option<&Value>) -> Option<String> {
+        if self.switching {
+            return None;
+        }
+        let p = decode_params::<AppsLaunch>(params.cloned()).ok()?;
+        let steam = match p.request().ok()? {
+            LaunchRequest::Id(id) => match self.cfg.apps.iter().find(|a| a.id == id) {
+                Some(a) if a.command.is_none() => a.steam_app_id,
+                _ => {
+                    let app = self.apps.get(&id)?;
+                    return app.closing.is_some().then_some(id);
+                }
+            },
+            LaunchRequest::Steam(steam) => Some(steam),
+            LaunchRequest::Command { .. } => None,
+        }?;
+        self.apps
+            .values()
+            .find(|r| r.info.source == AppSource::Steam && r.info.gamescope_app_id == steam)
+            .filter(|r| r.closing.is_some())
+            .map(|r| r.info.id.clone())
+    }
+
+    /// Answer the launches that waited for their app to close: launch it now that it is gone,
+    /// or fail once it is still there at the deadline.
+    fn retry_launches(&mut self, now: Instant) {
+        if self.waiting.is_empty() {
+            return;
+        }
+        for w in std::mem::take(&mut self.waiting) {
+            let closing = self.apps.get(&w.id).is_some_and(|a| a.closing.is_some());
+            if closing && now < w.until {
+                self.waiting.push(w);
+                continue;
+            }
+            let result = if closing {
+                Err(ErrorObject::new(
+                    ErrorCode::AppLaunchFailed,
+                    format!("'{}' did not close in time", w.id),
+                ))
+            } else {
+                self.request(AppsLaunch::NAME, w.params, now)
+            };
+            let _ = w.reply.send(result);
         }
     }
 
@@ -970,6 +1064,13 @@ impl Shell {
         let request = p
             .request()
             .map_err(|e| ErrorObject::new(ErrorCode::InvalidParams, e))?;
+        if self.switching {
+            // CloseAll has gone out: an app started now would hold up the switch.
+            return Err(ErrorObject::new(
+                ErrorCode::AppLaunchFailed,
+                "a profile switch is running",
+            ));
+        }
         if let LaunchRequest::Id(id) = &request
             && let Some(t) = self.cfg.needs_terms.get(id)
             && !self.apps.contains_key(id)
@@ -1314,17 +1415,24 @@ impl Shell {
             }
             return Ok(AppsCloseResult {});
         }
-        if app.closing.is_some() {
-            return Ok(AppsCloseResult {});
+        if app.closing.is_none() {
+            self.close_app(&p.id, now, false);
         }
-        let id = p.id;
+        Ok(AppsCloseResult {})
+    }
+
+    /// Ask app `id` (running, not closing) to quit. `switch`: for a profile switch
+    /// ([`Msg::CloseAll`]): no deadline, and Steam is left to the switch, which shuts it down
+    /// itself.
+    fn close_app(&mut self, id: &str, now: Instant, switch: bool) {
+        let Some(app) = self.apps.get(id) else { return };
         let info = app.info.clone();
-        info!(app = %id, "closing");
+        info!(app = %id, switch, "closing");
         match info.source {
             AppSource::Command | AppSource::Unknown => {
                 let Some(pid) = info.pid else {
-                    self.exited(&id, ExitReason::Closed, None);
-                    return Ok(AppsCloseResult {});
+                    self.exited(id, ExitReason::Closed, None);
+                    return;
                 };
                 // The reaper forwards it to the app's process group.
                 self.procs.signal(pid, Sig::Term);
@@ -1334,8 +1442,8 @@ impl Shell {
                 let procs = self.steam_game_processes(info.gamescope_app_id);
                 if procs.is_empty() {
                     info!(app = %id, "no game processes (yet); no longer tracking it");
-                    self.exited(&id, ExitReason::Closed, None);
-                    return Ok(AppsCloseResult {});
+                    self.exited(id, ExitReason::Closed, None);
+                    return;
                 }
                 for pid in procs {
                     self.procs.signal(pid, Sig::Term);
@@ -1343,35 +1451,41 @@ impl Shell {
             }
             AppSource::SteamClient => {
                 self.steam_action_at = Some(now);
-                match self.steam_binary(ErrorCode::AppNotFound) {
-                    Ok(steam_path) => {
-                        let argv = [steam_path, "-shutdown".into()];
-                        if let Err(e) = self.spawner.spawn("steam-close", &argv, None, None, None) {
-                            warn!("cannot ask Steam to shut down: {e}");
+                if !switch {
+                    match self.steam_binary(ErrorCode::AppNotFound) {
+                        Ok(steam_path) => {
+                            let argv = [steam_path, "-shutdown".into()];
+                            if let Err(e) =
+                                self.spawner.spawn("steam-close", &argv, None, None, None)
+                            {
+                                warn!("cannot ask Steam to shut down: {e}");
+                            }
                         }
+                        Err(e) => warn!("cannot ask Steam to shut down: {}", e.message),
                     }
-                    Err(e) => warn!("cannot ask Steam to shut down: {}", e.message),
                 }
                 if !self.cfg.gamescope {
                     // Nothing to watch: consider it closed.
-                    self.exited(&id, ExitReason::Closed, None);
-                    return Ok(AppsCloseResult {});
+                    self.exited(id, ExitReason::Closed, None);
+                    return;
                 }
             }
         }
-        if let Some(app) = self.apps.get_mut(&id) {
+        // No silent force-close in a switch: the user decides (switch_blocked).
+        let deadline = if switch {
+            now + Duration::from_secs(365 * 24 * 3600)
+        } else {
+            now + self.cfg.close_timeout
+        };
+        if let Some(app) = self.apps.get_mut(id) {
             app.closing = Some(Closing {
                 killed: false,
-                deadline: now + self.cfg.close_timeout,
+                deadline,
+                switch,
             });
         }
-        Ok(AppsCloseResult {})
     }
 
-    /// Whether the Steam game `id`, about to be given up (`reason`: its windows are gone, or
-    /// it never showed one in time), is in fact still there: Steam's reaper for it is alive,
-    /// or, while it never had a window, Steam shows windows of its own (shader pre-caching,
-    /// a pre-launch or error dialog). Not for other apps, nor for games being closed.
     /// The games Steam (Big Picture) runs that it started itself, from its library: no app of
     /// ours. Each has a Steam reaper with the game's (or shortcut's) app id, and its window
     /// may carry yet another id (the one its Steam API reports, e.g. 480 for Spacewar), so the
@@ -1545,6 +1659,10 @@ impl Shell {
         }
     }
 
+    /// Whether the Steam game `id`, about to be given up (`reason`: its windows are gone, or
+    /// it never showed one in time), is in fact still there: Steam's reaper for it is alive,
+    /// or, while it never had a window, Steam shows windows of its own (shader pre-caching,
+    /// a pre-launch or error dialog). Not for other apps, nor for games being closed.
     fn steam_game_still_running(&mut self, id: &str, reason: ExitReason) -> bool {
         let Some(app) = self.apps.get(id) else {
             return false;
@@ -1715,6 +1833,7 @@ impl Shell {
             app.closing = Some(Closing {
                 killed: true,
                 deadline: now + self.cfg.close_timeout,
+                switch: false,
             });
         }
     }
@@ -1759,6 +1878,7 @@ impl Shell {
             app.closing = Some(Closing {
                 killed: true,
                 deadline: now + self.cfg.close_timeout,
+                switch: false,
             });
         }
     }
@@ -1818,7 +1938,6 @@ impl Shell {
         self.update_attention();
     }
 
-    /// (Re)apply the current focus to gamescope and InputPlumber.
     /// What gamescope should show now, and the focus order that is.
     fn focus_plan(&mut self) -> (FocusPlan, Vec<u32>) {
         let target = self
@@ -1856,6 +1975,7 @@ impl Shell {
         }
     }
 
+    /// (Re)apply the current focus to gamescope and InputPlumber.
     fn apply_focus(&mut self) {
         let (plan, order) = self.focus_plan();
         if self.written.len() == 4 {
@@ -2975,6 +3095,7 @@ impl Shell {
             .chain(self.osk_auto_hide_at)
             .chain(self.guide.as_ref().and_then(|hold| hold.steam_at))
             .chain(self.capture)
+            .chain(self.waiting.iter().map(|w| w.until))
             .min()
     }
 
@@ -3068,6 +3189,7 @@ impl Shell {
                 }
             }
         }
+        self.retry_launches(now);
     }
 }
 
@@ -4203,6 +4325,146 @@ mod tests {
                 .code,
             ErrorCode::AppNotFound.code()
         );
+    }
+
+    fn running_ids(t: &mut T) -> Vec<String> {
+        let (reply, mut rx) = oneshot::channel();
+        t.shell.handle(Msg::RunningApps { reply }, t.now);
+        rx.try_recv().unwrap().into_iter().map(|a| a.id).collect()
+    }
+
+    fn close_all(t: &mut T) {
+        let (reply, mut rx) = oneshot::channel();
+        t.shell.handle(Msg::CloseAll { reply }, t.now);
+        rx.try_recv().unwrap();
+    }
+
+    #[test]
+    fn switch_close_all_waits_for_the_user() {
+        let mut t = T::new();
+        let app = t.launch(json!({"command": ["stubborn"]}));
+        let reaper = app.pid.unwrap();
+        t.procs
+            .lock()
+            .unwrap()
+            .trees
+            .insert(reaper, vec![reaper + 1]);
+        t.launch(json!({"id": "steam"}));
+        t.gamescope(Some(769), &[769]);
+        t.log.take();
+        close_all(&mut t);
+        // Steam is left to the switch, which shuts it down itself.
+        assert_eq!(t.log.take(), [Call::Signal(reaper, Sig::Term)]);
+        assert_eq!(running_ids(&mut t), ["cmd-1", "steam"]);
+        // Never a SIGKILL of its own.
+        t.advance(Duration::from_secs(600));
+        assert_eq!(t.log.take(), []);
+        // Nothing starts while the switch runs.
+        let e = t
+            .call("apps.launch", json!({"command": ["late"]}))
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::AppLaunchFailed.code());
+        assert!(t.log.take().is_empty());
+        // Force close: SIGKILL, then (still there at the deadline) no longer tracked.
+        t.shell
+            .handle(Msg::ForceClose { id: "cmd-1".into() }, t.now);
+        assert_eq!(t.log.take(), [Call::Signal(reaper + 1, Sig::Kill)]);
+        t.events();
+        t.advance(MS(5000));
+        assert_eq!(
+            t.events()[0],
+            ev(
+                EventName::AppExited,
+                json!({"id": "cmd-1", "reason": "closed"})
+            )
+        );
+        // Steam's Big Picture is never killed: force close only stops tracking it.
+        t.shell
+            .handle(Msg::ForceClose { id: "steam".into() }, t.now);
+        assert!(!t.log.take().iter().any(|c| matches!(c, Call::Signal(..))));
+        assert!(running_ids(&mut t).is_empty());
+    }
+
+    #[test]
+    fn cancelled_switch_gives_back_close_and_launch() {
+        let mut t = T::new();
+        let app = t.launch(json!({"command": ["stubborn"]}));
+        let reaper = app.pid.unwrap();
+        t.procs
+            .lock()
+            .unwrap()
+            .trees
+            .insert(reaper, vec![reaper + 1]);
+        t.log.take();
+        close_all(&mut t);
+        assert_eq!(t.log.take(), [Call::Signal(reaper, Sig::Term)]);
+        t.shell.handle(Msg::CancelCloseAll, t.now);
+        assert_eq!(running_ids(&mut t), ["cmd-1"]);
+        // apps.close works again: SIGTERM, SIGKILL at the close timeout.
+        t.call("apps.close", json!({"id": "cmd-1"})).unwrap();
+        assert_eq!(t.log.take(), [Call::Signal(reaper, Sig::Term)]);
+        t.advance(MS(5000));
+        assert_eq!(t.log.take(), [Call::Signal(reaper + 1, Sig::Kill)]);
+        // And so do launches.
+        assert_eq!(t.launch(json!({"command": ["other"]})).id, "cmd-2");
+        // An exit after the cancel that no close asked for is not "closed".
+        let other = t.shell.apps["cmd-2"].info.pid.unwrap();
+        close_all(&mut t);
+        t.shell.handle(Msg::CancelCloseAll, t.now);
+        t.events();
+        exit(&mut t, "cmd-2", other, 1);
+        assert_eq!(
+            t.events()[0],
+            ev(
+                EventName::AppExited,
+                json!({"id": "cmd-2", "reason": "crashed", "exit_code": 1})
+            )
+        );
+    }
+
+    fn launch_later(t: &mut T, params: Value) -> oneshot::Receiver<Result<Value, ErrorObject>> {
+        let (reply, rx) = oneshot::channel();
+        t.shell.handle(
+            Msg::Request {
+                method: "apps.launch".into(),
+                params: Some(params),
+                reply,
+            },
+            t.now,
+        );
+        rx
+    }
+
+    #[test]
+    fn launching_a_closing_app_waits_until_it_is_gone() {
+        let mut t = T::new();
+        let first = t.launch(json!({"id": "jellyfin-desktop"})).pid.unwrap();
+        t.call("apps.close", json!({"id": "jellyfin-desktop"}))
+            .unwrap();
+        t.log.take();
+        let mut rx = launch_later(&mut t, json!({"id": "jellyfin-desktop"}));
+        // Not the dying instance: no answer yet.
+        assert!(rx.try_recv().is_err());
+        assert!(t.log.take().is_empty());
+        exit(&mut t, "jellyfin-desktop", first, 0);
+        let app: AppsLaunchResult =
+            serde_json::from_value(rx.try_recv().unwrap().unwrap()).unwrap();
+        assert_ne!(app.app.pid, Some(first));
+        assert!(t.log.take().iter().any(|c| matches!(c, Call::Spawn { .. })));
+
+        // One that does not go in time: an error a moment after its SIGKILL.
+        let second = app.app.pid.unwrap();
+        t.call("apps.close", json!({"id": "jellyfin-desktop"}))
+            .unwrap();
+        let mut rx = launch_later(&mut t, json!({"id": "jellyfin-desktop"}));
+        t.advance(MS(5000));
+        assert!(rx.try_recv().is_err());
+        t.advance(LAUNCH_AFTER_CLOSE_GRACE);
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap_err().code,
+            ErrorCode::AppLaunchFailed.code()
+        );
+        assert_eq!(t.shell.apps["jellyfin-desktop"].info.pid, Some(second));
     }
 
     #[test]

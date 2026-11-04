@@ -249,25 +249,23 @@ impl Profiles {
         pin: Option<zeroize::Zeroizing<String>>,
         end_guest: bool,
     ) -> Result<(), ErrorObject> {
-        if self.inner.switch.lock().unwrap().is_some() {
-            return Err(invalid("id", "busy", "a switch is already running"));
-        }
-        if let Some(id) = &target {
-            let cur = self.current().await?;
-            if cur.id.as_deref() == Some(id.as_str()) || (cur.guest && id == "guest") {
-                return Err(invalid("id", "same", "that is this profile"));
-            }
-            let mut params = json!({ "id": id });
-            if let Some(pin) = &pin {
-                params["pin"] = json!(pin.as_str());
-            }
-            self.inner
-                .relay
-                .call(system::ProfilesSwitch::NAME, Some(params))
-                .await?;
-        }
+        // Take the slot before the first await: two requests at once must not both start one.
         let (tx, rx) = mpsc::unbounded_channel();
-        *self.inner.switch.lock().unwrap() = Some(tx);
+        {
+            let mut slot = self.inner.switch.lock().unwrap();
+            if slot.is_some() {
+                return Err(invalid("id", "busy", "a switch is already running"));
+            }
+            *slot = Some(tx);
+        }
+        if let Some(id) = &target
+            && let Err(e) = self
+                .check_target(id, pin.as_ref().map(|p| p.as_str()))
+                .await
+        {
+            *self.inner.switch.lock().unwrap() = None;
+            return Err(e);
+        }
         let me = self.clone();
         tokio::spawn(async move {
             let ended = me.run_switch(rx, target).await;
@@ -278,6 +276,24 @@ impl Profiles {
                 me.end_session().await;
             }
         });
+        Ok(())
+    }
+
+    /// Before a switch to `id`: not this profile, and `system.profiles.switch` takes it (and
+    /// `pin`, for a locked one).
+    async fn check_target(&self, id: &str, pin: Option<&str>) -> Result<(), ErrorObject> {
+        let cur = self.current().await?;
+        if cur.id.as_deref() == Some(id) || (cur.guest && id == "guest") {
+            return Err(invalid("id", "same", "that is this profile"));
+        }
+        let mut params = json!({ "id": id });
+        if let Some(pin) = pin {
+            params["pin"] = json!(pin);
+        }
+        self.inner
+            .relay
+            .call(system::ProfilesSwitch::NAME, Some(params))
+            .await?;
         Ok(())
     }
 
@@ -421,7 +437,7 @@ impl Profiles {
                     Some(Ctl::Wait) => {
                         let now = Instant::now();
                         deadline = now + cfg.wait;
-                        steam_deadline = now + cfg.wait;
+                        steam_deadline = now + cfg.steam_wait;
                         reported.clear();
                     }
                     Some(Ctl::ForceClose(id)) => {
@@ -439,6 +455,8 @@ impl Profiles {
                     }
                     Some(Ctl::Cancel) | None => {
                         info!("switch cancelled");
+                        // Apps that did not quit yet stay; they can be closed again.
+                        let _ = self.inner.shell.send(Msg::CancelCloseAll);
                         if target.is_some()
                             && let Err(e) = self
                                 .inner
@@ -483,11 +501,16 @@ impl Profiles {
             .await;
         if !self.inner.cfg.end_session {
             info!("not ending the session (tests)");
+            let _ = self.inner.shell.send(Msg::CancelCloseAll);
             return;
         }
         match crate::restart::terminate_own_session(self.inner.cfg.bus.as_deref()).await {
             Ok(()) => info!("session ended for the switch"),
-            Err(e) => warn!("cannot end the session: {e}"),
+            Err(e) => {
+                warn!("cannot end the session: {e}");
+                // Still here: apps may start again.
+                let _ = self.inner.shell.send(Msg::CancelCloseAll);
+            }
         }
     }
 
@@ -514,6 +537,7 @@ impl Profiles {
                 Ok(v) => {
                     info!(job = %v["job_id"], "the guest is being wiped; the job ends this session");
                     if !self.inner.cfg.end_session {
+                        let _ = self.inner.shell.send(Msg::CancelCloseAll);
                         return;
                     }
                     tokio::time::sleep(GUEST_END_GRACE).await;

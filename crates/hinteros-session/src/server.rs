@@ -99,13 +99,17 @@ pub async fn handle(
                     Step::Ignore => debug!("ignoring client notification"),
                     Step::Dispatch(req) => {
                         let id = req.id.expect("dispatched requests have an id");
-                        if crate::appseed::wants(&req.method, req.params.as_ref()) {
-                            // The Jellyfin app: its sign-in seed first (a system call), then the
-                            // launch, without holding up the connection.
+                        if req.method == session::AppsLaunch::NAME {
+                            // Without holding up the connection: a launch of an app that is
+                            // still closing waits for it to go; the Jellyfin app gets its
+                            // sign-in seed first (a system call).
+                            let seed = crate::appseed::wants(&req.method, req.params.as_ref());
                             let (shell, relay, tx) =
                                 (shell.clone(), services.relay.clone(), answers_tx.clone());
                             tokio::spawn(async move {
-                                crate::appseed::before_launch(&shell, &relay).await;
+                                if seed {
+                                    crate::appseed::before_launch(&shell, &relay).await;
+                                }
                                 let outcome = shell_call(&shell, &req.method, req.params).await;
                                 let _ = tx.send(jsonrpc::response(&id, outcome));
                             });

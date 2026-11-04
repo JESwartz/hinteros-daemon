@@ -9,7 +9,10 @@
 //!
 //! Fields this daemon does not know load and are written back (each struct's `extra`): a box
 //! that switches to an older channel still has to read the newer file. A change that is not
-//! safe to ignore bumps `schemaVersion`.
+//! safe to ignore bumps `schemaVersion`. For the same reason the checks on load are about shape,
+//! not about what this daemon knows: an enum value it does not know is kept ([`Lenient`]), a box
+//! feature it does not know is kept in `requirements`, and the profile limit is checked when a
+//! profile is added, not on load.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -39,7 +42,7 @@ pub const GUEST_UID: u32 = 20000;
 #[serde(rename_all = "camelCase")]
 pub struct State {
     pub schema_version: u32,
-    pub base: Base,
+    pub base: Lenient<Base>,
     /// NixOS `system.stateVersion`, installer-written; never settable through the API.
     pub state_version: String,
     #[serde(default)]
@@ -56,6 +59,35 @@ pub struct State {
     /// Fields this daemon does not know, here and in the structs below.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// An enum value of the file: one this daemon knows, or one a newer daemon wrote. The newer
+/// value loads and is written back as it was; this daemon acts on a fallback
+/// ([`Lenient::known_or`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Lenient<T> {
+    Known(T),
+    Unknown(String),
+}
+
+impl<T: Copy> Lenient<T> {
+    pub fn known(&self) -> Option<T> {
+        match self {
+            Lenient::Known(v) => Some(*v),
+            Lenient::Unknown(_) => None,
+        }
+    }
+
+    pub fn known_or(&self, fallback: T) -> T {
+        self.known().unwrap_or(fallback)
+    }
+}
+
+impl<T> From<T> for Lenient<T> {
+    fn from(v: T) -> Self {
+        Lenient::Known(v)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +122,7 @@ pub struct CleanupState {
     #[serde(default = "yes")]
     pub enable: bool,
     #[serde(default = "default_frequency")]
-    pub frequency: CleanupFrequency,
+    pub frequency: Lenient<CleanupFrequency>,
     #[serde(default = "default_keep")]
     pub keep_system: u32,
     #[serde(default = "default_keep")]
@@ -111,8 +143,8 @@ impl Default for CleanupState {
     }
 }
 
-fn default_frequency() -> CleanupFrequency {
-    CleanupFrequency::Weekly
+fn default_frequency() -> Lenient<CleanupFrequency> {
+    Lenient::Known(CleanupFrequency::Weekly)
 }
 
 fn default_keep() -> u32 {
@@ -258,10 +290,11 @@ impl State {
                 printable(z)
             ));
         }
+        // A feature a newer system knows is kept (only apps this daemon knows add features).
         let mut seen = BTreeSet::new();
         for f in &self.requirements {
-            if !hinteros_api::catalog::is_box_feature(f) || !seen.insert(f) {
-                return Err(format!("bad requirement {f:?}"));
+            if !is_app_id(f) || !seen.insert(f) {
+                return Err(format!("bad requirement {:?}", printable(f)));
             }
         }
         for s in &self.services {
@@ -269,8 +302,9 @@ impl State {
                 return Err(format!("bad service id {s:?}"));
             }
         }
-        if self.profiles.is_empty() || self.profiles.len() > MAX_PROFILES {
-            return Err(format!("1 to {MAX_PROFILES} profiles"));
+        // MAX_PROFILES is checked when a profile is added: a newer system may allow more.
+        if self.profiles.is_empty() {
+            return Err("no profiles".into());
         }
         let mut ids = BTreeSet::new();
         for p in &self.profiles {
@@ -418,18 +452,23 @@ fn printable(s: &str) -> String {
 }
 
 /// `base.set`: `Ok(None)` if `to` is the current base; a base that is not built is refused;
-/// unstable → stable is a downgrade.
-pub fn base_change(from: Base, to: Base, acknowledged: bool) -> Result<Option<Base>, ErrorObject> {
-    base_change_within(BUILT_BASES, from, to, acknowledged)
+/// unstable → stable is a downgrade. From a base this daemon does not know, any built base is
+/// a change.
+pub fn base_change(
+    from: &Lenient<Base>,
+    to: Base,
+    acknowledged: bool,
+) -> Result<Option<Base>, ErrorObject> {
+    base_change_within(BUILT_BASES, from.known(), to, acknowledged)
 }
 
 fn base_change_within(
     built: &[Base],
-    from: Base,
+    from: Option<Base>,
     to: Base,
     acknowledged: bool,
 ) -> Result<Option<Base>, ErrorObject> {
-    if from == to {
+    if from == Some(to) {
         return Ok(None);
     }
     if !built.contains(&to) {
@@ -439,7 +478,7 @@ fn base_change_within(
             json!({ "service": "base", "reason": "not_built" }),
         ));
     }
-    if from == Base::Unstable && to == Base::Stable && !acknowledged {
+    if from == Some(Base::Unstable) && to == Base::Stable && !acknowledged {
         return Err(ErrorObject::new(
             ErrorCode::NeedsAcknowledgement,
             "unstable to stable is a downgrade",
@@ -536,11 +575,11 @@ mod tests {
             r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"profiles":[{"id":"p1"}]}"#,
             r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[]}"#,
             // Bad values of known fields.
-            r#"{"schemaVersion":2,"base":"23.11","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":2311,"stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"}]}"#,
             r#"{"schemaVersion":2,"base":"unstable","stateVersion":"","requirements":[],"services":[],"profiles":[{"id":"p1"}]}"#,
             r#"{"schemaVersion":2,"base":"unstable","stateVersion":26,"requirements":[],"services":[],"profiles":[{"id":"p1"}]}"#,
             r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[]}"#,
-            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":["x86"],"services":[],"profiles":[{"id":"p1"}]}"#,
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":["../x"],"services":[],"profiles":[{"id":"p1"}]}"#,
             r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":["graphics32","graphics32"],"services":[],"profiles":[{"id":"p1"}]}"#,
             r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":["../x"],"profiles":[{"id":"p1"}]}"#,
             r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],"profiles":[{"id":"p1"},{"id":"p1"}]}"#,
@@ -552,6 +591,37 @@ mod tests {
         ] {
             assert!(State::parse(bad.as_bytes()).is_err(), "{bad}");
         }
+    }
+
+    /// What a later 1.x may add (a box feature, a base, a clean-up frequency, more profiles)
+    /// loads, gets a fallback here, and is written back as it was.
+    #[test]
+    fn newer_values_load_and_are_kept() {
+        let profiles: Vec<String> = (1..=12).map(|n| format!(r#"{{"id":"p{n}"}}"#)).collect();
+        let file = format!(
+            r#"{{"schemaVersion":2,"base":"lts","stateVersion":"26.11",
+            "settings":{{"cleanup":{{"frequency":"fortnightly"}}}},
+            "requirements":["graphics32","vr"],"services":[],"profiles":[{}]}}"#,
+            profiles.join(",")
+        );
+        let s = State::parse(file.as_bytes()).unwrap();
+        assert_eq!(s.base, Lenient::Unknown("lts".into()));
+        assert_eq!(s.base.known_or(Base::Unstable), Base::Unstable);
+        assert_eq!(
+            s.cleanup().frequency,
+            Lenient::Unknown("fortnightly".into())
+        );
+        assert_eq!(s.requirements, ["graphics32", "vr"]);
+        assert_eq!(s.profiles.len(), 12);
+        let written: Value = serde_json::from_slice(&s.to_canonical_json()).unwrap();
+        assert_eq!(written["base"], "lts");
+        assert_eq!(written["settings"]["cleanup"]["frequency"], "fortnightly");
+        assert_eq!(written["requirements"], json!(["graphics32", "vr"]));
+        // From an unknown base, a built base is a change, with no downgrade to acknowledge.
+        assert_eq!(
+            base_change(&s.base, Base::Unstable, false).unwrap(),
+            Some(Base::Unstable)
+        );
     }
 
     #[test]
@@ -639,7 +709,7 @@ mod tests {
                 s.cleanup().keep_system,
                 s.cleanup().keep_profiles
             ),
-            (true, CleanupFrequency::Weekly, 5, 5)
+            (true, CleanupFrequency::Weekly.into(), 5, 5)
         );
         assert!(
             !String::from_utf8(s.to_canonical_json())
@@ -651,7 +721,7 @@ mod tests {
         let c = s.cleanup();
         assert_eq!(
             (c.enable, c.frequency, c.keep_system, c.keep_profiles),
-            (true, CleanupFrequency::Daily, 2, 5)
+            (true, CleanupFrequency::Daily.into(), 2, 5)
         );
         let text = String::from_utf8(s.to_canonical_json()).unwrap();
         assert!(
@@ -662,7 +732,7 @@ mod tests {
         for bad in [
             r#"{"keepSystem":0}"#,
             r#"{"keepProfiles":11}"#,
-            r#"{"frequency":"yearly"}"#,
+            r#"{"frequency":7}"#,
             r#"{"enable":"yes"}"#,
             r#"{"keepSystem":-1}"#,
         ] {
@@ -743,16 +813,16 @@ mod tests {
     #[test]
     fn version_rules() {
         assert_eq!(
-            base_change(Base::Unstable, Base::Unstable, false).unwrap(),
+            base_change(&Base::Unstable.into(), Base::Unstable, false).unwrap(),
             None
         );
         assert_eq!(
-            base_change(Base::Stable, Base::Unstable, false).unwrap(),
+            base_change(&Base::Stable.into(), Base::Unstable, false).unwrap(),
             Some(Base::Unstable)
         );
         // Stable is not built: refused whatever was acknowledged, and it names why.
         for ack in [false, true] {
-            let e = base_change(Base::Unstable, Base::Stable, ack).unwrap_err();
+            let e = base_change(&Base::Unstable.into(), Base::Stable, ack).unwrap_err();
             assert_eq!(e.kind(), Some(ErrorCode::Unavailable));
             assert_eq!(
                 e.data.unwrap(),
@@ -761,13 +831,13 @@ mod tests {
         }
         // The day it is built, the downgrade needs acknowledging.
         assert_eq!(
-            base_change_within(Base::ALL, Base::Unstable, Base::Stable, false)
+            base_change_within(Base::ALL, Some(Base::Unstable), Base::Stable, false)
                 .unwrap_err()
                 .kind(),
             Some(ErrorCode::NeedsAcknowledgement)
         );
         assert_eq!(
-            base_change_within(Base::ALL, Base::Unstable, Base::Stable, true).unwrap(),
+            base_change_within(Base::ALL, Some(Base::Unstable), Base::Stable, true).unwrap(),
             Some(Base::Stable)
         );
     }

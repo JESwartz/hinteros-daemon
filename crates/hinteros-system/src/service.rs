@@ -493,7 +493,7 @@ async fn dispatch(
             encode::<SettingsGet>(SettingsGetResult {
                 revision,
                 settings: Settings {
-                    base: state.base,
+                    base: state.base.known_or(system::Base::Unstable),
                     ssh: SshSettings {
                         enabled: state.settings.ssh.enable,
                     },
@@ -1095,7 +1095,7 @@ impl Service {
             channel: flake::current_channel(&lock, table.as_ref()),
             base: state
                 .as_ref()
-                .map(|s| s.base)
+                .and_then(|s| s.base.known())
                 .unwrap_or(system::Base::Unstable),
             rev: lock.rev,
             generation: generations::current_generation(&self.paths.profile),
@@ -1320,11 +1320,11 @@ impl Service {
                     .await?;
                 let (mut state, _) = self.load_state()?;
                 let ack = p.acknowledge_downgrade.unwrap_or(false);
-                let Some(base) = state::base_change(state.base, p.base, ack)? else {
+                let Some(base) = state::base_change(&state.base, p.base, ack)? else {
                     return job_ref(None);
                 };
-                let from_base = state.base;
-                state.base = base;
+                let from_base = state.base.known();
+                state.base = base.into();
                 let state = self.requirements_update(&state).unwrap_or(state);
                 self.preflight()?;
                 let spec = self
@@ -1339,7 +1339,7 @@ impl Service {
                     )
                     .about(system::JobSubject {
                         base: Some(base),
-                        from_base: Some(from_base),
+                        from_base,
                         ..Default::default()
                     });
                 job_ref(Some(self.start(spec).await?))

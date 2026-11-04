@@ -2125,6 +2125,10 @@ supported. Required: `schemaVersion`, `base`, `stateVersion`, `requirements`, `s
 Unknown fields load, at every level, and are written back after the known ones, sorted: a box
 that switches to an older channel still has to read the newer file. A change that is not safe
 to ignore bumps `schemaVersion`. Bad values of known fields are errors. `check-state` follows.
+The checks on load are about shape, so a later 1.x may add values without a new schema: an
+unknown `base` or `settings.cleanup.frequency` loads and is written back as it was (the API shows
+`unstable` and `weekly`), a well-formed box feature this daemon does not know stays in
+`requirements`, and the 8-profile limit applies to `profiles.create`, not to loading.
 
 `base.set` to a base that is not built (`state::BUILT_BASES`, `unstable` only) is refused with
 `unavailable {service: base, reason: not_built}`, before the downgrade check.

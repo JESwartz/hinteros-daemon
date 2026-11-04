@@ -6141,6 +6141,7 @@ mod tests {
         assert_eq!(
             t.log.take(),
             [Call::Keys(vec![
+                KeyOp::CapsLockOff,
                 tap("shift+h"),
                 tap("i"),
                 tap("shift+1"),

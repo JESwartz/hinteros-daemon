@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tracing::{debug, warn};
 
+use super::code::KEY_CAPSLOCK;
 use super::{ImeAction, KeyCaps, KeyInjector, KeyOp};
 
 /// A keyboard device: press or release one key.
@@ -53,6 +54,8 @@ pub struct Worker {
     ime: Option<Box<dyn ImeSink>>,
     /// Don't retry a failed input method connection before this.
     ime_retry_at: Option<Instant>,
+    /// Caps Lock is on: the virtual keyboard pressed it an odd number of times.
+    caps_lock: bool,
     timing: Timing,
 }
 
@@ -67,6 +70,7 @@ impl Worker {
             ime_connect,
             ime: None,
             ime_retry_at: None,
+            caps_lock: false,
             timing,
         }
     }
@@ -91,14 +95,25 @@ impl Worker {
                 events.push((*code, false));
                 events.extend(mods.iter().rev().map(|&m| (m, false)));
                 for (code, down) in events {
-                    if let Err(e) = keys.key(code, down) {
-                        warn!(code, down, "virtual keyboard: {e}");
+                    match keys.key(code, down) {
+                        Ok(()) if code == KEY_CAPSLOCK && down => self.caps_lock ^= true,
+                        Ok(()) => {}
+                        Err(e) => warn!(code, down, "virtual keyboard: {e}"),
                     }
                     thread::sleep(delay);
                 }
             }
             KeyOp::Ime(text) => self.with_ime(|ime| ime.text(text)),
             KeyOp::ImeAction(action) => self.with_ime(|ime| ime.action(*action)),
+            KeyOp::CapsLockOff => {
+                if self.caps_lock {
+                    debug!("caps lock off before typing");
+                    self.run(&KeyOp::Tap {
+                        code: KEY_CAPSLOCK,
+                        mods: Vec::new(),
+                    });
+                }
+            }
         }
     }
 
@@ -322,6 +337,32 @@ pub(crate) mod tests {
         );
         // No input method: dropped, nothing breaks.
         w.run(&KeyOp::Ime("é".into()));
+        assert!(rec.take().is_empty());
+    }
+
+    #[test]
+    fn caps_lock_is_turned_off_before_text() {
+        let rec = Recorder::default();
+        let mut w = Worker::new(Some(Box::new(rec.clone())), None, FAST);
+        let caps = KeyOp::Tap {
+            code: KEY_CAPSLOCK,
+            mods: vec![],
+        };
+        // Off: nothing to do.
+        w.run(&KeyOp::CapsLockOff);
+        assert!(rec.take().is_empty());
+        // A bound caps_lock key turned it on: one tap turns it off again, once.
+        w.run(&caps);
+        rec.take();
+        w.run(&KeyOp::CapsLockOff);
+        assert_eq!(rec.take(), ["down 58", "up 58"]);
+        w.run(&KeyOp::CapsLockOff);
+        assert!(rec.take().is_empty());
+        // Pressed twice: off again.
+        w.run(&caps);
+        w.run(&caps);
+        rec.take();
+        w.run(&KeyOp::CapsLockOff);
         assert!(rec.take().is_empty());
     }
 

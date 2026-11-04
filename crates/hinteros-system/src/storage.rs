@@ -233,16 +233,18 @@ impl Walk<'_> {
         block_bytes(st)
     }
 
-    /// Walk the open folder `fd` (already checked to be on our device; `st` its stat).
+    /// Walk the open folder `fd` (already checked to be on our device; `st` its stat). The walk
+    /// reads entries through `fd` itself (one descriptor per level, closed when the level is done:
+    /// a deep tree must not run out of descriptors).
     /// `keep_tree`: record sub-folders (false below the depth limit and for the games).
-    fn dir(&mut self, fd: &OwnedFd, st: &Stat, depth: usize, keep_tree: bool) -> RawDir {
+    fn dir(&mut self, fd: OwnedFd, st: &Stat, depth: usize, keep_tree: bool) -> RawDir {
         let mut out = RawDir {
             name: String::new(),
             bytes: 0,
             files: block_bytes(st),
             dirs: Vec::new(),
         };
-        let Ok(mut entries) = rustix::io::dup(fd).and_then(Dir::new) else {
+        let Ok(mut entries) = Dir::new(fd) else {
             out.bytes = out.files;
             return out;
         };
@@ -255,6 +257,8 @@ impl Walk<'_> {
             if self.tick() {
                 break;
             }
+            // The stream's own descriptor: statat and openat do not move its position.
+            let Ok(fd) = entries.fd() else { break };
             let Ok(m) = statat(fd, name, AtFlags::SYMLINK_NOFOLLOW) else {
                 continue;
             };
@@ -276,12 +280,11 @@ impl Walk<'_> {
                 continue;
             }
             let mut sub = self.dir(
-                &sub_fd,
+                sub_fd,
                 &sm,
                 depth + 1,
                 keep_tree && depth < self.limits.max_depth,
             );
-            drop(sub_fd);
             if keep_tree && depth < self.limits.max_depth && sub.bytes >= self.limits.min_bytes {
                 sub.name = clean_name(&name.to_string_lossy(), self.limits.max_name);
                 out.dirs.push(sub);
@@ -511,18 +514,17 @@ pub fn measure_home(
         cancelled: false,
     };
     let mut game_nodes = Vec::new();
-    for (g, fd, m) in &games {
+    for (g, fd, m) in games {
         if m.st_dev != dev || !walk.exclude.insert((m.st_dev, m.st_ino)) {
             continue;
         }
-        let raw = walk.dir(fd, m, limits.max_depth, false);
+        let raw = walk.dir(fd, &m, limits.max_depth, false);
         let mut n = StorageNode::new(NodeKind::SteamGame, raw.bytes);
         n.name = Some(g.name.clone());
         n.app_id = Some(g.app_id);
         game_nodes.push(n);
     }
-    drop(games);
-    let raw = walk.dir(&home_fd, &st, 0, true);
+    let raw = walk.dir(home_fd, &st, 0, true);
     if walk.cancelled {
         return None;
     }
@@ -542,7 +544,7 @@ pub fn measure_media(dir: &Path, limits: Limits, cancel: &dyn Fn() -> bool) -> O
         cancel,
         cancelled: false,
     };
-    let raw = walk.dir(&fd, &st, limits.max_depth, false);
+    let raw = walk.dir(fd, &st, limits.max_depth, false);
     (!walk.cancelled).then(|| StorageNode::new(NodeKind::Media, raw.bytes))
 }
 

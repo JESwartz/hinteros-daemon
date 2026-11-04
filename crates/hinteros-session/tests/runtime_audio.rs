@@ -1,6 +1,6 @@
 //! Audio against a fake `pactl` (a shell script with the sinks in a state directory): the same
 //! commands and JSON output as the real one for `list sinks`, `list cards`, `set-card-profile`, `get-default-sink`,
-//! `set-default-sink`, `set-sink-volume` and `set-sink-mute`. Never the desktop's PipeWire.
+//! `set-default-sink`, `set-sink-volume`, `set-sink-mute` and `subscribe`. Never the desktop's PipeWire.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -12,7 +12,8 @@ mod common;
 use common::*;
 
 /// The fake: state in `<dir>/default`, `<dir>/volume-<sink>`, `<dir>/mute-<sink>`, calls
-/// appended to `<dir>/calls`.
+/// appended to `<dir>/calls`. `subscribe` prints the lines appended to `<dir>/events`, and
+/// fails when `<dir>/no-subscribe` exists.
 fn fake_pactl(dir: &Path) -> PathBuf {
     let state = dir.join("pactl-state");
     std::fs::create_dir_all(&state).unwrap();
@@ -21,6 +22,7 @@ fn fake_pactl(dir: &Path) -> PathBuf {
         "alsa_output.pci-0000_01_00.1.hdmi-stereo",
     )
     .unwrap();
+    std::fs::write(state.join("events"), "").unwrap();
     for (sink, vol) in [
         ("alsa_output.pci-0000_01_00.1.hdmi-stereo", "60"),
         ("alsa_output.usb-Foo-00.analog-stereo", "30"),
@@ -69,6 +71,9 @@ case "$1" in
     ;;
   get-default-sink) cat "$S/default"; echo ;;
   set-default-sink) echo "$2" > "$S/default" ;;
+  subscribe)
+    [ -f "$S/no-subscribe" ] && exit 2
+    exec tail -n0 -F --pid=$PPID "$S/events" 2>/dev/null ;;
   set-sink-volume) echo "${{3%\%}}" > "$S/volume-$2" ;;
   set-sink-mute) if [ "$3" = 1 ]; then echo yes > "$S/mute-$2"; else echo no > "$S/mute-$2"; fi ;;
   *) echo "unknown command $1" >&2; exit 2 ;;
@@ -80,12 +85,20 @@ esac"#,
 }
 
 fn start() -> (Daemon, PathBuf) {
+    start_subscribe(true)
+}
+
+/// `subscribe`: whether `pactl subscribe` works (else changes are found by polling).
+fn start_subscribe(subscribe: bool) -> (Daemon, PathBuf) {
     let mut state = PathBuf::new();
     let d = Daemon::start_env(
         |_| Vec::new(),
         |dir| {
             let pactl = fake_pactl(dir);
             state = dir.join("pactl-state");
+            if !subscribe {
+                std::fs::write(state.join("no-subscribe"), "").unwrap();
+            }
             vec![("HINTEROS_PACTL".into(), pactl.into_os_string())]
         },
     );
@@ -279,9 +292,26 @@ async fn an_output_of_another_card_profile_switches_the_profile() {
     assert!(!calls(&state).iter().any(|c| c.contains("extra1")));
 }
 
-#[tokio::test]
-async fn changes_are_pushed_by_us_and_found_by_polling() {
-    let (d, state) = start();
+fn append_event(state: &Path, line: &str) {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(state.join("events"))
+        .unwrap();
+    writeln!(f, "{line}").unwrap();
+}
+
+fn sink_reads(state: &Path) -> usize {
+    calls(state)
+        .iter()
+        .filter(|c| c.as_str() == "--format=json list sinks")
+        .count()
+}
+
+/// Our own changes are sent at once; changes made elsewhere are found through `pactl
+/// subscribe`, or by polling when it does not run.
+async fn changes_are_pushed_and_found(subscribe: bool) {
+    let (d, state) = start_subscribe(subscribe);
     let mut watcher = d.client().await;
     call(
         &mut watcher,
@@ -305,13 +335,37 @@ async fn changes_are_pushed_by_us_and_found_by_polling() {
     assert_eq!(ev["volume"], 45);
     assert_eq!(output(&ev, HDMI)["default"], true);
 
-    // Something else changes the volume: polling finds it.
+    // Something else changes the volume.
     std::fs::write(state.join(format!("volume-{HDMI}")), "10").unwrap();
+    if subscribe {
+        assert!(calls(&state).iter().any(|c| c == "subscribe"));
+        // The stream of an app is not what the clients see: no read for it.
+        let before = sink_reads(&state);
+        append_event(&state, "Event 'new' on sink-input #7");
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(sink_reads(&state), before, "read for a stream event");
+        append_event(&state, "Event 'change' on sink #50");
+    }
     let ev = event_named(&mut watcher, "audio_changed").await;
     assert_eq!(ev["volume"], 10);
     // And no event without a change.
+    let before = sink_reads(&state);
     let quiet = tokio::time::timeout(Duration::from_millis(3500), watcher.next_event_raw()).await;
     assert!(quiet.is_err(), "event without a change: {quiet:?}");
+    if subscribe {
+        // No polling while the events come.
+        assert_eq!(sink_reads(&state), before, "polled while subscribed");
+    }
+}
+
+#[tokio::test]
+async fn changes_are_pushed_by_us_and_found_through_pactl_subscribe() {
+    changes_are_pushed_and_found(true).await;
+}
+
+#[tokio::test]
+async fn changes_are_found_by_polling_without_pactl_subscribe() {
+    changes_are_pushed_and_found(false).await;
 }
 
 #[tokio::test]

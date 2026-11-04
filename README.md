@@ -399,7 +399,7 @@ enable = true                  # network.*, wifi.*, bluetooth.*, audio.*, displa
 
 [audio]
 pactl = "pactl"                # PipeWire's PulseAudio interface; found on PATH
-poll_ms = 2000                 # look for changes made elsewhere (only while a client is connected)
+poll_ms = 2000                 # poll for changes while `pactl subscribe` cannot run; 0: never look
 
 [display]
 # save_file = "/home/tv/.local/state/hinteros/gamescope-modes"   # [default: $GAMESCOPE_MODE_SAVE_FILE]
@@ -619,10 +619,11 @@ sink's name, description, volume, mute state, ports and device properties (`devi
 tells Bluetooth and USB, ports and names tell HDMI), and `get-default-sink`, `set-default-sink`,
 `set-sink-volume` and `set-sink-mute` cover the rest. `wpctl` has no machine-readable listing
 (`wpctl status` is a tree for humans, `wpctl inspect` prints properties as text), so the output
-list and kinds would need fragile parsing. There is no subscription (`pactl subscribe` would be a
-child process to supervise): changes made elsewhere are found by polling every `audio.poll_ms`
-while a client is connected. Volume is capped at 100 (`invalid_params` above; a sink already
-above 100 reports 100). Outputs are sinks; `id` is the sink name, stable across restarts.
+list and kinds would need fragile parsing. Changes made elsewhere come from one long-running
+`pactl subscribe` (sink, card and server events; the state is read again after each burst), and
+from polling every `audio.poll_ms` while it cannot run, only while a client is connected. Volume
+is capped at 100 (`invalid_params` above; a sink already above 100 reports 100). Outputs are
+sinks; `id` is the sink name, stable across restarts.
 
 **Display: gamescope's mode save file plus a nudge.** What gamescope 3.16.31 offers (read from
 its source in nixpkgs): there is *no* request to change the output mode at runtime, neither in

@@ -428,7 +428,8 @@ impl Default for RuntimeConfig {
 pub struct AudioConfig {
     /// The `pactl` binary.
     pub pactl: PathBuf,
-    /// How often changes made elsewhere are looked for (only while a client is connected).
+    /// How often changes made elsewhere are polled for while `pactl subscribe` cannot run (only
+    /// while a client is connected); 0: never look.
     pub poll_ms: u64,
     /// The box-wide audio output the system service publishes (`audio.save_output` of any
     /// profile): made the default sink when the session starts, once it exists.

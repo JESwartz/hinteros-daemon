@@ -6,9 +6,9 @@
 //! `set-default-sink`, `set-sink-volume` and `set-sink-mute` cover the rest. `wpctl` has no
 //! machine-readable listing (`wpctl status` is a tree for humans) and reports volume as text.
 //! The system needs `pactl` on the daemon's PATH (`pkgs.pulseaudio`; the server is PipeWire's,
-//! enabled by `services.pipewire.pulse.enable`). There is no subscription: changes made
-//! elsewhere are found by polling while a client is connected, and our own changes are sent
-//! at once.
+//! enabled by `services.pipewire.pulse.enable`). Changes made elsewhere are found through a
+//! long-running `pactl subscribe` (or by polling while it cannot run), and our own changes are
+//! sent at once.
 //!
 //! A sound card has one profile at a time, and only that profile's outputs are sinks: with
 //! the analog profile on, the TV on HDMI or DisplayPort has no sink. So the outputs are the
@@ -26,7 +26,7 @@ use hinteros_api::session::{
     EventName, Service, VOLUME_MAX,
 };
 use serde_json::Value;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 use tracing::debug;
@@ -573,19 +573,68 @@ async fn make_default(
     }
 }
 
-/// Look for changes made elsewhere (the TV's volume keys through HDMI-CEC, other apps).
+/// How long `pactl subscribe` must be quiet before the state is read again (a change of output
+/// is a burst of sink, card and server events).
+const EVENT_SETTLE: Duration = Duration::from_millis(200);
+
+/// Whether a `pactl subscribe` line ("Event 'change' on sink #56") is about what [`read`]
+/// reports: sinks, cards, and the server (its default sink). The streams of apps come and go
+/// all the time and are left out.
+fn relevant_event(line: &str) -> bool {
+    [" on sink #", " on card #", " on server"]
+        .iter()
+        .any(|what| line.contains(what))
+}
+
+/// Read the state and tell the clients, if there are any.
+async fn poll(ctx: &Ctx) {
+    if !ctx.has_clients() {
+        return;
+    }
+    match read(ctx).await {
+        Ok(state) => publish(ctx, &state),
+        Err(e) => debug!("audio poll: {}", e.message),
+    }
+}
+
+/// Look for changes made elsewhere (the TV's volume keys through HDMI-CEC, other apps): on the
+/// events of a long-running `pactl subscribe`, and every `poll_ms` while it cannot run (no
+/// sound server yet, or it restarted). Polling all the time would start pactl processes every
+/// few seconds during games.
 pub async fn watch(ctx: Arc<Ctx>) {
+    if ctx.audio.poll_ms == 0 {
+        return;
+    }
     let interval = Duration::from_millis(ctx.audio.poll_ms.max(250));
     loop {
+        if let Err(e) = follow(&ctx).await {
+            debug!("pactl subscribe: {e}");
+        }
+        // Changes made while nothing listened are found here.
         sleep(interval).await;
-        if !ctx.has_clients() || ctx.audio.poll_ms == 0 {
+        poll(&ctx).await;
+    }
+}
+
+/// Read the state again after each burst of relevant events, until `pactl subscribe` ends.
+async fn follow(ctx: &Ctx) -> std::io::Result<()> {
+    let mut child = Command::new(&ctx.audio.pactl)
+        .arg("subscribe")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut lines = BufReader::new(child.stdout.take().expect("piped")).lines();
+    while let Some(line) = lines.next_line().await? {
+        if !relevant_event(&line) {
             continue;
         }
-        match read(&ctx).await {
-            Ok(state) => publish(&ctx, &state),
-            Err(e) => debug!("audio poll: {}", e.message),
-        }
+        while let Ok(Ok(Some(_))) = timeout(EVENT_SETTLE, lines.next_line()).await {}
+        poll(ctx).await;
     }
+    child.wait().await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -693,6 +742,16 @@ mod tests {
         assert!(!make_default(&card, "usb", SWITCH_WAIT, SWITCH_RETRY).await);
         assert_eq!(*card.activations.lock().unwrap(), 51);
         assert_eq!(*card.default.lock().unwrap(), "analog");
+    }
+
+    #[test]
+    fn events_that_change_the_state() {
+        assert!(relevant_event("Event 'change' on sink #56"));
+        assert!(relevant_event("Event 'new' on card #48"));
+        assert!(relevant_event("Event 'change' on server #-1"));
+        assert!(!relevant_event("Event 'new' on sink-input #120"));
+        assert!(!relevant_event("Event 'change' on source #57"));
+        assert!(!relevant_event("Event 'remove' on client #95"));
     }
 
     /// The living-room box's Intel HDA card (pactl 17 against PipeWire), analog on, the TV on

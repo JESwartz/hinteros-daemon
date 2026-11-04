@@ -188,14 +188,19 @@ impl Jobs {
             .or(self.foreign.as_deref())
     }
 
+    /// `job_busy {job_id}`. A foreign job gets no data: `jobs.get` and `jobs.list` do not show
+    /// it, so a client that followed its id would only get `not_found`.
     pub fn busy_error(&self) -> Option<ErrorObject> {
-        self.busy().map(|id| {
-            ErrorObject::with_data(
+        const MSG: &str = "another job is running";
+        match (&self.active, &self.foreign) {
+            (Some(a), _) => Some(ErrorObject::with_data(
                 ErrorCode::JobBusy,
-                "another job is running",
-                json!({ "job_id": id }),
-            )
-        })
+                MSG,
+                json!({ "job_id": a.id }),
+            )),
+            (None, Some(_)) => Some(ErrorObject::new(ErrorCode::JobBusy, MSG)),
+            (None, None) => None,
+        }
     }
 
     /// Write a new job's directory and make it the active job (the caller starts the unit).
@@ -476,13 +481,20 @@ impl Jobs {
     }
 }
 
+/// A stage of a later version's job (after a rollback) is left out of a [`Job`] (`stage` is
+/// optional; the schema has no `unknown`). `job_progress` needs a stage, so it still says
+/// `unknown` there.
+fn known(stage: Option<Stage>) -> Option<Stage> {
+    stage.filter(|s| *s != Stage::Unknown)
+}
+
 fn running(a: &Active) -> Job {
     Job {
         job_id: a.id.clone(),
         kind: a.kind,
         uid: a.uid,
         state: JobState::Running,
-        stage: a.stage,
+        stage: known(a.stage),
         created_at: a.created_at,
         finished_at: None,
         error: None,
@@ -509,7 +521,7 @@ fn finished_job(
         kind,
         uid,
         state: status.state,
-        stage: status.stage,
+        stage: known(status.stage),
         created_at,
         finished_at: Some(status.finished_at),
         error: status.error.clone(),
@@ -782,7 +794,8 @@ mod tests {
         let mut jobs = Jobs::load(paths(d.path()));
         assert_eq!(jobs.busy(), Some("0123456789abcdef"));
         assert!(jobs.poll().1.is_none());
-        // Its status, with a result and a stage this binary does not know: shown, never replaced.
+        // Its status, with a result and a stage this binary does not know: shown (without them),
+        // never replaced.
         drop(lock);
         let status = json!({"state": "succeeded", "stage": "later_stage", "error": null,
             "result": {"later": true}, "session_restart_required": false, "finished_at": 7,
@@ -790,7 +803,7 @@ mod tests {
         fs::write(jd.join(job::STATUS), status.to_string()).unwrap();
         let fin = jobs.poll().1.unwrap();
         assert_eq!(fin.job.state, JobState::Succeeded);
-        assert_eq!(fin.job.stage, Some(Stage::Unknown));
+        assert_eq!(fin.job.stage, None);
         assert_eq!(fin.job.result, None);
         assert!(jobs.busy().is_none());
         let on_disk: Value =
@@ -816,6 +829,10 @@ mod tests {
         assert_eq!(jobs.busy(), Some("2123456789abcdef"));
         assert!(jobs.create(&spec(d.path(), "3123456789abcdef")).is_err());
         assert!(jobs.get("2123456789abcdef").is_none());
+        // `job_busy` without a `job_id` that `jobs.get` would not know.
+        let e = jobs.busy_error().unwrap();
+        assert_eq!(e.kind(), Some(ErrorCode::JobBusy));
+        assert_eq!(e.data, None);
         assert!(jobs.poll().1.is_none());
         assert_eq!(jobs.busy(), Some("2123456789abcdef"));
         // It ends: the box is free again. (A process another test is starting can hold a copy of

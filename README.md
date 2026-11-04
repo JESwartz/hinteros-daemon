@@ -870,9 +870,12 @@ trust.
   (systemd `StartUnit` over D-Bus), which runs `hinteros-system job <id>`; a switch that
   restarts the service doesn't touch it, and a restarted service re-attaches to it. After a
   rollback an older service reads a later version's job leniently (only id, kind, uid, time and
-  subject of the spec; unknown fields, kinds, stages and results fall back) and never overwrites
-  a `status.json` it cannot read; a job whose spec it cannot read at all still keeps the box
-  `job_busy` while its process holds the lock. The job reads its own spec strictly. The job
+  subject of the spec; unknown fields, kinds, stages and results fall back: an unknown kind is
+  `unknown`, an unknown stage is left out of `jobs.list`/`jobs.get` but is `unknown` in
+  `job_progress`, whose `stage` is required) and never overwrites a `status.json` it cannot read;
+  a job whose spec it cannot read at all still keeps the box `job_busy` (without `data.job_id`:
+  `jobs.get` does not know it) while its process holds the lock. The job reads its own spec
+  strictly. The job
   reports through `progress.ndjson` (stages; nix `internal-json` turned into paths, bytes,
   builds, the derivation building and a percent; see "Job progress" below) and `status.json`;
   the service turns them into events (at most 4/s, and a heartbeat at least every 2 s) and

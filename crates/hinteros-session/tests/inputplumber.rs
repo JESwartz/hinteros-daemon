@@ -491,8 +491,10 @@ async fn inputplumber_modes_nav_and_home() {
     fake.add_device().await;
     ready(&fake, 1, 2).await;
 
-    // InputPlumber restarts and forgets everything: the daemon sets it up again.
+    // InputPlumber restarts and forgets everything: the daemon sets it up again. The A press
+    // from the PASS part was never released: the daemon lets go of it.
     drop(fake);
+    assert_eq!(nav(&mut c).await, ("accept".into(), "release".into()));
     let mut fake = Fake::start(&bus.address).await;
     ready(&fake, 0, 2).await;
     fake.add_device().await;
@@ -1362,4 +1364,175 @@ async fn pointer_settings_reload_the_loaded_profile() {
         "the profile from before ours"
     );
     assert_eq!(fake.profile(), "Default");
+}
+
+/// Settings for a test that runs the InputPlumber task on its own.
+fn task_settings(
+    bus: &Bus,
+    initial: hinteros_session::input::InterceptMode,
+) -> hinteros_session::input::inputplumber::Settings {
+    use hinteros_session::input::LabelSwap;
+    use hinteros_session::input::inputplumber::{PointerProfile, Settings};
+    Settings {
+        bus: Some(bus.address.clone()),
+        initial,
+        swap: LabelSwap::Off,
+        profile: PointerProfile {
+            speed_pps: 600,
+            curve: 2.5,
+            activity_deadzone: 0.1,
+        },
+        call_timeout: std::time::Duration::from_secs(5),
+        watchdog: std::time::Duration::from_secs(600),
+    }
+}
+
+/// The next input the task forwards (none within a moment: `None`).
+async fn next_input(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<hinteros_session::input::RawInput>,
+    within: std::time::Duration,
+) -> Option<(String, String, f64)> {
+    tokio::time::timeout(within, events.recv())
+        .await
+        .ok()
+        .flatten()
+        .map(|i| (i.source, i.event, i.value))
+}
+
+/// Anyone on the system bus can send an `InputEvent` signal. Only InputPlumber's count: a
+/// forged one, on InputPlumber's own target path, is not input.
+#[tokio::test(flavor = "multi_thread")]
+async fn input_from_others_on_the_bus_is_ignored() {
+    use hinteros_session::input::InterceptMode;
+    use hinteros_session::input::inputplumber;
+    use std::time::Duration;
+
+    let Some(bus) = Bus::start() else { return };
+    let fake = Fake::start(&bus.address).await;
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let _input = inputplumber::spawn(task_settings(&bus, InterceptMode::All), tx);
+    ready(&fake, 0, 2).await;
+
+    let stranger = zbus::connection::Builder::address(bus.address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    for event in ["ui_accept", "ui_guide"] {
+        stranger
+            .emit_signal(
+                None::<BusName<'_>>,
+                TARGET,
+                "org.shadowblip.Input.DBusDevice",
+                "InputEvent",
+                &(event, 1.0),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        next_input(&mut events, Duration::from_millis(300)).await,
+        None
+    );
+    // InputPlumber's own still comes through.
+    fake.press("ui_back", 1.0).await;
+    assert_eq!(
+        next_input(&mut events, Duration::from_secs(5)).await,
+        Some((TARGET.into(), "ui_back".into(), 1.0))
+    );
+}
+
+/// A signal whose arguments do not parse is skipped: it used to end the integration for the
+/// rest of the session (no Home, no modes set any more).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_signal_does_not_end_the_integration() {
+    use hinteros_session::input::InterceptMode;
+    use hinteros_session::input::inputplumber;
+    use std::time::Duration;
+
+    let Some(bus) = Bus::start() else { return };
+    let mut fake = Fake::start(&bus.address).await;
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let _input = inputplumber::spawn(task_settings(&bus, InterceptMode::All), tx);
+    ready(&fake, 0, 2).await;
+
+    for member in ["InterfacesAdded", "InterfacesRemoved"] {
+        fake.conn
+            .emit_signal(
+                None::<BusName<'_>>,
+                ROOT,
+                "org.freedesktop.DBus.ObjectManager",
+                member,
+                &("not what it should be",),
+            )
+            .await
+            .unwrap();
+    }
+    fake.press("ui_accept", 1.0).await;
+    assert_eq!(
+        next_input(&mut events, Duration::from_secs(5)).await,
+        Some((TARGET.into(), "ui_accept".into(), 1.0))
+    );
+    // Pads that come later are still set up.
+    fake.add_device().await;
+    ready(&fake, 1, 2).await;
+}
+
+/// A long Guide press while Steam is in front, but focus moved to the launcher before the
+/// pad's worker got to the tap (the game quit): the routing is ALL and already applied. The
+/// stale tap must not put the pad in PASS (where its input goes to the virtual pad, which apps
+/// can read) until the next watchdog check.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guide_tap_after_the_routing_changed_is_dropped() {
+    use hinteros_session::input::inputplumber;
+    use hinteros_session::input::{InputControl, InterceptMode};
+
+    let Some(bus) = Bus::start() else { return };
+    let fake = Fake::start(&bus.address).await;
+    let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+    let mut input = inputplumber::spawn(task_settings(&bus, InterceptMode::Pass), tx);
+    ready(&fake, 0, 1).await;
+    input.set_mode(InterceptMode::All);
+    ready(&fake, 0, 2).await;
+    input.guide_tap(TARGET, InterceptMode::Pass);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert_eq!(fake.mode(0), 2, "the stale tap left the pad in PASS");
+    assert!(fake.calls.take().is_empty(), "a Guide tap was sent");
+}
+
+/// A pad that goes away mid-hold (a flat battery) sends no release: the task lets go of what
+/// it held, or the session would repeat the direction until another pad pressed one. What
+/// another pad holds stays held.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pad_that_goes_away_lets_go_of_what_it_held() {
+    use hinteros_session::input::InterceptMode;
+    use hinteros_session::input::inputplumber;
+    use std::time::Duration;
+
+    const TARGET2: &str = "/org/shadowblip/InputPlumber/devices/target/dbus1";
+    let Some(bus) = Bus::start() else { return };
+    let mut fake = Fake::start(&bus.address).await;
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let _input = inputplumber::spawn(task_settings(&bus, InterceptMode::All), tx);
+    ready(&fake, 0, 2).await;
+    fake.add_pad("Second Gamepad", TARGET2).await;
+    ready(&fake, 1, 2).await;
+
+    fake.press_on(TARGET2, "ui_up", 1.0).await;
+    fake.press("ui_down", 1.0).await;
+    for (target, event) in [(TARGET2, "ui_up"), (TARGET, "ui_down")] {
+        assert_eq!(
+            next_input(&mut events, Duration::from_secs(5)).await,
+            Some((target.into(), event.into(), 1.0))
+        );
+    }
+    fake.remove_device(0).await;
+    assert_eq!(
+        next_input(&mut events, Duration::from_secs(5)).await,
+        Some((TARGET.into(), "ui_down".into(), 0.0))
+    );
+    assert_eq!(
+        next_input(&mut events, Duration::from_millis(300)).await,
+        None
+    );
 }

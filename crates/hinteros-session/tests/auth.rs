@@ -137,7 +137,7 @@ echo "$user $cookie" >> {log}
 printf 'PAM_TEXT_INFO Checking\\tnow\n'
 printf 'PAM_PROMPT_ECHO_OFF Password: \n'
 read pw
-if [ "$pw" = "s3cret" ]; then echo SUCCESS; else echo 'PAM_ERROR_MSG Authentication failure'; echo FAILURE; fi"#,
+if [ "$pw" = "s3cret" ]; then echo SUCCESS; elif [ "$pw" = "garble" ]; then echo HUH; else echo 'PAM_ERROR_MSG Authentication failure'; echo FAILURE; fi"#,
                     log = log.display()
                 ),
             );
@@ -293,11 +293,20 @@ if [ "$pw" = "s3cret" ]; then echo SUCCESS; else echo 'PAM_ERROR_MSG Authenticat
         "cancelled"
     );
 
-    // 4. Three wrong passwords: the request fails.
+    // 4. Three wrong passwords: the request fails. A helper that ends without a verdict
+    // after it got the password counts as one.
     let cookie = "1-6f1c0e2a9b7d4c58-4-3b2c3d4e5f607182";
     let task = begin(&polkit_conn, &agent, cookie);
     event_named(&mut launcher, "authentication_requested").await;
-    for left in [2, 1, 0] {
+    let e = call(
+        &mut launcher,
+        "auth.respond",
+        json!({"cookie": cookie, "password": "garble"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["code"], ErrorCode::Unavailable.code());
+    for left in [1, 0] {
         let r = call(
             &mut launcher,
             "auth.respond",

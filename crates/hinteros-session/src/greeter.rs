@@ -32,22 +32,29 @@ pub const METHODS: &[&str] = &[
     GreeterCreate::NAME,
 ];
 
-/// The service's `profiles-public.json` (only what the greeter reads).
+/// The `profiles-public.json` version this reads. A newer file is read as far as this
+/// version knows it.
+const PUBLIC_VERSION: u32 = 1;
+
+/// The service's `profiles-public.json` (only what the greeter reads; a copy of
+/// `hinteros-system`'s `public::PublicView`). Tolerant: unknown fields are ignored, and a
+/// field or profile that does not parse is left out (logged), so a change on the service's
+/// side never empties the picker.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PublicView {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_list")]
     pub profiles: Vec<PublicProfile>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub guest: PublicGuest,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub first_boot: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub spare: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub last_used: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub next: Option<Next>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub appearance: Option<Appearance>,
 }
 
@@ -56,24 +63,33 @@ pub struct PublicProfile {
     pub id: String,
     pub user: String,
     pub name: String,
+    #[serde(default, deserialize_with = "lenient")]
     pub color: String,
+    /// Not known: locked (the picker asks for the PIN; PAM decides anyway).
+    #[serde(default = "yes")]
     pub locked: bool,
-    pub admin: bool,
     #[serde(default)]
+    pub admin: bool,
+    #[serde(default, deserialize_with = "lenient")]
     pub locked_until: Option<i64>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PublicGuest {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub user: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Next {
     pub target: String,
+    #[serde(default)]
     pub fast: bool,
     pub expires: i64,
 }
@@ -85,12 +101,57 @@ pub struct Appearance {
     pub reduce_motion: bool,
 }
 
+/// A value that does not parse is left at its default, not the whole file.
+fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or_else(|e| {
+        warn!("profiles-public.json: a field is ignored: {e}");
+        T::default()
+    }))
+}
+
+/// A list whose entries that do not parse are left out.
+fn lenient_list<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let Value::Array(items) = Value::deserialize(d)? else {
+        warn!("profiles-public.json: a list is not a list; ignored");
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| {
+            serde_json::from_value(item)
+                .inspect_err(|e| warn!("profiles-public.json: an entry is ignored: {e}"))
+                .ok()
+        })
+        .collect())
+}
+
 impl PublicView {
+    /// Read the file. Missing: nothing to show yet (the service writes it when it starts).
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(e) => {
+                warn!(path = %path.display(), "cannot read the public profile list: {e}");
+                return Self::default();
+            }
+        };
+        if let Err(e) = hinteros_api::common::check_version(path, &bytes, PUBLIC_VERSION) {
+            warn!("{e}; reading the fields this version knows");
+        }
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            warn!(path = %path.display(), "cannot parse the public profile list: {e}");
+            Self::default()
+        })
     }
 
     /// The user of a profile id or `guest`.
@@ -359,6 +420,8 @@ impl Greeter {
         params: Option<Value>,
         client: Option<&str>,
     ) -> Result<Value, ErrorObject> {
+        // The name the client gave in its handshake: not a security boundary (see `auth`);
+        // greetd and PAM check the PIN.
         if client != Some(hinteros_api::session::LAUNCHER_CLIENT_NAME) {
             return Err(ErrorObject::new(
                 ErrorCode::NotAuthorized,
@@ -401,14 +464,18 @@ impl Greeter {
                             reboot: false,
                         });
                     };
-                    let resp = c.request(&Request::PostAuthMessageResponse {
-                        response: Some(pin.to_string()),
-                    })?;
-                    let outcome = advance(c, resp, cmd)?;
-                    if outcome != Outcome::Prompt {
+                    let outcome = c
+                        .request(&Request::PostAuthMessageResponse {
+                            response: Some(pin),
+                        })
+                        .and_then(|resp| advance(c, resp, cmd));
+                    // An error (a timeout, a short read) leaves the conversation out of step
+                    // with greetd: drop it too. greetd cancels a session whose connection
+                    // closes.
+                    if !matches!(outcome, Ok(Outcome::Prompt)) {
                         *conn = None;
                     }
-                    Ok(outcome)
+                    outcome
                 })
                 .await?;
                 encode_result::<GreeterPin>(ProfileEmpty {})
@@ -565,5 +632,40 @@ mod tests {
         assert_eq!(first.fast_path(0).as_deref(), Some("hinteros-p1"));
         assert_eq!(v.user_of("guest").as_deref(), Some("hinteros-guest"));
         assert_eq!(PublicView::default().fast_path(0), None);
+    }
+
+    #[test]
+    fn public_view_reads_what_it_can() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles-public.json");
+        assert!(PublicView::load(&path).profiles.is_empty(), "missing");
+        // A newer service: unknown fields, a profile this version cannot read, fields of
+        // another type.
+        std::fs::write(
+            &path,
+            r#"{"version":2,"profiles":[
+                 {"id":"p1","user":"hinteros-p1","name":"J","color":null,"admin":true,"kind":"x"},
+                 {"id":"p2","name":"no user"},
+                 {"id":"p3","user":"hinteros-p3","name":"S","color":"red","locked":false,"admin":false,"locked_until":"soon"}],
+               "guest":{"enabled":true,"user":"hinteros-guest"},"first_boot":"no","spare":null,
+               "last_used":"p1","next":{"target":"p3","fast":true,"expires":"later"},
+               "appearance":{"text_scale":1.5,"high_contrast":true,"reduce_motion":false},
+               "new":{"a":1}}"#,
+        )
+        .unwrap();
+        let v = PublicView::load(&path);
+        let ids: Vec<_> = v.profiles.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["p1", "p3"]);
+        assert_eq!(v.profiles[0].color, "");
+        assert!(v.profiles[0].locked, "not known: locked");
+        assert!(!v.profiles[1].locked);
+        assert_eq!(v.profiles[1].locked_until, None);
+        assert!(!v.first_boot);
+        assert!(v.next.is_none());
+        assert_eq!(v.user_of("guest").as_deref(), Some("hinteros-guest"));
+        assert_eq!(v.appearance.map(|a| a.text_scale), Some(1.5));
+        // Not JSON at all: nothing.
+        std::fs::write(&path, "{").unwrap();
+        assert!(PublicView::load(&path).profiles.is_empty());
     }
 }

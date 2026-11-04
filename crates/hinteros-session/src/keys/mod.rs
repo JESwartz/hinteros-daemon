@@ -275,6 +275,9 @@ pub enum KeyOp {
     /// One character through the input method.
     Ime(String),
     ImeAction(ImeAction),
+    /// Turn Caps Lock off if the virtual keyboard turned it on (a bound `caps_lock` key), so
+    /// the text taps after it make the case they mean.
+    CapsLockOff,
 }
 
 impl KeyOp {
@@ -317,6 +320,9 @@ pub fn plan_text(text: &str, caps: KeyCaps) -> (Vec<KeyOp>, Vec<String>) {
             _ if caps.ime && !c.is_control() => ops.push(KeyOp::Ime(c.to_string())),
             _ => untypeable.push(c.to_string()),
         }
+    }
+    if ops.iter().any(|op| matches!(op, KeyOp::Tap { .. })) {
+        ops.insert(0, KeyOp::CapsLockOff);
     }
     (ops, untypeable)
 }
@@ -516,6 +522,7 @@ mod tests {
         assert_eq!(
             ops,
             [
+                KeyOp::CapsLockOff,
                 tap(25, &[SHIFT]),
                 tap(3, &[SHIFT]),
                 tap(31, &[]),
@@ -535,6 +542,7 @@ mod tests {
         assert_eq!(
             ops,
             [
+                KeyOp::CapsLockOff,
                 KeyOp::Ime("é".into()),
                 KeyOp::Ime("☃".into()),
                 tap(45, &[]),
@@ -548,7 +556,7 @@ mod tests {
             ime: false,
         };
         let (ops, bad) = plan_text("café\u{7}", keys_only);
-        assert_eq!(ops.len(), 3);
+        assert_eq!(ops.len(), 4);
         assert_eq!(bad, ["é", "\u{7}"]);
 
         // Without uinput, everything goes through the input method.

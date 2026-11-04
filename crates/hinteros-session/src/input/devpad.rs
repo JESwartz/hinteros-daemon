@@ -256,11 +256,16 @@ impl EventSource for Evdev {
     }
 }
 
+/// InputPlumber's virtual devices, and ours ([`crate::keys::uinput::DEVICE_NAME`]).
+fn virtual_device(name: &str) -> bool {
+    name.contains("InputPlumber") || name.to_ascii_lowercase().contains("hinteros")
+}
+
 /// Whether the device looks like a gamepad: it has A and a stick or d-pad. Skips InputPlumber's
 /// and our own virtual devices, which would double every input.
 fn is_gamepad(dev: &evdev::Device) -> bool {
     let name = dev.name().unwrap_or("");
-    if name.contains("InputPlumber") || name.contains("hinteros") {
+    if virtual_device(name) {
         return false;
     }
     let keys = dev
@@ -354,6 +359,13 @@ mod tests {
             (AbsoluteAxisCode::ABS_Z.0, (0, 1023)),
             (AbsoluteAxisCode::ABS_RZ.0, (0, 1023)),
         ]))
+    }
+
+    #[test]
+    fn skips_virtual_devices() {
+        assert!(virtual_device(crate::keys::uinput::DEVICE_NAME));
+        assert!(virtual_device("InputPlumber Gamepad"));
+        assert!(!virtual_device("Microsoft X-Box 360 pad"));
     }
 
     #[test]

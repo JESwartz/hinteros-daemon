@@ -139,9 +139,10 @@ pub enum Msg {
         focus: FieldFocus,
         clicked: bool,
     },
-    /// A text field focus reporter's connection ended (after its last [`Msg::TextFocus`]): its
-    /// app is no longer remembered.
-    ReporterGone {
+    /// A text field reporter's connection closed: its fields no longer have focus. By
+    /// `reporter`, not by pid (its process has usually exited, so it is in no app's tree any
+    /// more).
+    TextFocusClosed {
         reporter: u64,
     },
 }
@@ -512,6 +513,9 @@ pub struct Shell {
     /// The text fields with focus in each keyboard-profile app, per reporter (the Firefox
     /// extension for the page, Firefox's chrome code for the address bar). No entry: none.
     text_fields: BTreeMap<String, BTreeMap<u64, FieldFocus>>,
+    /// The app each text field reporter (with a pid) runs in, looked up once per connection
+    /// (`None`: in no keyboard-profile app): finding it scans all of `/proc`.
+    reporter_apps: BTreeMap<u64, Option<String>>,
     /// Stick chatter filter for directions.
     debounce: Debounce,
     /// The right-stick pointer: in use or not, hidden by us or not.
@@ -539,9 +543,6 @@ pub struct Shell {
     switching: bool,
     /// Launches of apps that are still closing.
     waiting: Vec<WaitingLaunch>,
-    /// The app of each text field focus reporter ([`Msg::TextFocus`]) that had one, until its
-    /// connection ends ([`Msg::ReporterGone`]) or the app exits.
-    reporters: BTreeMap<u64, String>,
     /// The Steam library watcher's last scan ([`crate::steam::watch`]).
     games: GameCache,
 }
@@ -561,6 +562,7 @@ impl Shell {
         let pointer = PointerState::new();
         Self {
             text_fields: BTreeMap::new(),
+            reporter_apps: BTreeMap::new(),
             debounce,
             pointer,
             pointer_profile: false,
@@ -575,7 +577,6 @@ impl Shell {
             switching: false,
             waiting: Vec::new(),
             games: GameCache::default(),
-            reporters: BTreeMap::new(),
             cfg,
             focus,
             input,
@@ -729,9 +730,7 @@ impl Shell {
                 focus,
                 clicked,
             } => self.text_focus(pid, reporter, focus, clicked, now),
-            Msg::ReporterGone { reporter } => {
-                self.reporters.remove(&reporter);
-            }
+            Msg::TextFocusClosed { reporter } => self.text_focus_closed(reporter, now),
         }
         self.retry_launches(now);
     }
@@ -2161,34 +2160,17 @@ impl Shell {
         clicked: bool,
         now: Instant,
     ) {
-        let keyboard_apps: Vec<(String, Option<u32>)> = self
-            .apps
-            .values()
-            .filter(|a| a.keymap.is_some())
-            .map(|a| (a.info.id.clone(), a.info.pid))
-            .collect();
         let owner = match pid {
             None => self
                 .focused
                 .clone()
-                .filter(|id| keyboard_apps.iter().any(|(a, _)| a == id)),
-            // A reporter's process stays the same: its app is looked up once (a /proc walk),
-            // and stays known after the process is gone (its last "none" on disconnect).
-            Some(pid) => match self.reporters.get(&reporter) {
-                Some(id) if self.apps.contains_key(id) => Some(id.clone()),
-                _ => {
-                    let id = keyboard_apps
-                        .iter()
-                        .find(|(_, root)| {
-                            root.is_some_and(|root| {
-                                root == pid || self.procs.descendants(root).contains(&pid)
-                            })
-                        })
-                        .map(|(id, _)| id.clone());
-                    if let Some(id) = &id {
-                        self.reporters.insert(reporter, id.clone());
-                    }
-                    id
+                .filter(|id| self.apps.get(id).is_some_and(|a| a.keymap.is_some())),
+            Some(pid) => match self.reporter_apps.get(&reporter) {
+                Some(app) => app.clone(),
+                None => {
+                    let app = self.reporter_app(pid);
+                    self.reporter_apps.insert(reporter, app.clone());
+                    app
                 }
             },
         };
@@ -2200,6 +2182,48 @@ impl Shell {
             );
             return;
         };
+        self.field_focus(&id, reporter, focus, clicked, now);
+    }
+
+    /// The keyboard-profile app whose process tree `pid` is in (a scan of `/proc`).
+    fn reporter_app(&mut self, pid: u32) -> Option<String> {
+        let keyboard_apps: Vec<(String, Option<u32>)> = self
+            .apps
+            .values()
+            .filter(|a| a.keymap.is_some())
+            .map(|a| (a.info.id.clone(), a.info.pid))
+            .collect();
+        keyboard_apps
+            .into_iter()
+            .find(|(_, root)| {
+                root.is_some_and(|root| root == pid || self.procs.descendants(root).contains(&pid))
+            })
+            .map(|(id, _)| id)
+    }
+
+    /// A reporter's connection closed: whatever field it reported no longer has focus.
+    fn text_focus_closed(&mut self, reporter: u64, now: Instant) {
+        self.reporter_apps.remove(&reporter);
+        let app = self
+            .text_fields
+            .iter()
+            .find(|(_, fields)| fields.contains_key(&reporter))
+            .map(|(id, _)| id.clone());
+        if let Some(id) = app {
+            self.field_focus(&id, reporter, FieldFocus::None, false, now);
+        }
+    }
+
+    /// `reporter` in the app `id` reported `focus` (see [`Self::text_focus`]).
+    fn field_focus(
+        &mut self,
+        id: &str,
+        reporter: u64,
+        focus: FieldFocus,
+        clicked: bool,
+        now: Instant,
+    ) {
+        let id = id.to_string();
         let fields = self.text_fields.entry(id.clone()).or_default();
         if focus.editable() {
             fields.insert(reporter, focus);
@@ -2662,6 +2686,8 @@ impl Shell {
     }
 
     fn input(&mut self, input: RawInput, now: Instant) {
+        // Held-back direction releases whose time is up come first (a late tick).
+        self.release_due(now);
         if self.capture_input(&input, now) {
             return;
         }
@@ -2684,13 +2710,41 @@ impl Shell {
             }
             Intent::Nav(action) => self.remap(&input, action),
         };
-        if self
-            .debounce
-            .drop_event(action, &input.source, pressed, now)
-        {
-            debug!(?action, pressed, "stick chatter dropped");
-            return;
+        // Stick chatter ([`Debounce`]): a direction's release waits; a re-press in that time
+        // drops both, and the hold goes on.
+        if pressed {
+            if let Some(repeat) = self.debounce.chatter(action, &input.source) {
+                debug!(?action, "stick chatter dropped");
+                if let Some(next) = repeat
+                    && self.route() != Route::App
+                {
+                    self.repeat.resume(action, &input.source, next, now);
+                }
+                return;
+            }
+            for (action, release) in self.debounce.take_before(action, &input.source) {
+                self.nav_input(&release, action, now);
+            }
+        } else {
+            // The repeat stops at once, whether or not the release waits.
+            let repeat = self.repeat.stop(action, &input.source);
+            if self.debounce.hold_release(action, &input, now, repeat) {
+                return;
+            }
         }
+        self.nav_input(&input, action, now);
+    }
+
+    /// Pass on the held-back direction releases whose time is up.
+    fn release_due(&mut self, now: Instant) {
+        for (action, release) in self.debounce.due(now) {
+            self.nav_input(&release, action, now);
+        }
+    }
+
+    /// A navigation press or release (`action`, after the profile's remapping).
+    fn nav_input(&mut self, input: &RawInput, action: NavAction, now: Instant) {
+        let pressed = input.pressed();
         if pressed {
             let guide_held = self
                 .guide
@@ -2894,7 +2948,8 @@ impl Shell {
     /// An app ended (`closed` instead of `reason` if apps.close asked it to).
     fn exited(&mut self, id: &str, reason: ExitReason, exit_code: Option<i32>) {
         self.text_fields.remove(id);
-        self.reporters.retain(|_, app| app != id);
+        self.reporter_apps
+            .retain(|_, app| app.as_deref() != Some(id));
         let Some(app) = self.apps.remove(id) else {
             return;
         };
@@ -3149,6 +3204,7 @@ impl Shell {
             })
             .flatten()
             .chain(self.repeat.deadline())
+            .chain(self.debounce.deadline())
             .chain(self.focus_lost_at)
             .chain(self.focus_retry_at)
             .chain(self.order.at)
@@ -3187,6 +3243,7 @@ impl Shell {
                 self.set_osk(false, true);
             }
         }
+        self.release_due(now);
         if let Some(action) = self.repeat.tick(now) {
             match self.route() {
                 route @ (Route::Launcher | Route::Osk) => self.nav(action, NavPhase::Repeat, route),
@@ -3480,6 +3537,8 @@ mod tests {
         steam_clients: Vec<u32>,
         /// Reapers left on an X display (by display).
         display_users: BTreeMap<String, Vec<u32>>,
+        /// How often a process tree was listed (a scan of /proc on a real box).
+        scans: u32,
     }
 
     struct MockProcs {
@@ -3491,13 +3550,9 @@ mod tests {
             self.log.push(Call::Signal(pid, sig));
         }
         fn descendants(&mut self, pid: u32) -> Vec<u32> {
-            self.table
-                .lock()
-                .unwrap()
-                .trees
-                .get(&pid)
-                .cloned()
-                .unwrap_or_default()
+            let mut table = self.table.lock().unwrap();
+            table.scans += 1;
+            table.trees.get(&pid).cloned().unwrap_or_default()
         }
         fn steam_reapers(&mut self, app_id: u32) -> Vec<u32> {
             let t = self.table.lock().unwrap();
@@ -3681,9 +3736,17 @@ mod tests {
         }
 
         fn input(&mut self, event: &str, value: f64) {
+            self.input_from(
+                "/org/shadowblip/InputPlumber/devices/target/dbus0",
+                event,
+                value,
+            );
+        }
+
+        fn input_from(&mut self, source: &str, event: &str, value: f64) {
             self.shell.handle(
                 Msg::Input(RawInput {
-                    source: "/org/shadowblip/InputPlumber/devices/target/dbus0".into(),
+                    source: source.into(),
                     event: event.into(),
                     value,
                 }),
@@ -5756,6 +5819,8 @@ mod tests {
         t.input("ui_right", 1.0);
         t.advance(MS(400));
         t.input("ui_right", 0.0);
+        // The release waits out the stick chatter window.
+        t.advance(MS(40));
         let to_osk = |action: &str, phase: &str| {
             (
                 EventName::InputNav,
@@ -6437,6 +6502,7 @@ mod tests {
         assert_eq!(
             t.log.take(),
             [Call::Keys(vec![
+                KeyOp::CapsLockOff,
                 tap("shift+h"),
                 tap("i"),
                 tap("shift+1"),
@@ -6537,6 +6603,8 @@ mod tests {
             let want = if i % 2 == 0 { "left" } else { "right" };
             assert_eq!(k, &super::tests::keys(&[want]));
         }
+        // Only the last release waits (the chatter window); then nothing is pending.
+        t.advance(MS(40));
         assert_eq!(t.shell.deadline(), None, "no repeat pending");
         t.advance(Duration::from_secs(3));
         assert!(t.log.take().is_empty(), "nothing after the last release");
@@ -6546,6 +6614,8 @@ mod tests {
         t.events();
         t.advance(MS(100));
         sweep(&mut t, 10);
+        // The last release waits out the chatter window.
+        t.advance(MS(40));
         let nav: Vec<(String, String)> = t
             .events()
             .into_iter()
@@ -6598,14 +6668,119 @@ mod tests {
         let mut t = firefox_with_host(|_| {});
         t.text_focus(555, FieldFocus::Password);
         assert!(t.shell.text_fields.contains_key("youtube"));
-        // The host exits and Firefox reaps it; then its connection ends with "none".
+        // The host exits and Firefox reaps it; then it reports "none": its app is still known.
         let root = t.shell.apps["youtube"].info.pid.unwrap();
         t.procs.lock().unwrap().trees.insert(root, vec![root + 1]);
         t.text_focus(555, FieldFocus::None);
         assert!(t.shell.text_fields.is_empty());
         // The app stays open; the host comes and goes many times: no entry is kept for it.
-        t.shell.handle(Msg::ReporterGone { reporter: 1 }, t.now);
-        assert!(t.shell.reporters.is_empty());
+        t.shell.handle(Msg::TextFocusClosed { reporter: 1 }, t.now);
+        assert!(t.shell.reporter_apps.is_empty());
+    }
+
+    #[test]
+    fn stick_chatter_does_not_end_a_held_direction() {
+        let mut t = T::new();
+        t.events();
+        // Held near the threshold: a short dip sends release + press 8 ms apart.
+        t.input("ui_down", 1.0);
+        t.advance(MS(450));
+        t.input("ui_down", 0.0);
+        t.advance(MS(8));
+        t.input("ui_down", 1.0);
+        t.advance(MS(300));
+        // Let go.
+        t.input("ui_down", 0.0);
+        t.advance(MS(500));
+        let phases: Vec<String> = t
+            .events()
+            .into_iter()
+            .filter(|(n, _)| *n == EventName::InputNav)
+            .map(|(_, p)| {
+                format!(
+                    "{} {}",
+                    p["action"].as_str().unwrap(),
+                    p["phase"].as_str().unwrap()
+                )
+            })
+            .collect();
+        // One press, repeats on through the dip (none after the real release), one release.
+        assert_eq!(phases.first().map(String::as_str), Some("down press"));
+        assert_eq!(phases.last().map(String::as_str), Some("down release"));
+        let repeats = phases.iter().filter(|p| *p == "down repeat").count();
+        assert!(repeats >= 3, "{phases:?}");
+        assert_eq!(phases.len(), repeats + 2, "{phases:?}");
+    }
+
+    #[test]
+    fn a_held_back_release_comes_before_another_pads_press() {
+        let mut t = T::new();
+        t.events();
+        let (p, q) = (
+            "/org/shadowblip/InputPlumber/devices/target/dbus0",
+            "/org/shadowblip/InputPlumber/devices/target/dbus1",
+        );
+        // Pad p lets go of Down; pad q presses Down 10 ms later, in p's chatter window.
+        t.input_from(p, "ui_down", 1.0);
+        t.advance(MS(100));
+        t.input_from(p, "ui_down", 0.0);
+        t.advance(MS(10));
+        t.input_from(q, "ui_down", 1.0);
+        t.advance(MS(100));
+        let phases: Vec<String> = t
+            .events()
+            .into_iter()
+            .filter(|(n, _)| *n == EventName::InputNav)
+            .map(|(_, p)| {
+                format!(
+                    "{} {}",
+                    p["action"].as_str().unwrap(),
+                    p["phase"].as_str().unwrap()
+                )
+            })
+            .collect();
+        // q still holds Down: its press comes last.
+        assert_eq!(phases, ["down press", "down release", "down press"]);
+        assert!(t.shell.held.contains(&NavAction::Down));
+    }
+
+    #[test]
+    fn a_reporter_that_died_is_cleared_by_its_connection() {
+        let mut t = firefox_with_host(auto_show);
+        let root = t.shell.apps["youtube"].info.pid.unwrap();
+        t.text_focus(555, FieldFocus::Password);
+        assert!(t.shell.osk_visible());
+        // The host crashed with the field focused; its process is gone before the shell hears
+        // that its connection closed, so it is in no app's tree any more.
+        t.procs.lock().unwrap().trees.insert(root, vec![root + 1]);
+        t.shell.handle(Msg::TextFocusClosed { reporter: 1 }, t.now);
+        assert!(t.shell.text_fields.is_empty());
+        assert!(!t.shell.field_focused());
+        assert!(!t.shell.password_field());
+        t.advance(OSK_AUTO_HIDE_DELAY);
+        assert!(!t.shell.osk_visible());
+        // Closing a reporter that never reported anything is harmless.
+        t.shell.handle(Msg::TextFocusClosed { reporter: 7 }, t.now);
+    }
+
+    #[test]
+    fn a_reporter_is_looked_up_once_per_connection() {
+        let mut t = firefox_with_host(auto_show);
+        t.procs.lock().unwrap().scans = 0;
+        for _ in 0..20 {
+            t.text_focus(555, FieldFocus::Text);
+            t.text_focus(555, FieldFocus::None);
+        }
+        assert_eq!(t.procs.lock().unwrap().scans, 1);
+        // One from outside every keyboard-profile app: also looked up once.
+        for _ in 0..20 {
+            t.text_focus_from(999, 2, FieldFocus::Text);
+        }
+        assert_eq!(t.procs.lock().unwrap().scans, 2);
+        // A new connection is looked up again.
+        t.shell.handle(Msg::TextFocusClosed { reporter: 1 }, t.now);
+        t.text_focus(555, FieldFocus::Text);
+        assert_eq!(t.procs.lock().unwrap().scans, 3);
     }
 
     #[test]

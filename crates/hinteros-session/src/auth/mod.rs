@@ -15,6 +15,12 @@
 //! Safety: only polkit (the owner of `org.freedesktop.PolicyKit1`) may call the agent; only
 //! the launcher may answer; passwords are never logged (`Debug` hides them), live in
 //! `Zeroizing` buffers and are wiped after use; every wait has a time limit.
+//!
+//! "Only the launcher" means the connection whose handshake names `hinteros-launcher`. That
+//! keeps the prompt away from other clients, but it is not a security boundary: any process
+//! of our uid that reaches `session.sock` can claim the name. The boundary is the socket
+//! itself (our uid only; sandboxed apps never see it). Steam and `sandbox = false` apps can
+//! reach it, and could as well read the launcher's memory.
 
 pub mod helper;
 
@@ -257,6 +263,13 @@ impl Auth {
             }
             Err(e) => {
                 warn!("{e}");
+                // The helper ran, so the password may have reached PAM: it counts as a try.
+                if !matches!(e, helper::HelperError::Start(..)) {
+                    let used = pending.tries.fetch_add(1, Ordering::SeqCst) + 1;
+                    if used >= max {
+                        self.finish(&cookie, AuthOutcome::Failed);
+                    }
+                }
                 return Err(ErrorObject::with_data(
                     ErrorCode::Unavailable,
                     format!("polkit cannot check the password: {e}"),

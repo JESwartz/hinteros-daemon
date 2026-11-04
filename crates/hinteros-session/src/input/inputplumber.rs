@@ -5,7 +5,8 @@
 //! InputPlumber forgets `ManageAllDevices`, the modes and loaded profiles when it restarts, so
 //! all are re-applied whenever its bus name gets a new owner, and applied to every composite
 //! device that appears later (one per pad). If there is no bus or no InputPlumber, this logs
-//! and waits; the rest of the daemon works without it.
+//! and waits; the rest of the daemon works without it. A bus connection that fails is made
+//! again (see [`spawn`]); a single bad message is skipped.
 //!
 //! The intercept mode is also what keeps controller input from sandboxed apps while HinterOS
 //! UI is in front (a PIN, a password): apps with the `gamepad` permission get `/dev/input`,
@@ -14,6 +15,12 @@
 //! either to the virtual pad or to D-Bus, never both, so nothing the launcher gets from a pad
 //! reaches an app. A new pad starts in `None` (all to the virtual pad), so its worker sets
 //! the mode before anything else.
+//!
+//! Input is taken only from InputPlumber itself: any process on the system bus can send an
+//! `InputEvent` signal (a media server's account, say), and a forged one would act like a pad
+//! press in the launcher. The match rule names InputPlumber as the sender (the bus enforces
+//! it), and each signal's sender is checked against the unique name that owns InputPlumber's
+//! bus name now (`NameOwnerChanged`).
 //!
 //! Every InputPlumber method and property read goes through polkit, so nothing here may cost a
 //! D-Bus round trip per input event: the signal loop forwards events at once, and the mapping
@@ -39,7 +46,7 @@
 //!   its Manager object is exported, so the first try can fail with `UnknownObject`. Once set
 //!   up, the same task checks every [`Settings::watchdog`] that `ManageAllDevices` is still on.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -51,7 +58,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use zbus::fdo::{DBusProxy, ObjectManagerProxy};
 use zbus::message::Type as MessageType;
-use zbus::names::BusName;
+use zbus::names::{BusName, OwnedUniqueName};
 use zbus::proxy::CacheProperties;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, Value};
 use zbus::{Connection, MatchRule, MessageStream, Proxy};
@@ -179,17 +186,50 @@ impl InputControl for InputPlumber {
     }
 }
 
-/// Start the InputPlumber task.
+/// The first wait before the integration connects again after it failed; doubles up to
+/// [`RECONNECT_MAX`].
+const RECONNECT_MIN: Duration = Duration::from_secs(1);
+const RECONNECT_MAX: Duration = Duration::from_secs(30);
+
+/// Start the InputPlumber task. If the integration fails (the bus connection broke), it
+/// connects again (1 s, doubling up to 30 s) and sets every pad up from scratch: without it
+/// nothing sets the intercept modes that keep the pads from apps while HinterOS UI is in front.
 pub fn spawn(settings: Settings, events: mpsc::UnboundedSender<RawInput>) -> InputPlumber {
     let (tx, rx) = watch::channel(Routing {
         mode: settings.initial,
         pointer: false,
         tuning: PointerTuning::default(),
     });
-    let (ctx, crx) = mpsc::unbounded_channel();
+    let (ctx, mut crx) = mpsc::unbounded_channel();
+    let settings = Arc::new(settings);
     tokio::spawn(async move {
-        if let Err(e) = run(settings, rx, crx, events).await {
-            warn!("InputPlumber integration stopped: {e:#}");
+        let mut retry = RECONNECT_MIN;
+        let mut held = Held::default();
+        let mut failures = 0u32;
+        loop {
+            let started = std::time::Instant::now();
+            let result = run(settings.clone(), rx.clone(), &mut crx, &events, &mut held).await;
+            let Err(e) = result else {
+                // Nobody takes input any more: the daemon is stopping.
+                return;
+            };
+            // The connection is gone, and with it what the pads held.
+            if !Held::send(held.release(|_| false), &events) || events.is_closed() {
+                return;
+            }
+            if started.elapsed() >= RECONNECT_MAX {
+                // It ran for a while: a new failure starts the backoff over.
+                retry = RECONNECT_MIN;
+                failures = 0;
+            }
+            if failures == 0 {
+                warn!("InputPlumber integration failed: {e:#}; connecting again");
+            } else {
+                debug!(failures, "InputPlumber integration failed: {e:#}");
+            }
+            failures += 1;
+            tokio::time::sleep(retry).await;
+            retry = (retry * 2).min(RECONNECT_MAX);
         }
     });
     InputPlumber {
@@ -215,6 +255,57 @@ enum Op {
 
 /// When a pad's last Guide press arrived (set by the signal loop, read by its worker).
 type GuideAt = Arc<std::sync::Mutex<Option<std::time::Instant>>>;
+
+/// What each D-Bus target holds down (pressed, not released yet). When its pad goes away
+/// (unplugged, a flat battery, InputPlumber gone) nothing releases it, and the session would
+/// repeat a held direction until another pad pressed one; so the task lets go of it.
+#[derive(Debug, Default)]
+struct Held(HashMap<String, BTreeSet<String>>);
+
+impl Held {
+    fn note(&mut self, input: &RawInput) {
+        if input.pressed() {
+            self.0
+                .entry(input.source.clone())
+                .or_default()
+                .insert(input.event.clone());
+        } else if let Some(events) = self.0.get_mut(&input.source) {
+            events.remove(&input.event);
+            if events.is_empty() {
+                self.0.remove(&input.source);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Releases for everything held by targets that `keep` does not keep, which are forgotten.
+    fn release(&mut self, keep: impl Fn(&str) -> bool) -> Vec<RawInput> {
+        let gone: Vec<String> = self.0.keys().filter(|s| !keep(s)).cloned().collect();
+        let mut out = Vec::new();
+        for source in gone {
+            for event in self.0.remove(&source).unwrap_or_default() {
+                out.push(RawInput {
+                    source: source.clone(),
+                    event,
+                    value: 0.0,
+                });
+            }
+        }
+        out.sort_by(|a, b| (&a.source, &a.event).cmp(&(&b.source, &b.event)));
+        out
+    }
+
+    /// Send the releases; `false` when nobody takes input any more.
+    fn send(releases: Vec<RawInput>, events: &mpsc::UnboundedSender<RawInput>) -> bool {
+        releases.into_iter().all(|r| {
+            debug!(source = %r.source, event = %r.event, "released: its pad is gone");
+            events.send(r).is_ok()
+        })
+    }
+}
 
 /// One composite device (pad): its worker and what the signal loop needs to know.
 struct Device {
@@ -244,19 +335,18 @@ struct Task {
     targets: Targets,
 }
 
+/// Connect and run until the connection fails (`Err`, connect again) or nobody takes input any
+/// more (`Ok`). A bad single message is skipped, not a failure.
 async fn run(
-    settings: Settings,
+    settings: Arc<Settings>,
     routing: watch::Receiver<Routing>,
-    mut commands: mpsc::UnboundedReceiver<Command>,
-    events: mpsc::UnboundedSender<RawInput>,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+    events: &mpsc::UnboundedSender<RawInput>,
+    held: &mut Held,
 ) -> Result<()> {
-    let conn = match connect(settings.bus.as_deref(), settings.call_timeout).await {
-        Ok(conn) => conn,
-        Err(e) => {
-            warn!("no D-Bus connection for InputPlumber ({e}); controller input is not managed");
-            return Ok(());
-        }
-    };
+    let conn = connect(settings.bus.as_deref(), settings.call_timeout)
+        .await
+        .context("no D-Bus connection for InputPlumber; controller input is not managed")?;
     let dbus = DBusProxy::new(&conn).await?;
     let mut owner_changes = dbus
         .receive_name_owner_changed_with_args(&[(0, SERVICE)])
@@ -269,8 +359,12 @@ async fn run(
         .await?;
     let mut added = objects.receive_interfaces_added().await?;
     let mut removed = objects.receive_interfaces_removed().await?;
+    // Only InputPlumber's own signals: anyone on the system bus may send an `InputEvent`, and
+    // a forged one would drive the launcher like a pad. The bus delivers only signals sent by
+    // the name's owner (`sender=`); each is checked against that owner's unique name too.
     let rule = MatchRule::builder()
         .msg_type(MessageType::Signal)
+        .sender(SERVICE)?
         .interface(DBUS_DEVICE_IFACE)?
         .member("InputEvent")?
         .path_namespace(ROOT)?
@@ -279,7 +373,7 @@ async fn run(
 
     let mut task = Task {
         conn,
-        settings: Arc::new(settings),
+        settings,
         routing,
         devices: HashMap::new(),
         targets: HashMap::new(),
@@ -296,12 +390,17 @@ async fn run(
     )));
     let mut generation = 0;
     let service = BusName::try_from(SERVICE)?;
-    match dbus.name_has_owner(service).await {
-        Ok(true) => {
+    // InputPlumber's unique name: the only sender whose input is taken.
+    let mut owner: Option<OwnedUniqueName> = None;
+    match dbus.get_name_owner(service).await {
+        Ok(name) => {
+            owner = Some(name);
             generation += 1;
             presence.send_replace(Some(generation));
         }
-        Ok(false) => info!("waiting for InputPlumber ({SERVICE}) to appear on D-Bus"),
+        Err(zbus::fdo::Error::NameHasNoOwner(_)) => {
+            info!("waiting for InputPlumber ({SERVICE}) to appear on D-Bus")
+        }
         Err(e) => warn!("asking D-Bus for InputPlumber: {e}; waiting for it to appear"),
     }
 
@@ -310,7 +409,20 @@ async fn run(
             // Input first: nothing else may hold it up.
             biased;
             Some(msg) = inputs.next() => {
-                let msg = msg?;
+                let msg = match msg {
+                    Ok(msg) => msg,
+                    // The connection is broken: connect again.
+                    Err(e @ zbus::Error::InputOutput(_)) => return Err(e.into()),
+                    Err(e) => {
+                        debug!("ignoring a bad message: {e}");
+                        continue;
+                    }
+                };
+                let sender = msg.header().sender().map(|s| s.as_str().to_owned());
+                if sender.is_none() || sender.as_deref() != owner.as_ref().map(|o| o.as_str()) {
+                    debug!(?sender, owner = ?owner.as_ref().map(|o| o.as_str()), "ignoring InputEvent not from InputPlumber");
+                    continue;
+                }
                 let source = msg.header().path().map(ToString::to_string).unwrap_or_default();
                 match msg.body().deserialize::<(String, f64)>() {
                     Ok((event, value)) => {
@@ -323,7 +435,9 @@ async fn run(
                         if event == "ui_guide" && value > 0.5 {
                             task.guide_pressed(&source).await;
                         }
-                        if events.send(RawInput { source, event, value }).is_err() {
+                        let input = RawInput { source, event, value };
+                        held.note(&input);
+                        if events.send(input).is_err() {
                             return Ok(());
                         }
                     }
@@ -337,9 +451,21 @@ async fn run(
                 Command::GuideTap { source, mode } => task.guide_tap(&source, mode).await,
             },
             Some(change) = owner_changes.next() => {
+                let args = match change.args() {
+                    Ok(args) => args,
+                    Err(e) => {
+                        warn!("ignoring a bad NameOwnerChanged signal: {e}");
+                        continue;
+                    }
+                };
                 task.devices.clear();
                 task.targets.clear();
-                if change.args()?.new_owner().is_some() {
+                // Its pads went with it (a new owner starts from scratch).
+                if !Held::send(held.release(|_| false), events) {
+                    return Ok(());
+                }
+                owner = args.new_owner().as_ref().map(|n| n.to_owned().into());
+                if owner.is_some() {
                     info!("InputPlumber appeared");
                     generation += 1;
                     presence.send_replace(Some(generation));
@@ -364,7 +490,13 @@ async fn run(
                 }
             }
             Some(signal) = added.next() => {
-                let args = signal.args()?;
+                let args = match signal.args() {
+                    Ok(args) => args,
+                    Err(e) => {
+                        debug!("ignoring a bad InterfacesAdded signal: {e}");
+                        continue;
+                    }
+                };
                 if args.interfaces_and_properties().keys().any(|i| i.as_str() == COMPOSITE_IFACE) {
                     let path: OwnedObjectPath = args.object_path().clone().into();
                     info!(device = %path, "new controller");
@@ -372,14 +504,26 @@ async fn run(
                 }
             }
             Some(signal) = removed.next() => {
-                let args = signal.args()?;
+                let args = match signal.args() {
+                    Ok(args) => args,
+                    Err(e) => {
+                        debug!("ignoring a bad InterfacesRemoved signal: {e}");
+                        continue;
+                    }
+                };
                 if args.interfaces().iter().any(|i| i.as_str() == COMPOSITE_IFACE) {
                     info!(device = %args.object_path(), "controller gone");
                     task.devices.remove(&OwnedObjectPath::from(args.object_path().clone()));
                     task.targets.clear();
+                    if !held.is_empty() {
+                        let claimed = task.claimed_targets().await;
+                        if !Held::send(held.release(|s| claimed.contains(s)), events) {
+                            return Ok(());
+                        }
+                    }
                 }
             }
-            else => return Ok(()),
+            else => anyhow::bail!("the D-Bus connection closed"),
         }
     }
 }
@@ -584,6 +728,30 @@ impl Task {
             }
         }
         self.targets.get(source).cloned().flatten()
+    }
+
+    /// The D-Bus targets the pads claim now (read from each pad; the cache learns them too).
+    /// Only when a pad went away while something was held, so not per event.
+    async fn claimed_targets(&mut self) -> HashSet<String> {
+        let mut claimed = HashSet::new();
+        for path in self.devices.keys() {
+            let Ok(proxy) = device_proxy(&self.conn, path).await else {
+                continue;
+            };
+            match proxy
+                .get_property::<Vec<String>>(DBUS_DEVICES_PROPERTY)
+                .await
+            {
+                Ok(paths) => {
+                    for t in paths {
+                        self.targets.insert(t.clone(), Some(path.clone()));
+                        claimed.insert(t);
+                    }
+                }
+                Err(e) => debug!(device = %path, "reading {DBUS_DEVICES_PROPERTY}: {e}"),
+            }
+        }
+        claimed
     }
 
     /// A Guide press came from the D-Bus target `source` (all pads when it is unknown).
@@ -899,9 +1067,17 @@ impl Worker {
     /// press and release Guide with `SendEvent`. Both go through the composite device's one
     /// command queue in the order we await them, so the mode is in place before the press.
     /// If the mode cannot be set, or is one in which the tap would come back to us, no tap.
+    /// The session asks with the routing's mode; if the routing has another mode by now (focus
+    /// moved to the launcher meanwhile), the tap is for nobody, and setting `mode` would leave
+    /// the pad in it until the next watchdog check: no tap either.
     async fn guide_tap(&mut self, mode: InterceptMode) {
         if !mode.reaches_pad() {
             warn!(device = %self.path, ?mode, "no Guide tap: it would come back as ui_guide");
+            return;
+        }
+        let routed = self.routing.borrow().mode;
+        if routed != mode {
+            info!(device = %self.path, ?mode, ?routed, "no Guide tap: the routing changed since the press");
             return;
         }
         let proxy = match device_proxy(&self.conn, &self.path).await {
@@ -933,9 +1109,9 @@ impl Worker {
                 self.dirty = true;
             }
         }
-        // The routing may have changed meanwhile (the next apply sets it), or not be `mode`.
+        // The routing changed during the tap: the pad is in `mode`; put it in the routing's now.
         if self.routing.borrow().mode != mode {
-            self.dirty = true;
+            self.apply().await;
         }
     }
 }
@@ -953,4 +1129,35 @@ fn source_driver(dev: &str) -> Option<String> {
     };
     let target = std::fs::read_link(link).ok()?;
     Some(target.file_name()?.to_str()?.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(source: &str, event: &str, value: f64) -> RawInput {
+        RawInput {
+            source: source.into(),
+            event: event.into(),
+            value,
+        }
+    }
+
+    #[test]
+    fn held_inputs_are_let_go_of_when_their_pad_goes() {
+        let mut held = Held::default();
+        held.note(&input("a", "ui_down", 1.0));
+        held.note(&input("a", "ui_accept", 1.0));
+        held.note(&input("a", "ui_accept", 0.0));
+        held.note(&input("b", "ui_up", 1.0));
+        // A release with no press is nothing to remember.
+        held.note(&input("c", "ui_left", 0.0));
+        // Pad "b" is still there: only "a" is let go of, once.
+        assert_eq!(held.release(|s| s == "b"), [input("a", "ui_down", 0.0)]);
+        assert!(held.release(|s| s == "b").is_empty());
+        assert!(!held.is_empty());
+        // Everything (InputPlumber gone).
+        assert_eq!(held.release(|_| false), [input("b", "ui_up", 0.0)]);
+        assert!(held.is_empty());
+    }
 }

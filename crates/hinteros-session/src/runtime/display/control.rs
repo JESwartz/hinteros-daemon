@@ -5,7 +5,6 @@
 //! pinned with gamescope like the input method one).
 
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use hinteros_api::session::Mode;
@@ -13,7 +12,7 @@ use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_output, wl_registry};
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 
-use crate::keys::ime::socket_path;
+use crate::keys::ime::{ANSWER_TIMEOUT, socket_path, with_timeout};
 
 /// Generated from the protocol XML.
 #[allow(missing_docs, clippy::all, unused_imports)]
@@ -142,7 +141,11 @@ pub fn query(display: &str) -> Result<Info> {
     let path = socket_path(display)?;
     let stream = UnixStream::connect(&path)
         .with_context(|| format!("connecting to Wayland display {}", path.display()))?;
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    let watched = stream.try_clone()?;
+    with_timeout(&watched, ANSWER_TIMEOUT, || read_info(stream))
+}
+
+fn read_info(stream: UnixStream) -> Result<Info> {
     let conn = Connection::from_socket(stream)?;
     let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
     let qh = queue.handle();

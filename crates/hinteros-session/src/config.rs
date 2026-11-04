@@ -501,6 +501,9 @@ pub struct DisplayConfig {
     /// How long `display.set_mode` waits for gamescope to switch before it gives up and puts
     /// the old mode back.
     pub apply_timeout_ms: u64,
+    /// A `display.set_mode` change that neither `display.keep` nor `display.revert` answers in
+    /// this time is reverted by the daemon (the launcher's dialog takes 15 s). 0: never.
+    pub revert_after_ms: u64,
 }
 
 impl Default for DisplayConfig {
@@ -509,6 +512,7 @@ impl Default for DisplayConfig {
             save_file: None,
             modes_file: None,
             apply_timeout_ms: 6000,
+            revert_after_ms: 20000,
         }
     }
 }

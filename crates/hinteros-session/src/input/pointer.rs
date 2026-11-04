@@ -240,39 +240,55 @@ impl CursorControl for NoCursor {
 }
 
 /// Runs a command to hide and one to show the pointer (`gamescopectl paint_cursor_plane 0/1`
-/// by default). Fire and forget: the commands are reaped in the background.
+/// by default), one at a time in a background task: two at once could finish in either order
+/// and leave the pointer in the wrong state. When requests come faster than the commands
+/// finish, only the latest wanted state is run next. Needs a tokio runtime.
 pub struct CommandCursor {
-    pub hide: Vec<String>,
-    pub show: Vec<String>,
-    pub env: Vec<(String, String)>,
+    wanted: tokio::sync::watch::Sender<Option<bool>>,
+}
+
+impl CommandCursor {
+    pub fn new(hide: Vec<String>, show: Vec<String>, env: Vec<(String, String)>) -> Self {
+        let (wanted, mut rx) = tokio::sync::watch::channel(None);
+        tokio::spawn(async move {
+            while rx.changed().await.is_ok() {
+                let Some(visible) = *rx.borrow_and_update() else {
+                    continue;
+                };
+                let argv = if visible { &show } else { &hide };
+                run_cursor_command(argv, &env, visible).await;
+            }
+        });
+        Self { wanted }
+    }
 }
 
 impl CursorControl for CommandCursor {
     fn set_visible(&mut self, visible: bool) {
-        let argv = if visible { &self.show } else { &self.hide };
-        let Some(program) = argv.first() else { return };
-        let mut cmd = tokio::process::Command::new(program);
-        cmd.args(&argv[1..])
-            .envs(crate::config::live_env(&self.env))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .kill_on_drop(true);
-        match cmd.spawn() {
-            Ok(mut child) => {
-                debug!(visible, ?argv, "pointer visibility");
-                tokio::spawn(async move {
-                    let wait = tokio::time::timeout(Duration::from_secs(5), child.wait());
-                    match wait.await {
-                        Ok(Ok(status)) if !status.success() => {
-                            debug!(%status, "pointer visibility command failed")
-                        }
-                        Ok(_) => {}
-                        Err(_) => warn!("pointer visibility command hangs; killing it"),
-                    }
-                });
-            }
-            Err(e) => debug!(?argv, "cannot run the pointer visibility command: {e}"),
+        self.wanted.send_replace(Some(visible));
+    }
+}
+
+/// Run one pointer visibility command and wait for it (at most 5 s).
+async fn run_cursor_command(argv: &[String], env: &[(String, String)], visible: bool) {
+    let Some(program) = argv.first() else { return };
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(&argv[1..])
+        .envs(crate::config::live_env(env))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => return debug!(?argv, "cannot run the pointer visibility command: {e}"),
+    };
+    debug!(visible, ?argv, "pointer visibility");
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(status)) if !status.success() => {
+            debug!(%status, "pointer visibility command failed")
         }
+        Ok(_) => {}
+        Err(_) => warn!("pointer visibility command hangs; killing it"),
     }
 }
 
@@ -349,6 +365,55 @@ impl PointerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cursor_commands_run_one_at_a_time_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        let gate = dir.path().join("gate");
+        // The hide logs that it started, then waits for the gate file before it logs again.
+        let hide = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "echo start >> {log}; while [ ! -e {gate} ]; do sleep 0.01; done; echo hide >> {log}",
+                log = log.display(),
+                gate = gate.display()
+            ),
+        ];
+        let show = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("echo show >> {}", log.display()),
+        ];
+        // The log once it has `lines` lines (no fixed sleeps: the build box may be busy).
+        let wait_lines = async |lines: usize| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let text = std::fs::read_to_string(&log).unwrap_or_default();
+                if text.lines().count() >= lines || std::time::Instant::now() > deadline {
+                    return text;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        // The hide is slow: run at once, the show would finish before it.
+        let mut c = CommandCursor::new(hide, show, Vec::new());
+        c.set_visible(false);
+        assert_eq!(wait_lines(1).await, "start\n");
+        c.set_visible(true);
+        std::fs::write(&gate, "").unwrap();
+        assert_eq!(wait_lines(3).await, "start\nhide\nshow\n");
+        // Requests that come while a command runs: only the latest runs next.
+        std::fs::remove_file(&log).unwrap();
+        std::fs::remove_file(&gate).unwrap();
+        c.set_visible(false);
+        assert_eq!(wait_lines(1).await, "start\n");
+        c.set_visible(true);
+        c.set_visible(false);
+        std::fs::write(&gate, "").unwrap();
+        assert_eq!(wait_lines(4).await, "start\nhide\nstart\nhide\n");
+    }
 
     #[test]
     fn profile_maps_the_right_stick() {

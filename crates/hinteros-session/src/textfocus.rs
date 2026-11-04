@@ -266,6 +266,10 @@ pub async fn serve(listener: UnixListener, shell: mpsc::UnboundedSender<Msg>) {
     }
 }
 
+/// Lines a reporter may send per second before the daemon reads its connection more slowly
+/// (nothing is dropped; the reporter waits). Focus changes come at the pace of a person.
+const LINES_PER_SECOND: u32 = 50;
+
 async fn connection(stream: tokio::net::UnixStream, shell: mpsc::UnboundedSender<Msg>) {
     let Ok(cred) = stream.peer_cred() else { return };
     if cred.uid() != rustix::process::geteuid().as_raw() {
@@ -284,13 +288,22 @@ async fn connection(stream: tokio::net::UnixStream, shell: mpsc::UnboundedSender
         reporter, "osk.sock: text field focus reporter connected"
     );
     let mut reader = hinteros_api::codec::LineReader::with_limit(stream, MAX_FRAME);
-    let mut last = FieldFocus::None;
+    let mut window = (tokio::time::Instant::now(), 0u32);
+    let mut bad = 0u32;
     loop {
+        // A reporter that floods the socket is read at LINES_PER_SECOND.
+        if window.1 >= LINES_PER_SECOND {
+            tokio::time::sleep_until(window.0 + std::time::Duration::from_secs(1)).await;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= window.0 + std::time::Duration::from_secs(1) {
+            window = (now, 0);
+        }
+        window.1 += 1;
         match reader.next_line().await {
             Ok(Some(line)) => match FocusMessage::parse(line.as_bytes()) {
                 Ok(msg) => {
                     debug!(?pid, reporter, client = ?msg.client, focus = ?msg.focus, clicked = msg.clicked, "text field focus");
-                    last = msg.focus;
                     if shell
                         .send(Msg::TextFocus {
                             pid,
@@ -303,7 +316,15 @@ async fn connection(stream: tokio::net::UnixStream, shell: mpsc::UnboundedSender
                         return;
                     }
                 }
-                Err(e) => info!(?pid, "osk.sock: {e}"),
+                // The first bad line of a connection at info, the rest at debug.
+                Err(e) if bad == 0 => {
+                    bad += 1;
+                    info!(?pid, "osk.sock: {e}");
+                }
+                Err(e) => {
+                    bad += 1;
+                    debug!(?pid, bad, "osk.sock: {e}");
+                }
             },
             Ok(None) => break,
             Err(e) => {
@@ -313,15 +334,7 @@ async fn connection(stream: tokio::net::UnixStream, shell: mpsc::UnboundedSender
         }
     }
     // Firefox (or the extension) went away: whatever had focus no longer does.
-    if last.editable() {
-        let _ = shell.send(Msg::TextFocus {
-            pid,
-            reporter,
-            focus: FieldFocus::None,
-            clicked: false,
-        });
-    }
-    let _ = shell.send(Msg::ReporterGone { reporter });
+    let _ = shell.send(Msg::TextFocusClosed { reporter });
     debug!(?pid, "osk.sock: reporter disconnected");
 }
 
@@ -507,9 +520,9 @@ mod tests {
         }
     }
 
-    async fn next_gone(rx: &mut mpsc::UnboundedReceiver<Msg>) -> u64 {
+    async fn assert_closed(rx: &mut mpsc::UnboundedReceiver<Msg>, reporter: u64) {
         match rx.recv().await.unwrap() {
-            Msg::ReporterGone { reporter } => reporter,
+            Msg::TextFocusClosed { reporter: r } => assert_eq!(r, reporter),
             other => panic!("{other:?}"),
         }
     }
@@ -551,12 +564,10 @@ mod tests {
             other => panic!("{other:?}"),
         }
         drop(d);
-        assert_eq!(next_focus(&mut rx).await, (me, b, FieldFocus::None));
-        assert_eq!(next_gone(&mut rx).await, b);
+        assert_closed(&mut rx, b).await;
 
         drop(c);
-        assert_eq!(next_focus(&mut rx).await, (me, a, FieldFocus::None));
-        assert_eq!(next_gone(&mut rx).await, a);
+        assert_closed(&mut rx, a).await;
         server.abort();
     }
 }

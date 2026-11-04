@@ -252,6 +252,32 @@ impl Repeat {
         }
     }
 
+    /// Like [`Self::release`]; returns when the stopped repeat was due next (for
+    /// [`Self::resume`]).
+    pub fn stop(&mut self, action: NavAction, source: &str) -> Option<Instant> {
+        let next = self
+            .held
+            .as_ref()
+            .filter(|h| h.action == action && h.source == source)
+            .map(|h| h.next);
+        if next.is_some() {
+            self.held = None;
+        }
+        next
+    }
+
+    /// Go on with a repeat [`Self::stop`] stopped (the release was stick chatter), due at
+    /// `next` (not before `now`). Not when another repeat took over meanwhile.
+    pub fn resume(&mut self, action: NavAction, source: &str, next: Instant, now: Instant) {
+        if action.is_direction() && self.held.is_none() {
+            self.held = Some(Held {
+                action,
+                source: source.into(),
+                next: next.max(now),
+            });
+        }
+    }
+
     pub fn clear(&mut self) {
         self.held = None;
     }
@@ -275,51 +301,100 @@ impl Repeat {
 /// InputPlumber (0.81, `src/input/target/dbus.rs:31,87-170`) turns the left stick into
 /// `ui_left`/`ui_right`/`ui_up`/`ui_down` at one threshold (0.60) for both press and release,
 /// without hysteresis, so a stick resting near it, or swept through it, sends a burst of
-/// press/release pairs. A press of a direction that comes within `window` of its own release
-/// (same pad) is taken as chatter: it and its release are dropped. Releases always go through
-/// at once, so a release still stops a repeat immediately. Nobody presses the same D-pad
-/// direction twice within a few tens of milliseconds.
+/// press/release pairs. So a direction's release is held back for `window`: a press of the
+/// same direction on the same pad in that time is chatter, and both are dropped (the hold goes
+/// on; a repeat it stopped goes on too). Otherwise the release is passed on when the time is
+/// up, or at once when that pad presses another direction or another pad presses the same one
+/// (so the release still comes before the new hold). The repeat itself stops at the
+/// release (the caller stops it), so a real release never repeats once more. Nobody presses
+/// the same D-pad direction twice within a few tens of milliseconds.
 #[derive(Debug)]
 pub struct Debounce {
     window: Duration,
-    last_release: std::collections::HashMap<(NavAction, String), Instant>,
-    suppressed: std::collections::HashSet<(NavAction, String)>,
+    pending: std::collections::HashMap<(NavAction, String), Pending>,
+}
+
+/// A direction release held back.
+#[derive(Debug)]
+struct Pending {
+    /// When it is passed on.
+    at: Instant,
+    input: RawInput,
+    /// When the repeat it stopped was due next (`None`: it stopped none).
+    repeat: Option<Instant>,
 }
 
 impl Debounce {
     pub fn new(window: Duration) -> Self {
         Self {
             window,
-            last_release: Default::default(),
-            suppressed: Default::default(),
+            pending: Default::default(),
         }
     }
 
-    /// Whether to drop this event.
-    pub fn drop_event(
+    /// A release of `action` (`input`): whether it is held back. `repeat`: when the repeat
+    /// the release stopped was due next.
+    pub fn hold_release(
         &mut self,
         action: NavAction,
-        source: &str,
-        pressed: bool,
+        input: &RawInput,
         now: Instant,
+        repeat: Option<Instant>,
     ) -> bool {
         if !action.is_direction() || self.window.is_zero() {
             return false;
         }
-        let key = (action, source.to_string());
-        if pressed {
-            let chatter = self
-                .last_release
-                .get(&key)
-                .is_some_and(|&t| now.duration_since(t) < self.window);
-            if chatter {
-                self.suppressed.insert(key);
-            }
-            chatter
-        } else {
-            self.last_release.insert(key.clone(), now);
-            self.suppressed.remove(&key)
-        }
+        self.pending.insert(
+            (action, input.source.clone()),
+            Pending {
+                at: now + self.window,
+                input: input.clone(),
+                repeat,
+            },
+        );
+        true
+    }
+
+    /// A press of `action` on `source`: `Some` when it is chatter (drop it, and its held-back
+    /// release), with when the repeat that release stopped is due (resume it).
+    pub fn chatter(&mut self, action: NavAction, source: &str) -> Option<Option<Instant>> {
+        self.pending
+            .remove(&(action, source.to_string()))
+            .map(|p| p.repeat)
+    }
+
+    /// The releases to pass on before a press of `action` on `source` that is not chatter,
+    /// oldest first: all of that pad's, and those of `action` on any other pad.
+    pub fn take_before(&mut self, action: NavAction, source: &str) -> Vec<(NavAction, RawInput)> {
+        self.take(|(a, s), _| s == source || *a == action)
+    }
+
+    /// The releases whose time is up, oldest first.
+    pub fn due(&mut self, now: Instant) -> Vec<(NavAction, RawInput)> {
+        self.take(|_, p| p.at <= now)
+    }
+
+    /// When the next held-back release is due.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.pending.values().map(|p| p.at).min()
+    }
+
+    fn take(
+        &mut self,
+        mut which: impl FnMut(&(NavAction, String), &Pending) -> bool,
+    ) -> Vec<(NavAction, RawInput)> {
+        let keys: Vec<_> = self
+            .pending
+            .iter()
+            .filter(|(k, p)| which(k, p))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut out: Vec<(Instant, NavAction, RawInput)> = keys
+            .into_iter()
+            .filter_map(|k| self.pending.remove(&k).map(|p| (p.at, k.0, p.input)))
+            .collect();
+        out.sort_by_key(|(at, ..)| *at);
+        out.into_iter().map(|(_, a, i)| (a, i)).collect()
     }
 }
 
@@ -425,31 +500,50 @@ mod tests {
     fn debounce_drops_stick_chatter() {
         let t0 = Instant::now();
         let ms = Duration::from_millis;
+        let raw = |source: &str, event: &str| RawInput {
+            source: source.into(),
+            event: event.into(),
+            value: 0.0,
+        };
         let mut d = Debounce::new(ms(40));
         let (l, r) = (NavAction::Left, NavAction::Right);
-        assert!(!d.drop_event(l, "p", true, t0));
-        assert!(!d.drop_event(l, "p", false, t0 + ms(100)));
-        // Chatter: re-pressed 8 ms after the release, again and again; all dropped.
+        assert_eq!(d.deadline(), None);
+        // A release waits; a re-press of it 8 ms later is chatter: both dropped, and the
+        // repeat the release stopped goes on. Again and again.
         let mut t = t0 + ms(100);
         for _ in 0..10 {
+            assert!(d.hold_release(l, &raw("p", "ui_left"), t, Some(t0 + ms(500))));
+            assert_eq!(d.deadline(), Some(t + ms(40)));
             t += ms(8);
-            assert!(d.drop_event(l, "p", true, t));
+            assert!(d.due(t).is_empty());
+            assert_eq!(d.chatter(l, "p"), Some(Some(t0 + ms(500))));
             t += ms(8);
-            assert!(d.drop_event(l, "p", false, t));
         }
-        // Calm for a moment, then a real press.
-        assert!(!d.drop_event(l, "p", true, t + ms(40)));
-        assert!(!d.drop_event(l, "p", false, t + ms(200)));
-        // Another direction, another pad, or a button: not affected.
-        assert!(!d.drop_event(r, "p", true, t + ms(201)));
-        assert!(!d.drop_event(l, "q", true, t + ms(201)));
-        assert!(!d.drop_event(NavAction::Accept, "p", true, t + ms(201)));
-        assert!(!d.drop_event(NavAction::Accept, "p", false, t + ms(202)));
-        assert!(!d.drop_event(NavAction::Accept, "p", true, t + ms(203)));
-        // Off.
+        assert_eq!(d.deadline(), None);
+        // A real release: passed on once its time is up.
+        assert!(d.hold_release(l, &raw("p", "ui_left"), t, None));
+        assert!(d.due(t + ms(39)).is_empty());
+        assert_eq!(d.due(t + ms(40)), [(l, raw("p", "ui_left"))]);
+        assert_eq!(d.chatter(l, "p"), None);
+        // Another direction on the same pad takes the waiting releases first; another pad's
+        // stay.
+        assert!(d.hold_release(l, &raw("p", "ui_left"), t, None));
+        assert!(d.hold_release(r, &raw("q", "ui_right"), t + ms(1), None));
+        assert_eq!(d.chatter(NavAction::Up, "p"), None);
+        assert_eq!(
+            d.take_before(NavAction::Up, "p"),
+            [(l, raw("p", "ui_left"))]
+        );
+        assert_eq!(d.deadline(), Some(t + ms(41)));
+        // The same direction on another pad is not chatter, and takes that release first: it
+        // comes before the new hold.
+        assert_eq!(d.chatter(r, "s"), None);
+        assert_eq!(d.take_before(r, "s"), [(r, raw("q", "ui_right"))]);
+        assert_eq!(d.deadline(), None);
+        // Buttons, and no window: never held back.
         let mut off = Debounce::new(Duration::ZERO);
-        assert!(!off.drop_event(l, "p", false, t0));
-        assert!(!off.drop_event(l, "p", true, t0));
+        assert!(!off.hold_release(l, &raw("p", "ui_left"), t0, None));
+        assert!(!d.hold_release(NavAction::Accept, &raw("p", "ui_accept"), t0, None));
     }
 
     #[test]
@@ -484,5 +578,27 @@ mod tests {
         assert_eq!(r.deadline(), Some(t0 + ms(3400)));
         r.release(NavAction::Down, "pad0");
         assert_eq!(r.deadline(), None);
+    }
+
+    #[test]
+    fn repeat_stops_and_resumes() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut r = Repeat::new(ms(400), ms(100));
+        r.press(NavAction::Up, "p", t0);
+        assert_eq!(r.stop(NavAction::Down, "p"), None);
+        assert_eq!(r.stop(NavAction::Up, "q"), None);
+        assert_eq!(r.stop(NavAction::Up, "p"), Some(t0 + ms(400)));
+        assert_eq!(r.deadline(), None);
+        // Chatter: it goes on when it was due (an overdue one at once).
+        r.resume(NavAction::Up, "p", t0 + ms(400), t0 + ms(10));
+        assert_eq!(r.deadline(), Some(t0 + ms(400)));
+        r.stop(NavAction::Up, "p");
+        r.resume(NavAction::Up, "p", t0 + ms(400), t0 + ms(450));
+        assert_eq!(r.tick(t0 + ms(450)), Some(NavAction::Up));
+        // Another repeat that took over meanwhile stays.
+        r.press(NavAction::Left, "q", t0 + ms(500));
+        r.resume(NavAction::Up, "p", t0 + ms(400), t0 + ms(500));
+        assert_eq!(r.deadline(), Some(t0 + ms(900)));
     }
 }

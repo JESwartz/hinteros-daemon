@@ -78,6 +78,8 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   InputPlumber turns the left stick into directions at one
   threshold (0.60) without hysteresis, so a direction re-pressed within
   `[input] direction_debounce_ms` (40) of its release is chatter and dropped with its release.
+  A held-back release still comes before the next press on that pad, or of that direction on
+  any pad.
 - **Apps** (`apps.rs`, `shell.rs`): `apps.launch` runs a command, or hands a
   `steam://rungameid/<id>` URL to `steam -silent`, and tracks it (`app_started`,
   `app_exited`, `focus_changed`). A command app has exited when its process tree has; a Steam
@@ -409,6 +411,7 @@ poll_ms = 2000                 # look for changes made elsewhere (only while a c
 # save_file = "/home/tv/.local/state/hinteros/gamescope-modes"   # [default: $GAMESCOPE_MODE_SAVE_FILE]
 # modes_file = "/run/user/1000/gamescope-edid.modes"            # [default: $GAMESCOPE_PATCHED_EDID_FILE + ".modes"]
 apply_timeout_ms = 6000        # display.set_mode: how long gamescope gets to switch
+revert_after_ms = 20000        # display.set_mode: reverted when not kept in this time (0: never)
 
 [bluetooth]
 pair_timeout_s = 45            # bluetooth.pair gives up
@@ -650,7 +653,12 @@ file) or without the save file. Refresh rates are whole Hz (59.94 is 60).
 Keep-or-revert: `display.set_mode` returns `{previous, current}` and remembers the mode it
 replaced; the launcher's 15 s dialog calls `display.keep` when the user keeps it and
 `display.revert` when the time runs out (also after a second change before deciding: revert goes
-back to the mode before both).
+back to the mode before both). The daemon reverts by itself when neither comes within
+`display.revert_after_ms` (20 s; the launcher may have crashed). While a change is not kept, the
+save file as it was before waits next to it (`<save file>.confirmed`); a daemon that stopped before
+keep or revert (a crash, a power cut) puts it back at its next start (removes the save file if
+there was none) and nudges gamescope, so an unconfirmed mode never becomes the mode of every later
+start.
 
 **Power.** `Suspend`, `Reboot` and `PowerOff` go to logind with `interactive = false`;
 `power.capabilities` reports `CanSuspend`/`CanReboot`/`CanPowerOff` (`yes`, `no`, `challenge`,
@@ -1119,7 +1127,13 @@ onto the launcher's `lib/src/system` repository interfaces:
    message, identities}` to connections named `hinteros-launcher` only (non-root identities first;
    it authenticates as the first) and waits up to `[auth] prompt_timeout_s` (120).
 5. The launcher answers `auth.respond {cookie, password}` (only a `hinteros-launcher` connection
-   may; others get `not_authorized`). The daemon runs polkit's helper for the identity: the
+   may; others get `not_authorized`; a helper failure after the password was sent counts as a
+   wrong one). The client name is what the client says in its handshake: it keeps the prompt
+   away from other clients (the on-screen keyboard, the CLI), but it is not a security
+   boundary. The boundary is `session.sock`: only our uid may connect, and sandboxed apps never
+   see it. Steam and `sandbox = false` apps run as the profile's user, can reach it, and could
+   claim the name (they could also read the launcher's memory). The daemon runs polkit's helper
+   for the identity: the
    socket-activated helper (`/run/polkit/agent-helper.socket`, `polkit-agent-helper.socket`) when
    it exists, else the setuid `polkit-agent-helper-1` (`[auth] helper`), writes the cookie, answers
    the first PAM prompt with the password, and reads `SUCCESS`/`FAILURE` (protocol of polkit 127's

@@ -178,6 +178,12 @@ pub struct ServeArgs {
     #[arg(long, default_value = "/run/booted-system")]
     pub booted_system: PathBuf,
 
+    /// systemd-boot's entries (`nixos-*.conf`). `generations.list` leaves out the generations
+    /// that have none (a rollback to one fails); without entries (another boot loader) it lists
+    /// all
+    #[arg(long, default_value = "/boot/loader/entries", hide = true)]
+    pub boot_entries: PathBuf,
+
     /// Release info and update policy of the running generation (`release.json`,
     /// `update/channels.json`, `update/allowed_signers`) [default: <current-system>/sw/share/hinteros]
     #[arg(long)]
@@ -357,6 +363,7 @@ impl ServeArgs {
             profile: self.profile.clone(),
             current_system: self.current_system.clone(),
             booted_system: self.booted_system.clone(),
+            boot_entries: self.boot_entries.clone(),
             apps_profiles: self.apps_profiles_dir.clone(),
             catalog_index: self.catalog_index.clone(),
             users: self.users(),
@@ -419,6 +426,9 @@ pub struct Paths {
     pub profile: PathBuf,
     pub current_system: PathBuf,
     pub booted_system: PathBuf,
+    /// systemd-boot's entries (`generations::boot_toplevels`).
+    #[serde(default = "default_boot_entries")]
+    pub boot_entries: PathBuf,
     /// Root of the per-profile app Nix profiles.
     #[serde(default = "default_apps_profiles")]
     pub apps_profiles: PathBuf,
@@ -478,6 +488,10 @@ impl Default for ServerPaths {
 
 fn default_proc() -> PathBuf {
     "/proc".into()
+}
+
+pub fn default_boot_entries() -> PathBuf {
+    "/boot/loader/entries".into()
 }
 
 pub fn default_zoneinfo() -> PathBuf {

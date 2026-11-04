@@ -419,6 +419,7 @@ mod tests {
             profile: root.join("profiles/system"),
             current_system: root.join("current"),
             booted_system: root.join("booted"),
+            boot_entries: root.join("boot/loader/entries"),
             apps_profiles: root.join("nixprofiles"),
             catalog_index: None,
             users: Users::default(),

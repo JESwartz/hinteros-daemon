@@ -905,7 +905,11 @@ trust.
   `base.set` edits `state.json` (unstable → stable needs the acknowledgement).
 - **Rollback**: `nix-env --switch-generation N` + `switch-to-configuration switch`, then
   `/etc/hinteros`'s `flake.nix`, `flake.lock` and `state.json` from the generation's snapshot
-  (`$out/hinteros/`, as `hinteros-config-sync` does at boot).
+  (`$out/hinteros/`, as `hinteros-config-sync` does at boot). systemd-boot has entries for the
+  newest `configurationLimit` generations only, and the system repo fails the switch to one
+  without (the next boot would undo it). So `generations.list` leaves out a generation (not the
+  current one) whose system no `/boot/loader/entries/nixos-*.conf` names in `init=`, and
+  `rollback` refuses it (`not_found`); with no entries (another boot loader) all are listed.
 - **`hardware.redetect`**: `nixos-facter -o staging/facter.json`, then the apply flow.
 - **Keyboard Home** (`keyboard.rs`): Ctrl + Super + D on a keyboard is Home. No profile
   account may read keyboards (a game would log the admin password typed into the launcher's

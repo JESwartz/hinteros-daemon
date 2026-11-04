@@ -986,6 +986,9 @@ impl System {
             r("current"),
             "--booted-system".into(),
             r("booted"),
+            // Never this machine's boot entries (they would hide the fake generations).
+            "--boot-entries".into(),
+            r("boot/loader/entries"),
             "--policy-dir".into(),
             r("policy"),
             "--ssh-host-key-dir".into(),

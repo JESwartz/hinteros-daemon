@@ -293,7 +293,8 @@ impl Service {
     }
 
     /// `apps.clear_data`: a job that deletes one app's `dataPaths` in the caller's home,
-    /// whether the app is installed or not.
+    /// whether the app is installed or not, also after the catalog removed it (a tombstone keeps
+    /// its `dataPaths`).
     pub(super) async fn apps_clear_data(
         &self,
         peer: &Peer,
@@ -302,7 +303,10 @@ impl Service {
         let (state, _) = self.load_state()?;
         let (caller, owner) = self.app_owner(peer.uid, &state)?;
         let index = self.catalog()?;
-        if index.app(&p.id).is_none() {
+        if index
+            .get(&p.id)
+            .is_none_or(|e| e.kind != hinteros_api::catalog::EntryKind::App)
+        {
             return Err(ErrorObject::new(
                 ErrorCode::NotFound,
                 format!("{} is not in the catalog", p.id),

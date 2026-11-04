@@ -115,7 +115,13 @@ impl Relay {
         };
         match tokio::time::timeout(limit, rx).await {
             Ok(Ok(outcome)) => outcome,
-            _ => Err(unavailable(Unavailable::Down)),
+            Ok(Err(_)) => Err(unavailable(Unavailable::Down)),
+            // The schema has no reason of its own for this (`down`); the message says it.
+            Err(_) => Err(ErrorObject::with_data(
+                ErrorCode::SystemUnavailable,
+                "the system service did not answer in time",
+                json!({ "reason": "down" }),
+            )),
         }
     }
 }
@@ -127,12 +133,13 @@ async fn run(
     home: Option<mpsc::UnboundedSender<Msg>>,
 ) {
     let mut backoff = BACKOFF_MIN;
-    let mut logged_down = false;
+    // Logged once per reason, not on every retry.
+    let mut logged: Option<Unavailable> = None;
     loop {
         let why = match connect(&socket).await {
             Ok(conn) => {
                 info!(socket = %socket.display(), "connected to the system service");
-                logged_down = false;
+                logged = None;
                 backoff = BACKOFF_MIN;
                 serve(conn, &mut calls, &events, home.as_ref()).await;
                 if calls.is_closed() {
@@ -142,9 +149,9 @@ async fn run(
                 Unavailable::Down
             }
             Err(why) => {
-                if !logged_down || why == Unavailable::VersionMismatch {
+                if logged != Some(why) {
                     warn!(socket = %socket.display(), ?why, "system service unavailable; relayed methods fail until it is back");
-                    logged_down = true;
+                    logged = Some(why);
                 }
                 why
             }
@@ -256,6 +263,17 @@ async fn serve(
                 next_id += 1;
                 let params = call.params.unwrap_or_else(|| json!({}));
                 let msg = jsonrpc::request(&Id::Number(id), call.method, params);
+                // The service reads at most system::MAX_MESSAGE_BYTES a line and drops the
+                // connection, every other call on it too, for a longer one.
+                if too_long(&msg) {
+                    let _ = call.reply.send(Err(ErrorObject::new(
+                        ErrorCode::InvalidParams,
+                        format!("params too long for the system service (at most {} bytes)", system::MAX_MESSAGE_BYTES),
+                    )));
+                    continue;
+                }
+                // Calls that timed out (Relay::call) wait for no answer any more.
+                pending.retain(|_, reply| !reply.is_closed());
                 if write_message(&mut conn.writer, &msg).await.is_err() {
                     let _ = call.reply.send(Err(unavailable(Unavailable::Down)));
                     break;
@@ -298,6 +316,11 @@ async fn serve(
     for (_, reply) in pending.drain() {
         let _ = reply.send(Err(unavailable(Unavailable::Down)));
     }
+}
+
+/// Whether `msg`, as one line, is longer than the system service reads.
+fn too_long(msg: &Value) -> bool {
+    serde_json::to_vec(msg).map_or(usize::MAX, |b| b.len()) > system::MAX_MESSAGE_BYTES
 }
 
 /// System errors are forwarded unchanged, except protocol-level ones (which mean the relay's
@@ -351,5 +374,14 @@ mod tests {
         let e = map_error(ErrorObject::new(ErrorCode::HandshakeRequired, "x"));
         assert_eq!(e.kind(), Some(ErrorCode::SystemUnavailable));
         assert_eq!(e.data.unwrap()["reason"], "down");
+    }
+
+    #[test]
+    fn params_the_service_would_not_read_stay_here() {
+        let call = |text: String| {
+            jsonrpc::request(&Id::Number(3), "apps.install", json!({ "revision": text }))
+        };
+        assert!(!too_long(&call("x".repeat(1000))));
+        assert!(too_long(&call("x".repeat(system::MAX_MESSAGE_BYTES))));
     }
 }

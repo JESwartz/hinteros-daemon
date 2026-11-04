@@ -1,6 +1,7 @@
 //! The system relay: `system.*` methods and job events between the launcher and a fake system
 //! service (speaking the system API on a temporary socket).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use hinteros_api::codec::{LineReader, write_message};
@@ -251,6 +252,35 @@ async fn relays_methods_errors_and_job_events() {
     let second = c.read_raw().await.unwrap().unwrap();
     assert_eq!(second["id"], 900);
     assert_eq!(second["result"], json!({"job_id": null}));
+
+    // Params longer than the service reads fail here, not on the shared connection: a slow
+    // call on it still gets its answer.
+    for (id, method, params) in [
+        (902, "system.rebuild", json!({})),
+        (903, "system.info", json!({"pad": "x".repeat(100_000)})),
+    ] {
+        c.send_line(
+            &jsonrpc::request(&hinteros_api::jsonrpc::Id::Number(id), method, params).to_string(),
+        )
+        .await
+        .unwrap();
+    }
+    // The fake service would answer system.info: an error here means the relay kept it.
+    let mut answers = BTreeMap::new();
+    for _ in 0..2 {
+        let a = c.read_raw().await.unwrap().unwrap();
+        answers.insert(a["id"].as_i64().unwrap(), a);
+    }
+    assert_eq!(
+        answers[&903]["error"]["code"],
+        ErrorCode::InvalidParams.code(),
+        "{answers:?}"
+    );
+    assert_eq!(
+        answers[&902]["result"],
+        json!({"job_id": null}),
+        "{answers:?}"
+    );
 
     // The service restarts speaking another version: version_mismatch.
     task.abort();

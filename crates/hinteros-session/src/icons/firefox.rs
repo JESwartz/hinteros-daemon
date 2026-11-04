@@ -7,11 +7,18 @@
 //! mode, so it is never opened in place: the file and its `-wal` are copied to a private
 //! temporary directory and the copy is read (SQLite replays the copied WAL, so the newest
 //! icons are seen). The largest image stored for the app's site wins.
+//!
+//! A sandboxed app writes its profile, so the files are copied only when regular (no symlink
+//! followed, no FIFO) and not too large, and the copy is opened in SQLite's defensive mode
+//! without a trusted schema.
 
 use std::fs;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use nix::libc;
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags, params};
 use url::Url;
 
@@ -19,14 +26,14 @@ use super::web::{self, Image};
 
 /// Icons per site we look at before giving up on unusable data.
 const MAX_ROWS: usize = 16;
+/// The database and its WAL are copied only up to this size each (a kiosk profile's is far
+/// smaller).
+const MAX_FILE: u64 = 32 << 20;
 
 /// The best favicon Firefox stored for `site_url`, if any. `Ok(None)`: no profile database
 /// yet, or no icon for this site.
 pub fn favicon(profile: &Path, site_url: &str) -> Result<Option<Image>> {
     let db = profile.join("favicons.sqlite");
-    if !db.is_file() {
-        return Ok(None);
-    }
     let site = Url::parse(site_url).with_context(|| format!("site_url {site_url}"))?;
     let Some(host) = site.host_str() else {
         return Ok(None);
@@ -35,18 +42,57 @@ pub fn favicon(profile: &Path, site_url: &str) -> Result<Option<Image>> {
 
     let tmp = tempfile::tempdir().context("temporary directory")?;
     let copy = tmp.path().join("favicons.sqlite");
-    fs::copy(&db, &copy).with_context(|| format!("copying {}", db.display()))?;
-    let wal = profile.join("favicons.sqlite-wal");
-    if wal.is_file() {
-        // Best effort: Firefox may checkpoint (and delete) it right now.
-        let _ = fs::copy(&wal, tmp.path().join("favicons.sqlite-wal"));
+    if !copy_regular(&db, &copy).with_context(|| format!("copying {}", db.display()))? {
+        return Ok(None);
     }
+    // Best effort: Firefox may checkpoint (and delete) it right now.
+    let _ = copy_regular(
+        &profile.join("favicons.sqlite-wal"),
+        &tmp.path().join("favicons.sqlite-wal"),
+    );
     let conn = Connection::open_with_flags(
         &copy,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("opening a copy of {}", db.display()))?;
+    // The app wrote the file: no schema tricks (triggers, views calling functions), no writes
+    // that could corrupt the copy into something worse.
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
     best_icon(&conn, &prefix, site_url)
+}
+
+/// Copy `from` to `to` (new) when it is a regular file of at most [`MAX_FILE`] bytes. The
+/// profile is in the app's sandbox home, which the app controls: a symlink there is not
+/// followed, and a FIFO, device or huge file is refused. `Ok(false)`: no such file.
+fn copy_regular(from: &Path, to: &Path) -> Result<bool> {
+    use std::io::Read;
+    let mut src = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(from)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    let meta = src.metadata()?;
+    if !meta.is_file() {
+        bail!("not a regular file");
+    }
+    if meta.len() > MAX_FILE {
+        bail!("larger than {} MiB", MAX_FILE >> 20);
+    }
+    let mut dst = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(to)?;
+    let n = std::io::copy(&mut (&mut src).take(MAX_FILE + 1), &mut dst)?;
+    if n > MAX_FILE {
+        bail!("larger than {} MiB", MAX_FILE >> 20);
+    }
+    Ok(true)
 }
 
 fn best_icon(conn: &Connection, prefix: &str, page: &str) -> Result<Option<Image>> {
@@ -184,6 +230,45 @@ pub(crate) mod tests {
         assert_eq!(
             favicon(&t.path().join("gone"), "https://a.test/").unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn only_regular_files_of_the_profile_are_read() {
+        let real = profile(&[("https://a.test/", "https://a.test/i.png", 64, PNG)]);
+        // A symlink to a database (or anything else) the app does not own is not followed.
+        let t = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            real.path().join("favicons.sqlite"),
+            t.path().join("favicons.sqlite"),
+        )
+        .unwrap();
+        assert!(favicon(t.path(), "https://a.test/").is_err());
+        // A FIFO does not block the refresher.
+        let t = tempfile::tempdir().unwrap();
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            t.path().join("favicons.sqlite"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        assert!(favicon(t.path(), "https://a.test/").is_err());
+        // Nor is a huge (sparse) file copied.
+        let t = tempfile::tempdir().unwrap();
+        fs::File::create(t.path().join("favicons.sqlite"))
+            .unwrap()
+            .set_len(MAX_FILE + 1)
+            .unwrap();
+        let e = favicon(t.path(), "https://a.test/").unwrap_err();
+        assert!(format!("{e:#}").contains("larger than"), "{e:#}");
+        // A symlinked WAL is left out; the database itself still counts.
+        let t = profile(&[("https://a.test/", "https://a.test/i.png", 64, PNG)]);
+        std::os::unix::fs::symlink("/dev/zero", t.path().join("favicons.sqlite-wal")).unwrap();
+        assert_eq!(
+            favicon(t.path(), "https://a.test/").unwrap().unwrap().bytes,
+            PNG
         );
     }
 

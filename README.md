@@ -2171,7 +2171,9 @@ Both APIs are 1.0. A client works with a server of the same major and an equal o
 - **Enums a client also sends are closed:** a new value of `Channel`, `Base`,
   `CleanupFrequency`, `LibraryKind`, `Key`, `Modifier`, `KeyAction`, `ControllerButton` or either
   `EventName` is a new major. A catch-all there would let an unknown value through to the server
-  or into `state.json`.
+  or into `state.json`; the server refuses an unknown value (`invalid_params`). A client that also
+  reads one (the launcher: `Channel`, `Base`, `CleanupFrequency` in `system.info`, job subjects and
+  `cleanup.get`) has its own catch-all for it and never sends that back.
 
 The schema documents list exactly what their version sends (`additionalProperties: false`), so
 the conformance tests catch a server that sends what is not documented. An item a later minor

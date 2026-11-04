@@ -293,19 +293,39 @@ pub fn journal_note(
     }
 }
 
-/// Send without ever blocking the service for long: a full journal queue gets a few short retries,
-/// then the entry is reported as lost (it is still in the service's own log above).
+/// Send without ever blocking the service: a full journal queue gets a few short retries (on the
+/// blocking pool inside a tokio runtime, so the service's one thread does not wait), then the
+/// entry is reported as lost (it is still in the service's own log above).
 fn send_datagram(socket: &std::path::Path, datagram: &[u8]) -> std::io::Result<()> {
     let s = UnixDatagram::unbound()?;
     s.set_nonblocking(true)?;
+    match s.send_to(datagram, socket) {
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        r => return r.map(|_| ()),
+    }
+    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+        let (socket, datagram) = (socket.to_owned(), datagram.to_owned());
+        rt.spawn_blocking(move || {
+            if let Err(e) = retry_datagram(&s, &socket, &datagram) {
+                warn!("cannot write to the journal: {e}");
+            }
+        });
+        return Ok(());
+    }
+    retry_datagram(&s, socket, datagram)
+}
+
+fn retry_datagram(
+    s: &UnixDatagram,
+    socket: &std::path::Path,
+    datagram: &[u8],
+) -> std::io::Result<()> {
     let mut tries = 0;
     loop {
+        std::thread::sleep(Duration::from_millis(5));
         match s.send_to(datagram, socket) {
             Ok(_) => return Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && tries < 20 => {
-                tries += 1;
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && tries < 20 => tries += 1,
             Err(e) => return Err(e),
         }
     }
@@ -362,6 +382,40 @@ pub fn parse_datagram(mut data: &[u8]) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full journal queue never makes the service's thread wait: inside a runtime the retries
+    /// run on the blocking pool, and the entry still arrives once there is room.
+    #[test]
+    fn a_full_journal_queue_does_not_block_the_runtime() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("journal");
+        let journal = UnixDatagram::bind(&path).unwrap();
+        let s = UnixDatagram::unbound().unwrap();
+        s.set_nonblocking(true).unwrap();
+        while s.send_to(b"fill", &path).is_ok() {}
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let start = Instant::now();
+            send_datagram(&path, b"last").unwrap();
+            assert!(start.elapsed() < Duration::from_millis(50));
+            journal.set_nonblocking(true).unwrap();
+            let mut buf = [0u8; 16];
+            let mut got = Vec::new();
+            for _ in 0..2000 {
+                match journal.recv(&mut buf) {
+                    Ok(n) => got.push(buf[..n].to_vec()),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+                }
+                if got.last().is_some_and(|m| m == b"last") {
+                    break;
+                }
+            }
+            assert_eq!(got.last().map(Vec::as_slice), Some(&b"last"[..]));
+        });
+    }
 
     #[test]
     fn native_format_round_trips() {

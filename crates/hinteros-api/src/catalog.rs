@@ -208,15 +208,15 @@ pub struct Entry {
     /// `false`: the app runs without the sandbox (optional; default true).
     #[serde(default = "yes")]
     pub sandbox: bool,
-    /// Services (M10): ports the system opens while the service is on (optional).
+    /// Services: ports the system opens while the service is on (optional).
     #[serde(default)]
     pub ports: Vec<Port>,
-    /// Services (M10): the setup flow the Server section shows (`jellyfin-server`,
+    /// Services: the setup flow the Server section shows (`jellyfin-server`,
     /// `plex-media-server`, `tailscale`, `cloudflare-tunnel`), as written; see
     /// [`Entry::setup_kind`]. Optional.
     #[serde(default)]
     pub setup: Option<String>,
-    /// Services (M10): directories below `/var/lib` that `services.disable {delete_data}`
+    /// Services: directories below `/var/lib` that `services.disable {delete_data}`
     /// removes (checked with [`is_state_dir`]). Optional.
     #[serde(default)]
     pub state_dirs: Vec<String>,

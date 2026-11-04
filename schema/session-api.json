@@ -6343,7 +6343,7 @@
           }
         },
         "features_readded": {
-          "description": "0.5 (rollback jobs): box features turned back on after the rollback, because the profiles' apps need them and the restored generation lacked them. Absent when there were none.",
+          "description": "Rollback jobs: box features turned back on after the rollback, because the profiles' apps need them and the restored generation lacked them. Absent when there were none.",
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/$defs/BoxFeature" }
@@ -6477,14 +6477,14 @@
       }
     },
     "MeasuredResult": {
-      "description": "0.6, storage_measure jobs.",
+      "description": "storage_measure jobs.",
       "type": "object",
       "required": ["measured_at"],
       "additionalProperties": false,
       "properties": { "measured_at": { "type": "integer" } }
     },
     "CleanedResult": {
-      "description": "0.6, cleanup_system and cleanup_profiles jobs. freed_bytes: free space after minus before on the store's filesystem (never negative).",
+      "description": "cleanup_system and cleanup_profiles jobs. freed_bytes: free space after minus before on the store's filesystem (never negative).",
       "type": "object",
       "required": ["freed_bytes", "generations_removed"],
       "additionalProperties": false,

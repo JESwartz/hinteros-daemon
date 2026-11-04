@@ -562,7 +562,7 @@ pub struct AvailableUpdate {
     #[serde(default, deserialize_with = "nullable")]
     pub removed_apps: Option<Vec<RemovedApp>>,
     /// The release `rev` carries: its `release/version` file if that is a semantic version,
-    /// otherwise the first 12 hex digits of `rev`. Absent from services before M6.
+    /// otherwise the first 12 hex digits of `rev`.
     #[serde(default, deserialize_with = "nullable")]
     pub version: Option<String>,
     /// The newest `Security-Summary:` trailer among the new commits (one line, at most 120
@@ -702,7 +702,7 @@ impl Method for BaseSet {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Store (M8)
+// Store
 
 /// `apps.install`: catalog ids (1 to 8) to install, with their dependencies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -593,17 +593,21 @@ impl Profiles {
             }
             None => zbus::Connection::system().await?,
         };
-        const LOGIND: &str = "org.freedesktop.login1";
-        // Only logind's: any client on the bus can send a signal by that name.
+        // Only logind's own signal: any account on the system bus may emit one with this name,
+        // and a fake one would lock the screen and let go of the inhibitor. The bus applies the
+        // sender in this rule to broadcasts only: a unicast signal gets past it, and zbus cannot
+        // match a well-known sender itself. So the loop also checks that the sender (set by the
+        // bus) is the current owner of logind's name.
         let rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
-            .sender(LOGIND)?
+            .sender("org.freedesktop.login1")?
             .path("/org/freedesktop/login1")?
             .interface("org.freedesktop.login1.Manager")?
             .member("PrepareForSleep")?
             .build();
         let mut stream = zbus::MessageStream::for_match_rule(rule, &conn, None).await?;
         let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
+        let logind = zbus::names::BusName::from_static_str("org.freedesktop.login1")?;
         let inhibit = |conn: zbus::Connection| async move {
             let reply = conn
                 .call_method(
@@ -620,13 +624,14 @@ impl Profiles {
         let mut held = inhibit(conn.clone()).await.ok();
         while let Some(msg) = stream.next().await {
             let Ok(msg) = msg else { continue };
-            // The bus checks the rule's sender too; zbus cannot match a well-known name itself.
-            let owner = dbus
-                .get_name_owner(zbus::names::BusName::try_from(LOGIND)?)
+            let Some(sender) = msg.header().sender().map(|s| s.to_owned()) else {
+                continue;
+            };
+            if !dbus
+                .get_name_owner(logind.clone())
                 .await
-                .ok();
-            let sender = msg.header().sender().map(|s| s.as_str().to_owned());
-            if owner.is_none_or(|o| sender.as_deref() != Some(o.as_str())) {
+                .is_ok_and(|owner| *owner == sender)
+            {
                 warn!("PrepareForSleep not from logind; ignored");
                 continue;
             }

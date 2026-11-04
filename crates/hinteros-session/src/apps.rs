@@ -125,10 +125,13 @@ pub struct SandboxSettings {
 
 /// How long a launch waits for the reaper to be in the `nolan` cgroup.
 const IN_CGROUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How much of that blocks the launch (and the daemon's thread); the rest is waited for in the
+/// background.
+const IN_CGROUP_SYNC: Duration = Duration::from_millis(500);
 
 /// Wait until the reaper writes `1` on `read` (it is in its `Cgroup=`). End of file: it could
-/// not move there and started nothing.
-fn wait_in_cgroup(read: std::io::PipeReader, timeout: Duration) -> io::Result<()> {
+/// not move there and started nothing. `TimedOut` when it said nothing in `timeout`.
+fn wait_in_cgroup(read: &std::io::PipeReader, timeout: Duration) -> io::Result<()> {
     use rustix::event::{PollFd, PollFlags, Timespec, poll};
     use std::io::Read;
     let deadline = std::time::Instant::now() + timeout;
@@ -141,7 +144,7 @@ fn wait_in_cgroup(read: std::io::PipeReader, timeout: Duration) -> io::Result<()
             ));
         }
         let left = Timespec::try_from(left).map_err(io::Error::other)?;
-        let mut fds = [PollFd::new(&read, PollFlags::IN)];
+        let mut fds = [PollFd::new(read, PollFlags::IN)];
         match poll(&mut fds, Some(&left)) {
             Ok(0) => continue,
             Ok(_) => break,
@@ -150,7 +153,7 @@ fn wait_in_cgroup(read: std::io::PipeReader, timeout: Duration) -> io::Result<()
         }
     }
     let mut byte = [0u8; 1];
-    match (&read).read(&mut byte)? {
+    match (&*read).read(&mut byte)? {
         1 if byte == *b"1" => Ok(()),
         _ => Err(io::Error::other("the reaper could not enter the cgroup")),
     }
@@ -346,15 +349,22 @@ impl Spawner for ProcessSpawner {
         drop(seccomp);
         // Our copy of the pipe's write end goes with it: end of file once the reaper is gone.
         drop(cmd);
-        if let Some(read) = in_nolan
-            && let Err(e) = wait_in_cgroup(read, IN_CGROUP_TIMEOUT)
-        {
-            let _ = child.start_kill();
-            tokio::spawn(async move { child.wait().await });
-            return Err(io::Error::new(
-                e.kind(),
-                format!("no local network filter: {e}"),
-            ));
+        // The reaper answers in milliseconds; only that long does the launch wait for it here
+        // (this runs on the daemon's only thread). A later answer is waited for beside the app.
+        let mut late = None;
+        if let Some(read) = in_nolan {
+            match wait_in_cgroup(&read, IN_CGROUP_SYNC) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => late = Some(read),
+                Err(e) => {
+                    let _ = child.start_kill();
+                    tokio::spawn(async move { child.wait().await });
+                    return Err(io::Error::new(
+                        e.kind(),
+                        format!("no local network filter: {e}"),
+                    ));
+                }
+            }
         }
         let pid = child.id().unwrap_or_default();
         let children = self.children.clone();
@@ -375,6 +385,19 @@ impl Spawner for ProcessSpawner {
         let exits = self.exits.clone();
         let key = key.to_string();
         tokio::spawn(async move {
+            if let Some(read) = late {
+                // The reaper starts nothing before it is in the cgroup; one that is not there
+                // in time is ended (its exit is reported as usual).
+                let check = tokio::task::spawn_blocking(move || {
+                    wait_in_cgroup(&read, IN_CGROUP_TIMEOUT.saturating_sub(IN_CGROUP_SYNC))
+                })
+                .await
+                .unwrap_or_else(|e| Err(io::Error::other(e)));
+                if let Err(e) = check {
+                    warn!(key, pid, "no local network filter: {e}");
+                    let _ = child.start_kill();
+                }
+            }
             let code = match child.wait().await {
                 Ok(status) => {
                     use std::os::unix::process::ExitStatusExt;
@@ -570,7 +593,7 @@ mod tests {
         })
         .to_vec();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut s = ProcessSpawner::new(reaper, env, tx)
+        let mut s = ProcessSpawner::new(reaper.clone(), env, tx)
             .with_sandbox(settings)
             .with_lan_filter(filter);
         let spec = Spec {
@@ -593,6 +616,38 @@ mod tests {
             std::fs::read_to_string(unit_dir.join("daemon/cgroup.procs")).unwrap(),
             format!("{}\n", std::process::id())
         );
+        // A slow reaper does not hold up the daemon past IN_CGROUP_SYNC: the app starts once
+        // it is in, or the reaper is ended when it does not get there.
+        let slow = t.path().join("slow-reaper");
+        std::fs::write(
+            &slow,
+            format!(
+                "#!/bin/sh\nsleep 1\n[ -e {flag} ] && exec {reaper} \"$@\"\nsleep 30\n",
+                flag = t.path().join("go").display(),
+                reaper = reaper.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut slow_s = ProcessSpawner::new(slow, s.env.clone(), s.exits.clone())
+            .with_sandbox(s.sandbox.clone().unwrap())
+            .with_lan_filter(s.lan.clone().unwrap());
+        std::fs::write(t.path().join("go"), "").unwrap();
+        let started = std::time::Instant::now();
+        slow_s
+            .spawn("a", &argv, Some(1), Some(&spec), None)
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(900));
+        assert_eq!(rx.recv().await.unwrap().code, Some(0), "in nolan late: ran");
+        std::fs::remove_file(t.path().join("go")).unwrap();
+        slow_s
+            .spawn("a", &argv, Some(1), Some(&spec), None)
+            .unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("ended at the timeout")
+            .unwrap();
+        assert_eq!(exit.code, Some(128 + 9), "killed");
         // The reaper cannot enter nolan: the launch fails.
         std::fs::remove_dir_all(unit_dir.join("nolan")).unwrap();
         let e = s.spawn("a", &argv, Some(1), Some(&spec), None).unwrap_err();

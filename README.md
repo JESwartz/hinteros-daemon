@@ -1805,7 +1805,8 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   once, then after 1 s doubling to 30 s, and at every launch while it is not on). The daemon
   always stays in `daemon`. An app without `lan` gets `reaper ... Cgroup=<nolan dir> -- ...`: the
   reaper writes its own pid to `nolan`'s `cgroup.procs` before it starts anything (so bwrap and
-  the app run there too) and then writes `1` to its stdin, a pipe the launch waits on (5 s). If
+  the app run there too) and then writes `1` to its stdin, a pipe the launch waits on (0.5 s;
+  after that the wait goes on beside the app, and a reaper not in `nolan` after 5 s is ended). If
   it cannot move, it starts nothing and exits 125; the launch fails. A sandboxed app cannot
   leave `nolan` (`/sys` is read-only inside, a cgroup namespace reaches only below its root).
   Fail closed: until the system says the filter is on (or when the cgroups cannot be set up, or

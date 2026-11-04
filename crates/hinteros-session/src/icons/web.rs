@@ -405,19 +405,28 @@ pub fn manifest_url(html: &str, page: &Url) -> Option<Url> {
 
 #[derive(Deserialize)]
 struct Manifest {
+    /// Each entry read on its own: one a site got wrong costs only itself.
     #[serde(default)]
-    icons: Vec<ManifestIcon>,
+    icons: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct ManifestIcon {
     src: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     sizes: String,
-    #[serde(default, rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "lenient_string")]
     mime: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     purpose: String,
+}
+
+/// A string member, or empty when it is something else (`"sizes": 192`, a purpose list).
+fn lenient_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => s,
+        _ => String::new(),
+    })
 }
 
 /// Icons listed in a web app manifest fetched from `manifest_url`.
@@ -426,6 +435,7 @@ pub fn manifest_candidates(json: &[u8], manifest_url: &Url) -> Result<Vec<Candid
     Ok(manifest
         .icons
         .into_iter()
+        .filter_map(|v| serde_json::from_value::<ManifestIcon>(v).ok())
         .filter_map(|i| {
             let mut c = Candidate::new(manifest_url.join(&i.src).ok()?, Origin::Manifest);
             c.size = parse_sizes(&i.sizes);
@@ -583,6 +593,22 @@ mod tests {
                 "/favicon.ico"
             ]
         );
+    }
+
+    #[test]
+    fn a_bad_manifest_entry_costs_only_itself() {
+        let page = u("https://example.com/");
+        let manifest = br#"{"icons":[
+            {"sizes":"512x512"},
+            {"src":7},
+            "nope",
+            {"src":"/n.png","sizes":192,"purpose":["any"]},
+            {"src":"/m512.png","sizes":"512x512","type":"image/png","purpose":"any"}],
+            "future":{"x":1}}"#;
+        let c = manifest_candidates(manifest, &page).unwrap();
+        let got: Vec<_> = c.iter().map(|c| (c.url.path(), c.size)).collect();
+        assert_eq!(got, [("/n.png", None), ("/m512.png", Some(512))]);
+        assert!(!c[0].maskable_only);
     }
 
     #[test]

@@ -322,28 +322,38 @@ pub fn parse(buf: &[u8], eof: bool) -> Option<io::Result<Response>> {
     }
 }
 
-/// A chunked body: `Ok(None)` until the last chunk is in.
-fn dechunk(mut rest: &[u8]) -> io::Result<Option<Vec<u8>>> {
-    let mut body = Vec::new();
+/// A chunked body: `Ok(None)` until the last chunk is in. The data is copied only then: called
+/// after every read, a pass costs one step per chunk, not per byte.
+fn dechunk(buf: &[u8]) -> io::Result<Option<Vec<u8>>> {
+    let mut chunks = Vec::new();
+    let mut at = 0;
     loop {
+        let rest = &buf[at..];
         let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") else {
             return Ok(None);
         };
         let size_text = std::str::from_utf8(&rest[..eol]).map_err(|_| bad("bad chunk size"))?;
         let size_text = size_text.split(';').next().unwrap_or_default().trim();
-        let size = usize::from_str_radix(size_text, 16).map_err(|_| bad("bad chunk size"))?;
-        rest = &rest[eol + 2..];
+        let size = usize::from_str_radix(size_text, 16)
+            .ok()
+            .filter(|s| *s <= MAX_RESPONSE)
+            .ok_or_else(|| bad("bad chunk size"))?;
+        at += eol + 2;
         if size == 0 {
+            let mut body = Vec::with_capacity(chunks.iter().map(|(_, n)| n).sum());
+            for (start, n) in chunks {
+                body.extend_from_slice(&buf[start..start + n]);
+            }
             return Ok(Some(body));
         }
-        if rest.len() < size + 2 {
+        if buf.len() - at < size + 2 {
             return Ok(None);
         }
-        body.extend_from_slice(&rest[..size]);
-        if &rest[size..size + 2] != b"\r\n" {
+        if &buf[at + size..at + size + 2] != b"\r\n" {
             return Err(bad("bad chunk end"));
         }
-        rest = &rest[size + 2..];
+        chunks.push((at, size));
+        at += size + 2;
     }
 }
 
@@ -380,6 +390,11 @@ mod tests {
         let r = parse(chunked, false).unwrap().unwrap();
         assert_eq!(r.body, b"Wikipedia");
         assert!(parse(&chunked[..chunked.len() - 5], false).is_none());
+        // A chunk size near usize::MAX is refused, not wrapped.
+        for size in ["ffffffffffffffff", "fffffffffffffffe", "400001"] {
+            let huge = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{size}\r\nx");
+            assert!(parse(huge.as_bytes(), false).unwrap().is_err(), "{size}");
+        }
         let r = parse(b"HTTP/1.0 503 No\r\n\r\nbody", true)
             .unwrap()
             .unwrap();

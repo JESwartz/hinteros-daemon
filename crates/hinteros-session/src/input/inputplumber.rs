@@ -46,7 +46,7 @@
 //!   its Manager object is exported, so the first try can fail with `UnknownObject`. Once set
 //!   up, the same task checks every [`Settings::watchdog`] that `ManageAllDevices` is still on.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -204,14 +204,17 @@ pub fn spawn(settings: Settings, events: mpsc::UnboundedSender<RawInput>) -> Inp
     let settings = Arc::new(settings);
     tokio::spawn(async move {
         let mut retry = RECONNECT_MIN;
+        let mut held = Held::default();
         let mut failures = 0u32;
         loop {
             let started = std::time::Instant::now();
-            let Err(e) = run(settings.clone(), rx.clone(), &mut crx, &events).await else {
+            let result = run(settings.clone(), rx.clone(), &mut crx, &events, &mut held).await;
+            let Err(e) = result else {
                 // Nobody takes input any more: the daemon is stopping.
                 return;
             };
-            if events.is_closed() {
+            // The connection is gone, and with it what the pads held.
+            if !Held::send(held.release(|_| false), &events) || events.is_closed() {
                 return;
             }
             if started.elapsed() >= RECONNECT_MAX {
@@ -253,6 +256,57 @@ enum Op {
 /// When a pad's last Guide press arrived (set by the signal loop, read by its worker).
 type GuideAt = Arc<std::sync::Mutex<Option<std::time::Instant>>>;
 
+/// What each D-Bus target holds down (pressed, not released yet). When its pad goes away
+/// (unplugged, a flat battery, InputPlumber gone) nothing releases it, and the session would
+/// repeat a held direction until another pad pressed one; so the task lets go of it.
+#[derive(Debug, Default)]
+struct Held(HashMap<String, BTreeSet<String>>);
+
+impl Held {
+    fn note(&mut self, input: &RawInput) {
+        if input.pressed() {
+            self.0
+                .entry(input.source.clone())
+                .or_default()
+                .insert(input.event.clone());
+        } else if let Some(events) = self.0.get_mut(&input.source) {
+            events.remove(&input.event);
+            if events.is_empty() {
+                self.0.remove(&input.source);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Releases for everything held by targets that `keep` does not keep, which are forgotten.
+    fn release(&mut self, keep: impl Fn(&str) -> bool) -> Vec<RawInput> {
+        let gone: Vec<String> = self.0.keys().filter(|s| !keep(s)).cloned().collect();
+        let mut out = Vec::new();
+        for source in gone {
+            for event in self.0.remove(&source).unwrap_or_default() {
+                out.push(RawInput {
+                    source: source.clone(),
+                    event,
+                    value: 0.0,
+                });
+            }
+        }
+        out.sort_by(|a, b| (&a.source, &a.event).cmp(&(&b.source, &b.event)));
+        out
+    }
+
+    /// Send the releases; `false` when nobody takes input any more.
+    fn send(releases: Vec<RawInput>, events: &mpsc::UnboundedSender<RawInput>) -> bool {
+        releases.into_iter().all(|r| {
+            debug!(source = %r.source, event = %r.event, "released: its pad is gone");
+            events.send(r).is_ok()
+        })
+    }
+}
+
 /// One composite device (pad): its worker and what the signal loop needs to know.
 struct Device {
     /// Its `ui_action`/`ui_context` labels get swapped (set by the worker once classified).
@@ -288,6 +342,7 @@ async fn run(
     routing: watch::Receiver<Routing>,
     commands: &mut mpsc::UnboundedReceiver<Command>,
     events: &mpsc::UnboundedSender<RawInput>,
+    held: &mut Held,
 ) -> Result<()> {
     let conn = connect(settings.bus.as_deref(), settings.call_timeout)
         .await
@@ -380,7 +435,9 @@ async fn run(
                         if event == "ui_guide" && value > 0.5 {
                             task.guide_pressed(&source).await;
                         }
-                        if events.send(RawInput { source, event, value }).is_err() {
+                        let input = RawInput { source, event, value };
+                        held.note(&input);
+                        if events.send(input).is_err() {
                             return Ok(());
                         }
                     }
@@ -403,6 +460,10 @@ async fn run(
                 };
                 task.devices.clear();
                 task.targets.clear();
+                // Its pads went with it (a new owner starts from scratch).
+                if !Held::send(held.release(|_| false), events) {
+                    return Ok(());
+                }
                 owner = args.new_owner().as_ref().map(|n| n.to_owned().into());
                 if owner.is_some() {
                     info!("InputPlumber appeared");
@@ -454,6 +515,12 @@ async fn run(
                     info!(device = %args.object_path(), "controller gone");
                     task.devices.remove(&OwnedObjectPath::from(args.object_path().clone()));
                     task.targets.clear();
+                    if !held.is_empty() {
+                        let claimed = task.claimed_targets().await;
+                        if !Held::send(held.release(|s| claimed.contains(s)), events) {
+                            return Ok(());
+                        }
+                    }
                 }
             }
             else => anyhow::bail!("the D-Bus connection closed"),
@@ -661,6 +728,30 @@ impl Task {
             }
         }
         self.targets.get(source).cloned().flatten()
+    }
+
+    /// The D-Bus targets the pads claim now (read from each pad; the cache learns them too).
+    /// Only when a pad went away while something was held, so not per event.
+    async fn claimed_targets(&mut self) -> HashSet<String> {
+        let mut claimed = HashSet::new();
+        for path in self.devices.keys() {
+            let Ok(proxy) = device_proxy(&self.conn, path).await else {
+                continue;
+            };
+            match proxy
+                .get_property::<Vec<String>>(DBUS_DEVICES_PROPERTY)
+                .await
+            {
+                Ok(paths) => {
+                    for t in paths {
+                        self.targets.insert(t.clone(), Some(path.clone()));
+                        claimed.insert(t);
+                    }
+                }
+                Err(e) => debug!(device = %path, "reading {DBUS_DEVICES_PROPERTY}: {e}"),
+            }
+        }
+        claimed
     }
 
     /// A Guide press came from the D-Bus target `source` (all pads when it is unknown).
@@ -1038,4 +1129,35 @@ fn source_driver(dev: &str) -> Option<String> {
     };
     let target = std::fs::read_link(link).ok()?;
     Some(target.file_name()?.to_str()?.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(source: &str, event: &str, value: f64) -> RawInput {
+        RawInput {
+            source: source.into(),
+            event: event.into(),
+            value,
+        }
+    }
+
+    #[test]
+    fn held_inputs_are_let_go_of_when_their_pad_goes() {
+        let mut held = Held::default();
+        held.note(&input("a", "ui_down", 1.0));
+        held.note(&input("a", "ui_accept", 1.0));
+        held.note(&input("a", "ui_accept", 0.0));
+        held.note(&input("b", "ui_up", 1.0));
+        // A release with no press is nothing to remember.
+        held.note(&input("c", "ui_left", 0.0));
+        // Pad "b" is still there: only "a" is let go of, once.
+        assert_eq!(held.release(|s| s == "b"), [input("a", "ui_down", 0.0)]);
+        assert!(held.release(|s| s == "b").is_empty());
+        assert!(!held.is_empty());
+        // Everything (InputPlumber gone).
+        assert_eq!(held.release(|_| false), [input("b", "ui_up", 0.0)]);
+        assert!(held.is_empty());
+    }
 }

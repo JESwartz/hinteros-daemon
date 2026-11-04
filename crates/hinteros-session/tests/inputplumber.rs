@@ -491,8 +491,10 @@ async fn inputplumber_modes_nav_and_home() {
     fake.add_device().await;
     ready(&fake, 1, 2).await;
 
-    // InputPlumber restarts and forgets everything: the daemon sets it up again.
+    // InputPlumber restarts and forgets everything: the daemon sets it up again. The A press
+    // from the PASS part was never released: the daemon lets go of it.
     drop(fake);
+    assert_eq!(nav(&mut c).await, ("accept".into(), "release".into()));
     let mut fake = Fake::start(&bus.address).await;
     ready(&fake, 0, 2).await;
     fake.add_device().await;
@@ -1496,4 +1498,41 @@ async fn a_guide_tap_after_the_routing_changed_is_dropped() {
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     assert_eq!(fake.mode(0), 2, "the stale tap left the pad in PASS");
     assert!(fake.calls.take().is_empty(), "a Guide tap was sent");
+}
+
+/// A pad that goes away mid-hold (a flat battery) sends no release: the task lets go of what
+/// it held, or the session would repeat the direction until another pad pressed one. What
+/// another pad holds stays held.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pad_that_goes_away_lets_go_of_what_it_held() {
+    use hinteros_session::input::InterceptMode;
+    use hinteros_session::input::inputplumber;
+    use std::time::Duration;
+
+    const TARGET2: &str = "/org/shadowblip/InputPlumber/devices/target/dbus1";
+    let Some(bus) = Bus::start() else { return };
+    let mut fake = Fake::start(&bus.address).await;
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let _input = inputplumber::spawn(task_settings(&bus, InterceptMode::All), tx);
+    ready(&fake, 0, 2).await;
+    fake.add_pad("Second Gamepad", TARGET2).await;
+    ready(&fake, 1, 2).await;
+
+    fake.press_on(TARGET2, "ui_up", 1.0).await;
+    fake.press("ui_down", 1.0).await;
+    for (target, event) in [(TARGET2, "ui_up"), (TARGET, "ui_down")] {
+        assert_eq!(
+            next_input(&mut events, Duration::from_secs(5)).await,
+            Some((target.into(), event.into(), 1.0))
+        );
+    }
+    fake.remove_device(0).await;
+    assert_eq!(
+        next_input(&mut events, Duration::from_secs(5)).await,
+        Some((TARGET.into(), "ui_down".into(), 0.0))
+    );
+    assert_eq!(
+        next_input(&mut events, Duration::from_millis(300)).await,
+        None
+    );
 }

@@ -348,6 +348,11 @@ impl Jobs {
         self.finished.iter().find(|j| j.job_id == id).cloned()
     }
 
+    /// The uid that started job `id`, while it runs or after.
+    pub fn uid_of(&self, id: &str) -> Option<u32> {
+        self.get(id).map(|j| j.uid)
+    }
+
     pub fn list(&self) -> Vec<Job> {
         self.active
             .iter()
@@ -396,6 +401,30 @@ impl Jobs {
             return Err(busy());
         }
         Ok(())
+    }
+}
+
+/// Whether `uid` may see the sign-in URL (`detail.auth_url`) of a job started by `job_uid`:
+/// whoever opens it first adds the box to their tailnet, so only the uid that started the
+/// sign-in (and root) gets it; every other connection, the greeter's too, gets the progress
+/// without it.
+pub fn sees_auth_url(uid: u32, job_uid: Option<u32>) -> bool {
+    uid == 0 || job_uid == Some(uid)
+}
+
+/// Drop `detail.auth_url` from a job or a `job_progress` (as JSON).
+pub fn strip_auth_url(v: &mut Value) {
+    if let Some(detail) = v.get_mut("detail").and_then(Value::as_object_mut) {
+        detail.remove("auth_url");
+    }
+}
+
+/// [`strip_auth_url`] on a [`Job`] that `uid` may not see the URL of.
+pub fn redact_job(job: &mut Job, uid: u32) {
+    if !sees_auth_url(uid, Some(job.uid))
+        && let Some(d) = job.detail.as_mut()
+    {
+        d.auth_url = None;
     }
 }
 
@@ -489,6 +518,19 @@ mod tests {
     use super::*;
     use crate::config::Tools;
     use crate::job::{Action, Apply};
+
+    /// The Tailscale sign-in URL goes only to the uid that started the sign-in (and root).
+    #[test]
+    fn auth_url_only_for_its_uid() {
+        assert!(sees_auth_url(1000, Some(1000)) && sees_auth_url(0, Some(1000)));
+        assert!(!sees_auth_url(1001, Some(1000)) && !sees_auth_url(1001, None));
+        let mut p = json!({"job_id": "x", "detail": {"auth_url": "https://login.tailscale.com/a/1", "x": 1}});
+        strip_auth_url(&mut p);
+        assert_eq!(p["detail"], json!({"x": 1}));
+        let mut no_detail = json!({"job_id": "x"});
+        strip_auth_url(&mut no_detail);
+        assert_eq!(no_detail, json!({"job_id": "x"}));
+    }
 
     fn paths(d: &Path) -> Paths {
         Paths {

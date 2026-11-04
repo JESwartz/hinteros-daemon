@@ -2000,7 +2000,9 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
 - **`tailscale.login {pin}`** (job): `tailscale up --reset --json --timeout=600s` (defaults: no
   exit node, routes or Tailscale SSH; `--force-reauth` for an expired key); its pretty-printed
   JSON objects are decoded as a stream; each new `AuthURL` (https, printable ASCII, ≤ 512) is
-  `job_progress {stage: signing_in, detail: {auth_url}}`; done at `{"BackendState":"Running"}`
+  `job_progress {stage: signing_in, detail: {auth_url}}`, sent (and shown by `jobs.get` and
+  `jobs.list`) only to connections of the uid that started the job and of root: whoever opens
+  the URL first adds the box to their tailnet; done at `{"BackendState":"Running"}`
   and exit 0. `jobs.cancel` kills the CLI. `tailscale.logout {pin}` (job) runs `tailscale
   logout`. Both answer `job_id: null` when the state is already the asked one.
 - **`cloudflare.set_token {pin, token}`**: checked strictly (cloudflared's `ParseToken`: padded

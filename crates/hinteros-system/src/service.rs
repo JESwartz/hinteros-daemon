@@ -38,7 +38,7 @@ use crate::config::{Paths, ServeArgs, Tools};
 use crate::flake::{self, ChannelTable, Release};
 use crate::generations;
 use crate::job::{self, Action, Apply, ApplyUpdate, JobSpec, NotFastForward, UpdateSource};
-use crate::jobs::Jobs;
+use crate::jobs::{self, Jobs};
 use crate::peer::Peer;
 use crate::state::{self, State};
 use crate::store;
@@ -412,7 +412,14 @@ async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             event = events.recv() => match event {
-                Ok((name, params)) if subscriptions.contains(&name) => {
+                Ok((name, mut params)) if subscriptions.contains(&name) => {
+                    // The Tailscale sign-in URL only to whoever started the sign-in.
+                    if name == EventName::JobProgress {
+                        let job_uid = params["job_id"].as_str().and_then(|id| svc.jobs.lock().unwrap().uid_of(id));
+                        if greeter || !jobs::sees_auth_url(peer.uid, job_uid) {
+                            jobs::strip_auth_url(&mut params);
+                        }
+                    }
                     write_message(&mut w, &jsonrpc::notification(name.wire_name(), params)).await?;
                 }
                 Ok(_) => {}
@@ -523,13 +530,18 @@ async fn dispatch(
             let p: JobIdParams = decode::<JobsGet>(params)?;
             check_job_id(&p.job_id)?;
             let job = svc.jobs.lock().unwrap().get(&p.job_id);
-            let job = job.ok_or_else(|| ErrorObject::new(ErrorCode::NotFound, "no such job"))?;
+            let mut job =
+                job.ok_or_else(|| ErrorObject::new(ErrorCode::NotFound, "no such job"))?;
+            jobs::redact_job(&mut job, peer.uid);
             encode::<JobsGet>(JobsGetResult { job })
         }
         JobsList::NAME => {
             decode::<JobsList>(params)?;
-            let jobs = svc.jobs.lock().unwrap().list();
-            encode::<JobsList>(JobsListResult { jobs })
+            let mut list = svc.jobs.lock().unwrap().list();
+            for j in &mut list {
+                jobs::redact_job(j, peer.uid);
+            }
+            encode::<JobsList>(JobsListResult { jobs: list })
         }
         AppsList::NAME => {
             decode::<AppsList>(params)?;

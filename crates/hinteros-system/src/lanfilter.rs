@@ -279,24 +279,19 @@ const RTF_REJECT: u32 = 0x200;
 /// The on-link IPv4 networks of `/proc/net/route` (up, no gateway, not `lo`, not the default
 /// route).
 pub fn onlink_v4(route: &str) -> Vec<(Ipv4Addr, u8)> {
-    let hex = |s: &str| u32::from_str_radix(s, 16).ok();
-    route
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let f: Vec<&str> = line.split_whitespace().collect();
-            if f.len() < 8 || f[0] == "lo" {
+    crate::servers::netinfo::routes(route)
+        .into_iter()
+        .filter_map(|r| {
+            if r.iface == "lo" {
                 return None;
             }
-            let (dest, flags, mask) = (hex(f[1])?, hex(f[3])?, hex(f[7])?);
-            // The kernel prints the addresses as host-order numbers of network-order bytes.
-            let mask = u32::from_be_bytes(mask.to_ne_bytes());
+            let mask = u32::from(r.mask);
             let len = u8::try_from(mask.leading_ones()).ok()?;
-            let usable = flags & RTF_UP != 0
-                && flags & (RTF_GATEWAY | RTF_REJECT) == 0
+            let usable = r.flags & RTF_UP != 0
+                && r.flags & (RTF_GATEWAY | RTF_REJECT) == 0
                 && len > 0
                 && mask.count_ones() == u32::from(len);
-            usable.then(|| (Ipv4Addr::from(dest.to_ne_bytes()), len))
+            usable.then_some((r.dest, len))
         })
         .collect()
 }

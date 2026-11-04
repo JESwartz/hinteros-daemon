@@ -12,21 +12,24 @@ use std::path::Path;
 
 /// One line of `/proc/net/route`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Route {
-    iface: String,
-    dest: Ipv4Addr,
-    mask: Ipv4Addr,
-    metric: u32,
-    up: bool,
+pub(crate) struct Route {
+    pub iface: String,
+    pub dest: Ipv4Addr,
+    pub mask: Ipv4Addr,
+    pub metric: u32,
+    /// `RTF_*` of `<linux/route.h>`.
+    pub flags: u32,
+    pub up: bool,
 }
 
-/// The kernel writes addresses as host-order (little-endian on x86) hex of the network bytes.
+/// The kernel writes addresses as host-order hex numbers of the network-order bytes.
 fn hex_addr(s: &str) -> Option<Ipv4Addr> {
     let n = u32::from_str_radix(s, 16).ok()?;
-    Some(Ipv4Addr::from(n.to_le_bytes()))
+    Some(Ipv4Addr::from(n.to_ne_bytes()))
 }
 
-fn routes(text: &str) -> Vec<Route> {
+/// The lines of `/proc/net/route` (the one parser of it: `lanfilter` uses it too).
+pub(crate) fn routes(text: &str) -> Vec<Route> {
     text.lines()
         .skip(1)
         .filter_map(|l| {
@@ -34,12 +37,14 @@ fn routes(text: &str) -> Vec<Route> {
             if f.len() < 8 {
                 return None;
             }
+            let flags = u32::from_str_radix(f[3], 16).ok()?;
             Some(Route {
                 iface: f[0].to_owned(),
                 dest: hex_addr(f[1])?,
                 mask: hex_addr(f[7])?,
                 metric: f[6].parse().ok()?,
-                up: u32::from_str_radix(f[3], 16).ok()? & 1 == 1,
+                flags,
+                up: flags & 1 == 1,
             })
         })
         .collect()

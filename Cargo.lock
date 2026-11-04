@@ -753,6 +753,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tz-rs",
+ "unicode-general-category",
  "zbus",
  "zeroize",
 ]

@@ -1,12 +1,15 @@
 //! A small blocking HTTP/1.1 client for the box's own services: Jellyfin, Plex and cloudflared on
 //! loopback TCP, tailscaled's LocalAPI on its unix socket. Nothing else: a TCP target that is not
 //! a loopback address is refused, so no caller can make the service talk to the network.
+//! Requests that carry a secret go to [`Target::TcpOwnedBy`]: their ports are not privileged, so
+//! while the real server is down any local process could listen there; the server's uid is
+//! checked on the connection before a byte is sent.
 //!
 //! One request per connection (`Connection: close`), a deadline for the whole exchange, bodies
 //! with `Content-Length`, chunked or up to EOF, at most [`MAX_RESPONSE`] bytes.
 
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -19,6 +22,8 @@ pub const MAX_RESPONSE: usize = 4 << 20;
 pub enum Target<'a> {
     /// A loopback address (anything else is refused).
     Tcp(SocketAddr),
+    /// A loopback address whose server must run as this uid (else nothing is sent).
+    TcpOwnedBy(SocketAddr, u32),
     /// A unix socket, with the `Host` header to send.
     Unix(&'a Path, &'a str),
 }
@@ -63,6 +68,84 @@ fn timed_out() -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, "no answer in time")
 }
 
+/// Where the kernel lists TCP sockets (the service's own network namespace).
+const PROC_NET_TCP: [&str; 2] = ["/proc/net/tcp", "/proc/net/tcp6"];
+
+/// The uid that owns the server end of the loopback connection `s`: the accepted socket (or the
+/// pending one, before `accept`) carries its listener's uid in `/proc/net/tcp`. Looked up a few
+/// times: on loopback the server's side can show up just after `connect` returns.
+fn server_uid(s: &TcpStream) -> io::Result<u32> {
+    let (local, peer) = (s.local_addr()?, s.peer_addr()?);
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for file in PROC_NET_TCP {
+            if let Ok(text) = std::fs::read_to_string(file)
+                && let Some(uid) = uid_in(&text, peer, local)
+            {
+                return Ok(uid);
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("no server socket for {peer}"),
+    ))
+}
+
+/// In the text of `/proc/net/tcp{,6}`: the uid of the socket at `local` connected to `remote`.
+fn uid_in(text: &str, local: SocketAddr, remote: SocketAddr) -> Option<u32> {
+    let (local, remote) = (unmapped(local), unmapped(remote));
+    text.lines().skip(1).find_map(|line| {
+        // sl local rem st tx:rx tr:when retrnsmt uid ...
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let (l, r, uid) = (f.get(1)?, f.get(2)?, f.get(7)?);
+        (proc_addr(l)? == local && proc_addr(r)? == remote)
+            .then(|| uid.parse().ok())
+            .flatten()
+    })
+}
+
+fn unmapped(a: SocketAddr) -> SocketAddr {
+    match a.ip() {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => SocketAddr::new(IpAddr::V4(v4), a.port()),
+            None => a,
+        },
+        IpAddr::V4(_) => a,
+    }
+}
+
+/// A `/proc/net/tcp{,6}` address, `IP:PORT` in hex: the IP as the kernel's 32-bit words, each
+/// printed in host byte order. An IPv4-mapped IPv6 address comes back as IPv4.
+pub fn proc_addr(s: &str) -> Option<SocketAddr> {
+    let (ip, port) = s.split_once(':')?;
+    if !ip.is_ascii() {
+        return None;
+    }
+    let port = u16::from_str_radix(port, 16).ok()?;
+    let word = |i: usize| -> Option<[u8; 4]> {
+        Some(
+            u32::from_str_radix(ip.get(i * 8..i * 8 + 8)?, 16)
+                .ok()?
+                .to_ne_bytes(),
+        )
+    };
+    let ip = match ip.len() {
+        8 => IpAddr::V4(Ipv4Addr::from(word(0)?)),
+        32 => {
+            let mut b = [0u8; 16];
+            for i in 0..4 {
+                b[i * 4..i * 4 + 4].copy_from_slice(&word(i)?);
+            }
+            IpAddr::V6(Ipv6Addr::from(b))
+        }
+        _ => return None,
+    };
+    Some(unmapped(SocketAddr::new(ip, port)))
+}
+
 /// Send one request and read the answer, all within `timeout`.
 pub fn request(
     target: Target<'_>,
@@ -74,17 +157,24 @@ pub fn request(
 ) -> io::Result<Response> {
     let deadline = Instant::now() + timeout;
     let (mut stream, host): (Box<dyn Stream>, String) = match target {
-        Target::Tcp(addr) => {
+        Target::Tcp(addr) | Target::TcpOwnedBy(addr, _) => {
             if !addr.ip().is_loopback() {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     format!("{addr} is not a loopback address"),
                 ));
             }
-            (
-                Box::new(TcpStream::connect_timeout(&addr, timeout)?),
-                addr.to_string(),
-            )
+            let stream = TcpStream::connect_timeout(&addr, timeout)?;
+            if let Target::TcpOwnedBy(_, owner) = target {
+                let uid = server_uid(&stream)?;
+                if uid != owner {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("{addr} is served by uid {uid}, not {owner}"),
+                    ));
+                }
+            }
+            (Box::new(stream), addr.to_string())
         }
         Target::Unix(path, host) => (Box::new(UnixStream::connect(path)?), host.to_owned()),
     };
@@ -232,28 +322,38 @@ pub fn parse(buf: &[u8], eof: bool) -> Option<io::Result<Response>> {
     }
 }
 
-/// A chunked body: `Ok(None)` until the last chunk is in.
-fn dechunk(mut rest: &[u8]) -> io::Result<Option<Vec<u8>>> {
-    let mut body = Vec::new();
+/// A chunked body: `Ok(None)` until the last chunk is in. The data is copied only then: called
+/// after every read, a pass costs one step per chunk, not per byte.
+fn dechunk(buf: &[u8]) -> io::Result<Option<Vec<u8>>> {
+    let mut chunks = Vec::new();
+    let mut at = 0;
     loop {
+        let rest = &buf[at..];
         let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") else {
             return Ok(None);
         };
         let size_text = std::str::from_utf8(&rest[..eol]).map_err(|_| bad("bad chunk size"))?;
         let size_text = size_text.split(';').next().unwrap_or_default().trim();
-        let size = usize::from_str_radix(size_text, 16).map_err(|_| bad("bad chunk size"))?;
-        rest = &rest[eol + 2..];
+        let size = usize::from_str_radix(size_text, 16)
+            .ok()
+            .filter(|s| *s <= MAX_RESPONSE)
+            .ok_or_else(|| bad("bad chunk size"))?;
+        at += eol + 2;
         if size == 0 {
+            let mut body = Vec::with_capacity(chunks.iter().map(|(_, n)| n).sum());
+            for (start, n) in chunks {
+                body.extend_from_slice(&buf[start..start + n]);
+            }
             return Ok(Some(body));
         }
-        if rest.len() < size + 2 {
+        if buf.len() - at < size + 2 {
             return Ok(None);
         }
-        body.extend_from_slice(&rest[..size]);
-        if &rest[size..size + 2] != b"\r\n" {
+        if &buf[at + size..at + size + 2] != b"\r\n" {
             return Err(bad("bad chunk end"));
         }
-        rest = &rest[size + 2..];
+        chunks.push((at, size));
+        at += size + 2;
     }
 }
 
@@ -290,6 +390,11 @@ mod tests {
         let r = parse(chunked, false).unwrap().unwrap();
         assert_eq!(r.body, b"Wikipedia");
         assert!(parse(&chunked[..chunked.len() - 5], false).is_none());
+        // A chunk size near usize::MAX is refused, not wrapped.
+        for size in ["ffffffffffffffff", "fffffffffffffffe", "400001"] {
+            let huge = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{size}\r\nx");
+            assert!(parse(huge.as_bytes(), false).unwrap().is_err(), "{size}");
+        }
         let r = parse(b"HTTP/1.0 503 No\r\n\r\nbody", true)
             .unwrap()
             .unwrap();
@@ -386,6 +491,74 @@ mod tests {
         assert!(req.starts_with("POST /x?a=1 HTTP/1.1\r\n"), "{req}");
         assert!(req.contains("Content-Length: 2\r\n") && req.ends_with("\r\n\r\n{}"));
         assert!(req.contains("Connection: close\r\n"));
+    }
+
+    #[test]
+    fn proc_net_tcp_addresses_and_owners() {
+        let v4 = |s: &str| -> SocketAddr { s.parse().unwrap() };
+        // As little-endian x86_64 prints them.
+        assert_eq!(proc_addr("0100007F:1FA0"), Some(v4("127.0.0.1:8096")));
+        assert_eq!(
+            proc_addr("0000000000000000FFFF00000100007F:1FA0"),
+            Some(v4("127.0.0.1:8096"))
+        );
+        assert_eq!(
+            proc_addr("00000000000000000000000001000000:0016"),
+            Some(v4("[::1]:22"))
+        );
+        for bad in [
+            "",
+            "0100007F",
+            "0100007:1FA0",
+            "0100007F:x",
+            "é100007F:1FA0",
+        ] {
+            assert_eq!(proc_addr(bad), None, "{bad}");
+        }
+        let text = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+            0: 0100007F:1FA0 00000000:0000 0A 00000000:00000000 00:00000000 00000000   990        0 1 1 0\n\
+            1: 0100007F:1FA0 0100007F:A000 01 00000000:00000000 00:00000000 00000000   990        0 2 1 0\n\
+            2: 0100007F:A000 0100007F:1FA0 01 00000000:00000000 00:00000000 00000000     0        0 3 1 0\n";
+        let (server, client) = (v4("127.0.0.1:8096"), v4("127.0.0.1:40960"));
+        assert_eq!(uid_in(text, server, client), Some(990));
+        assert_eq!(uid_in(text, client, server), Some(0));
+        assert_eq!(uid_in(text, server, v4("127.0.0.1:1")), None);
+    }
+
+    #[test]
+    fn secrets_go_only_to_the_owner() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let me = rustix::process::getuid().as_raw();
+        let t = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            for _ in 0..2 {
+                let (mut s, _) = l.accept().unwrap();
+                let mut req = Vec::new();
+                s.read_to_end(&mut req).unwrap();
+                got.push(req);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+            got
+        });
+        // Another owner: nothing is sent, the connection just closes.
+        let e = request(
+            Target::TcpOwnedBy(addr, me.wrapping_add(1)),
+            "GET",
+            "/",
+            &[("Authorization", "secret")],
+            None,
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}");
+        // Ours: sent (the reader waits for EOF, so only the write half is checked here).
+        let mut s = TcpStream::connect(addr).unwrap();
+        assert_eq!(server_uid(&s).unwrap(), me);
+        s.write_all(b"x").unwrap();
+        s.shutdown(std::net::Shutdown::Write).unwrap();
+        let got = t.join().unwrap();
+        assert_eq!(got, [b"".to_vec(), b"x".to_vec()]);
     }
 
     #[test]

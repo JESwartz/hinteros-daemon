@@ -2,9 +2,10 @@
 //!
 //! The `storage_measure` job ([`crate::runner`]) gathers the facts: the store's filesystem
 //! (statvfs), the NAR size of every store path and which are live, the closure of every system
-//! and app-env generation, and each home with [`measure_home`] (a walk that never follows a
-//! symlink, never leaves the home's filesystem and never reads a file; only Steam's
-//! `libraryfolders.vdf` and `appmanifest_*.acf` are read, to name the games), and `/srv`. This
+//! and app-env generation, and each home with [`measure_home`] (a walk by directory descriptor
+//! that never follows a symlink, not even one swapped in while it runs, never leaves the home's
+//! filesystem and never reads a file; only Steam's `libraryfolders.vdf` and `appmanifest_*.acf`
+//! are read, at most 1 MiB each, to name the games), and `/srv`. This
 //! module turns them into [`StorageNode`] trees whose children always add up to their parent, and writes the
 //! result to `/var/lib/hinteros/storage.json` (root, 0600): the public view (top level, every
 //! profile's total, the system/apps breakdown, the clean-up estimates) and the detailed trees
@@ -13,12 +14,14 @@
 //! Nothing here logs a file or folder name.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::os::unix::fs::MetadataExt;
+use std::ffi::CString;
+use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
 
 use hinteros_api::system::{
     CleanupEstimate, CleanupEstimates, DiskUsage, MAX_KEEP, Measurement, NodeKind, StorageNode,
 };
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, Stat, fstat, openat, statat};
 use serde::{Deserialize, Serialize};
 
 use crate::fsutil;
@@ -64,19 +67,26 @@ impl Stored {
     }
 }
 
-/// statvfs of `dir`, like df: total, used (total minus free blocks), free (available blocks).
-/// On btrfs it is the whole filesystem from any subvolume; available is below free by what the
-/// filesystem holds back for metadata, which [`top_level`] counts as used.
+/// statvfs of `dir`: total, free (available blocks) and used (total minus free, so the three
+/// add up, as in the ring). On btrfs it is the whole filesystem from any subvolume; available
+/// is below the free blocks by what the filesystem holds back for metadata, which counts as used
+/// here and in [`top_level`].
 pub fn disk_usage(dir: &Path) -> Option<DiskUsage> {
     let s = rustix::fs::statvfs(dir).ok()?;
     let frsize = s.f_frsize.max(1);
-    let total = s.f_blocks.saturating_mul(frsize);
-    let free_blocks = s.f_bfree.saturating_mul(frsize);
-    Some(DiskUsage {
+    Some(usage(
+        s.f_blocks.saturating_mul(frsize),
+        s.f_bavail.saturating_mul(frsize),
+    ))
+}
+
+fn usage(total: u64, available: u64) -> DiskUsage {
+    let free = available.min(total);
+    DiskUsage {
         total_bytes: total,
-        used_bytes: total.saturating_sub(free_blocks),
-        free_bytes: s.f_bavail.saturating_mul(frsize),
-    })
+        used_bytes: total - free,
+        free_bytes: free,
+    }
 }
 
 /// Write out what the kernel holds for the filesystem of `dir`. Btrfs gives freed space back when
@@ -176,6 +186,38 @@ struct RawDir {
     dirs: Vec<RawDir>,
 }
 
+/// Folders are opened with these, relative to their parent's descriptor: the walk runs as root
+/// in homes their (untrusted) users can change under it, so it never resolves a path. A folder
+/// swapped for a symlink after it was looked at fails to open and is left out.
+const DIR_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// Open the folder at `path` (its last component not followed) and stat it.
+fn open_dir(path: &Path) -> Option<(OwnedFd, Stat)> {
+    let fd = rustix::fs::open(path, DIR_FLAGS, Mode::empty()).ok()?;
+    let st = fstat(&fd).ok()?;
+    Some((fd, st))
+}
+
+/// Open folder `name` in the open folder `parent` without following a symlink, and stat it.
+fn open_dir_at(parent: &OwnedFd, name: &str) -> Option<(OwnedFd, Stat)> {
+    let c = CString::new(name).ok()?;
+    let fd = openat(parent, c.as_c_str(), DIR_FLAGS, Mode::empty()).ok()?;
+    let st = fstat(&fd).ok()?;
+    Some((fd, st))
+}
+
+/// Allocated bytes of a stat.
+fn block_bytes(st: &Stat) -> u64 {
+    u64::try_from(st.st_blocks).unwrap_or(0).saturating_mul(512)
+}
+
+fn is_dir(st: &Stat) -> bool {
+    FileType::from_raw_mode(st.st_mode) == FileType::Directory
+}
+
 struct Walk<'a> {
     dev: u64,
     /// Folders not counted in the tree (the Steam games, counted on their own).
@@ -197,62 +239,70 @@ impl Walk<'_> {
         self.cancelled
     }
 
-    fn file_bytes(&mut self, meta: &std::fs::Metadata) -> u64 {
-        if meta.nlink() > 1 && !meta.is_dir() && !self.seen.insert((meta.dev(), meta.ino())) {
+    fn file_bytes(&mut self, st: &Stat) -> u64 {
+        if st.st_nlink > 1 && !is_dir(st) && !self.seen.insert((st.st_dev, st.st_ino)) {
             return 0;
         }
-        meta.blocks().saturating_mul(512)
+        block_bytes(st)
     }
 
-    /// Walk `dir` (already checked to be a folder on our device). `keep_tree`: record
-    /// sub-folders (false below the depth limit and for the games).
-    fn dir(
-        &mut self,
-        dir: &Path,
-        meta: &std::fs::Metadata,
-        depth: usize,
-        keep_tree: bool,
-    ) -> RawDir {
+    /// Walk the open folder `fd` (already checked to be on our device; `st` its stat). The walk
+    /// reads entries through `fd` itself (one descriptor per level, closed when the level is done:
+    /// a deep tree must not run out of descriptors).
+    /// `keep_tree`: record sub-folders (false below the depth limit and for the games).
+    fn dir(&mut self, fd: OwnedFd, st: &Stat, depth: usize, keep_tree: bool) -> RawDir {
         let mut out = RawDir {
             name: String::new(),
             bytes: 0,
-            files: meta.blocks().saturating_mul(512),
+            files: block_bytes(st),
             dirs: Vec::new(),
         };
-        let Ok(entries) = std::fs::read_dir(dir) else {
+        let Ok(mut entries) = Dir::new(fd) else {
             out.bytes = out.files;
             return out;
         };
-        for entry in entries.flatten() {
+        while let Some(entry) = entries.read() {
+            let Ok(entry) = entry else { break };
+            let name = entry.file_name();
+            if name == c"." || name == c".." {
+                continue;
+            }
             if self.tick() {
                 break;
             }
-            // DirEntry::metadata does not follow a symlink.
-            let Ok(m) = entry.metadata() else { continue };
-            if m.dev() != self.dev {
+            // The stream's own descriptor: statat and openat do not move its position.
+            let Ok(fd) = entries.fd() else { break };
+            let Ok(m) = statat(fd, name, AtFlags::SYMLINK_NOFOLLOW) else {
+                continue;
+            };
+            if m.st_dev != self.dev {
                 // A mount point or a nested subvolume: not counted (nor its directory).
                 continue;
             }
-            if m.is_dir() {
-                if self.exclude.contains(&(m.dev(), m.ino())) {
-                    continue;
-                }
-                let mut sub = self.dir(
-                    &entry.path(),
-                    &m,
-                    depth + 1,
-                    keep_tree && depth < self.limits.max_depth,
-                );
-                if keep_tree && depth < self.limits.max_depth && sub.bytes >= self.limits.min_bytes
-                {
-                    sub.name =
-                        clean_name(&entry.file_name().to_string_lossy(), self.limits.max_name);
-                    out.dirs.push(sub);
-                } else {
-                    out.files += sub.bytes;
-                }
-            } else {
+            if !is_dir(&m) {
                 out.files += self.file_bytes(&m);
+                continue;
+            }
+            // What is walked is the folder opened now, checked again (it may have been swapped
+            // since the stat above).
+            let Ok(sub_fd) = openat(fd, name, DIR_FLAGS, Mode::empty()) else {
+                continue;
+            };
+            let Ok(sm) = fstat(&sub_fd) else { continue };
+            if sm.st_dev != self.dev || self.exclude.contains(&(sm.st_dev, sm.st_ino)) {
+                continue;
+            }
+            let mut sub = self.dir(
+                sub_fd,
+                &sm,
+                depth + 1,
+                keep_tree && depth < self.limits.max_depth,
+            );
+            if keep_tree && depth < self.limits.max_depth && sub.bytes >= self.limits.min_bytes {
+                sub.name = clean_name(&name.to_string_lossy(), self.limits.max_name);
+                out.dirs.push(sub);
+            } else {
+                out.files += sub.bytes;
             }
         }
         out.bytes = out.files + out.dirs.iter().map(|d| d.bytes).sum::<u64>();
@@ -310,71 +360,100 @@ fn vdf_value<'a>(tokens: &'a [String], key: &str) -> Option<&'a str> {
         .map(|w| w[1].as_str())
 }
 
-/// Read a small text file without following a symlink (Steam's own files only).
-fn read_small(path: &Path) -> Option<String> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > 1 << 20 {
+/// Largest Steam file read.
+const MAX_SMALL: u64 = 1 << 20;
+
+/// Read the small regular file `name` in the open folder `dir` without following a symlink
+/// (Steam's own files only). Opened non-blocking (a FIFO does not hang the walk), checked on the
+/// open file, and never more than [`MAX_SMALL`] bytes read.
+fn read_small_at(dir: &OwnedFd, name: &str) -> Option<String> {
+    use std::io::Read;
+    let c = CString::new(name).ok()?;
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = openat(dir, c.as_c_str(), flags, Mode::empty()).ok()?;
+    let st = fstat(&fd).ok()?;
+    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile
+        || u64::try_from(st.st_size).map_or(true, |n| n > MAX_SMALL)
+    {
         return None;
     }
-    let bytes = std::fs::read(path).ok()?;
+    let mut bytes = Vec::new();
+    std::fs::File::from(fd)
+        .take(MAX_SMALL)
+        .read_to_end(&mut bytes)
+        .ok()?;
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Whether `path` is `home` or below it with no symlink on the way (lexically clean, absolute).
-fn inside_without_links(home: &Path, path: &Path) -> bool {
+/// Open `path`, which must be `home` or below it, component by component from the open home
+/// without following a symlink (lexically clean and absolute, else `None`).
+fn open_in_home(home_fd: &OwnedFd, home: &Path, path: &Path) -> Option<(OwnedFd, Stat)> {
     if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
-        return false;
+        return None;
     }
-    let Ok(rest) = path.strip_prefix(home) else {
-        return false;
-    };
-    let mut at = home.to_path_buf();
+    let rest = path.strip_prefix(home).ok()?;
+    let mut fd = rustix::io::dup(home_fd).ok()?;
+    let mut st = fstat(&fd).ok()?;
     for c in rest.components() {
-        at.push(c);
-        match std::fs::symlink_metadata(&at) {
-            Ok(m) if m.is_dir() => {}
-            _ => return false,
-        }
-    }
-    true
-}
-
-/// The Steam library folders inside `home`: Steam's own folder and every `"path"` of its
-/// `libraryfolders.vdf` that is a real folder in the home.
-pub fn steam_libraries(home: &Path) -> Vec<PathBuf> {
-    let main = home.join(".local/share/Steam");
-    let mut libs: Vec<PathBuf> = Vec::new();
-    if inside_without_links(home, &main) {
-        libs.push(main.clone());
-    }
-    for f in ["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
-        let Some(text) = read_small(&main.join(f)) else {
+        let Component::Normal(part) = c else {
             continue;
         };
+        (fd, st) = open_dir_at(&fd, part.to_str()?)?;
+    }
+    Some((fd, st))
+}
+
+/// The Steam library folders inside `home` (open): Steam's own folder and every `"path"` of its
+/// `libraryfolders.vdf` that is a real folder in the home.
+fn steam_libraries(home_fd: &OwnedFd, home: &Path) -> Vec<(PathBuf, OwnedFd)> {
+    let main = home.join(".local/share/Steam");
+    let Some((main_fd, main_st)) = open_in_home(home_fd, home, &main) else {
+        return Vec::new();
+    };
+    let mut seen = vec![(main_st.st_dev, main_st.st_ino)];
+    let mut texts = Vec::new();
+    for sub in ["steamapps", "config"] {
+        if let Some((fd, _)) = open_dir_at(&main_fd, sub)
+            && let Some(text) = read_small_at(&fd, "libraryfolders.vdf")
+        {
+            texts.push(text);
+        }
+    }
+    let mut libs = vec![(main, main_fd)];
+    for text in texts {
         let tokens = vdf_tokens(&text);
         for w in tokens.windows(2) {
-            if w[0].eq_ignore_ascii_case("path") {
-                let p = PathBuf::from(&w[1]);
-                if inside_without_links(home, &p) && !libs.contains(&p) {
-                    libs.push(p);
-                }
+            if !w[0].eq_ignore_ascii_case("path") {
+                continue;
+            }
+            let p = PathBuf::from(&w[1]);
+            if let Some((fd, st)) = open_in_home(home_fd, home, &p)
+                && !seen.contains(&(st.st_dev, st.st_ino))
+            {
+                seen.push((st.st_dev, st.st_ino));
+                libs.push((p, fd));
             }
         }
     }
     libs
 }
 
-/// The installed games of the libraries in `home`, named from their `appmanifest_*.acf`.
-pub fn steam_games(home: &Path) -> Vec<SteamGame> {
-    let mut games: Vec<SteamGame> = Vec::new();
-    for lib in steam_libraries(home) {
-        let apps = lib.join("steamapps");
-        let Ok(entries) = std::fs::read_dir(&apps) else {
+/// The installed games of the libraries in `home` (open), named from their
+/// `appmanifest_*.acf`, each with its folder open.
+fn steam_games(home_fd: &OwnedFd, home: &Path) -> Vec<(SteamGame, OwnedFd, Stat)> {
+    let mut games: Vec<(SteamGame, OwnedFd, Stat)> = Vec::new();
+    for (lib, lib_fd) in steam_libraries(home_fd, home) {
+        let Some((apps_fd, _)) = open_dir_at(&lib_fd, "steamapps") else {
             continue;
         };
-        for e in entries.flatten() {
-            let file = e.file_name();
-            let Some(file) = file.to_str() else { continue };
+        let Ok(mut entries) = rustix::io::dup(&apps_fd).and_then(Dir::new) else {
+            continue;
+        };
+        let common = open_dir_at(&apps_fd, "common");
+        while let Some(Ok(e)) = entries.read() {
+            let Ok(file) = e.file_name().to_str() else {
+                continue;
+            };
             let Some(id) = file
                 .strip_prefix("appmanifest_")
                 .and_then(|r| r.strip_suffix(".acf"))
@@ -382,7 +461,7 @@ pub fn steam_games(home: &Path) -> Vec<SteamGame> {
             else {
                 continue;
             };
-            let Some(text) = read_small(&e.path()) else {
+            let Some(text) = read_small_at(&apps_fd, file) else {
                 continue;
             };
             let tokens = vdf_tokens(&text);
@@ -397,22 +476,30 @@ pub fn steam_games(home: &Path) -> Vec<SteamGame> {
             ) {
                 continue;
             }
-            let dir = apps.join("common").join(installdir);
-            match std::fs::symlink_metadata(&dir) {
-                Ok(m) if m.is_dir() => {}
-                _ => continue,
-            }
-            if games.iter().any(|g| g.app_id == id || g.dir == dir) {
+            let Some((dir_fd, st)) = common
+                .as_ref()
+                .and_then(|(c, _)| open_dir_at(c, installdir))
+            else {
+                continue;
+            };
+            if games
+                .iter()
+                .any(|(g, _, s)| g.app_id == id || (s.st_dev, s.st_ino) == (st.st_dev, st.st_ino))
+            {
                 continue;
             }
             let name = vdf_value(&tokens, "name")
                 .filter(|n| !n.trim().is_empty())
                 .unwrap_or(installdir);
-            games.push(SteamGame {
-                app_id: id,
-                name: clean_name(name.trim(), 128),
-                dir,
-            });
+            games.push((
+                SteamGame {
+                    app_id: id,
+                    name: clean_name(name.trim(), 128),
+                    dir: lib.join("steamapps/common").join(installdir),
+                },
+                dir_fd,
+                st,
+            ));
         }
     }
     games
@@ -427,12 +514,9 @@ pub fn measure_home(
     limits: Limits,
     cancel: &dyn Fn() -> bool,
 ) -> Option<StorageNode> {
-    let meta = std::fs::symlink_metadata(home).ok()?;
-    if !meta.is_dir() {
-        return None;
-    }
-    let dev = meta.dev();
-    let games = steam_games(home);
+    let (home_fd, st) = open_dir(home)?;
+    let dev = st.st_dev;
+    let games = steam_games(&home_fd, home);
     let mut walk = Walk {
         dev,
         exclude: HashSet::new(),
@@ -443,20 +527,17 @@ pub fn measure_home(
         cancelled: false,
     };
     let mut game_nodes = Vec::new();
-    for g in &games {
-        let Ok(m) = std::fs::symlink_metadata(&g.dir) else {
-            continue;
-        };
-        if m.dev() != dev || !walk.exclude.insert((m.dev(), m.ino())) {
+    for (g, fd, m) in games {
+        if m.st_dev != dev || !walk.exclude.insert((m.st_dev, m.st_ino)) {
             continue;
         }
-        let raw = walk.dir(&g.dir, &m, limits.max_depth, false);
+        let raw = walk.dir(fd, &m, limits.max_depth, false);
         let mut n = StorageNode::new(NodeKind::SteamGame, raw.bytes);
         n.name = Some(g.name.clone());
         n.app_id = Some(g.app_id);
         game_nodes.push(n);
     }
-    let raw = walk.dir(home, &meta, 0, true);
+    let raw = walk.dir(home_fd, &st, 0, true);
     if walk.cancelled {
         return None;
     }
@@ -466,12 +547,9 @@ pub fn measure_home(
 /// The total of `/srv`, walked like a home, for the `media` node: no tree, nobody sees inside it
 /// here. `None`: not a folder, or cancelled.
 pub fn measure_media(dir: &Path, limits: Limits, cancel: &dyn Fn() -> bool) -> Option<StorageNode> {
-    let meta = std::fs::symlink_metadata(dir).ok()?;
-    if !meta.is_dir() {
-        return None;
-    }
+    let (fd, st) = open_dir(dir)?;
     let mut walk = Walk {
-        dev: meta.dev(),
+        dev: st.st_dev,
         exclude: HashSet::new(),
         seen: HashSet::new(),
         limits,
@@ -479,7 +557,7 @@ pub fn measure_media(dir: &Path, limits: Limits, cancel: &dyn Fn() -> bool) -> O
         cancel,
         cancelled: false,
     };
-    let raw = walk.dir(dir, &meta, limits.max_depth, false);
+    let raw = walk.dir(fd, &st, limits.max_depth, false);
     (!walk.cancelled).then(|| StorageNode::new(NodeKind::Media, raw.bytes))
 }
 
@@ -852,10 +930,12 @@ fn scale(node: &mut StorageNode, bytes: u64) {
 /// NAR sizes and `st_blocks` are uncompressed, so on a compressed filesystem what is known can be
 /// more than the disk uses (total minus free). The known segments on the disk are then scaled
 /// down in proportion to fill exactly that, and `other` is 0: the ring still adds up to the disk.
-/// `homes` are scaled in place, with their detailed trees, so `storage.tree` agrees.
+/// `homes` are scaled in place, with their detailed trees, so `storage.tree` agrees. The store's
+/// garbage and clean-up estimates (NAR sizes too) are scaled by the store's factor (System and
+/// Apps together), so a clean-up does not promise the uncompressed size.
 pub fn top_level(
     disk: DiskUsage,
-    store: &StoreTree,
+    store: &mut StoreTree,
     homes: &mut [(StorageNode, bool)],
     media: Option<(StorageNode, bool)>,
 ) -> StorageNode {
@@ -874,6 +954,19 @@ pub fn top_level(
         }
     }
     let mut known = system.bytes + apps.bytes;
+    let raw = store.system.bytes + store.apps.bytes;
+    if known < raw {
+        let f = |b: u64| (u128::from(b) * u128::from(known) / u128::from(raw)) as u64;
+        store.garbage_bytes = f(store.garbage_bytes);
+        let estimates = &mut store.estimates;
+        for e in estimates
+            .system
+            .iter_mut()
+            .chain(estimates.profiles.iter_mut())
+        {
+            e.bytes = f(e.bytes);
+        }
+    }
     let mut root = StorageNode::new(NodeKind::Disk, 0);
     root.children.push(system);
     root.children.push(apps);
@@ -987,15 +1080,30 @@ mod tests {
         std::fs::write(
             steam.join("steamapps/libraryfolders.vdf"),
             format!(
-                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"2\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"2\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"3\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
                 steam.display(),
                 lib2.display(),
-                outside.display()
+                outside.display(),
+                home.join("Games/Linked").display()
             ),
         )
         .unwrap();
         // A symlink out of the home is not followed (its target is 5 MiB).
         symlink(&outside, home.join("link")).unwrap();
+        // Manifests that are a FIFO (would block) or a link to an endless file: skipped.
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            lib2.join("steamapps/appmanifest_4.acf"),
+            FileType::Fifo,
+            Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        symlink("/dev/zero", lib2.join("steamapps/appmanifest_5.acf")).unwrap();
+        // A library whose `steamapps` is a link out of the home: not followed.
+        let lib3 = home.join("Games/Linked");
+        std::fs::create_dir_all(&lib3).unwrap();
+        symlink(outside.join("steamapps"), lib3.join("steamapps")).unwrap();
 
         let h = measure_home(&home, NodeKind::Profile, small(), &|| false).unwrap();
         let t = &h;
@@ -1127,7 +1235,7 @@ mod tests {
                 }],
             },
         ];
-        let t = store_tree(&facts, &system, &owners);
+        let mut t = store_tree(&facts, &system, &owners);
         sum_ok(&t.system);
         sum_ok(&t.apps);
         assert_eq!(t.garbage_bytes, 9);
@@ -1195,7 +1303,7 @@ mod tests {
             n.id = Some("p2".into());
             n
         };
-        let top = top_level(disk, &t, &mut [(home, true), (empty, true)], None);
+        let top = top_level(disk, &mut t, &mut [(home, true), (empty, true)], None);
         assert_eq!(top.bytes, 10_000);
         let kinds: Vec<NodeKind> = top.children.iter().map(|c| c.kind).collect();
         assert_eq!(
@@ -1230,6 +1338,16 @@ mod tests {
 
     fn fs(p: &str) -> Option<String> {
         filesystem_in(BTRFS, Path::new(p))
+    }
+
+    #[test]
+    fn used_and_free_add_up() {
+        // Blocks held back for metadata count as used, as in the ring.
+        let u = usage(500, 296);
+        assert_eq!((u.total_bytes, u.used_bytes, u.free_bytes), (500, 204, 296));
+        assert_eq!(usage(10, 20).used_bytes, 0);
+        let real = disk_usage(Path::new("/")).unwrap();
+        assert_eq!(real.used_bytes + real.free_bytes, real.total_bytes);
     }
 
     #[test]
@@ -1314,7 +1432,7 @@ mod tests {
             used_bytes: 5_900,
             free_bytes: 4_000,
         };
-        let s = store(
+        let mut s = store(
             deep(NodeKind::System, &[3_001, 999]),
             deep(NodeKind::Apps, &[1_000, 1_000]),
         );
@@ -1324,8 +1442,17 @@ mod tests {
             // Another disk: as it is, and none of this one's used space.
             (deep(NodeKind::Profile, &[700]), false),
         ];
+        s.garbage_bytes = 600;
+        s.estimates.system.push(CleanupEstimate {
+            keep: 1,
+            generations: 2,
+            bytes: 1_200,
+        });
         let media = (StorageNode::new(NodeKind::Media, 1_998), true);
-        let top = top_level(disk, &s, &mut homes, Some(media));
+        let top = top_level(disk, &mut s, &mut homes, Some(media));
+        // The store got half: so do its garbage and estimates.
+        assert_eq!(s.garbage_bytes, 300);
+        assert_eq!(s.estimates.system[0].bytes, 600);
         sum_ok(&top);
         for c in &top.children {
             sum_ok(c);
@@ -1353,21 +1480,21 @@ mod tests {
             used_bytes: 6_000,
             free_bytes: 4_000,
         };
-        let s = store(
+        let mut s = store(
             deep(NodeKind::System, &[3_000]),
             deep(NodeKind::Apps, &[1_000]),
         );
         // Exactly the used space.
         let mut homes = [(deep(NodeKind::Profile, &[1_500]), true)];
         let media = (StorageNode::new(NodeKind::Media, 500), true);
-        let top = top_level(disk, &s, &mut homes, Some(media));
+        let top = top_level(disk, &mut s, &mut homes, Some(media));
         assert_eq!(of_kind(&top, NodeKind::System), [3_000]);
         assert_eq!(of_kind(&top, NodeKind::Media), [500]);
         assert!(of_kind(&top, NodeKind::Other).is_empty());
         assert_eq!(top.children[0], s.system);
         // Below it: other is the rest. An empty or absent `/srv` is no segment.
         let media = (StorageNode::new(NodeKind::Media, 0), true);
-        let top = top_level(disk, &s, &mut homes, Some(media));
+        let top = top_level(disk, &mut s, &mut homes, Some(media));
         assert_eq!(of_kind(&top, NodeKind::Other), [500]);
         assert!(of_kind(&top, NodeKind::Media).is_empty());
         assert_eq!(top.bytes, 10_000);

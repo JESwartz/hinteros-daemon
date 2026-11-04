@@ -1497,7 +1497,9 @@ Design: `hinteros-docs/design/storage.md`. Every method below is relayed as `sys
   known total can pass what the disk uses (total − free): the known segments on that filesystem,
   with their children and detailed trees, are then scaled down in proportion to fill it exactly
   (largest remainder, children still add up) and `other` is 0. Up to that, nothing is scaled.
-  The clean-up estimates, `garbage_bytes` and `profiles.list`'s `usage` stay uncompressed sizes.
+  The clean-up estimates and `garbage_bytes` are scaled by the store's factor (System and Apps
+  together), as the ring is. `profiles.list`'s `usage` stays uncompressed.
+  Per-path NAR sizes still count hard links (`nix.optimise`) once per path.
 - The result goes to `/var/lib/hinteros/storage.json` (0600) with its time: `storage.get`
   (read-only, open) returns the public part (top level, every profile's total, garbage and the
   clean-up estimates for keep 1..10); `storage.tree {id, admin_pin?}` (through the mutating gate
@@ -2006,14 +2008,18 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   " 2"… added; `Profile <n>` when nothing is left), not an administrator and without media
   deletion (the policy is posted back whole), renames it with the profile (the whole user with its
   `Configuration` is posted back), deletes it with the profile; dashboard-made users are left
-  alone. It runs after profile create/remove jobs, after a rename (in the background), at the end
-  of `services_enable`, in every Jellyfin job and in `jellyfin.users.reveal {pin}` (no job; the
+  alone. A new user is recorded first, with an empty `jellyfin_user_id` (pending): if Jellyfin
+  makes it but the answer is lost, the next sync takes over the user of that name, but only if it
+  signs in with the recorded password (else it is not ours: the profile gets " 2"). It runs after
+  profile create/remove jobs, after a rename (in the background), at the end of `services_enable`, in every Jellyfin job and in `jellyfin.users.reveal {pin}` (no job; the
   admin's and each profile's password; never logged). `jellyfin.client_token` (no PIN, read-only
   for the caller): the caller's own profile only (from its uid; guest and spare accounts get
   `permission_denied {reason: profile}`): `{server_id, user_id, device_id: "hinteros-<id>",
   access_token}`, minted with `AuthenticateByName` as that device (Jellyfin ends the device's older
-  token), kept in `users.json`, minted again when `GET /System/Info` answers 401. The session
-  daemon signs the Jellyfin app in with it (below).
+  token), kept in `users.json`, minted again when `GET /System/Info` answers 401. A sign-in
+  refused with 401 (the user deleted, or its password changed, in the dashboard) runs `sync`
+  (which makes a missing user again), sets the recorded password back (`POST /Users/Password`)
+  and tries once more. The session daemon signs the Jellyfin app in with it (below).
 - **The Jellyfin app signs in by itself** (spike S1, session side, `appseed.rs`): before
   `apps.launch {id: "jellyfin-desktop"}` (not while it runs, not without `lan`) the session daemon calls
   `jellyfin.client_token` (10 s at most; `unavailable` = the server is off or not set up: nothing
@@ -2037,7 +2043,9 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
 - **`plex.claim {pin, code}`** (job): `claim-` and 20 of `[A-Za-z0-9_-]` (what plex.tv/claim gives;
   Plex documents no exact format, so a change shows as `invalid_params`). The job posts it to
   Plex's own `POST /myplex/claim?token=` on 127.0.0.1:32400 with `X-Plex-Client-Identifier` (the
-  server's `ProcessedMachineIdentifier`) and succeeds once `PlexOnlineToken` is set (30 s).
+  server's `ProcessedMachineIdentifier`) and succeeds once `PlexOnlineToken` is set (30 s). The
+  probe and the code go only to a server owned by the `plex` account (32400 is not a privileged
+  port; the same check as Jellyfin's).
 - **`tailscale.login {pin}`** (job): `tailscale up --reset --json --timeout=600s` (defaults: no
   exit node, routes or Tailscale SSH; `--force-reauth` for an expired key); its pretty-printed
   JSON objects are decoded as a stream; each new `AuthURL` (https, printable ASCII, ≤ 512) is
@@ -2048,7 +2056,7 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   logout`. Both answer `job_id: null` when the state is already the asked one.
 - **`cloudflare.set_token {pin, token}`**: checked strictly (cloudflared's `ParseToken`: padded
   standard base64 of `{"a": 32 hex, "t": UUID, "s": base64 of 32..256 bytes, "e"?: endpoint}`,
-  no other or repeated key, ≤ 512); the service writes it 0600 atomically (the directory 0700) so
+  no repeated key; other keys are ignored, as cloudflared ignores them; ≤ 512); the service writes it 0600 atomically (the directory 0700) so
   it is never in a job spec; the job restarts `hinteros-cloudflared.service` (D-Bus) and waits 30 s
   for `/ready`. `cloudflare.clear_token {pin}` (job) stops the unit and deletes the file.
 - polkit action `org.hinteros.system.services` for every write (the admin PIN is the service's

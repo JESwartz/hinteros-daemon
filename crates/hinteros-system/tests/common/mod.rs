@@ -839,14 +839,17 @@ impl Root {
         script(&r.p("mkgen"), MKGEN);
         script(&r.p("bin/nix-env"), FAKE_NIX_ENV);
         script(&r.p("bin/nix-store"), FAKE_NIX_STORE);
-        // The test's own uid is the first account, `hinteros-p1`.
+        // The test's own uid is the first account, `hinteros-p1`, and `jellyfin` and `plex`
+        // (the fake servers run in the test; listed last, so the uid still names the profile).
         std::fs::write(
             r.p("passwd"),
             format!(
-                "hinteros-p1:x:{}:100::{}:/bin/sh\nhinteros-p2:x:20002:100::/nonexistent:/bin/sh\n\
-                 hinteros-guest:x:20000:100::/nonexistent:/bin/sh\n",
-                me(),
-                r.p("home").display()
+                "hinteros-p1:x:{me}:100::{}:/bin/sh\nhinteros-p2:x:20002:100::/nonexistent:/bin/sh\n\
+                 hinteros-guest:x:20000:100::/nonexistent:/bin/sh\n\
+                 jellyfin:x:{me}:100::/nonexistent:/bin/sh\n\
+                 plex:x:{me}:100::/nonexistent:/bin/sh\n",
+                r.p("home").display(),
+                me = me(),
             ),
         )
         .unwrap();

@@ -1577,6 +1577,7 @@ mod tests {
             profile: d.path().join("profiles/system"),
             current_system: d.path().join("current"),
             booted_system: d.path().join("booted"),
+            boot_entries: d.path().join("boot/loader/entries"),
             apps_profiles: d.path().join("nixprofiles"),
             catalog_index: None,
             users: Default::default(),

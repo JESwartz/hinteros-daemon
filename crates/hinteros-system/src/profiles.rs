@@ -118,6 +118,10 @@ impl ProfilesFile {
         }
     }
 
+    pub fn exists(path: &Path) -> bool {
+        path.exists()
+    }
+
     /// [`Self::load`] for the checks: a file that cannot be read is an empty, locked-down one
     /// ([`Self::unreadable`]): never first-boot mode, no admin, no spares, never saved.
     pub fn load_or_locked(path: &Path) -> Self {

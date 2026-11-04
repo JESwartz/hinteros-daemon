@@ -611,7 +611,7 @@ impl Profiles {
         let inhibit = |conn: zbus::Connection| async move {
             let reply = conn
                 .call_method(
-                    Some(LOGIND),
+                    Some("org.freedesktop.login1"),
                     "/org/freedesktop/login1",
                     Some("org.freedesktop.login1.Manager"),
                     "Inhibit",

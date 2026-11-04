@@ -566,7 +566,10 @@ impl Profiles {
             None => zbus::Connection::system().await?,
         };
         // Only logind's own signal: any account on the system bus may emit one with this name,
-        // and a fake one would lock the screen and let go of the inhibitor.
+        // and a fake one would lock the screen and let go of the inhibitor. The bus applies the
+        // sender in this rule to broadcasts only: a unicast signal gets past it, and zbus cannot
+        // match a well-known sender itself. So the loop also checks that the sender (set by the
+        // bus) is the current owner of logind's name.
         let rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
             .sender("org.freedesktop.login1")?
@@ -575,6 +578,8 @@ impl Profiles {
             .member("PrepareForSleep")?
             .build();
         let mut stream = zbus::MessageStream::for_match_rule(rule, &conn, None).await?;
+        let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
+        let logind = zbus::names::BusName::from_static_str("org.freedesktop.login1")?;
         let inhibit = |conn: zbus::Connection| async move {
             let reply = conn
                 .call_method(
@@ -591,6 +596,16 @@ impl Profiles {
         let mut held = inhibit(conn.clone()).await.ok();
         while let Some(msg) = stream.next().await {
             let Ok(msg) = msg else { continue };
+            let Some(sender) = msg.header().sender().map(|s| s.to_owned()) else {
+                continue;
+            };
+            if !dbus
+                .get_name_owner(logind.clone())
+                .await
+                .is_ok_and(|owner| *owner == sender)
+            {
+                continue;
+            }
             let Ok(going) = msg.body().deserialize::<bool>() else {
                 continue;
             };

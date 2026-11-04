@@ -364,7 +364,7 @@ impl Login1 {
 }
 
 /// PrepareForSleep(true) locks a locked profile only when logind sends it: the same signal from
-/// another bus client, or from logind on another path, changes nothing.
+/// another bus client (broadcast or unicast), or from logind on another path, changes nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn only_logind_puts_the_profile_to_sleep() {
     let Some(bus) = Bus::start() else { return };
@@ -418,6 +418,26 @@ async fn only_logind_puts_the_profile_to_sleep() {
         .unwrap();
     sleep(&stranger, "/org/freedesktop/login1").await;
     sleep(&logind, "/org/freedesktop/login1/other").await;
+    // A unicast signal reaches a connection whatever its match rules say: send one to every
+    // client on the bus, so the daemon's sleep watch gets it too.
+    let names = zbus::fdo::DBusProxy::new(&stranger)
+        .await
+        .unwrap()
+        .list_names()
+        .await
+        .unwrap();
+    for name in names.iter().filter(|n| n.starts_with(':')) {
+        stranger
+            .emit_signal(
+                Some(name.as_ref()),
+                "/org/freedesktop/login1",
+                "org.freedesktop.login1.Manager",
+                "PrepareForSleep",
+                &(true,),
+            )
+            .await
+            .unwrap();
+    }
     tokio::time::sleep(Duration::from_millis(1000)).await;
     assert_eq!(
         call(&mut c, "session.lock_state", json!({})).await.unwrap(),

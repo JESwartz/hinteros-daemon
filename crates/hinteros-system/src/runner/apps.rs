@@ -453,7 +453,6 @@ impl Runner {
     }
 }
 
-/// Features in `needed` that `state` does not turn on (sorted).
 /// The ids an owner's env is rebuilt with in the `apps` stage: apps the catalog removed
 /// (tombstones) are dropped; an app the catalog does not have at all (an older catalog after a
 /// rollback) is `Err`, and the env keeps its generation, so the app is still there after the
@@ -477,6 +476,7 @@ fn stage_ids(index: Option<&Index>, ids: &[String]) -> Result<Vec<String>, Vec<S
         .collect())
 }
 
+/// Features in `needed` that `state` does not turn on (sorted).
 pub fn missing_features(state: &State, needed: &std::collections::BTreeSet<String>) -> Vec<String> {
     needed
         .iter()

@@ -13,7 +13,7 @@
 // <input> types that take typed text. Everything else (checkbox, range, color, date
 // pickers, buttons) has its own controls.
 const TEXT_TYPES = new Set([
-  "", "text", "search", "email", "url", "tel", "number", "password",
+  "text", "search", "email", "url", "tel", "number", "password",
 ]);
 
 // The element that really has focus, looking inside open shadow roots.
@@ -27,7 +27,8 @@ function deepActiveElement() {
 
 // "text", "password" or "none" for an element.
 function kindOf(el) {
-  if (!el || el.disabled || el.readOnly) {
+  // :disabled also covers a field in a disabled <fieldset>.
+  if (!el || el.readOnly || el.matches(":disabled")) {
     return "none";
   }
   const tag = el.localName;
@@ -35,7 +36,9 @@ function kindOf(el) {
     return "text";
   }
   if (tag === "input") {
-    const type = (el.getAttribute("type") || "").toLowerCase();
+    // The browser's own type: "text" for a missing, unknown or obsolete type attribute, which
+    // it shows as a text field too.
+    const type = String(el.type ?? "text").toLowerCase();
     if (!TEXT_TYPES.has(type)) {
       return "none";
     }

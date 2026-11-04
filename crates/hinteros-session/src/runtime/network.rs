@@ -740,24 +740,29 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
         }
     };
 
-    let dev = proxy(&conn, NM, &device.path, I_DEVICE)
+    // Every error from here on must reach the clean-up below: the connection or password just
+    // stored is not proven yet.
+    let result = async {
+        let dev = proxy(&conn, NM, &device.path, I_DEVICE)
+            .await
+            .map_err(map)?;
+        let states = dev.receive_signal("StateChanged").await.map_err(map)?;
+        let nmp = proxy(&conn, NM, ROOT, I_NM).await.map_err(map)?;
+        let target_path = OwnedObjectPath::try_from(target.as_str())
+            .map_err(|e| failed("bad_path", e.to_string()))?;
+        let dev_path = OwnedObjectPath::try_from(device.path.as_str())
+            .map_err(|e| failed("bad_path", e.to_string()))?;
+        let ap_path = OwnedObjectPath::try_from(ap.path.as_str())
+            .map_err(|e| failed("bad_path", e.to_string()))?;
+        nmp.call::<_, _, OwnedObjectPath>(
+            "ActivateConnection",
+            &(&target_path, &dev_path, &ap_path),
+        )
         .await
         .map_err(map)?;
-    let states = dev.receive_signal("StateChanged").await.map_err(map)?;
-    let nmp = proxy(&conn, NM, ROOT, I_NM).await.map_err(map)?;
-    let target_path = OwnedObjectPath::try_from(target.as_str())
-        .map_err(|e| failed("bad_path", e.to_string()))?;
-    let dev_path = OwnedObjectPath::try_from(device.path.as_str())
-        .map_err(|e| failed("bad_path", e.to_string()))?;
-    let ap_path = OwnedObjectPath::try_from(ap.path.as_str())
-        .map_err(|e| failed("bad_path", e.to_string()))?;
-    let result = match nmp
-        .call::<_, _, OwnedObjectPath>("ActivateConnection", &(&target_path, &dev_path, &ap_path))
-        .await
-    {
-        Ok(_) => wait_activated(&conn, &device.path, &target, states, password.is_some()).await,
-        Err(e) => Err(map(e)),
-    };
+        wait_activated(&conn, &device.path, &target, states, password.is_some()).await
+    }
+    .await;
     if let Err(e) = &result {
         warn!(ssid = %p.ssid, code = e.code, "Wi-Fi connect failed: {}", e.message);
         if created && let Ok(c) = proxy(&conn, NM, &target, I_CONNECTION).await {

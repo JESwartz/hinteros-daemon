@@ -333,7 +333,11 @@ impl Profiles {
                     .nth(1)?
                     .parse()
                     .ok()?;
-                (owner == uid && name == "steam").then_some(pid)
+                // Not one inside an app's sandbox, which can take any name.
+                (owner == uid
+                    && name == "steam"
+                    && crate::procs::in_own_pid_ns_at(&self.inner.cfg.proc_dir, &pid.to_string()))
+                .then_some(pid)
             })
             .collect()
     }

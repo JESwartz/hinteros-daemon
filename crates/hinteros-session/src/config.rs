@@ -371,9 +371,23 @@ fn apps_key<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<AppsK
     use serde::de::Error;
     let v = toml::Value::deserialize(d)?;
     match v {
-        toml::Value::Array(_) => Vec::<AppConfig>::deserialize(v)
-            .map(AppsKey::List)
-            .map_err(D::Error::custom),
+        toml::Value::Array(list) => {
+            // The config file is written by hand: a key AppConfig does not know is a typo (the
+            // manifest's entries, which a newer system may write, are read leniently).
+            let known = struct_fields::<AppConfig>();
+            for key in list
+                .iter()
+                .filter_map(toml::Value::as_table)
+                .flat_map(|t| t.keys())
+            {
+                if !known.contains(&key.as_str()) {
+                    return Err(D::Error::unknown_field(key, known));
+                }
+            }
+            Vec::<AppConfig>::deserialize(toml::Value::Array(list))
+                .map(AppsKey::List)
+                .map_err(D::Error::custom)
+        }
         toml::Value::Table(_) => AppsTable::deserialize(v)
             .map(|t| AppsKey::Profile(t.profile))
             .map_err(D::Error::custom),
@@ -381,6 +395,36 @@ fn apps_key<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<AppsK
             "apps must be [[apps]] entries or an [apps] table with profile",
         )),
     }
+}
+
+/// The field names `T`'s derived `Deserialize` knows: it passes them to `deserialize_struct`,
+/// which this probe answers with an error.
+fn struct_fields<T: serde::de::DeserializeOwned>() -> &'static [&'static str] {
+    use serde::de::value::Error;
+    struct Probe<'a>(&'a mut &'static [&'static str]);
+    impl<'de> serde::Deserializer<'de> for Probe<'_> {
+        type Error = Error;
+        fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Error> {
+            Err(serde::de::Error::custom("not a struct"))
+        }
+        fn deserialize_struct<V: serde::de::Visitor<'de>>(
+            self,
+            _: &'static str,
+            fields: &'static [&'static str],
+            _: V,
+        ) -> Result<V::Value, Error> {
+            *self.0 = fields;
+            Err(serde::de::Error::custom("probed"))
+        }
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+            option unit unit_struct newtype_struct seq tuple tuple_struct map enum identifier
+            ignored_any
+        }
+    }
+    let mut fields: &'static [&'static str] = &[];
+    let _ = T::deserialize(Probe(&mut fields));
+    fields
 }
 
 /// This process's user name (`$USER`, else the user database).
@@ -968,8 +1012,11 @@ impl InputConfig {
 }
 
 /// An `apps.list` entry. Exactly one of `command` and `steam_app_id`.
+///
+/// Unknown keys are ignored here: the app env's manifest may come from a newer system (a
+/// boot-menu rollback keeps the env). `[[apps]]` in the config file is checked for them
+/// separately (`apps_key`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub id: String,
     pub name: String,
@@ -1040,6 +1087,100 @@ pub fn expand_home(path: &Path) -> PathBuf {
 }
 
 impl AppConfig {
+    /// Drop the keymap entries with an action or key this daemon does not know, and a
+    /// `back_key` it does not know (logged): a newer manifest's, so the app still runs.
+    fn drop_unknown_keys(&mut self) {
+        if self
+            .back_key
+            .as_ref()
+            .is_some_and(|k| k.parse::<KeyCombo>().is_err())
+        {
+            tracing::warn!(app = %self.id, "ignoring an unknown back_key");
+            self.back_key = None;
+        }
+        self.keymap.retain(|action, key| {
+            let ok = nav_action(action).is_some() && parse_binding(key).is_ok();
+            if !ok {
+                tracing::warn!(app = %self.id, "ignoring keymap entry {action} = {key}");
+            }
+            ok
+        });
+    }
+
+    /// The checks of one entry (the config's [`Config::validate`] adds those across entries).
+    pub fn validate(&self) -> Result<()> {
+        ensure!(valid_app_id(&self.id), "invalid app id '{}'", self.id);
+        ensure!(
+            !reserved_app_id(&self.id),
+            "app id '{}' is reserved for apps started by command or Steam URL",
+            self.id
+        );
+        ensure!(
+            self.id != STEAM_CLIENT_APP_ID,
+            "app id '{STEAM_CLIENT_APP_ID}' is reserved for the built-in Steam entry"
+        );
+        ensure!(!self.name.is_empty(), "app '{}' has an empty name", self.id);
+        match (&self.command, self.steam_app_id) {
+            (Some(cmd), None) if !cmd.is_empty() => {}
+            (None, Some(steam)) if steam != 0 => {}
+            _ => bail!(
+                "app '{}' needs exactly one of a non-empty 'command' or a 'steam_app_id'",
+                self.id
+            ),
+        }
+        ensure!(
+            self.steam_app_id.is_none() || self.input == InputProfile::Gamepad,
+            "app '{}': Steam games always use the gamepad input profile",
+            self.id
+        );
+        if self.input == InputProfile::Gamepad {
+            ensure!(
+                self.back_key.is_none()
+                    && self.keymap.is_empty()
+                    && !self.address_bar
+                    && self.pointer.is_none(),
+                "app '{}': back_key, keymap, address_bar and pointer need input = \"keyboard\"",
+                self.id
+            );
+        }
+        for (what, url) in [("icon_url", &self.icon_url), ("site_url", &self.site_url)] {
+            if let Some(url) = url {
+                ensure!(
+                    url.starts_with("https://"),
+                    "app '{}': {what} must be an https:// URL",
+                    self.id
+                );
+            }
+        }
+        ensure!(
+            self.icon_url.is_none() || self.icon_sha256.is_some(),
+            "app '{}': icon_url needs icon_sha256",
+            self.id
+        );
+        if let Some(hash) = &self.icon_sha256 {
+            ensure!(
+                self.icon_url.is_some() && crate::icons::web::is_sha256_hex(hash),
+                "app '{}': icon_sha256 must be 64 hex digits and needs icon_url",
+                self.id
+            );
+        }
+        ensure!(
+            self.firefox_profile.is_none() || self.site_url.is_some(),
+            "app '{}': firefox_profile needs site_url",
+            self.id
+        );
+        if let Some(id) = &self.desktop_id {
+            ensure!(
+                !id.is_empty() && !id.contains('/'),
+                "app '{}': invalid desktop_id",
+                self.id
+            );
+        }
+        self.keymap()
+            .with_context(|| format!("app '{}'", self.id))?;
+        Ok(())
+    }
+
     /// The keymap for the keyboard profile (`None` for gamepad apps): the default keymap with
     /// [`Self::own_keymap`] over it. The profile's controller settings come on top of that in
     /// the session ([`crate::controller`]).
@@ -1135,20 +1276,23 @@ impl Config {
                 return;
             }
         };
-        let mut apps = Vec::new();
+        // A newer system may have written it (a boot-menu rollback keeps the env): an entry
+        // this daemon cannot use is skipped alone, and so are keys it does not know.
+        let mut seen = BTreeSet::new();
         for v in manifest.apps {
-            match serde_json::from_value::<AppConfig>(v) {
-                Ok(a) => apps.push(a),
-                Err(e) => tracing::warn!("ignoring an app of the manifest: {e}"),
+            let mut app = match serde_json::from_value::<AppConfig>(v) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!("ignoring an app of the manifest: {e}");
+                    continue;
+                }
+            };
+            app.drop_unknown_keys();
+            match app.validate() {
+                Ok(()) if seen.insert(app.id.clone()) => self.apps.push(app),
+                Ok(()) => tracing::warn!("ignoring a second app '{}' of the manifest", app.id),
+                Err(e) => tracing::warn!("ignoring an app of the manifest: {e:#}"),
             }
-        }
-        let probe = Config {
-            apps,
-            ..Config::default()
-        };
-        match probe.validate() {
-            Ok(()) => self.apps = probe.apps,
-            Err(e) => tracing::warn!("ignoring the app env's apps: {e:#}"),
         }
         match manifest.steam {
             Some(s) => self.steam.path = s.path,
@@ -1361,75 +1505,8 @@ impl Config {
         }
         let mut seen = BTreeSet::new();
         for app in &self.apps {
-            ensure!(valid_app_id(&app.id), "invalid app id '{}'", app.id);
-            ensure!(
-                !reserved_app_id(&app.id),
-                "app id '{}' is reserved for apps started by command or Steam URL",
-                app.id
-            );
-            ensure!(
-                app.id != STEAM_CLIENT_APP_ID,
-                "app id '{STEAM_CLIENT_APP_ID}' is reserved for the built-in Steam entry"
-            );
             ensure!(seen.insert(&app.id), "duplicate app id '{}'", app.id);
-            ensure!(!app.name.is_empty(), "app '{}' has an empty name", app.id);
-            match (&app.command, app.steam_app_id) {
-                (Some(cmd), None) if !cmd.is_empty() => {}
-                (None, Some(steam)) if steam != 0 => {}
-                _ => bail!(
-                    "app '{}' needs exactly one of a non-empty 'command' or a 'steam_app_id'",
-                    app.id
-                ),
-            }
-            ensure!(
-                app.steam_app_id.is_none() || app.input == InputProfile::Gamepad,
-                "app '{}': Steam games always use the gamepad input profile",
-                app.id
-            );
-            if app.input == InputProfile::Gamepad {
-                ensure!(
-                    app.back_key.is_none()
-                        && app.keymap.is_empty()
-                        && !app.address_bar
-                        && app.pointer.is_none(),
-                    "app '{}': back_key, keymap, address_bar and pointer need input = \"keyboard\"",
-                    app.id
-                );
-            }
-            for (what, url) in [("icon_url", &app.icon_url), ("site_url", &app.site_url)] {
-                if let Some(url) = url {
-                    ensure!(
-                        url.starts_with("https://"),
-                        "app '{}': {what} must be an https:// URL",
-                        app.id
-                    );
-                }
-            }
-            ensure!(
-                app.icon_url.is_none() || app.icon_sha256.is_some(),
-                "app '{}': icon_url needs icon_sha256",
-                app.id
-            );
-            if let Some(hash) = &app.icon_sha256 {
-                ensure!(
-                    app.icon_url.is_some() && crate::icons::web::is_sha256_hex(hash),
-                    "app '{}': icon_sha256 must be 64 hex digits and needs icon_url",
-                    app.id
-                );
-            }
-            ensure!(
-                app.firefox_profile.is_none() || app.site_url.is_some(),
-                "app '{}': firefox_profile needs site_url",
-                app.id
-            );
-            if let Some(id) = &app.desktop_id {
-                ensure!(
-                    !id.is_empty() && !id.contains('/'),
-                    "app '{}': invalid desktop_id",
-                    app.id
-                );
-            }
-            app.keymap().with_context(|| format!("app '{}'", app.id))?;
+            app.validate()?;
         }
         Ok(())
     }
@@ -1706,6 +1783,41 @@ mod tests {
         assert_eq!(c.steam.path, PathBuf::from("/nix/store/x-steam/bin/steam"));
         assert!(c.steam.autostart);
         assert_eq!(c.icons.profile_share, Some(d.path().join("share")));
+        // A newer system's manifest: unknown keys, keymap actions and kinds cost only what this
+        // daemon does not know; a bad or second entry is skipped alone.
+        std::fs::write(
+            d.path().join("share/hinteros/apps.json"),
+            r#"{"version":1,"ids":["a","b","c","d"],"box":[],
+                "apps":[{"id":"a","name":"A","kind":"web","command":["ff"],"input":"keyboard",
+                         "future":{"x":1},"back_key":"media_back",
+                         "keymap":{"media_play":"space","accept":"f13x","menu":"ctrl+l"}},
+                        {"id":"b","name":"B","kind":"hologram","command":["b"]},
+                        {"id":"c","name":"C","input":"voice","command":["c"]},
+                        {"id":"d","name":"","command":["d"]},
+                        {"id":"e","name":"E","command":["e"]},
+                        {"id":"e","name":"E2","command":["e2"]}]}"#,
+        )
+        .unwrap();
+        let mut c = Config::default();
+        c.load_profile_apps(d.path());
+        let ids: Vec<_> = c
+            .apps
+            .iter()
+            .map(|a| (a.id.as_str(), a.name.as_str()))
+            .collect();
+        assert_eq!(ids, [("a", "A"), ("e", "E")]);
+        assert_eq!(c.apps[0].back_key, None);
+        assert_eq!(
+            c.apps[0].keymap,
+            BTreeMap::from([("menu".to_owned(), "ctrl+l".to_owned())])
+        );
+        c.validate().unwrap();
+        // The config file's [[apps]] stay strict: an unknown key is a typo.
+        let err =
+            Config::parse("[[apps]]\nid = \"a\"\nname = \"A\"\ncommand = [\"a\"]\ncomand = 1\n")
+                .unwrap_err();
+        assert!(format!("{err:#}").contains("comand"), "{err:#}");
+        assert!(struct_fields::<AppConfig>().contains(&"steam_app_id"));
         // No env yet: no apps, no Steam, no autostart.
         let mut c = Config::parse("[steam]\nautostart = true\n").unwrap();
         c.load_profile_apps(&d.path().join("nowhere"));

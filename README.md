@@ -264,7 +264,9 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   smaller PNG. Web apps: the daemon fetches `icon_url` (with its required `icon_sha256`, the catalog's
   `icon.sha256`, keeps it only if its SHA-256 matches; else it logs and retries later), or finds the icon of `site_url` (web app
   manifest icons, `apple-touch-icon`, `<link rel=icon>`, `/favicon.ico`; the largest square one
-  of at least 192 px, not mask-only), over https only (also through redirects), with timeouts,
+  of at least 192 px, not mask-only), over https only and to internet hosts only (not this box
+  or the home network; also through redirects; it connects only to the address it checked, and
+  ignores proxy settings), with timeouts,
   a 1 MiB limit and an image check, in a background thread; it caches the file as
   `$XDG_CACHE_HOME/hinteros/icons/<app-id>.<ext>`, refetches after `icons.refresh_days` (30),
   retries failures (1 min, 10 min, 1 h, then every 6 h), and sends `apps_changed` when an
@@ -273,7 +275,8 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   Some sites refuse non-browser fetches (Crunchyroll answers 403): for those, `firefox_profile`
   (the app's kiosk profile, `~/` allowed; needs `site_url`) names the profile whose
   `favicons.sqlite` Firefox filled when it visited the site. The daemon copies that database (and
-  its `-wal`) to a temporary directory, never opening Firefox's own files, takes the largest icon
+  its `-wal`, only regular files under 32 MiB, following no symlink below `$HOME`) to a temporary
+  directory, never opening Firefox's own files, takes the largest icon
   stored for the site, and exports it as `<app-id>.firefox.<ext>` in the icon cache. It is read
   at startup, when a download fails, and again whenever the app exits (`app_exited`), sending
   `apps_changed` if the icon changed; a downloaded icon always replaces it.
@@ -1438,10 +1441,12 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
 ### Session daemon
 
 - `session.toml` `[apps] profile = "/run/hinteros/apps/%u"` (instead of `[[apps]]`): apps, Steam's
-  path and icons from the env; the whole link chain is watched. `apps.list` entries get
-  `needs_terms`; `apps.launch` refuses them (`terms_required`), and Steam games while Steam needs
-  its terms and is not running; Steam's autostart waits for its terms. `store.list` uses the
-  profile's ids and hides services.
+  path and icons from the env; the whole link chain is watched. The env may be a newer system's
+  (a boot-menu rollback keeps it): unknown keys, keymap actions and keys are ignored, and an
+  entry the daemon cannot use is skipped alone (logged). `[[apps]]` in `session.toml` stays
+  strict. `apps.list` entries get `needs_terms`; `apps.launch` refuses them (`terms_required`),
+  and Steam games while Steam needs its terms and is not running; Steam's autostart waits for its
+  terms. `store.list` uses the profile's ids and hides services.
 - `profile.current`, `session.switch_profile` (+ `switch_wait`, `switch_force_close`,
   `switch_cancel`; events `switch_progress {stage: closing_apps|closing_steam|ending|cancelled}`,
   `switch_blocked {app, waited_s}`; `[switch] wait_s = 10`, `steam_wait_s = 15`; nothing is
@@ -1821,9 +1826,10 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   policy, modules, kexec, reboot, swap, clocks, `syslog`, quotas, `acct`, `open_by_handle_at`,
   `iopl`/`ioperm`, `vhangup`, obsolete calls (`EPERM`); the new mount API (`ENOSYS`); `ioctl`
   `TIOCSTI`/`TIOCLINUX`; `personality` other than Linux/32-bit/`UNAME26`/query; sockets other
-  than Unix, IPv4, IPv6, netlink (`EAFNOSUPPORT`). Only the x86-64 ABI (i386 kills the process,
-  x32 gets `ENOSYS`). User namespaces, `mount`, `pivot_root`, `chroot` stay allowed (Firefox,
-  Chromium and Plex's FHS bwrap sandbox themselves inside). No filter, no launch
+  than Unix, IPv4, IPv6, netlink (`EAFNOSUPPORT`), netlink other than route and uevent
+  (`EPROTONOSUPPORT`: no nf_tables in a nested network namespace). Only the x86-64 ABI (i386
+  kills the process, x32 gets `ENOSYS`). User namespaces, `mount`, `pivot_root`, `chroot` stay
+  allowed (Firefox, Chromium and Plex's FHS bwrap sandbox themselves inside). No filter, no launch
   (`app_launch_failed`, "no sandbox: no system call filter"); bwrap that cannot load it starts
   nothing.
 - `--new-session` puts the app out of reach of the reaper's group signal, so the reaper sends
@@ -1837,7 +1843,9 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   (`~/Downloads`, created, read-write). The profile's opt-outs are in
   `$XDG_STATE_HOME/hinteros/permissions.json` (`{"version":1,"denied":{"<id>":["mic"]}}`,
   written atomically); no record means every permission, a required one is never denied, a
-  change applies at the next start. Only enforced permissions are listed: none while the sandbox
+  change applies at the next start. A file that is there but cannot be read, does not parse or
+  is newer fails closed: every optional permission is denied, `apps.set_permission` is an error
+  and the file is never written (recover from the console). Only enforced permissions are listed: none while the sandbox
   is off, and not `mic` while `pulse_record_socket` equals `pulse_socket` (both default
   `pulse/native`), and not `lan` without `[sandbox] lan_filter`. `[sandbox]` changes need a
   daemon restart.
@@ -1849,7 +1857,8 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   once, then after 1 s doubling to 30 s, and at every launch while it is not on). The daemon
   always stays in `daemon`. An app without `lan` gets `reaper ... Cgroup=<nolan dir> -- ...`: the
   reaper writes its own pid to `nolan`'s `cgroup.procs` before it starts anything (so bwrap and
-  the app run there too) and then writes `1` to its stdin, a pipe the launch waits on (5 s). If
+  the app run there too) and then writes `1` to its stdin, a pipe the launch waits on (0.5 s;
+  after that the wait goes on beside the app, and a reaper not in `nolan` after 5 s is ended). If
   it cannot move, it starts nothing and exits 125; the launch fails. A sandboxed app cannot
   leave `nolan` (`/sys` is read-only inside, a cgroup namespace reaches only below its root).
   Fail closed: until the system says the filter is on (or when the cgroups cannot be set up, or
@@ -2247,7 +2256,7 @@ Unknown fields are ignored. A newer file is not understood; what follows depends
 | `starter.json` | reads as none; saving is an error (the job fails); the file stays | kept |
 | `channel-tips.json` | reads as empty; saving fails with a warning; the file stays | kept |
 | `runtime.json` | defaults; a change holds until the next boot; the file stays | kept |
-| `permissions.json` (session) | defaults; a change holds in memory; the file stays | dropped |
+| `permissions.json` (session) | optional permissions denied; a change is an error; the file stays (also when damaged or unreadable) | kept |
 | `controller.json` (session) | defaults; a change holds in memory; the file stays | kept |
 | `apps/registry.json`, `storage.json` | discarded and overwritten (rebuilt from the env manifests, the next measure) | dropped |
 | `usage.json`, `update-check.json`, `channel-check.json`, `libraries.json`, `pins/<id>.state`, `pins/<id>.tries` | discarded and overwritten | dropped |

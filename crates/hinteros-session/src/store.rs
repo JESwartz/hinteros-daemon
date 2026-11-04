@@ -46,6 +46,39 @@ struct Inner {
     terms_wake: tokio::sync::Notify,
     /// The profile's home (`$HOME`), where `has_data` looks for each app's `dataPaths`.
     home: Option<PathBuf>,
+    /// The last catalog index read ([`Inner::index`]).
+    index_cache: Mutex<Option<(IndexKey, Arc<Index>)>>,
+}
+
+/// What identifies one catalog index file: its resolved path (a Nix store path, which never
+/// changes), modification time and size.
+type IndexKey = (PathBuf, Option<std::time::SystemTime>, u64);
+
+fn index_key(path: &Path) -> Option<IndexKey> {
+    let real = std::fs::canonicalize(path).ok()?;
+    let meta = std::fs::metadata(&real).ok()?;
+    Some((real, meta.modified().ok(), meta.len()))
+}
+
+impl Inner {
+    /// The catalog index, parsed once per file ([`IndexKey`]) rather than at every
+    /// `store.list` and terms check.
+    fn index(&self) -> Result<Arc<Index>, IndexError> {
+        let key = index_key(&self.index);
+        if let (Some(k), Some((cached, index))) = (&key, &*self.index_cache.lock().unwrap())
+            && k == cached
+        {
+            return Ok(index.clone());
+        }
+        let index = Arc::new(Index::load(&self.index)?);
+        // Kept only when the file did not change while it was read.
+        if let Some(k) = key
+            && index_key(&self.index).as_ref() == Some(&k)
+        {
+            *self.index_cache.lock().unwrap() = Some((k, index.clone()));
+        }
+        Ok(index)
+    }
 }
 
 /// Unaccepted vendor terms of the profile's apps, by app id.
@@ -79,6 +112,7 @@ impl Store {
                 home: std::env::var_os("HOME")
                     .map(PathBuf::from)
                     .filter(|h| h.is_absolute() && h != Path::new("/")),
+                index_cache: Mutex::new(None),
             }),
         };
         let rx = events.subscribe();
@@ -182,7 +216,7 @@ impl Store {
         if ids.is_empty() {
             return Ok(NeedsTerms::new());
         }
-        let index = Index::load(&self.inner.index).map_err(catalog_unavailable)?;
+        let index = self.inner.index().map_err(catalog_unavailable)?;
         Ok(ids
             .into_iter()
             .filter_map(|id| {
@@ -264,7 +298,7 @@ impl Store {
 
     /// `store.list`.
     pub async fn list(&self, relay: &Relay) -> Result<Value, ErrorObject> {
-        let index = Index::load(&self.inner.index).map_err(catalog_unavailable)?;
+        let index = self.inner.index().map_err(catalog_unavailable)?;
         let installed = strings(&relay.call(system::AppsList::NAME, None).await?["ids"]);
         let (installing, removing, more) = {
             let s = self.inner.state.lock().unwrap();
@@ -549,6 +583,35 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn the_index_is_parsed_once_per_file() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("catalog.json");
+        let (events, _) = broadcast::channel(4);
+        let store = Store::spawn(
+            path.clone(),
+            IconStore::default(),
+            Permissions::default(),
+            events,
+        );
+        assert!(matches!(store.inner.index(), Err(IndexError::Missing(_))));
+        std::fs::write(
+            &path,
+            r#"{"indexVersion":4,"entries":[{"id":"a","name":"A","status":"available"}]}"#,
+        )
+        .unwrap();
+        let first = store.inner.index().unwrap();
+        assert!(Arc::ptr_eq(&first, &store.inner.index().unwrap()));
+        // A new generation (here: the file rewritten) is read again.
+        std::fs::write(
+            &path,
+            r#"{"indexVersion":4,"entries":[{"id":"bb","name":"B","status":"available"}]}"#,
+        )
+        .unwrap();
+        let second = store.inner.index().unwrap();
+        assert!(second.get("bb").is_some() && second.get("a").is_none());
+    }
 
     #[test]
     fn has_data_when_a_data_path_is_left() {

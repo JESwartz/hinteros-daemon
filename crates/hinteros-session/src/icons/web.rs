@@ -4,17 +4,20 @@
 //! favicon), read the manifest's `icons`, and take the best candidate (the largest square icon
 //! of at least 192 px, preferring ones not made only for masking), falling back to
 //! `/favicon.ico`. From an `icon_url`: just that file, and only if its SHA-256 is the pinned
-//! one, when the catalog gives one. Only https is used (also for every redirect), requests have
-//! timeouts, responses are limited to [`MAX_BYTES`] and must be an image (checked by
-//! Content-Type and by the file's first bytes).
+//! one (always required with it). Only https is used and only internet hosts (not this box or
+//! the home network), also for every redirect; requests have timeouts, responses are limited to
+//! [`MAX_BYTES`] and must be an image (checked by Content-Type and by the file's first bytes).
 
 use std::io::Read;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 use url::Url;
 
 /// Largest response (page, manifest or image) we read.
@@ -57,15 +60,23 @@ impl Default for Fetcher {
 impl Fetcher {
     /// `allow_http` only for tests against a local server.
     pub fn new(allow_http: bool) -> Self {
-        let agent = ureq::Agent::config_builder()
+        let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(20)))
             .timeout_connect(Some(Duration::from_secs(8)))
             .max_redirects(0)
             .https_only(!allow_http)
             .http_status_as_error(false)
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) HinterOS")
-            .build()
-            .into();
+            // Through a proxy, the resolver would check the proxy, not the site.
+            .proxy(None)
+            .build();
+        let agent = ureq::Agent::with_parts(
+            config,
+            DefaultConnector::default(),
+            InternetOnly {
+                allow_local: allow_http,
+            },
+        );
         Self { agent, allow_http }
     }
 
@@ -98,7 +109,8 @@ impl Fetcher {
         Ok(())
     }
 
-    /// GET with manual redirects (https only), a size limit and the final URL.
+    /// GET with manual redirects (https only), a size limit and the final URL. Each request
+    /// and redirect goes only to internet hosts ([`InternetOnly`]).
     fn get(&self, url: &Url) -> Result<(Url, Option<String>, Vec<u8>)> {
         let mut url = url.clone();
         for _ in 0..=MAX_REDIRECTS {
@@ -188,6 +200,80 @@ impl Fetcher {
             }
         }
         Err(last.unwrap_or_else(|| anyhow::anyhow!("{page}: no icon candidates")))
+    }
+}
+
+/// Whether `ip` is on the internet: not loopback, private (RFC 1918, unique local), link-local,
+/// CGNAT, multicast or another special-purpose range (as the local network filter's list),
+/// also through an IPv4-mapped, NAT64 or 6to4 address.
+/// The resolver of [`Fetcher`]'s agent. A site, page or redirect may name any host, and the
+/// daemon is not behind the local network filter: refuse hosts that are (or resolve to) this
+/// box or the home network. The agent connects only to the addresses checked here, so a DNS
+/// answer that changes after the check (rebinding) cannot reach the home network.
+/// Not with `allow_local` (tests against a local server).
+#[derive(Debug)]
+struct InternetOnly {
+    allow_local: bool,
+}
+
+impl Resolver for InternetOnly {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let addrs = DefaultResolver::default().resolve(uri, config, timeout)?;
+        if !self.allow_local && addrs.iter().any(|a| !is_global(a.ip())) {
+            return Err(ureq::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "not an internet host",
+            )));
+        }
+        Ok(addrs)
+    }
+}
+
+pub fn is_global(ip: IpAddr) -> bool {
+    let v4 = |a: Ipv4Addr| {
+        let [b0, b1, b2, _] = a.octets();
+        !(a.is_unspecified()
+            || a.is_loopback()
+            || a.is_private()
+            || a.is_link_local()
+            || a.is_multicast()
+            || a.is_broadcast()
+            || b0 == 0
+            || b0 >= 240
+            || (b0 == 100 && (64..128).contains(&b1))
+            || (b0 == 192 && b1 == 0 && b2 == 0)
+            || (b0 == 198 && (18..20).contains(&b1)))
+    };
+    match ip {
+        IpAddr::V4(a) => v4(a),
+        IpAddr::V6(a) => {
+            let s = a.segments();
+            if let Some(m) = a.to_ipv4_mapped() {
+                return v4(m);
+            }
+            let embedded = |hi: u16, lo: u16| Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return v4(embedded(s[6], s[7]));
+            }
+            if s[0] == 0x2002 {
+                return v4(embedded(s[1], s[2]));
+            }
+            !(a.is_unspecified()
+                || a.is_loopback()
+                || a.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00
+                || (s[0] & 0xffc0) == 0xfe80
+                || (s[0] & 0xffc0) == 0xfec0
+                || s[..3] == [0x64, 0xff9b, 1]
+                || s[..4] == [0x100, 0, 0, 0]
+                || s[..3] == [0x2001, 2, 0]
+                || s[0] == 0x5f00)
+        }
     }
 }
 
@@ -405,19 +491,28 @@ pub fn manifest_url(html: &str, page: &Url) -> Option<Url> {
 
 #[derive(Deserialize)]
 struct Manifest {
+    /// Each entry read on its own: one a site got wrong costs only itself.
     #[serde(default)]
-    icons: Vec<ManifestIcon>,
+    icons: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct ManifestIcon {
     src: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     sizes: String,
-    #[serde(default, rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "lenient_string")]
     mime: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     purpose: String,
+}
+
+/// A string member, or empty when it is something else (`"sizes": 192`, a purpose list).
+fn lenient_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => s,
+        _ => String::new(),
+    })
 }
 
 /// Icons listed in a web app manifest fetched from `manifest_url`.
@@ -426,6 +521,7 @@ pub fn manifest_candidates(json: &[u8], manifest_url: &Url) -> Result<Vec<Candid
     Ok(manifest
         .icons
         .into_iter()
+        .filter_map(|v| serde_json::from_value::<ManifestIcon>(v).ok())
         .filter_map(|i| {
             let mut c = Candidate::new(manifest_url.join(&i.src).ok()?, Origin::Manifest);
             c.size = parse_sizes(&i.sizes);
@@ -583,6 +679,84 @@ mod tests {
                 "/favicon.ico"
             ]
         );
+    }
+
+    #[test]
+    fn only_internet_hosts_are_fetched() {
+        for local in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fd00::1",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:192.168.1.1",
+            "64:ff9b::c0a8:101",
+            "2002:c0a8:101::1",
+        ] {
+            assert!(!is_global(local.parse().unwrap()), "{local}");
+        }
+        for global in [
+            "1.1.1.1",
+            "93.184.216.34",
+            "2606:4700::1111",
+            "64:ff9b::101:101",
+        ] {
+            assert!(is_global(global.parse().unwrap()), "{global}");
+        }
+        // The resolver the agent connects with refuses the answer itself, so no second lookup
+        // can swap in another address.
+        let localhost: ureq::http::Uri = "https://localhost:1/".parse().unwrap();
+        let resolve = |allow_local| {
+            InternetOnly { allow_local }.resolve(
+                &localhost,
+                &ureq::config::Config::default(),
+                NextTimeout {
+                    after: ureq::unversioned::transport::time::Duration::NotHappening,
+                    reason: ureq::Timeout::Global,
+                },
+            )
+        };
+        assert!(resolve(false).is_err());
+        assert!(resolve(true).unwrap().iter().all(|a| a.ip().is_loopback()));
+        // Refused before any connection (nothing listens there anyway).
+        let f = Fetcher::new(false);
+        for url in [
+            "https://127.0.0.1:1/icon.png",
+            "https://[::1]:1/",
+            "https://localhost:1/",
+            "https://192.168.0.1/cgi-bin/reboot",
+        ] {
+            let e = f.fetch_icon(&Source::Site(url.into())).unwrap_err();
+            assert!(
+                format!("{e:#}").contains("not an internet host"),
+                "{url}: {e:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_manifest_entry_costs_only_itself() {
+        let page = u("https://example.com/");
+        let manifest = br#"{"icons":[
+            {"sizes":"512x512"},
+            {"src":7},
+            "nope",
+            {"src":"/n.png","sizes":192,"purpose":["any"]},
+            {"src":"/m512.png","sizes":"512x512","type":"image/png","purpose":"any"}],
+            "future":{"x":1}}"#;
+        let c = manifest_candidates(manifest, &page).unwrap();
+        let got: Vec<_> = c.iter().map(|c| (c.url.path(), c.size)).collect();
+        assert_eq!(got, [("/n.png", None), ("/m512.png", Some(512))]);
+        assert!(!c[0].maskable_only);
     }
 
     #[test]

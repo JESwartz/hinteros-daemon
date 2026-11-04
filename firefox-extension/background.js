@@ -108,3 +108,21 @@ browser.tabs.onRemoved.addListener((tabId) => {
   }
   update();
 });
+
+// The tab started loading: a frame torn down without pagehide (a crash, a discarded document)
+// would keep its report for good. Drop the tab's reports and ask the frames that are still
+// there to report again (a same-document navigation keeps its focused field).
+browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status !== "loading") {
+    return;
+  }
+  for (const key of [...focused.keys()]) {
+    if (key.startsWith(`${tabId}/`)) {
+      focused.delete(key);
+    }
+  }
+  update();
+  browser.tabs.sendMessage(tabId, { report: true }).catch(() => {
+    // No content script in the tab yet; a new document reports by itself.
+  });
+}, { properties: ["status"] });

@@ -2184,7 +2184,8 @@ Both APIs are 1.0. A client works with a server of the same major and an equal o
 
 The schema documents list exactly what their version sends (`additionalProperties: false`), so
 the conformance tests catch a server that sends what is not documented. An item a later minor
-adds has `since`; an item without it is part of x.0.
+adds has `since`; an item without it is part of x.0. A server does not refuse a method by its
+`since`: the negotiated version is the client's, and a client knows no method newer than it.
 
 ## Persisted JSON files
 

@@ -677,6 +677,56 @@ async fn settings_ssh_rebuild_rollback() {
     assert!(list["jobs"].as_array().unwrap().len() >= 8);
 }
 
+/// After a rollback, a job that builds the newest generation's toplevel again reuses that
+/// generation (as `nix-env --set` does). When its switch fails, that generation was there
+/// before the job, so it stays a rollback target.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_switch_keeps_a_reused_generation() {
+    let Some(sys) = System::start(Root::create(), &[]).await else {
+        return;
+    };
+    let root = &sys.root;
+    let mut c = sys.subscriber().await;
+    let r = call(&mut c, "ssh.set", json!({"enabled": true}))
+        .await
+        .unwrap();
+    let id = r["job_id"].as_str().unwrap().to_owned();
+    let done = finished(&until_finished(&mut c, &id).await).clone();
+    assert_eq!(done["ok"], true, "{}", sys.job_log(&id));
+    let r = call(&mut c, "rollback", json!({"generation": 1}))
+        .await
+        .unwrap();
+    let id = r["job_id"].as_str().unwrap().to_owned();
+    let done = finished(&until_finished(&mut c, &id).await).clone();
+    assert_eq!(done["ok"], true, "{}", sys.job_log(&id));
+
+    std::fs::write(
+        root.p("build-out"),
+        root.p("store/gen2").display().to_string(),
+    )
+    .unwrap();
+    root.touch("switch-fail");
+    let r = call(&mut c, "ssh.set", json!({"enabled": true}))
+        .await
+        .unwrap();
+    let id = r["job_id"].as_str().unwrap().to_owned();
+    let done = finished(&until_finished(&mut c, &id).await).clone();
+    root.rm("switch-fail");
+    root.rm("build-out");
+    assert_eq!(done["ok"], false, "{}", sys.job_log(&id));
+    assert_eq!(done["error"]["data"]["stage"], "activating");
+    assert_eq!(
+        std::fs::read_link(root.p("profiles/system")).unwrap(),
+        std::path::Path::new("system-1-link")
+    );
+    assert_eq!(
+        std::fs::canonicalize(root.p("profiles/system-2-link")).unwrap(),
+        root.p("store/gen2"),
+        "the reused generation stays"
+    );
+    assert!(!root.read("nix-env.log").contains("--delete-generations"));
+}
+
 /// While nix compiles: what is building, the count, heartbeats with a moving
 /// `last_activity_at`, and the same state from `jobs.get` for a client that connects later.
 #[tokio::test(flavor = "multi_thread")]

@@ -987,9 +987,15 @@ impl Runner {
         self.check_cancel()?;
         self.enter_activation()?;
         let jellyfin_stopped = self.jellyfin_backup(old_toplevel.as_deref(), &toplevel)?;
+        // `nix-env --set` reuses the newest generation when it has the same toplevel (after a
+        // rollback): only a generation this job made is deleted when the switch fails.
+        let generations_before: Vec<u32> = generations::links(&paths.profile)
+            .iter()
+            .map(|l| l.generation)
+            .collect();
         let activated = self.activate(&toplevel);
         if activated.is_err() {
-            self.restore(old_generation, old_toplevel.as_deref());
+            self.restore(old_generation, &generations_before, old_toplevel.as_deref());
         }
         self.jellyfin_start(jellyfin_stopped);
         activated?;
@@ -1047,18 +1053,19 @@ impl Runner {
     }
 
     /// After a failed activation: point the profile back at the old generation, delete the
-    /// generation that failed (so it is no rollback target), and make the old system the boot
-    /// default again (best effort; the failure is reported either way). Without a generation
-    /// number, the profile is set to the old system.
-    fn restore(&mut self, old_generation: Option<u32>, old: Option<&Path>) {
+    /// generation that failed if the job made it (so it is no rollback target; one that was
+    /// there before, in `before`, stays), and make the old system the boot default again (best
+    /// effort; the failure is reported either way). Without a generation number, the profile
+    /// is set to the old system.
+    fn restore(&mut self, old_generation: Option<u32>, before: &[u32], old: Option<&Path>) {
         let Some(old) = old else { return };
         warn!(
             "activation failed; restoring the profile to {}",
             old.display()
         );
         let profile = self.spec.paths.profile.clone();
-        let failed =
-            generations::current_generation(&profile).filter(|g| old_generation < Some(*g));
+        let failed = generations::current_generation(&profile)
+            .filter(|g| old_generation != Some(*g) && !before.contains(g));
         let mut cmd = Command::new(&self.spec.tools.nix_env);
         cmd.arg("-p").arg(&profile);
         match old_generation {

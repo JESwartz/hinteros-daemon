@@ -86,6 +86,8 @@ window.addEventListener("pagehide", () => {
     browser.runtime.sendMessage({ focus: "none" }).catch(() => {});
   }
 }, true);
+// Back from the back/forward cache: the field may still have focus, and no focus event comes.
+window.addEventListener("pageshow", settle, true);
 document.addEventListener("visibilitychange", settle, true);
 // A click into the focused field. "click" comes after the press moved focus, and only for
 // the primary button (the right click, for the context menu, is "auxclick").

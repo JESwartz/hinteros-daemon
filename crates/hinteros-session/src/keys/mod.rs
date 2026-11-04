@@ -442,7 +442,8 @@ pub fn binding_name(key: Option<&KeyCombo>) -> String {
 /// Performs [`KeyOp`]s, in order, without blocking the caller.
 pub trait KeyInjector: Send {
     fn caps(&self) -> KeyCaps;
-    /// Perform `ops` in order; never dropped (typed text, Enter, shortcuts).
+    /// Perform `ops` in order; never dropped (typed text, Enter, shortcuts), but by
+    /// [`KeyInjector::clear`].
     fn send(&mut self, ops: Vec<KeyOp>);
     /// One tap for a controller direction (a held or repeating D-pad/stick). Never queued
     /// behind other navigation: dropped if a newer navigation tap is waiting or if it waited
@@ -450,6 +451,9 @@ pub trait KeyInjector: Send {
     fn send_nav(&mut self, op: KeyOp) {
         self.send(vec![op]);
     }
+    /// Drop what is queued and stop what is being typed: focus moved on, and the keys were
+    /// meant for the app that had it.
+    fn clear(&mut self) {}
 }
 
 /// No keyboard at all.

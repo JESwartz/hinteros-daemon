@@ -78,6 +78,7 @@ use crate::input::{
 use crate::keys::{KeyCombo, KeyInjector, KeyOp, Keymap, plan_action, plan_text};
 use crate::procs::{ProcessControl, Sig};
 use crate::steam::library;
+use crate::steam::watch::GameCache;
 use crate::textfocus::FieldFocus;
 use crate::{Audience, Broadcast};
 
@@ -416,6 +417,15 @@ fn tracked_by_windows(source: AppSource) -> bool {
     matches!(source, AppSource::Steam | AppSource::SteamClient)
 }
 
+/// `apps.launch` refused: app `id` needs its store terms `t` accepted first.
+fn terms_required(id: &str, t: &hinteros_api::session::StoreTerms) -> ErrorObject {
+    ErrorObject::with_data(
+        ErrorCode::TermsRequired,
+        format!("{id} needs its terms accepted (version {})", t.version),
+        serde_json::json!({ "id": id, "version": t.version }),
+    )
+}
+
 /// The running-app entry for Steam itself.
 fn steam_client_app() -> RunningApp {
     RunningApp {
@@ -524,6 +534,10 @@ pub struct Shell {
     switching: bool,
     /// Launches of apps that are still closing.
     waiting: Vec<WaitingLaunch>,
+    /// The app of each text field focus reporter ([`Msg::TextFocus`]) that had one.
+    reporters: BTreeMap<u64, String>,
+    /// The Steam library watcher's last scan ([`crate::steam::watch`]).
+    games: GameCache,
 }
 
 impl Shell {
@@ -554,6 +568,8 @@ impl Shell {
             pressed_as: BTreeMap::new(),
             switching: false,
             waiting: Vec::new(),
+            games: GameCache::default(),
+            reporters: BTreeMap::new(),
             cfg,
             focus,
             input,
@@ -602,6 +618,12 @@ impl Shell {
     pub fn with_controller(mut self, store: ControllerStore) -> Self {
         self.controller = store;
         self.input.set_pointer_tuning(self.controller.get().tuning);
+        self
+    }
+
+    /// Answer `games.list` from `games`, the Steam library watcher's (default: a scan per call).
+    pub fn with_games(mut self, games: GameCache) -> Self {
+        self.games = games;
         self
     }
 
@@ -804,11 +826,15 @@ impl Shell {
             }
             GamesList::NAME => {
                 decode_params::<GamesList>(params)?;
+                // The watcher's scan: a scan here would block the shell (input, Home) while a
+                // slow disk answers.
+                let cached = crate::steam::watch::lock(&self.games).clone();
                 encode_result::<GamesList>(GamesListResult {
-                    games: self
-                        .steam_dir()
-                        .map(|dir| library::scan(&dir))
-                        .unwrap_or_default(),
+                    games: cached.unwrap_or_else(|| {
+                        self.steam_dir()
+                            .map(|dir| library::scan(&dir))
+                            .unwrap_or_default()
+                    }),
                 })
             }
             SteamAttentionQuery::NAME => {
@@ -1075,11 +1101,7 @@ impl Shell {
             && let Some(t) = self.cfg.needs_terms.get(id)
             && !self.apps.contains_key(id)
         {
-            return Err(ErrorObject::with_data(
-                ErrorCode::TermsRequired,
-                format!("{id} needs its terms accepted (version {})", t.version),
-                serde_json::json!({ "id": id, "version": t.version }),
-            ));
+            return Err(terms_required(id, t));
         }
         let configured = match &request {
             LaunchRequest::Id(id) => self.cfg.apps.iter().find(|a| &a.id == id),
@@ -1213,6 +1235,13 @@ impl Shell {
                 }
             }
             Target::Steam(steam) => {
+                // `steam -silent` starts the client when it is not running: Steam's terms
+                // first, as for the app `steam` itself.
+                if let Some(t) = self.cfg.needs_terms.get(STEAM_CLIENT_APP_ID)
+                    && !self.procs.steam_running()
+                {
+                    return Err(terms_required(STEAM_CLIENT_APP_ID, t));
+                }
                 let steam_path = self.steam_binary(ErrorCode::AppLaunchFailed)?;
                 let argv = vec![
                     steam_path.clone(),
@@ -1762,6 +1791,12 @@ impl Shell {
 
     /// A Steam game's name: its manifest's, else its non-Steam shortcut's, else its number.
     fn steam_game_name(&self, steam: u32) -> String {
+        if let Some(game) = crate::steam::watch::lock(&self.games)
+            .as_ref()
+            .and_then(|games| games.iter().find(|g| g.steam_app_id == steam))
+        {
+            return game.name.clone();
+        }
         let dir = self.steam_dir();
         dir.as_deref()
             .and_then(|dir| library::find_manifest(dir, steam))
@@ -1911,6 +1946,10 @@ impl Shell {
         self.held.clear();
         self.focus_lost_at = None;
         let changed = self.focused != target;
+        if changed {
+            // Text still queued for the app that had focus must not go to the next one.
+            self.keys.clear();
+        }
         if changed && self.osk_visible {
             // The mode is applied with the new focus below.
             self.set_osk(false, false);
@@ -2124,14 +2163,25 @@ impl Shell {
                 .focused
                 .clone()
                 .filter(|id| keyboard_apps.iter().any(|(a, _)| a == id)),
-            Some(pid) => keyboard_apps
-                .iter()
-                .find(|(_, root)| {
-                    root.is_some_and(|root| {
-                        root == pid || self.procs.descendants(root).contains(&pid)
-                    })
-                })
-                .map(|(id, _)| id.clone()),
+            // A reporter's process stays the same: its app is looked up once (a /proc walk),
+            // and stays known after the process is gone (its last "none" on disconnect).
+            Some(pid) => match self.reporters.get(&reporter) {
+                Some(id) if self.apps.contains_key(id) => Some(id.clone()),
+                _ => {
+                    let id = keyboard_apps
+                        .iter()
+                        .find(|(_, root)| {
+                            root.is_some_and(|root| {
+                                root == pid || self.procs.descendants(root).contains(&pid)
+                            })
+                        })
+                        .map(|(id, _)| id.clone());
+                    if let Some(id) = &id {
+                        self.reporters.insert(reporter, id.clone());
+                    }
+                    id
+                }
+            },
         };
         let Some(id) = owner else {
             debug!(
@@ -2835,6 +2885,7 @@ impl Shell {
     /// An app ended (`closed` instead of `reason` if apps.close asked it to).
     fn exited(&mut self, id: &str, reason: ExitReason, exit_code: Option<i32>) {
         self.text_fields.remove(id);
+        self.reporters.retain(|_, app| app != id);
         let Some(app) = self.apps.remove(id) else {
             return;
         };
@@ -4465,6 +4516,61 @@ mod tests {
             ErrorCode::AppLaunchFailed.code()
         );
         assert_eq!(t.shell.apps["jellyfin-desktop"].info.pid, Some(second));
+    }
+
+    #[test]
+    fn games_come_from_the_watchers_scan() {
+        let mut t = T::new();
+        // No scan yet: games.list scans itself.
+        let scanned = t.call("games.list", json!({})).unwrap();
+        assert!(!scanned["games"].as_array().unwrap().is_empty());
+        let mut game = library::scan(&t.shell.steam_dir().unwrap())[0].clone();
+        game.steam_app_id = 4242;
+        game.name = "Cached".into();
+        let cache = GameCache::default();
+        *crate::steam::watch::lock(&cache) = Some(vec![game.clone()]);
+        t.shell.games = cache;
+        assert_eq!(
+            t.call("games.list", json!({})).unwrap(),
+            json!({ "games": [game] })
+        );
+        let app = t.launch(json!({"url": "steam://rungameid/4242"}));
+        assert_eq!(app.name, "Cached");
+    }
+
+    #[test]
+    fn a_steam_game_does_not_start_steam_before_its_terms() {
+        let mut t = T::new();
+        let terms = hinteros_api::session::StoreTerms {
+            title: "Steam Subscriber Agreement".into(),
+            version: "2026-01".into(),
+            url: "https://example.org/terms".into(),
+            retrieved: "2026-01-01".into(),
+            file: "/nonexistent/terms.txt".into(),
+        };
+        t.shell.handle(
+            Msg::SetNeedsTerms(BTreeMap::from([(STEAM_CLIENT_APP_ID.to_string(), terms)])),
+            t.now,
+        );
+        t.log.take();
+        for params in [
+            json!({"url": "steam://rungameid/570"}),
+            json!({"id": "portal"}),
+        ] {
+            let e = t.call("apps.launch", params).unwrap_err();
+            assert_eq!(e.code, ErrorCode::TermsRequired.code());
+            assert_eq!(
+                e.data.unwrap(),
+                json!({"id": "steam", "version": "2026-01"})
+            );
+        }
+        assert!(t.log.take().is_empty());
+        // Steam runs already (terms of an older version): the game goes to it.
+        t.procs.lock().unwrap().steam_running = true;
+        assert_eq!(
+            t.launch(json!({"url": "steam://rungameid/570"})).id,
+            "steam-570"
+        );
     }
 
     #[test]
@@ -6476,6 +6582,18 @@ mod tests {
                 "up release"
             ]
         );
+    }
+
+    #[test]
+    fn a_reporter_keeps_its_app_after_its_process_is_gone() {
+        let mut t = firefox_with_host(|_| {});
+        t.text_focus(555, FieldFocus::Password);
+        assert!(t.shell.text_fields.contains_key("youtube"));
+        // The host exits and Firefox reaps it; then its connection ends with "none".
+        let root = t.shell.apps["youtube"].info.pid.unwrap();
+        t.procs.lock().unwrap().trees.insert(root, vec![root + 1]);
+        t.text_focus(555, FieldFocus::None);
+        assert!(t.shell.text_fields.is_empty());
     }
 
     #[test]

@@ -238,14 +238,25 @@ pub fn run_host(args: &[String]) -> i32 {
     }
 }
 
+/// At most this many reporters at once (Firefox has two per app).
+const MAX_REPORTERS: usize = 32;
+
 /// Serve the internal socket: every connection's lines become [`Msg::TextFocus`] with the
 /// peer's pid. Only the session user may connect.
 pub async fn serve(listener: UnixListener, shell: mpsc::UnboundedSender<Msg>) {
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_REPORTERS));
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
+                let Ok(slot) = slots.clone().try_acquire_owned() else {
+                    debug!("osk.sock: too many reporters; connection refused");
+                    continue;
+                };
                 let shell = shell.clone();
-                tokio::spawn(async move { connection(stream, shell).await });
+                tokio::spawn(async move {
+                    connection(stream, shell).await;
+                    drop(slot);
+                });
             }
             Err(e) => {
                 warn!("osk.sock: accept failed: {e}");

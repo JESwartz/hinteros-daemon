@@ -1397,8 +1397,9 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
 
 - `session.toml` `[apps] profile = "/run/hinteros/apps/%u"` (instead of `[[apps]]`): apps, Steam's
   path and icons from the env; the whole link chain is watched. `apps.list` entries get
-  `needs_terms`; `apps.launch` refuses them (`terms_required`); Steam's autostart waits for its
-  terms. `store.list` uses the profile's ids and hides services.
+  `needs_terms`; `apps.launch` refuses them (`terms_required`), and Steam games while Steam needs
+  its terms and is not running; Steam's autostart waits for its terms. `store.list` uses the
+  profile's ids and hides services.
 - `profile.current`, `session.switch_profile` (+ `switch_wait`, `switch_force_close`,
   `switch_cancel`; events `switch_progress {stage: closing_apps|closing_steam|ending|cancelled}`,
   `switch_blocked {app, waited_s}`; `[switch] wait_s = 10`, `steam_wait_s = 15`; nothing is

@@ -302,6 +302,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
             "Steam not found: no built-in steam app until it is installed"
         ),
     }
+    let games = steam::watch::GameCache::default();
     let shell = Shell::new(
         shell_config,
         focus,
@@ -312,7 +313,8 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         events.clone(),
     )
     .with_displays(displays)
-    .with_controller(hinteros_session::controller::ControllerStore::load_default());
+    .with_controller(hinteros_session::controller::ControllerStore::load_default())
+    .with_games(games.clone());
     // gamescope's pointer is only ours to hide under gamescope.
     let shell = if config.gamescope.enable {
         shell.with_cursor(Box::new(pointer::CommandCursor {
@@ -366,6 +368,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         config.steam.dir.clone(),
         Duration::from_millis(config.steam.library_debounce_ms),
         Duration::from_secs(config.steam.library_poll_s),
+        games,
         move |_| {
             let params = serde_json::json!({});
             let _ = library_events.send((session::EventName::GamesChanged, params, Audience::All));
@@ -487,10 +490,13 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         ),
     };
 
+    // How long to wait after a failed accept (zero: the last one worked).
+    let mut accept_wait = Duration::ZERO;
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
+                    accept_wait = Duration::ZERO;
                     let rx = events.subscribe();
                     let shell = shell_tx.clone();
                     let services = services.clone();
@@ -500,7 +506,14 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
                         }
                     });
                 }
-                Err(e) => warn!("accept failed: {e}"),
+                Err(e) => {
+                    // Out of file descriptors fails again at once: back off, warn once.
+                    if accept_wait.is_zero() {
+                        warn!("accept failed: {e}");
+                    }
+                    accept_wait = (accept_wait * 2).clamp(Duration::from_millis(100), Duration::from_secs(1));
+                    tokio::time::sleep(accept_wait).await;
+                }
             },
             _ = usr1.recv() => {
                 info!("SIGUSR1: Home pressed");

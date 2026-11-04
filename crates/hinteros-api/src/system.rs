@@ -2189,6 +2189,10 @@ pub struct AppNotUpdated {
     pub reason: String,
 }
 
+/// A finished job's result. The job's `kind` sets the shape, not its fields: untagged decoding
+/// takes the first variant that fits, and a later minor may add a kind whose result has the same
+/// required fields as another (it then reads as that variant). So match the kind and the variant
+/// together, and ignore the result of a kind you do not handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum JobResult {

@@ -226,8 +226,10 @@ impl ProfilesFile {
 
     /// Take the next profile id: never below one plus the highest number in `state.json`,
     /// `profiles.json` or the user database, and the counter only increases. Past the last
-    /// id (`p999`), the lowest number none of them uses (a removed profile's home is gone).
-    pub fn take_id(&mut self, state: &State, users: &Users) -> String {
+    /// id (`p999`), the lowest number none of them uses and that `left` does not name: a
+    /// removed profile's home or PIN files that stayed (deleting them is best effort) must not
+    /// go to a new profile with the same uid.
+    pub fn take_id(&mut self, state: &State, users: &Users, left: impl Fn(u32) -> bool) -> String {
         let used: BTreeSet<u32> = state
             .accounts()
             .iter()
@@ -245,7 +247,7 @@ impl ProfilesFile {
             self.next = n + 1;
             return format!("p{n}");
         }
-        let free = (1..=MAX_PROFILE_NUMBER).find(|k| !used.contains(k));
+        let free = (1..=MAX_PROFILE_NUMBER).find(|k| !used.contains(k) && !left(*k));
         format!("p{}", free.unwrap_or(n))
     }
 }
@@ -434,25 +436,38 @@ mod tests {
             group: None,
         };
         let mut f = ProfilesFile::default();
-        assert_eq!(f.take_id(&state, &users), "p7", "above passwd's p6");
-        assert_eq!(f.take_id(&state, &users), "p8");
+        assert_eq!(
+            f.take_id(&state, &users, |_| false),
+            "p7",
+            "above passwd's p6"
+        );
+        assert_eq!(f.take_id(&state, &users, |_| false), "p8");
         let mut f = ProfilesFile {
             next: 20,
             ..Default::default()
         };
-        assert_eq!(f.take_id(&state, &users), "p20");
+        assert_eq!(f.take_id(&state, &users, |_| false), "p20");
         let mut f = ProfilesFile::default();
         f.profiles
             .insert("p9".into(), test_file(&state).profiles["p1"].clone());
-        assert_eq!(f.take_id(&state, &Users::default()), "p10");
+        assert_eq!(f.take_id(&state, &Users::default(), |_| false), "p10");
         // Past p999: the lowest free number, so a profile can still be created.
         let mut f = ProfilesFile {
             next: 999,
             ..Default::default()
         };
-        assert_eq!(f.take_id(&state, &Users::default()), "p999");
-        assert_eq!(f.take_id(&state, &Users::default()), "p2", "p1 is in use");
-        assert_eq!(f.take_id(&state, &users), "p2");
+        assert_eq!(f.take_id(&state, &Users::default(), |_| false), "p999");
+        assert_eq!(
+            f.take_id(&state, &Users::default(), |_| false),
+            "p2",
+            "p1 is in use"
+        );
+        assert_eq!(f.take_id(&state, &users, |_| false), "p2");
+        assert_eq!(
+            f.take_id(&state, &users, |k| k == 2),
+            "p3",
+            "p2's home or PIN files are still there"
+        );
     }
 
     /// Two writers (the service and a job): the one that read before the other wrote gets

@@ -359,6 +359,25 @@ impl Service {
             .send((hinteros_api::system::EventName::ProfilesChanged, json!({})));
     }
 
+    /// A removed profile `p<k>` left its PIN files or its home (next to the other profiles'
+    /// homes, or in /home): the number is not given out again (`take_id`).
+    fn left_behind(&self, state: &State, k: u32) -> bool {
+        let id = format!("p{k}");
+        if Pins::new(self.paths.pins_dir()).any(&id) {
+            return true;
+        }
+        let user = state::user_for(&id);
+        let mut dirs: BTreeSet<std::path::PathBuf> = state
+            .accounts()
+            .iter()
+            .filter_map(|a| self.users.by_name(&state::user_for(&a.id)))
+            .filter_map(|u| u.home.parent().map(std::path::Path::to_path_buf))
+            .collect();
+        dirs.insert("/home".into());
+        dirs.iter()
+            .any(|d| d.join(&user).symlink_metadata().is_ok())
+    }
+
     fn save_file(&self, file: &ProfilesFile) -> Result<(), ErrorObject> {
         file.save(&self.paths.profiles_json()).map_err(internal)
     }
@@ -506,7 +525,7 @@ impl Service {
                     return Err(e);
                 }
                 let name = profiles::check_name(&p.name)?;
-                let id = file.take_id(&state, &self.users);
+                let id = file.take_id(&state, &self.users, |k| self.left_behind(&state, k));
                 // The counter keeps the number even if the job fails.
                 self.save_file(&file)?;
                 let user = state::user_for(&id);

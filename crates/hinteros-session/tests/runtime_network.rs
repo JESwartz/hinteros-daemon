@@ -403,6 +403,20 @@ impl SavedConnection {
             ),
         ])
     }
+    fn get_secrets(&self, setting: &str) -> HashMap<String, HashMap<String, OwnedValue>> {
+        let m = self.0.lock().unwrap();
+        let s = m.saved.iter().find(|s| s.path == self.1).unwrap();
+        match &s.psk {
+            Some(psk) if setting == "802-11-wireless-security" => HashMap::from([(
+                setting.to_owned(),
+                HashMap::from([(
+                    "psk".to_owned(),
+                    OwnedValue::try_from(ZValue::from(psk.as_str())).unwrap(),
+                )]),
+            )]),
+            _ => HashMap::new(),
+        }
+    }
     fn update(&self, settings: HashMap<String, HashMap<String, OwnedValue>>) {
         let mut m = self.0.lock().unwrap();
         let psk = settings
@@ -672,7 +686,8 @@ async fn wrong_password_leaves_nothing_behind() {
         fake.model.lock().unwrap().saved[0].psk.as_deref(),
         Some(RIGHT_PASSWORD)
     );
-    // ... and a wrong one for a stored network is also reported (the old connection stays).
+    // ... and a wrong one for a stored network is also reported (the old connection stays,
+    // with the password that worked).
     let e = call(
         &mut c,
         "wifi.connect",
@@ -682,6 +697,12 @@ async fn wrong_password_leaves_nothing_behind() {
     .unwrap_err();
     assert_eq!(e["code"], 4003);
     assert_eq!(fake.model.lock().unwrap().saved.len(), 2);
+    assert_eq!(
+        fake.model.lock().unwrap().saved[0].psk.as_deref(),
+        Some(RIGHT_PASSWORD),
+        "the stored password was put back"
+    );
+    assert!(!d.log().contains("different wrong 1"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

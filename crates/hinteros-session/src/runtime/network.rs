@@ -506,6 +506,35 @@ fn new_settings<'a>(
     s
 }
 
+/// Connection settings as read (`GetSettings`, `GetSecrets`) turned into the argument of
+/// `Update`, leaving out the section `skip`.
+fn as_settings<'a>(all: &'a HashMap<String, PropMap>, skip: Option<&str>) -> Settings<'a> {
+    let mut out: Settings<'a> = HashMap::new();
+    for (section, values) in all {
+        if Some(section.as_str()) == skip {
+            continue;
+        }
+        let entry = out.entry(section.as_str()).or_default();
+        for (k, v) in values {
+            if let Ok(v) = v.try_clone() {
+                entry.insert(k.as_str(), Value::from(v));
+            }
+        }
+    }
+    out
+}
+
+/// `GetSettings` leaves secrets out: put the ones from `GetSecrets` back in.
+fn with_secrets(
+    mut all: HashMap<String, PropMap>,
+    secrets: HashMap<String, PropMap>,
+) -> HashMap<String, PropMap> {
+    for (section, values) in secrets {
+        all.entry(section).or_default().extend(values);
+    }
+    all
+}
+
 /// A WPA passphrase is 8 to 63 characters, or the 64 hex digits of the raw key.
 fn check_password(security: WifiSecurity, password: &str) -> Result<(), ErrorObject> {
     match security {
@@ -641,24 +670,16 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
         .find(|s| s.ssid == p.ssid.as_bytes());
 
     let settings = proxy(&conn, NM, SETTINGS, I_SETTINGS).await.map_err(map)?;
+    // The stored settings and secrets before a new password replaced them, to put back if
+    // the new password does not work.
+    let mut previous: Option<HashMap<String, PropMap>> = None;
     let (target, created) = match (existing, password) {
         (Some(s), Some(pw)) => {
             // A new password for a stored network replaces the stored one.
             let c = proxy(&conn, NM, &s.path, I_CONNECTION).await.map_err(map)?;
             let current: HashMap<String, PropMap> =
                 c.call("GetSettings", &()).await.map_err(map)?;
-            let mut update: Settings<'_> = HashMap::new();
-            for (section, values) in &current {
-                if section == "802-11-wireless-security" {
-                    continue;
-                }
-                let entry = update.entry(section.as_str()).or_default();
-                for (k, v) in values {
-                    if let Ok(v) = v.try_clone() {
-                        entry.insert(k.as_str(), Value::from(v));
-                    }
-                }
-            }
+            let mut update = as_settings(&current, Some("802-11-wireless-security"));
             let key_mgmt = if ap.security == WifiSecurity::Wpa3 {
                 "sae"
             } else {
@@ -671,9 +692,21 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
                     ("psk", Value::from(pw)),
                 ]),
             );
+            // Without the old secrets there is nothing to put back; the new password is
+            // still tried.
+            let secrets = c
+                .call::<_, _, HashMap<String, PropMap>>(
+                    "GetSecrets",
+                    &("802-11-wireless-security",),
+                )
+                .await;
+            if let Err(e) = &secrets {
+                warn!(ssid = %p.ssid, "cannot read the stored Wi-Fi secrets: {e}");
+            }
             c.call::<_, _, ()>("Update", &(update,))
                 .await
                 .map_err(map)?;
+            previous = secrets.ok().map(|s| with_secrets(current, s));
             (s.path, false)
         }
         (Some(s), None) => (s.path, false),
@@ -715,6 +748,17 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
         if created && let Ok(c) = proxy(&conn, NM, &target, I_CONNECTION).await {
             // Do not leave a connection with a wrong password behind.
             let _ = c.call::<_, _, ()>("Delete", &()).await;
+        }
+        if let Some(prev) = &previous
+            && let Ok(c) = proxy(&conn, NM, &target, I_CONNECTION).await
+        {
+            // The new password is not proven: keep the one that was stored.
+            if let Err(e) = c
+                .call::<_, _, ()>("Update", &(as_settings(prev, None),))
+                .await
+            {
+                warn!(ssid = %p.ssid, "cannot restore the stored Wi-Fi password: {e}");
+            }
         }
     }
     result?;
@@ -809,6 +853,33 @@ mod tests {
         assert_eq!(a.len(), 36);
         assert_eq!(a.as_bytes()[14], b'4');
         assert_ne!(a, uuid());
+    }
+
+    #[test]
+    fn restore_settings_carry_the_old_secrets() {
+        let v = |s: &str| OwnedValue::try_from(Value::from(s)).unwrap();
+        let current = HashMap::from([
+            (
+                "connection".to_owned(),
+                HashMap::from([("id".to_owned(), v("Home"))]),
+            ),
+            (
+                "802-11-wireless-security".to_owned(),
+                HashMap::from([("key-mgmt".to_owned(), v("sae"))]),
+            ),
+        ]);
+        let secrets = HashMap::from([(
+            "802-11-wireless-security".to_owned(),
+            HashMap::from([("psk".to_owned(), v("old-password"))]),
+        )]);
+        let prev = with_secrets(current, secrets);
+        let s = as_settings(&prev, None);
+        let sec = &s["802-11-wireless-security"];
+        assert_eq!(sec["key-mgmt"], Value::from("sae"));
+        assert_eq!(sec["psk"], Value::from("old-password"));
+        assert_eq!(s["connection"]["id"], Value::from("Home"));
+        let s = as_settings(&prev, Some("802-11-wireless-security"));
+        assert!(!s.contains_key("802-11-wireless-security"));
     }
 
     #[test]

@@ -315,11 +315,11 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
     .with_controller(hinteros_session::controller::ControllerStore::load_default());
     // gamescope's pointer is only ours to hide under gamescope.
     let shell = if config.gamescope.enable {
-        shell.with_cursor(Box::new(pointer::CommandCursor {
-            hide: config.pointer.hide_command.clone(),
-            show: config.pointer.show_command.clone(),
-            env: env.clone(),
-        }))
+        shell.with_cursor(Box::new(pointer::CommandCursor::new(
+            config.pointer.hide_command.clone(),
+            config.pointer.show_command.clone(),
+            env.clone(),
+        )))
     } else {
         shell
     };

@@ -447,11 +447,17 @@ pub(crate) mod tests {
         // 200 taps: 2 s of typing.
         inj.send((0..200).map(|_| tap(30)).collect());
         inj.send(vec![tap(31)]);
-        thread::sleep(Duration::from_millis(100));
-        inj.clear();
-        inj.send(vec![tap(KEY_ENTER)]);
+        // Clear once the typing has started (not after a fixed time: the key thread may start
+        // late on a busy machine).
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut seen = Vec::new();
+        while !seen.contains(&"down 30".to_string()) {
+            assert!(Instant::now() < deadline, "no typing: {seen:?}");
+            thread::sleep(Duration::from_millis(1));
+            seen.extend(rec.take());
+        }
+        inj.clear();
+        inj.send(vec![tap(KEY_ENTER)]);
         while !seen.contains(&format!("up {KEY_ENTER}")) {
             assert!(Instant::now() < deadline, "no Enter: {seen:?}");
             thread::sleep(Duration::from_millis(10));
@@ -461,6 +467,7 @@ pub(crate) mod tests {
         assert!(typed > 0 && typed < 200, "{typed} taps typed");
         assert!(!seen.contains(&"down 31".to_string()), "a queued job ran");
     }
+
     #[test]
     fn thread_injector_and_file_sink() {
         let dir = tempfile::tempdir().unwrap();

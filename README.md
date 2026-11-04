@@ -1966,7 +1966,8 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   deletion (the policy is posted back whole), renames it with the profile (the whole user with its
   `Configuration` is posted back), deletes it with the profile; dashboard-made users are left
   alone. A new user is recorded first, with an empty `jellyfin_user_id` (pending): if Jellyfin
-  makes it but the answer is lost, the next sync takes that user over by name. It runs after
+  makes it but the answer is lost, the next sync takes over the user of that name, but only if it
+  signs in with the recorded password (else it is not ours: the profile gets " 2"). It runs after
   profile create/remove jobs, after a rename (in the background), at the end of `services_enable`, in every Jellyfin job and in `jellyfin.users.reveal {pin}` (no job; the
   admin's and each profile's password; never logged). `jellyfin.client_token` (no PIN, read-only
   for the caller): the caller's own profile only (from its uid; guest and spare accounts get

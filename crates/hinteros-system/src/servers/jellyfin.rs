@@ -210,6 +210,9 @@ pub trait Api {
     fn create_user(&self, name: &str, password: &str) -> Result<String, Error>;
     /// Make sure a user is no administrator and may not delete media.
     fn set_policy(&self, id: &str) -> Result<(), Error>;
+    /// The id of the user that `name` and `password` sign in as (as device `device`), or `None`
+    /// when Jellyfin refuses them.
+    fn sign_in(&self, name: &str, password: &str, device: &str) -> Result<Option<String>, Error>;
     fn rename_user(&self, id: &str, name: &str) -> Result<(), Error>;
     fn delete_user(&self, id: &str) -> Result<(), Error>;
 }
@@ -365,6 +368,14 @@ impl Api for Client {
             self.call("POST", &format!("/Users/{id}/Policy"), Some(&policy))?;
         }
         Ok(())
+    }
+
+    fn sign_in(&self, name: &str, password: &str, device: &str) -> Result<Option<String>, Error> {
+        match self.authenticate(name, password, device) {
+            Ok((_, id)) => Ok(Some(id)),
+            Err(Error::Refused(m)) if m.contains("HTTP 401") => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     fn rename_user(&self, id: &str, name: &str) -> Result<(), Error> {
@@ -527,7 +538,8 @@ pub enum Op {
         profile: String,
         name: String,
     },
-    /// A pending record's user, made by a create that got no answer: record its id.
+    /// A pending record's user, made by a create that got no answer (it took the recorded
+    /// password): record its id.
     Claim {
         profile: String,
         user_id: String,
@@ -538,10 +550,33 @@ pub enum Op {
     },
 }
 
+/// Pending records whose create may have gone through: a user of that name that no record owns.
+/// It is ours only if it takes the record's password ([`sync`] checks; see [`plan`]).
+pub fn claimable<'a>(stored: &'a UsersFile, existing: &'a [User]) -> BTreeMap<&'a str, &'a User> {
+    let owned = |u: &User| stored.users.values().any(|r| r.jellyfin_user_id == u.id);
+    stored
+        .users
+        .iter()
+        .filter(|(_, r)| r.is_pending() && key(&r.name) != key(ADMIN_USER))
+        .filter_map(|(p, r)| {
+            let u = existing.iter().find(|u| key(&u.name) == key(&r.name))?;
+            (!owned(u)).then_some((p.as_str(), u))
+        })
+        .collect()
+}
+
 /// What makes Jellyfin match `profiles` (pure; [`sync`] applies it). Deletes come first (their
 /// names become free), then each profile in id order; names are unique case-insensitively among
-/// every Jellyfin user, the admin and dashboard-made users included.
-pub fn plan(profiles: &[Profile], stored: &UsersFile, existing: &[User]) -> Vec<Op> {
+/// every Jellyfin user, the admin and dashboard-made users included. `proven`: the profiles whose
+/// [`claimable`] user signed in with the recorded password. Any other user with a pending
+/// record's name is not ours (the owner may have made it in the dashboard): it is never claimed,
+/// changed or deleted, and the profile gets "<name> 2".
+pub fn plan(
+    profiles: &[Profile],
+    stored: &UsersFile,
+    existing: &[User],
+    proven: &BTreeSet<String>,
+) -> Vec<Op> {
     let mut ops = Vec::new();
     let by_id: BTreeMap<&str, &User> = existing.iter().map(|u| (u.id.as_str(), u)).collect();
     let wanted: BTreeSet<&str> = profiles.iter().map(|p| p.id.as_str()).collect();
@@ -558,16 +593,8 @@ pub fn plan(profiles: &[Profile], stored: &UsersFile, existing: &[User]) -> Vec<
         })
         .collect();
     taken.entry(key(ADMIN_USER)).or_insert(None);
-    // Pending records whose create went through: a user of that name that no record owns.
-    let claimable: BTreeMap<&str, &User> = stored
-        .users
-        .iter()
-        .filter(|(_, r)| r.is_pending() && key(&r.name) != key(ADMIN_USER))
-        .filter_map(|(p, r)| {
-            let u = existing.iter().find(|u| key(&u.name) == key(&r.name))?;
-            (taken.get(&key(&u.name)) == Some(&None)).then_some((p.as_str(), u))
-        })
-        .collect();
+    let mut claimable = claimable(stored, existing);
+    claimable.retain(|p, _| proven.contains(*p));
     for (profile, r) in &stored.users {
         if !wanted.contains(profile.as_str()) {
             let user = by_id
@@ -684,7 +711,15 @@ pub fn sync(api: &dyn Api, files: &Files, profiles: &[Profile]) -> Result<Synced
         return Err(Error::Profiles("no profiles".into()));
     }
     let existing = api.users()?;
-    let ops = plan(profiles, &stored, &existing);
+    // A user with a pending record's name is ours only if it takes the recorded password.
+    let mut proven = BTreeSet::new();
+    for (p, u) in claimable(&stored, &existing) {
+        let r = &stored.users[p];
+        if api.sign_in(&r.name, &r.password, &device_id(p))?.as_deref() == Some(u.id.as_str()) {
+            proven.insert(p.to_owned());
+        }
+    }
+    let ops = plan(profiles, &stored, &existing, &proven);
     let mut done = Synced::default();
     let save = |s: &UsersFile| {
         s.save(&path)
@@ -1060,6 +1095,10 @@ mod tests {
         format!("{n:032x}")
     }
 
+    fn none() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
     /// One connection per body, like Jellyfin's stand-in server during startup, then the real one.
     fn answers(bodies: &'static [&'static str]) -> SocketAddr {
         use std::io::{Read, Write};
@@ -1197,7 +1236,7 @@ mod tests {
             p("p3", "carol"),
             p("p5", "Admin"),
         ];
-        let ops = plan(&profiles, &stored, &existing);
+        let ops = plan(&profiles, &stored, &existing, &none());
         assert_eq!(
             ops,
             [
@@ -1223,7 +1262,7 @@ mod tests {
         // A user renamed in the dashboard to a variant of the name is kept and recorded.
         let mut s2 = UsersFile::default();
         s2.users.insert("p1".into(), rec(&hex(2), "Alice"));
-        let ops = plan(&[p("p1", "Alice")], &s2, &[u(&hex(2), "ALICE 2")]);
+        let ops = plan(&[p("p1", "Alice")], &s2, &[u(&hex(2), "ALICE 2")], &none());
         assert_eq!(
             ops,
             [Op::Adopt {
@@ -1232,7 +1271,7 @@ mod tests {
             }]
         );
         // Our user deleted in the dashboard: made again.
-        let ops = plan(&[p("p1", "Alice")], &s2, &[]);
+        let ops = plan(&[p("p1", "Alice")], &s2, &[], &none());
         assert_eq!(
             ops,
             [Op::Create {
@@ -1241,7 +1280,7 @@ mod tests {
             }]
         );
         // Nothing to do.
-        assert!(plan(&[p("p1", "Alice")], &s2, &[u(&hex(2), "Alice")]).is_empty());
+        assert!(plan(&[p("p1", "Alice")], &s2, &[u(&hex(2), "Alice")], &none()).is_empty());
     }
 
     #[test]
@@ -1250,7 +1289,12 @@ mod tests {
         let mut stored = UsersFile::default();
         stored.users.insert("p2".into(), rec(&hex(2), "Ann"));
         stored.users.insert("p3".into(), rec(&hex(3), "Bob"));
-        let ops = plan(&[p("p2", "Bob"), p("p3", "Ann")], &stored, &existing);
+        let ops = plan(
+            &[p("p2", "Bob"), p("p3", "Ann")],
+            &stored,
+            &existing,
+            &none(),
+        );
         // p2 cannot take Bob while p3 has it; p3 then takes Ann, which p2 gave up.
         assert_eq!(
             ops,
@@ -1275,6 +1319,7 @@ mod tests {
             &[p("p2", "Bob"), p("p3", "Ann")],
             &after,
             &[u(&hex(2), "Bob 2"), u(&hex(3), "Ann")],
+            &none(),
         );
         assert!(ops.is_empty(), "{ops:?}");
     }
@@ -1286,13 +1331,15 @@ mod tests {
         refuse: fn(&str) -> bool,
         /// `create_user` makes the user, then times out.
         lose_answers: bool,
+        /// Passwords by user id.
+        passwords: RefCell<BTreeMap<String, String>>,
     }
 
     impl Api for Fake {
         fn users(&self) -> Result<Vec<User>, Error> {
             Ok(self.users.borrow().clone())
         }
-        fn create_user(&self, name: &str, _password: &str) -> Result<String, Error> {
+        fn create_user(&self, name: &str, password: &str) -> Result<String, Error> {
             if (self.refuse)(name) {
                 return Err(Error::Refused("no".into()));
             }
@@ -1300,6 +1347,9 @@ mod tests {
             *n += 1;
             let id = hex(100 + *n);
             self.users.borrow_mut().push(u(&id, name));
+            self.passwords
+                .borrow_mut()
+                .insert(id.clone(), password.into());
             if self.lose_answers {
                 return Err(Error::Unreachable("timed out".into()));
             }
@@ -1308,6 +1358,14 @@ mod tests {
         fn set_policy(&self, id: &str) -> Result<(), Error> {
             assert!(self.users.borrow().iter().any(|x| x.id == id));
             Ok(())
+        }
+        fn sign_in(&self, name: &str, password: &str, _: &str) -> Result<Option<String>, Error> {
+            let users = self.users.borrow();
+            let Some(u) = users.iter().find(|x| key(&x.name) == key(name)) else {
+                return Ok(None);
+            };
+            let pw = self.passwords.borrow();
+            Ok((pw.get(&u.id).map(String::as_str) == Some(password)).then(|| u.id.clone()))
         }
         fn rename_user(&self, id: &str, name: &str) -> Result<(), Error> {
             for x in self.users.borrow_mut().iter_mut() {
@@ -1334,6 +1392,7 @@ mod tests {
             next: RefCell::new(0),
             refuse: |_| false,
             lose_answers: false,
+            passwords: Default::default(),
         };
         let s = sync(&fake, &files, &[p("p1", "Alice"), p("p2", "Bob")]).unwrap();
         assert_eq!(s.created, 2);
@@ -1366,6 +1425,7 @@ mod tests {
             next: RefCell::new(0),
             refuse: |_| true,
             lose_answers: false,
+            passwords: Default::default(),
         };
         assert!(sync(&failing, &files, &[p("p1", "Alicia"), p("p3", "C")]).is_err());
         assert!(
@@ -1380,6 +1440,7 @@ mod tests {
             next: RefCell::new(0),
             refuse: |n| n == "C",
             lose_answers: false,
+            passwords: Default::default(),
         };
         let profiles = [p("p1", "Alicia"), p("p3", "C"), p("p4", "Dee")];
         assert!(sync(&picky, &files, &profiles).is_err());
@@ -1401,6 +1462,7 @@ mod tests {
             next: RefCell::new(0),
             refuse: |_| false,
             lose_answers: true,
+            passwords: Default::default(),
         };
         let profiles = [p("p1", "Alice")];
         assert!(matches!(
@@ -1415,16 +1477,27 @@ mod tests {
             next: RefCell::new(5),
             refuse: |_| false,
             lose_answers: false,
+            passwords: RefCell::new(slow.passwords.borrow().clone()),
         };
+        let stored = UsersFile::load(&files.users_json()).unwrap();
         assert_eq!(
             plan(
                 &profiles,
-                &UsersFile::load(&files.users_json()).unwrap(),
-                &fake.users.borrow()
+                &stored,
+                &fake.users.borrow(),
+                &BTreeSet::from(["p1".into()])
             ),
             [Op::Claim {
                 profile: "p1".into(),
                 user_id: hex(101)
+            }]
+        );
+        // Only when it took the recorded password.
+        assert_eq!(
+            plan(&profiles, &stored, &fake.users.borrow(), &none()),
+            [Op::Create {
+                profile: "p1".into(),
+                name: "Alice 2".into()
             }]
         );
         assert_eq!(sync(&fake, &files, &profiles).unwrap().created, 1);
@@ -1435,14 +1508,52 @@ mod tests {
         );
         assert_eq!(r.password, pending.password);
         assert_eq!(fake.users.borrow().len(), 2);
+        // A pending record whose create never made a user, and a user of that name made in the
+        // dashboard meanwhile: that user is not ours. It is not taken, and not deleted with its
+        // profile.
+        let d = tempfile::tempdir().unwrap();
+        let files = Files {
+            dir: d.path().to_owned(),
+        };
+        let mut stored = UsersFile::default();
+        stored.users.insert("p2".into(), rec("", "Bob"));
+        stored.users.insert("p3".into(), rec("", "Carol"));
+        stored.save(&files.users_json()).unwrap();
+        let theirs = Fake {
+            users: RefCell::new(vec![u(&hex(7), "Bob"), u(&hex(8), "Carol")]),
+            next: RefCell::new(0),
+            refuse: |_| false,
+            lose_answers: false,
+            passwords: RefCell::new(BTreeMap::from([
+                (hex(7), "theirs".into()),
+                (hex(8), "theirs".into()),
+            ])),
+        };
+        assert_eq!(sync(&theirs, &files, &[p("p2", "Bob")]).unwrap().deleted, 0);
+        let users = UsersFile::load(&files.users_json()).unwrap().users;
+        assert_eq!(users.keys().collect::<Vec<_>>(), ["p2"]);
+        assert_eq!(users["p2"].name, "Bob 2");
+        assert_ne!(users["p2"].jellyfin_user_id, hex(7));
+        let names: Vec<_> = theirs
+            .users
+            .borrow()
+            .iter()
+            .map(|x| x.name.clone())
+            .collect();
+        assert_eq!(names, ["Bob", "Carol", "Bob 2"]);
         // A pending record whose user never came: made again. One whose profile went: its user
-        // goes too.
+        // (proven ours) goes too.
         let mut stored = UsersFile::default();
         stored.users.insert("p2".into(), rec("", "Bob"));
         stored.users.insert("p3".into(), rec("", "Carol"));
         let existing = [u(&hex(7), "Carol")];
         assert_eq!(
-            plan(&[p("p2", "Bob")], &stored, &existing),
+            plan(
+                &[p("p2", "Bob")],
+                &stored,
+                &existing,
+                &BTreeSet::from(["p3".into()])
+            ),
             [
                 Op::Delete {
                     profile: "p3".into(),
@@ -1511,6 +1622,7 @@ mod tests {
             next: RefCell::new(0),
             refuse: |_| false,
             lose_answers: false,
+            passwords: Default::default(),
         };
         sync(&fake, &files, &[p("p1", "Alice")]).unwrap();
         assert!(matches!(sync(&fake, &files, &[]), Err(Error::Profiles(_))));

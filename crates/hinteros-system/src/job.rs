@@ -377,8 +377,9 @@ pub struct UpdateSource {
     /// `update.check` only: compare the catalogs of the running and the target generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogCheck>,
-    /// `update.check` only: the other channel branches of the table, fetched and verified to
-    /// record their newest tips (`channel-tips.json`) before a switch to them.
+    /// `update.check`: the other channel branches of the table, fetched and verified to record
+    /// their newest tips (`channel-tips.json`) before a switch to them. `channel.check`: the
+    /// branch the box follows, fetched only when the locked revision is not local.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub others: Vec<String>,
 }

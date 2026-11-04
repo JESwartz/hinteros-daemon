@@ -1503,7 +1503,13 @@ impl Service {
                 if from == Some(p.channel) {
                     return job_ref(None);
                 }
-                let source = self.update_source(&table, p.channel, lock.rev.clone())?;
+                let mut source = self.update_source(&table, p.channel, lock.rev.clone())?;
+                // The branch the box follows: fetched if the locked revision is not local.
+                source.others = from
+                    .and_then(|c| table.branch(c))
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect();
                 let subject = system::JobSubject {
                     channel: Some(p.channel),
                     from_channel: from,

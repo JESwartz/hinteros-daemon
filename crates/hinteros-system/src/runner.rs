@@ -729,9 +729,20 @@ impl Runner {
             .init()
             .and_then(|()| git.fetch_tip(&source.repo, &source.branch))
             .map_err(|e| self.git_error(&source, e))?;
+        // The locked revision must be local to compare with: fetch the branch the box follows
+        // when it is not (best effort; else the target is described on its own).
+        let current = source.current_rev.as_deref();
+        if let Some(c) = current
+            && !git.has_commit(c)
+        {
+            for branch in &source.others {
+                if let Err(e) = git.fetch(&source.repo, branch) {
+                    warn!("cannot fetch {branch}: {e}");
+                }
+            }
+        }
         self.check_cancel()?;
         self.set_stage(Stage::Verifying);
-        let current = source.current_rev.as_deref();
         let target = git
             .describe(
                 &tip,
@@ -741,7 +752,8 @@ impl Runner {
                 &source.allowed_signers,
             )
             .map_err(|e| self.git_error(&source, e))?;
-        let older = match current {
+        // Not known when the locked revision is still not local.
+        let older = match current.filter(|c| git.has_commit(c)) {
             Some(c) => !git
                 .is_ancestor(c, &tip)
                 .map_err(|e| self.git_error(&source, e))?,
@@ -833,18 +845,14 @@ impl Runner {
             self.check_cancel()?;
             self.set_stage(Stage::Fetching);
             let git = self.git(&u.source);
-            let fetched = git
+            // Without a checked revision, the tip that was fetched (no race with ls-remote).
+            let tip = git
                 .init()
-                .and_then(|()| git.fetch(&u.source.repo, &u.source.branch));
-            fetched.map_err(|e| self.git_error(&u.source, e))?;
+                .and_then(|()| git.fetch_tip(&u.source.repo, &u.source.branch))
+                .map_err(|e| self.git_error(&u.source, e))?;
             self.check_cancel()?;
             self.set_stage(Stage::Verifying);
-            let rev = match &u.rev {
-                Some(r) => r.clone(),
-                None => git
-                    .ls_remote(&u.source.repo, &u.source.branch)
-                    .map_err(|e| self.git_error(&u.source, e))?,
-            };
+            let rev = u.rev.clone().unwrap_or(tip);
             let require_ff = u.not_fast_forward != NotFastForward::Allow;
             // Never older than the newest tip this box verified on the target branch (also on
             // a switch, which may go back from the locked revision).

@@ -27,9 +27,6 @@ use hinteros_api::{ErrorCode, ErrorObject};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// Most commits read for trailers in one check.
-pub const MAX_COMMITS: usize = 2000;
-
 /// Why verification failed (the `reason` of `update_verification_failed`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejection {
@@ -448,22 +445,6 @@ impl Git {
         Ok(())
     }
 
-    /// The tip of `branch` on `repo` (`git ls-remote`).
-    pub fn ls_remote(&self, repo: &str, branch: &str) -> Result<String, GitError> {
-        let refname = format!("refs/heads/{branch}");
-        let out = self.run(&["ls-remote", "--", repo, &refname])?;
-        if !out.status.success() {
-            return Err(GitError::Unreachable(last_line(&out.stderr)));
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        text.lines()
-            .find_map(|l| {
-                let (rev, name) = l.split_once('\t')?;
-                (name == refname && is_rev(rev)).then(|| rev.to_owned())
-            })
-            .ok_or_else(|| GitError::Failed(format!("the server has no branch {branch}")))
-    }
-
     /// Fetch `branch` into `refs/hinteros/<branch>`.
     pub fn fetch(&self, repo: &str, branch: &str) -> Result<(), GitError> {
         let refspec = format!("+refs/heads/{branch}:refs/hinteros/{branch}");
@@ -567,19 +548,23 @@ impl Git {
         }
     }
 
-    /// Commits in `from..to` (all of `to`'s history if `from` is unknown), newest first.
-    pub fn new_commits(&self, from: Option<&str>, to: &str) -> Result<Vec<String>, GitError> {
-        let max = format!("--max-count={MAX_COMMITS}");
-        let range = match from.filter(|f| self.has_commit(f)) {
-            Some(f) => format!("{f}..{to}"),
+    /// The messages of the commits in `from..to`, newest first, in one `git log`: all of
+    /// `to`'s history without `from`; only `to`'s own with a `from` this repo does not have
+    /// (what lies between is not known, and the whole history would overstate it).
+    pub fn new_messages(&self, from: Option<&str>, to: &str) -> Result<Vec<String>, GitError> {
+        let range = match from {
+            Some(f) if self.has_commit(f) => format!("{f}..{to}"),
+            Some(f) => {
+                tracing::warn!("{f} is not in the local repo; describing {to} on its own");
+                format!("{to}^!")
+            }
             None => to.to_owned(),
         };
-        Ok(self
-            .ok(&["rev-list", &max, &range])?
-            .lines()
-            .filter(|l| is_rev(l))
-            .map(str::to_owned)
-            .collect())
+        let out = self.ok(&["log", "-z", "--format=%B", &range, "--"])?;
+        // Each message ends with a NUL.
+        let mut messages: Vec<String> = out.split('\0').map(str::to_owned).collect();
+        messages.pop();
+        Ok(messages)
     }
 
     /// Fetch, verify and describe the tip of `branch`. `current`: the locked revision;
@@ -599,11 +584,12 @@ impl Git {
         use hinteros_api::system::Stage;
         progress(Stage::Fetching);
         self.init()?;
-        let tip = self.ls_remote(repo, branch)?;
+        // Fetched first, also when up to date: the locked revision is then local for a later
+        // channel check, and the tip described is the one fetched.
+        let tip = self.fetch_tip(repo, branch)?;
         if current == Some(tip.as_str()) {
             return Ok(None);
         }
-        self.fetch(repo, branch)?;
         progress(Stage::Verifying);
         self.describe(&tip, current, require_ff, seen, allowed_signers)
             .map(Some)
@@ -638,19 +624,14 @@ impl Git {
             return Err(GitError::Rejected(Rejection::OlderThanSeen));
         }
         let tip = self.commit(rev)?;
-        let commits = self.new_commits(current, rev)?;
+        let messages = self.new_messages(current, rev)?;
         let mut security = None;
         let mut summary = None;
         // Newest first: the first `Security-Summary:` found is the newest.
-        for c in &commits {
-            let msg = if c == rev {
-                tip.message.clone()
-            } else {
-                self.commit(c)?.message
-            };
-            security = security.max(security_severity(&msg));
+        for msg in &messages {
+            security = security.max(security_severity(msg));
             if summary.is_none() {
-                summary = security_summary(&msg);
+                summary = security_summary(msg);
             }
         }
         let version = version_or_short_rev(self.release_version(rev).as_deref(), rev);
@@ -660,7 +641,7 @@ impl Git {
             summary: tip.subject(),
             signer,
             security,
-            commits: u32::try_from(commits.len().max(1)).unwrap_or(u32::MAX),
+            commits: u32::try_from(messages.len().max(1)).unwrap_or(u32::MAX),
             // Filled in by the job from the target revision's catalog (`runner`).
             new_apps: None,
             removed_apps: None,
@@ -901,6 +882,30 @@ mod tests {
         assert_eq!(back.get("stable"), Some(c.as_str()));
         assert_eq!(back.get("beta"), Some(d.as_str()));
         assert_eq!(back.get("main"), None);
+    }
+
+    /// Every commit of the range in one `git log`, whatever its length; a `from` the repo does
+    /// not have describes the tip alone, not the whole history.
+    #[test]
+    fn new_messages_of_a_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some((git, [a, b, c, d])) = history(dir.path()) else {
+            return;
+        };
+        assert_eq!(git.new_messages(Some(&a), &c).unwrap(), ["c\n", "b\n"]);
+        assert_eq!(git.new_messages(None, &c).unwrap(), ["c\n", "b\n", "a\n"]);
+        assert_eq!(git.new_messages(Some(&b), &d).unwrap(), ["d\n"]);
+        assert_eq!(
+            git.new_messages(Some(&c), &c).unwrap(),
+            Vec::<String>::new()
+        );
+        let missing = "9a8b7c6d5e4f30211a2b3c4d5e6f708192a3b4c5";
+        assert_eq!(git.new_messages(Some(missing), &c).unwrap(), ["c\n"]);
+        assert_eq!(
+            git.new_messages(Some(missing), &a).unwrap(),
+            ["a\n"],
+            "a root"
+        );
     }
 
     #[test]

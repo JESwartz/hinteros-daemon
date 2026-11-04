@@ -459,7 +459,7 @@ impl Service {
         let made = tokio::task::spawn_blocking(move || {
             let files = jellyfin::Files::new(&paths.services_dir());
             let c = jellyfin::Client::new(&files, paths.server.jellyfin, Duration::from_secs(5))?;
-            jellyfin::client_token(&c, &files, &jellyfin::profiles(&paths), &profile)
+            jellyfin::client_token(&c, &files, &jellyfin::profiles(&paths)?, &profile)
         })
         .await
         .map_err(internal)?;
@@ -901,15 +901,24 @@ impl Service {
 }
 
 /// `jellyfin.users.reveal`: users made first (best effort), then the admin's and each
-/// profile's password.
+/// profile's password. Profiles that cannot be read: the admin only, and no sync.
 fn reveal(paths: &crate::config::Paths) -> JellyfinUsersRevealResult {
     let files = jellyfin::Files::new(&paths.services_dir());
-    let profiles = jellyfin::profiles(paths);
-    if let Ok(c) = jellyfin::Client::new(&files, paths.server.jellyfin, Duration::from_secs(3))
-        && let Err(e) = jellyfin::sync(&c, &files, &profiles)
-    {
-        warn!("Jellyfin users not synced: {e}");
-    }
+    let profiles = match jellyfin::profiles(paths) {
+        Ok(p) => {
+            if let Ok(c) =
+                jellyfin::Client::new(&files, paths.server.jellyfin, Duration::from_secs(3))
+                && let Err(e) = jellyfin::sync(&c, &files, &p)
+            {
+                warn!("Jellyfin users not synced: {e}");
+            }
+            p
+        }
+        Err(e) => {
+            warn!("Jellyfin users not synced: {e}");
+            Vec::new()
+        }
+    };
     let stored = jellyfin::UsersFile::load(&files.users_json()).unwrap_or_default();
     JellyfinUsersRevealResult {
         admin: files.admin_password().map(|password| JellyfinAccount {

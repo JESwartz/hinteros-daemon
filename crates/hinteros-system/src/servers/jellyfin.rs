@@ -84,6 +84,10 @@ pub enum Error {
     Unreachable(String),
     #[error("Jellyfin refused: {0}")]
     Refused(String),
+    /// `state.json` or `profiles.json` cannot be read (damaged, missing, or newer than this
+    /// binary): no sync, since an empty profile list would delete every user.
+    #[error("the profiles cannot be read: {0}")]
+    Profiles(String),
 }
 
 impl Error {
@@ -92,7 +96,7 @@ impl Error {
         match self {
             Error::NotReady => "not_ready",
             Error::Unreachable(_) => "unreachable",
-            Error::Refused(_) => "refused",
+            Error::Refused(_) | Error::Profiles(_) => "refused",
         }
     }
 }
@@ -599,6 +603,11 @@ pub fn sync(api: &dyn Api, files: &Files, profiles: &[Profile]) -> Result<Synced
     let mut stored =
         UsersFile::load(&path).map_err(|e| Error::Refused(format!("users.json: {e}")))?;
     stored.version = 1;
+    // Every box has an admin profile: none at all means the profiles were not read, and the
+    // plan would delete every user (their watch history goes with them).
+    if profiles.is_empty() && !stored.users.is_empty() {
+        return Err(Error::Profiles("no profiles".into()));
+    }
     let existing = api.users()?;
     let ops = plan(profiles, &stored, &existing);
     let mut done = Synced::default();
@@ -801,21 +810,25 @@ pub fn client_token(
 }
 
 /// The profiles that get a Jellyfin user: every profile with metadata (not the guest, not a
-/// spare account), with its name now.
-pub fn profiles(paths: &crate::config::Paths) -> Vec<Profile> {
-    let Ok((state, _)) = crate::state::State::load(&paths.state_json()) else {
-        return Vec::new();
-    };
-    let Ok(file) = crate::profiles::ProfilesFile::load(&paths.profiles_json()) else {
-        return Vec::new();
-    };
-    file.visible(&state)
+/// spare account), with its name now. A `state.json` or `profiles.json` that cannot be read
+/// (damaged, missing, newer than this binary) is an error, never "no profiles".
+pub fn profiles(paths: &crate::config::Paths) -> Result<Vec<Profile>, Error> {
+    let (state, _) = crate::state::State::load(&paths.state_json())
+        .map_err(|e| Error::Profiles(e.to_string()))?;
+    let path = paths.profiles_json();
+    if !crate::profiles::ProfilesFile::exists(&path) {
+        return Err(Error::Profiles(format!("{}: missing", path.display())));
+    }
+    let file =
+        crate::profiles::ProfilesFile::load(&path).map_err(|e| Error::Profiles(e.to_string()))?;
+    Ok(file
+        .visible(&state)
         .into_iter()
         .map(|(a, m)| Profile {
             id: a.id,
             name: m.name.clone(),
         })
-        .collect()
+        .collect())
 }
 
 /// Jellyfin is on in `state.json`.
@@ -832,7 +845,7 @@ pub fn sync_if_ready(paths: &crate::config::Paths, server: &crate::config::Serve
     }
     let files = Files::new(&paths.services_dir());
     match Client::new(&files, server.jellyfin, Duration::from_secs(5)) {
-        Ok(c) => match sync(&c, &files, &profiles(paths)) {
+        Ok(c) => match profiles(paths).and_then(|p| sync(&c, &files, &p)) {
             Ok(s) if s != Synced::default() => info!(?s, "Jellyfin users synced"),
             Ok(_) => {}
             Err(e) => warn!("Jellyfin users not synced: {e}"),
@@ -1193,6 +1206,72 @@ mod tests {
         );
         // Secrets stay out of debug output.
         assert!(!format!("{:?}", f.users["p1"]).contains(&f.users["p1"].password));
+    }
+
+    #[test]
+    fn unreadable_profiles_delete_nobody() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = crate::config::Paths {
+            config_dir: d.path().join("etc"),
+            state_dir: d.path().join("var"),
+            run_dir: d.path().join("run"),
+            profile: d.path().join("profiles/system"),
+            current_system: d.path().join("current"),
+            booted_system: d.path().join("booted"),
+            apps_profiles: d.path().join("nixprofiles"),
+            catalog_index: None,
+            users: Default::default(),
+            proc_dir: "/proc".into(),
+            zoneinfo_dir: d.path().join("zoneinfo"),
+            localtime: d.path().join("localtime"),
+            server: Default::default(),
+        };
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        // No state.json, then no profiles.json, then a newer one (a rollback): an error each.
+        assert!(matches!(profiles(&paths), Err(Error::Profiles(_))));
+        let state = crate::state::State::parse(
+            br#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],
+               "profiles":[{"id":"p1"},{"id":"p2"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(paths.state_json(), state.to_canonical_json()).unwrap();
+        assert!(matches!(profiles(&paths), Err(Error::Profiles(_))));
+        std::fs::write(paths.profiles_json(), r#"{"version":99,"profiles":{}}"#).unwrap();
+        assert!(matches!(profiles(&paths), Err(Error::Profiles(_))));
+        crate::profiles::test_file(&state)
+            .save(&paths.profiles_json())
+            .unwrap_err();
+        std::fs::remove_file(paths.profiles_json()).unwrap();
+        crate::profiles::test_file(&state)
+            .save(&paths.profiles_json())
+            .unwrap();
+        let got: Vec<String> = profiles(&paths)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(got, ["p1", "p2"]);
+
+        // An empty list with users recorded: refused, nothing deleted.
+        let files = Files {
+            dir: d.path().join("jf"),
+        };
+        std::fs::create_dir_all(&files.dir).unwrap();
+        let fake = Fake {
+            users: RefCell::new(vec![u(&hex(1), "admin")]),
+            next: RefCell::new(0),
+            fail_create: false,
+        };
+        sync(&fake, &files, &[p("p1", "Alice")]).unwrap();
+        assert!(matches!(sync(&fake, &files, &[]), Err(Error::Profiles(_))));
+        assert_eq!(fake.users.borrow().len(), 2);
+        assert!(
+            UsersFile::load(&files.users_json())
+                .unwrap()
+                .users
+                .contains_key("p1")
+        );
     }
 
     #[test]

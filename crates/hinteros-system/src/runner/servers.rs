@@ -156,7 +156,8 @@ impl Runner {
         self.set_stage(Stage::Configuring);
         let paths = self.spec.paths.clone();
         let files = jellyfin::Files::new(&paths.services_dir());
-        if let Err(e) = jellyfin::sync(&client, &files, &jellyfin::profiles(&paths)) {
+        if let Err(e) = jellyfin::profiles(&paths).and_then(|p| jellyfin::sync(&client, &files, &p))
+        {
             warn!("Jellyfin users not synced: {e}");
         }
         let fail = |r: &Self, e: jellyfin::Error| r.failed(e.to_string(), e.reason());

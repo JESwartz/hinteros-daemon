@@ -20,6 +20,7 @@ use hinteros_api::system::{
 use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde_json::{Value, json};
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use super::{Service, internal, job_ref, state_conflict};
 use crate::config::ServerPaths;
@@ -831,6 +832,9 @@ impl Service {
                     return Err(e);
                 }
                 let dir = self.paths.services_dir().join(servers::CLOUDFLARE);
+                // The job restarts the tunnel on the new token; if it cannot start, the old
+                // token comes back, so a later restart does not pick up one that was refused.
+                let previous = std::fs::read(dir.join("token")).ok().map(Zeroizing::new);
                 write_token(&dir, &p.token)
                     .map_err(|e| internal(format!("writing the tunnel token: {e}")))?;
                 info!(uid, "Cloudflare tunnel token written");
@@ -839,7 +843,13 @@ impl Service {
                     uid,
                     Action::Cloudflare(CloudflareJob { set: true }),
                 );
-                job_ref(Some(self.start(spec).await?))
+                let started = self.start(spec).await;
+                if started.is_err()
+                    && let Err(e) = restore_token(&dir, previous.as_deref().map(Vec::as_slice))
+                {
+                    warn!("cannot put the previous tunnel token back: {e}");
+                }
+                job_ref(Some(started?))
             }
             ServersRequest::ClearToken(_) => {
                 if !on(servers::CLOUDFLARE) {
@@ -944,6 +954,18 @@ fn write_token(dir: &std::path::Path, token: &str) -> std::io::Result<()> {
         .mode(0o700)
         .create(dir)?;
     crate::fsutil::write_atomic(&dir.join("token"), token.as_bytes(), 0o600)
+}
+
+/// Put the token file back as it was before [`write_token`] (`None`: there was none).
+fn restore_token(dir: &std::path::Path, previous: Option<&[u8]>) -> std::io::Result<()> {
+    let path = dir.join("token");
+    match previous {
+        Some(bytes) => crate::fsutil::write_atomic(&path, bytes, 0o600),
+        None => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -1099,6 +1121,14 @@ mod tests {
         let dir = d.path().join("services/cloudflare-tunnel");
         write_token(&dir, "abc").unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("token")).unwrap(), "abc");
+        // A job that cannot start: the previous token (or none) comes back.
+        write_token(&dir, "new").unwrap();
+        restore_token(&dir, Some(b"abc")).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("token")).unwrap(), "abc");
+        restore_token(&dir, None).unwrap();
+        assert!(!dir.join("token").exists());
+        restore_token(&dir, None).unwrap();
+        write_token(&dir, "abc").unwrap();
         assert_eq!(
             std::fs::metadata(dir.join("token"))
                 .unwrap()

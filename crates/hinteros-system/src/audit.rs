@@ -295,7 +295,9 @@ pub fn journal_note(
 
 /// Send without ever blocking the service: a full journal queue gets a few short retries (on the
 /// blocking pool inside a tokio runtime, so the service's one thread does not wait), then the
-/// entry is reported as lost (it is still in the service's own log above).
+/// entry is reported as lost (it is still in the service's own log above). While the queue is
+/// full, a retried entry can thus reach the journal after later ones (the journal stamps it when
+/// it arrives). That is accepted: the service's own log above keeps the request order.
 fn send_datagram(socket: &std::path::Path, datagram: &[u8]) -> std::io::Result<()> {
     let s = UnixDatagram::unbound()?;
     s.set_nonblocking(true)?;

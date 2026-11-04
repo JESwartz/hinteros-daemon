@@ -598,6 +598,9 @@ impl Runner {
                     break;
                 }
                 warn!("{program} exited and left processes running; stopping them");
+                // The leader is reaped, so the group id is free once its last member is gone.
+                // Accepted: pids grow up to pid_max (4194304) before they wrap, so a new group
+                // with this id within PIPE_GRACE is not a real case.
                 let _ = kill_process_group(pgid, Signal::KILL);
                 killed = true;
                 deadline = Instant::now() + PIPE_GRACE;
@@ -1262,7 +1265,10 @@ pub fn sync_config(
 }
 
 /// Whether `config_dir`'s `flake.nix` or `flake.lock` differs from the generation's `snapshot`
-/// (`state.json` may differ in its live time zone). No snapshot: no.
+/// (`state.json` may differ in its live time zone). No snapshot: no. A stale `state.json` alone
+/// (a settings-only job that switched but could not replace /etc/hinteros) is not healed here:
+/// the service made this job's state from /etc/hinteros before the job ran, so only
+/// hinteros-config-sync at the next boot can bring it in line (the failed job was reported).
 fn config_behind(snapshot: &Path, config_dir: &Path) -> bool {
     ["flake.nix", "flake.lock"].iter().any(|f| {
         fs::read(snapshot.join(f))

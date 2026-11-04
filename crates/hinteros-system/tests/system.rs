@@ -1605,3 +1605,46 @@ mod check_state {
         assert!(lines[2].starts_with("ok "));
     }
 }
+
+/// `check-catalog`: the system repo runs it on the generated catalog.json, so a value the
+/// catalog's own validator lets through but `Index::parse` refuses fails its CI.
+mod check_catalog {
+    use std::process::{Command, Output};
+
+    fn run(index: &str) -> (Output, std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("catalog.json");
+        std::fs::write(&f, index).unwrap();
+        let o = Command::new(env!("CARGO_BIN_EXE_hinteros-system"))
+            .arg("check-catalog")
+            .arg(&f)
+            .output()
+            .unwrap();
+        (o, f, dir)
+    }
+
+    #[test]
+    fn good_bad_and_newer() {
+        let (o, f, _d) = run(super::CATALOG);
+        let out = String::from_utf8_lossy(&o.stdout).into_owned();
+        assert_eq!(o.status.code(), Some(0), "{out}");
+        assert_eq!(out, format!("ok {}\n", f.display()));
+
+        // A dataPaths the daemon refuses refuses the whole index.
+        let (o, f, _d) = run(
+            r#"{"indexVersion": 4, "entries": [{"id": "a", "kind": "app", "name": "A",
+                "status": "available", "dataPaths": [".config/A [beta]"]}]}"#,
+        );
+        let out = String::from_utf8_lossy(&o.stdout).into_owned();
+        assert_eq!(o.status.code(), Some(1), "{out}");
+        assert!(
+            out.starts_with(&format!("invalid {}: ", f.display())),
+            "{out}"
+        );
+
+        let (o, _f, _d) = run(r#"{"indexVersion": 99, "entries": []}"#);
+        let out = String::from_utf8_lossy(&o.stdout).into_owned();
+        assert_eq!(o.status.code(), Some(1), "{out}");
+        assert!(out.contains("unsupported index version 99"), "{out}");
+    }
+}

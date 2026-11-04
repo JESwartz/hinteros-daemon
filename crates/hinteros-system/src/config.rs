@@ -36,6 +36,13 @@ pub enum Command {
         #[arg(required = true, value_name = "FILE")]
         files: Vec<PathBuf>,
     },
+    /// Check that catalog index files (`catalog.json`) parse with the same `Index::parse` the
+    /// service and the session daemon use. Prints and exits as `check-state`.
+    CheckCatalog {
+        /// catalog.json files to check
+        #[arg(required = true, value_name = "FILE")]
+        files: Vec<PathBuf>,
+    },
     /// The PAM helper (`pam_exec`, as root, `PAM_USER` set): `unlocked`, `verify` (the PIN on
     /// stdin), `end-others` or `splash` (the handover splash on `PAM_TTY`; always exits 0)
     Pin {

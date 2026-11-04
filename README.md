@@ -2256,7 +2256,11 @@ Both APIs are 1.0. A client works with a server of the same major and an equal o
   `EventName` is a new major. A catch-all there would let an unknown value through to the server
   or into `state.json`; the server refuses an unknown value (`invalid_params`). A client that also
   reads one (the launcher: `Channel`, `Base`, `CleanupFrequency` in `system.info`, job subjects and
-  `cleanup.get`) has its own catch-all for it and never sends that back.
+  `cleanup.get`) has its own catch-all for it and never sends that back. (`ControllerButton` is a
+  pattern string in the session schema, so the launcher has no enum for it.)
+- **`ProfileColor` is sent but open on purpose:** a minor may add a colour. A client reads one it
+  does not know as `unknown` (the launcher shows teal) and sends only names it knows, and the daemon
+  answers `invalid_params` for a name that is not in its list. A colour is not a security boundary.
 
 The schema documents list exactly what their version sends (`additionalProperties: false`), so
 the conformance tests catch a server that sends what is not documented. An item a later minor

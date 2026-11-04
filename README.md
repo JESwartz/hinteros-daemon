@@ -988,8 +988,9 @@ For `daemon.nix` (and the VM tests) in the system repo:
   `RuntimeDirectory=hinteros` with `RuntimeDirectoryMode=0755` and
   **`RuntimeDirectoryPreserve=yes`** (the job directories in `/run/hinteros/jobs` must survive a
   restart of the service during a switch), `UMask=0077` or `0007`. It reads `/etc/hinteros`,
-  `/var/lib/hinteros/update-check.json` and `channel-check.json`, `/proc`, the profile links and `/run/current-system`;
-  writes only `/run/hinteros`. So: `ProtectSystem=strict`, `ReadWritePaths=/run/hinteros`,
+  `/proc`, the profile links and `/run/current-system`; writes `/run/hinteros` and its state in
+  `/var/lib/hinteros` (`StateDirectory=hinteros`, 0700). So: `ProtectSystem=strict`,
+  `ReadWritePaths=/run/hinteros /var/lib/hinteros`,
   `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`,
   `RestrictAddressFamilies=AF_UNIX` (D-Bus, journal), `SystemCallFilter=@system-service`,
   `MemoryDenyWriteExecute=yes`, `CapabilityBoundingSet=CAP_SYS_PTRACE` (only so `HINTEROS_EXE`
@@ -1000,26 +1001,33 @@ For `daemon.nix` (and the VM tests) in the system repo:
   `IOSchedulingClass=idle`, `KillMode=control-group`, `path` with `nix`, `git`, `openssh`
   (`ssh-keygen`), `nixos-facter`, `coreutils`, `SSL_CERT_FILE` for git over https, and
   **`restartIfChanged = false; stopIfChanged = false`** (`X-RestartIfChanged=false`) so the
-  switch it performs never restarts the running instance. `StateDirectory=hinteros` (0700)
-  for `/var/lib/hinteros` on either unit.
+  switch it performs never restarts the running instance. **No `StateDirectory`**: the job uses
+  the service's `/var/lib/hinteros`. With its own, systemd chowns the whole tree at every job
+  start, and the job fails (ENOENT) when the service replaces a file during that walk (an update
+  check during a switch).
 - **Keyboards**: no profile account may read a keyboard (no uaccess rule for keyboards, no
   group `input`). `hinteros-keyboard.service`: `ExecStart=hinteros-system keyboard-home`,
   `DynamicUser`, `SupplementaryGroups=input hinteros-keyboard`, `DeviceAllow=char-input r`,
   no network, no capabilities. Group `hinteros-keyboard`, and `hinteros-system.service` in it
   (it chgrps `keyboard.sock` without `CAP_CHOWN`). `hinteros-system --freeze-inactive`.
-- **polkit** `share/polkit-1/actions/org.hinteros.system.policy` with the actions
-  `org.hinteros.system.{settings,rebuild,update.check,update.apply,rollback,channel,jobs.cancel,apps}`
-  (defaults `no/no/no`) and `org.hinteros.system.ssh` (defaults `auth_admin` for
-  any/inactive/active: the admin password). The rules file grants the first group to
-  `hinteros` members and must **not** return YES for `org.hinteros.system.ssh`:
+- **polkit** `share/polkit-1/actions/org.hinteros.system.policy` with every action of
+  `system::POLKIT_ACTIONS`:
+  `org.hinteros.system.{settings,rebuild,update.check,update.apply,rollback,channel,jobs.cancel,apps,profiles,profiles.create,starter,services}`
+  (defaults `no/no/no`), and `org.hinteros.system.ssh` and `org.hinteros.system.profiles.recover`
+  (`system::INTERACTIVE_ACTIONS`; defaults `auth_admin` for any/inactive/active: the admin
+  password). The rules file grants the first group to `hinteros` members and must **not** return
+  YES for the two `auth_admin` actions (`profiles.recover` resets the admin profile's PIN):
   ```js
   polkit.addRule(function (action, subject) {
     if (action.id.indexOf("org.hinteros.system.") === 0 &&
-        action.id !== "org.hinteros.system.ssh" && subject.isInGroup("hinteros")) {
+        action.id !== "org.hinteros.system.ssh" &&
+        action.id !== "org.hinteros.system.profiles.recover" && subject.isInGroup("hinteros")) {
       return polkit.Result.YES;
     }
   });
   ```
+  With the greeter on, a second rule grants only `org.hinteros.system.profiles.create` to the
+  greeter's user (`subject.user`).
   (`hardening.nix`'s `org.hinteros.system.ssh.admin` action is no longer used; the SSH toggle
   itself is `org.hinteros.system.ssh`.) `security.polkit.adminIdentities` decides whose password
   that is.
@@ -1239,7 +1247,7 @@ server, `--icon-allow-http`, a hidden test flag).
   `security.polkit.adminIdentities` names the admin account whose password is asked (polkit sends
   the identities; root is only used if nothing else is offered).
 - **polkit actions**: `org.hinteros.system.apps` (defaults `no/no/no`, granted to `hinteros` by the
-  existing rule; the rule must keep excluding `org.hinteros.system.ssh`, which stays `auth_admin`
+  existing rule; the rule must keep excluding `org.hinteros.system.ssh` and `profiles.recover`, which stay `auth_admin`
   with a `message` the launcher shows, e.g. "Authentication is required to turn remote login (SSH)
   on or off"). The user must be allowed to call `RegisterAuthenticationAgent` (polkit allows any
   user to register for its own process).
@@ -1248,8 +1256,8 @@ server, `--icon-allow-http`, a hidden test flag).
   `pathsToLink` `/share/hinteros`).
 - **`lib.catalogIds`** in the system flake: `{ "<id>": { name, status, statusReason } }` (status
   `available|retired|removed`), evaluable without building anything.
-- **`/var/lib/hinteros/terms-accepted.json`**: created by the job (the job unit already has
-  `StateDirectory=hinteros`); the installer writes the same format.
+- **`/var/lib/hinteros/terms-accepted.json`**: created by the job in the service's state directory
+  (the job unit has no `StateDirectory` of its own); the installer writes the same format.
 - **greetd** with `default_session = initial_session` (as `session.nix` has it) and the session
   daemon as the user unit `hinteros-session.service` (found from its cgroup); the daemon needs the
   user's session bus (`DBUS_SESSION_BUS_ADDRESS`, set for user units) for `RestartUnit`.

@@ -9,13 +9,15 @@
 //! [`MAX_BYTES`] and must be an image (checked by Content-Type and by the file's first bytes).
 
 use std::io::Read;
-use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 use url::Url;
 
 /// Largest response (page, manifest or image) we read.
@@ -58,15 +60,23 @@ impl Default for Fetcher {
 impl Fetcher {
     /// `allow_http` only for tests against a local server.
     pub fn new(allow_http: bool) -> Self {
-        let agent = ureq::Agent::config_builder()
+        let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(20)))
             .timeout_connect(Some(Duration::from_secs(8)))
             .max_redirects(0)
             .https_only(!allow_http)
             .http_status_as_error(false)
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) HinterOS")
-            .build()
-            .into();
+            // Through a proxy, the resolver would check the proxy, not the site.
+            .proxy(None)
+            .build();
+        let agent = ureq::Agent::with_parts(
+            config,
+            DefaultConnector::default(),
+            InternetOnly {
+                allow_local: allow_http,
+            },
+        );
         Self { agent, allow_http }
     }
 
@@ -99,37 +109,12 @@ impl Fetcher {
         Ok(())
     }
 
-    /// A site, page or redirect may name any host, and the daemon is not behind the local
-    /// network filter: refuse hosts that are (or resolve to) this box or the home network.
-    /// Checked before each request and redirect; the request resolves the name again, so this
-    /// does not stop DNS rebinding, but TLS (a public certificate) still has to pass then.
-    /// Not with `allow_http` (tests against a local server).
-    fn check_host(&self, url: &Url) -> Result<()> {
-        if self.allow_http {
-            return Ok(());
-        }
-        let local = match url.host() {
-            Some(url::Host::Ipv4(a)) => !is_global(a.into()),
-            Some(url::Host::Ipv6(a)) => !is_global(a.into()),
-            Some(url::Host::Domain(d)) => {
-                let addrs: Vec<_> = (d, url.port_or_known_default().unwrap_or(443))
-                    .to_socket_addrs()
-                    .with_context(|| format!("resolving {d}"))?
-                    .collect();
-                addrs.is_empty() || addrs.iter().any(|a| !is_global(a.ip()))
-            }
-            None => true,
-        };
-        ensure!(!local, "{url}: not an internet host");
-        Ok(())
-    }
-
-    /// GET with manual redirects (https only), a size limit and the final URL.
+    /// GET with manual redirects (https only), a size limit and the final URL. Each request
+    /// and redirect goes only to internet hosts ([`InternetOnly`]).
     fn get(&self, url: &Url) -> Result<(Url, Option<String>, Vec<u8>)> {
         let mut url = url.clone();
         for _ in 0..=MAX_REDIRECTS {
             self.check_scheme(&url)?;
-            self.check_host(&url)?;
             let mut resp = self
                 .agent
                 .get(url.as_str())
@@ -221,6 +206,34 @@ impl Fetcher {
 /// Whether `ip` is on the internet: not loopback, private (RFC 1918, unique local), link-local,
 /// CGNAT, multicast or another special-purpose range (as the local network filter's list),
 /// also through an IPv4-mapped, NAT64 or 6to4 address.
+/// The resolver of [`Fetcher`]'s agent. A site, page or redirect may name any host, and the
+/// daemon is not behind the local network filter: refuse hosts that are (or resolve to) this
+/// box or the home network. The agent connects only to the addresses checked here, so a DNS
+/// answer that changes after the check (rebinding) cannot reach the home network.
+/// Not with `allow_local` (tests against a local server).
+#[derive(Debug)]
+struct InternetOnly {
+    allow_local: bool,
+}
+
+impl Resolver for InternetOnly {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let addrs = DefaultResolver::default().resolve(uri, config, timeout)?;
+        if !self.allow_local && addrs.iter().any(|a| !is_global(a.ip())) {
+            return Err(ureq::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "not an internet host",
+            )));
+        }
+        Ok(addrs)
+    }
+}
+
 pub fn is_global(ip: IpAddr) -> bool {
     let v4 = |a: Ipv4Addr| {
         let [b0, b1, b2, _] = a.octets();
@@ -699,7 +712,22 @@ mod tests {
         ] {
             assert!(is_global(global.parse().unwrap()), "{global}");
         }
-        // Refused before any request (nothing listens there anyway).
+        // The resolver the agent connects with refuses the answer itself, so no second lookup
+        // can swap in another address.
+        let localhost: ureq::http::Uri = "https://localhost:1/".parse().unwrap();
+        let resolve = |allow_local| {
+            InternetOnly { allow_local }.resolve(
+                &localhost,
+                &ureq::config::Config::default(),
+                NextTimeout {
+                    after: ureq::unversioned::transport::time::Duration::NotHappening,
+                    reason: ureq::Timeout::Global,
+                },
+            )
+        };
+        assert!(resolve(false).is_err());
+        assert!(resolve(true).unwrap().iter().all(|a| a.ip().is_loopback()));
+        // Refused before any connection (nothing listens there anyway).
         let f = Fetcher::new(false);
         for url in [
             "https://127.0.0.1:1/icon.png",

@@ -264,7 +264,8 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   `icon.sha256`, keeps it only if its SHA-256 matches; else it logs and retries later), or finds the icon of `site_url` (web app
   manifest icons, `apple-touch-icon`, `<link rel=icon>`, `/favicon.ico`; the largest square one
   of at least 192 px, not mask-only), over https only and to internet hosts only (not this box
-  or the home network; also through redirects), with timeouts,
+  or the home network; also through redirects; it connects only to the address it checked, and
+  ignores proxy settings), with timeouts,
   a 1 MiB limit and an image check, in a background thread; it caches the file as
   `$XDG_CACHE_HOME/hinteros/icons/<app-id>.<ext>`, refetches after `icons.refresh_days` (30),
   retries failures (1 min, 10 min, 1 h, then every 6 h), and sends `apps_changed` when an

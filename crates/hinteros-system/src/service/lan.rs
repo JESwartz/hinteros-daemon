@@ -78,7 +78,7 @@ impl Service {
                 Ok(json!({}))
             }
             Err(e) => {
-                audit(Decision::Invalid);
+                audit(Decision::of_error(&e));
                 info!(method, error = %e.message, "request refused");
                 Err(e)
             }

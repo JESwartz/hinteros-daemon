@@ -856,8 +856,10 @@ trust.
 - **Audit** (`audit.rs`): every mutating request and denial, and every job outcome, goes to the
   journal's native socket with `HINTEROS_AUDIT=1`, `HINTEROS_UID`, `_PID`, `_EXE`, `_METHOD`,
   `_ACTION`, `_DECISION` (`allowed|denied_seat|denied_polkit|denied_peer|auth_required|invalid|
-  rate_limited`), `_JOB_ID`, `_PARAMS` (summary), and for jobs `_OUTCOME`, `_REV_BEFORE/AFTER`,
-  `_GENERATION_BEFORE/AFTER`. Denials are capped at 20 per minute and uid, then summarised.
+  rate_limited`; past the gate, the handler's answer: `pin_required|busy|conflict|refused|failed`),
+  `_JOB_ID`, `_PARAMS` (summary), and for jobs `_OUTCOME`, `_REV_BEFORE/AFTER`,
+  `_GENERATION_BEFORE/AFTER`. Denials (the gate's refusals, not the handler's answers) are capped
+  at 20 per minute and uid, then summarised.
 - **State** (`state.rs`): `state.json` is read into a typed `State` mirroring `state.nix`
   (`schemaVersion`, `base`, `stateVersion`, `settings.{hostname, ssh.enable, admin.user, guest, cleanup}`, `disk.layout`, `apps`,
   `profiles`; anything else refused) and written canonically from it, never from client JSON.

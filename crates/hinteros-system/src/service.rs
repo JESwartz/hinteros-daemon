@@ -666,7 +666,7 @@ async fn mutating(
             Ok(value)
         }
         Err(e) => {
-            audit(Decision::Invalid, None);
+            audit(Decision::of_error(&e), None);
             info!(method, error = %e.message, "request refused");
             Err(e)
         }

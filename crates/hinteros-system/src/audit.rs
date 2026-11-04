@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use hinteros_api::{ErrorCode, ErrorObject};
 use tracing::{info, warn};
 
 /// Decisions recorded in `HINTEROS_DECISION`.
@@ -20,6 +21,16 @@ pub enum Decision {
     AuthRequired,
     Invalid,
     RateLimited,
+    /// Past every check, the handler asked for a PIN (missing or wrong).
+    PinRequired,
+    /// Past every check, another job was running.
+    Busy,
+    /// Past every check, the state changed meanwhile (a stale revision).
+    Conflict,
+    /// Past every check, the handler refused it for another reason.
+    Refused,
+    /// Past every check, the handler failed (an internal error).
+    Failed,
 }
 
 impl Decision {
@@ -32,11 +43,37 @@ impl Decision {
             Self::AuthRequired => "auth_required",
             Self::Invalid => "invalid",
             Self::RateLimited => "rate_limited",
+            Self::PinRequired => "pin_required",
+            Self::Busy => "busy",
+            Self::Conflict => "conflict",
+            Self::Refused => "refused",
+            Self::Failed => "failed",
         }
     }
 
+    /// The decision for a handler's error (the request had passed the gate).
+    pub fn of_error(e: &ErrorObject) -> Self {
+        match e.kind() {
+            Some(ErrorCode::PinRequired) => Self::PinRequired,
+            Some(ErrorCode::JobBusy) => Self::Busy,
+            Some(ErrorCode::StateConflict) => Self::Conflict,
+            Some(ErrorCode::InternalError) => Self::Failed,
+            _ => Self::Refused,
+        }
+    }
+
+    /// What the per-uid cap counts: the gate's refusals, not a handler's answer to a request
+    /// that passed it (rate limited already, and a busy box must not hide real denials).
     fn is_denial(self) -> bool {
-        self != Self::Allowed
+        matches!(
+            self,
+            Self::DeniedSeat
+                | Self::DeniedPolkit
+                | Self::DeniedPeer
+                | Self::AuthRequired
+                | Self::Invalid
+                | Self::RateLimited
+        )
     }
 }
 
@@ -395,5 +432,37 @@ mod tests {
         }
         assert!(start.elapsed() < Duration::from_secs(10));
         assert_eq!(count, DENIALS_PER_MINUTE);
+    }
+
+    #[test]
+    fn handler_answers_are_named_and_never_use_the_denial_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let sock = UnixDatagram::bind(&path).unwrap();
+        sock.set_nonblocking(true).unwrap();
+        let audit = Audit::new(path);
+        let mut buf = vec![0u8; 65536];
+        let mut decision = |d: Decision| {
+            audit.request(1000, None, "?", "rebuild", None, d, None, "");
+            let n = sock.recv(&mut buf).expect("logged");
+            let m = parse_datagram(&buf[..n]);
+            m["HINTEROS_DECISION"].clone()
+        };
+        // A long job: busy many times; then a real denial is still logged.
+        for _ in 0..DENIALS_PER_MINUTE + 5 {
+            assert_eq!(decision(Decision::Busy), "busy");
+        }
+        assert_eq!(decision(Decision::DeniedPolkit), "denied_polkit");
+        for (e, name) in [
+            (ErrorCode::PinRequired, "pin_required"),
+            (ErrorCode::JobBusy, "busy"),
+            (ErrorCode::StateConflict, "conflict"),
+            (ErrorCode::InternalError, "failed"),
+            (ErrorCode::PermissionDenied, "refused"),
+            (ErrorCode::InvalidParams, "refused"),
+        ] {
+            let d = Decision::of_error(&ErrorObject::new(e, "x"));
+            assert_eq!(decision(d), name);
+        }
     }
 }

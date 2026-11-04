@@ -11,16 +11,22 @@
 //! (the seed URL; the client loads it instead of its server picker), `main.userWebClient` (the
 //! saved server) and `main.layout` (`tv`). Everything else, and the `version` the app wrote, is
 //! kept: a version the client does not know makes it move the file to `.broken`, so we never
-//! write one of our own over it. Files 0600, directories 0700.
+//! write one of our own over it. Files 0600, directories 0700. The app owns its home, so no
+//! symlink there is ever followed (see [`seed`]).
 //!
 //! Any failure launches the app unchanged (logged). The token is never logged.
 
 use std::io;
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use hinteros_api::system::{JellyfinClientToken, JellyfinClientTokenResult};
 use hinteros_api::{ErrorCode, Method};
+use rustix::fs::{
+    AtFlags, Dir, FileType, Mode, OFlags, fstat, mkdirat, openat, renameat, statat, unlinkat,
+};
+use rustix::io::Errno;
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -40,6 +46,14 @@ const CONF_VERSION: u64 = 7;
 const OUR_PROFILE: &str = "68696e7465726f730000000000000000";
 /// A launch never waits longer than this for the token.
 const TOKEN_WAIT: Duration = Duration::from_secs(10);
+/// The client's files we read are small; a larger one is not the client's.
+const MAX_FILE: u64 = 1 << 20;
+/// The conf's file name in a client profile directory.
+const CONF: &str = "jellyfin-desktop.conf";
+const DIR_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
 
 /// Whether this request is a launch of the app ([`APP_ID`]).
 pub fn wants(method: &str, params: Option<&Value>) -> bool {
@@ -121,52 +135,60 @@ fn is_profile_id(s: &str) -> bool {
 
 /// Write the client's settings in the app's data home `home` (its sandbox home, or the profile's
 /// home). Returns the conf's path.
+///
+/// The sandboxed app owns everything below `home` and could plant symlinks there that point
+/// out of its sandbox (an absolute link resolves to the real home out here). So no path is
+/// resolved: every component is opened relative to its parent with `O_NOFOLLOW`, files are read
+/// only when regular (and small), written through a temporary file and `renameat` in the same
+/// directory. A symlink, or anything that is not what we expect, fails the seed.
 pub fn seed(home: &Path, t: &JellyfinClientTokenResult) -> io::Result<PathBuf> {
+    let home_fd = rustix::fs::open(home, DIR_FLAGS, Mode::empty())?;
+    let mut base_fd = home_fd;
+    for name in [".local", "share", "jellyfin-desktop"] {
+        base_fd = subdir(&base_fd, name)?;
+    }
     let base = home.join(".local/share/jellyfin-desktop");
-    mkdirs(&base)?;
-    let profiles_json = base.join("profiles.json");
     // The client's own choice: profiles.json, else the first profile directory, else ours.
-    let named = std::fs::read(&profiles_json)
-        .ok()
+    let named = read_small(&base_fd, "profiles.json")?
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .and_then(|v| v["defaultProfile"].as_str().map(str::to_owned))
         .filter(|id| is_profile_id(id));
+    let profiles_fd = subdir(&base_fd, "profiles")?;
     let id = match named {
         Some(id) => id,
         None => {
-            let mut dirs: Vec<String> = std::fs::read_dir(base.join("profiles"))
-                .into_iter()
-                .flatten()
-                .filter_map(|e| e.ok()?.file_name().into_string().ok())
-                .filter(|n| is_profile_id(n))
-                .collect();
+            let mut dirs: Vec<String> = Vec::new();
+            let mut entries = Dir::read_from(&profiles_fd)?;
+            while let Some(entry) = entries.read() {
+                if let Ok(n) = entry?.file_name().to_str()
+                    && is_profile_id(n)
+                {
+                    dirs.push(n.to_owned());
+                }
+            }
             dirs.sort();
             let id = dirs
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| OUR_PROFILE.into());
             write_private(
-                &profiles_json,
+                &base_fd,
+                "profiles.json",
                 &serde_json::to_vec(&json!({ "defaultProfile": id }))?,
             )?;
             id
         }
     };
-    let dir = base.join("profiles").join(&id);
-    mkdirs(&dir)?;
-    let profile_json = dir.join("profile.json");
-    if !profile_json.exists() {
-        write_private(&profile_json, br#"{"name":"Default"}"#)?;
+    let dir_fd = subdir(&profiles_fd, &id)?;
+    match statat(&dir_fd, "profile.json", AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => {}
+        Err(Errno::NOENT) => write_private(&dir_fd, "profile.json", br#"{"name":"Default"}"#)?,
+        Err(e) => return Err(e.into()),
     }
-    let conf = dir.join("jellyfin-desktop.conf");
-    let before = match std::fs::read(&conf) {
-        Ok(b) => Some(b),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
+    let before = read_small(&dir_fd, CONF)?;
     let text = patch_conf(before.as_deref(), &seed_url(t));
-    write_private(&conf, text.as_bytes())?;
-    Ok(conf)
+    write_private(&dir_fd, CONF, text.as_bytes())?;
+    Ok(base.join("profiles").join(&id).join(CONF))
 }
 
 /// The conf with our three keys set; the rest (and the version) as it was. A conf that is not
@@ -206,31 +228,60 @@ fn section<'a>(m: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<String, 
     v.as_object_mut().expect("an object")
 }
 
-fn mkdirs(dir: &Path) -> io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
+/// The subdirectory `name` of `dir`, made 0700 when missing; never through a symlink.
+fn subdir(dir: &OwnedFd, name: &str) -> io::Result<OwnedFd> {
+    match mkdirat(dir, name, Mode::from_raw_mode(0o700)) {
+        Ok(()) | Err(Errno::EXIST) => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(openat(dir, name, DIR_FLAGS, Mode::empty())?)
 }
 
-/// Write `path` 0600 through a temporary file in the same directory (never a half-written conf).
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// The regular file `name` in `dir` (`None` when missing); never through a symlink, never a
+/// FIFO or device, at most [`MAX_FILE`] bytes.
+fn read_small(dir: &OwnedFd, name: &str) -> io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let fd = match openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let st = fstat(&fd)?;
+    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+        return Err(io::Error::other(format!("{name} is not a regular file")));
+    }
+    if st.st_size as u64 > MAX_FILE {
+        return Err(io::Error::other(format!("{name} is too large")));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::from(fd)
+        .take(MAX_FILE)
+        .read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+/// Write `name` in `dir` 0600 through a temporary file in the same directory (never a
+/// half-written conf). The rename replaces a symlink at `name`, never its target.
+fn write_private(dir: &OwnedFd, name: &str, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(".hinteros-tmp");
-    let tmp = PathBuf::from(tmp);
-    let _ = std::fs::remove_file(&tmp);
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)?;
+    let tmp = format!("{name}.hinteros-tmp");
+    let _ = unlinkat(dir, tmp.as_str(), AtFlags::empty());
+    let fd = openat(
+        dir,
+        tmp.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )?;
+    let mut f = std::fs::File::from(fd);
     f.write_all(bytes)?;
     f.sync_all()?;
     drop(f);
-    std::fs::rename(&tmp, path)
+    Ok(renameat(dir, tmp.as_str(), dir, name)?)
 }
 
 #[cfg(test)]
@@ -376,6 +427,70 @@ mod tests {
             read(&base.join("profiles.json")),
             json!({"defaultProfile": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
         );
+    }
+
+    #[test]
+    fn symlinks_the_app_planted_are_never_followed() {
+        use std::os::unix::fs::symlink;
+        let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let profiles_json = format!(r#"{{"defaultProfile":"{id}"}}"#);
+        // Each case: a home with one planted link to `outside`, which must stay as it was.
+        type Plant = fn(&Path, &Path);
+        let cases: [(&str, Plant); 4] = [
+            ("the conf", |base, outside| {
+                std::fs::create_dir_all(base.join("profiles/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+                    .unwrap();
+                symlink(
+                    outside.join("secret.json"),
+                    base.join("profiles/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/jellyfin-desktop.conf"),
+                )
+                .unwrap();
+            }),
+            ("the profile directory", |base, outside| {
+                std::fs::create_dir_all(base.join("profiles")).unwrap();
+                symlink(
+                    outside,
+                    base.join("profiles/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                )
+                .unwrap();
+            }),
+            ("the data directory", |base, outside| {
+                std::fs::remove_dir_all(base).unwrap();
+                symlink(outside, base).unwrap();
+            }),
+            ("profiles.json", |base, outside| {
+                std::fs::create_dir_all(base).unwrap();
+                symlink(outside.join("secret.json"), base.join("profiles.json")).unwrap();
+            }),
+        ];
+        for (what, plant) in cases {
+            let home = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let secret = outside.path().join("secret.json");
+            std::fs::write(&secret, r#"{"secret": 1}"#).unwrap();
+            let base = home.path().join(".local/share/jellyfin-desktop");
+            std::fs::create_dir_all(&base).unwrap();
+            if what != "profiles.json" {
+                std::fs::write(base.join("profiles.json"), &profiles_json).unwrap();
+            }
+            plant(&base, outside.path());
+            assert!(seed(home.path(), &token()).is_err(), "{what}");
+            let left: Vec<_> = std::fs::read_dir(outside.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert_eq!(left, ["secret.json"], "{what}: nothing written outside");
+            assert_eq!(
+                std::fs::read(&secret).unwrap(),
+                br#"{"secret": 1}"#,
+                "{what}"
+            );
+            // Nothing of the secret came into the home either.
+            let conf = base.join("profiles").join(id).join("jellyfin-desktop.conf");
+            if let Ok(m) = std::fs::symlink_metadata(&conf) {
+                assert!(m.file_type().is_symlink(), "{what}: the link is left alone");
+            }
+        }
     }
 
     #[test]

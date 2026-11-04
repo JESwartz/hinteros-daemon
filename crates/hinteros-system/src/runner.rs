@@ -1274,13 +1274,13 @@ pub fn session_restart_required(old: Option<&Path>, new: &Path) -> bool {
     })
 }
 
+/// Apps an update adds and removes.
+pub type CatalogChanges = (Vec<CatalogApp>, Vec<RemovedApp>);
+
 /// Compare the target's `lib.catalogIds` with the running catalog. The target is an object of
 /// id to `{name, status, statusReason?}` (or to just the status string). New: available in the
 /// target and not available now. Removed: installed, and removed from or missing in the
 /// target. `None` if the target is not such an object.
-/// Apps an update adds and removes.
-pub type CatalogChanges = (Vec<CatalogApp>, Vec<RemovedApp>);
-
 pub fn catalog_changes(
     current: Option<&hinteros_api::catalog::Index>,
     target: &serde_json::Value,

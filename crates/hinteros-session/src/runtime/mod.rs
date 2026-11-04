@@ -34,6 +34,13 @@ use zbus::Connection;
 use crate::config::{AudioConfig, BluetoothConfig, Config, DisplayConfig};
 use crate::{Audience, Broadcast};
 
+/// The runtime's D-Bus connection while it works, and its number (counts up with each new one).
+#[derive(Default)]
+struct ConnSlot {
+    current: Option<Connection>,
+    number: u64,
+}
+
 /// What the features share.
 pub struct Ctx {
     pub enabled: bool,
@@ -47,7 +54,7 @@ pub struct Ctx {
     pub wayland_display: String,
     events: broadcast::Sender<Broadcast>,
     /// The connection while it works; cleared when a watcher sees it close.
-    conn: tokio::sync::Mutex<Option<Connection>>,
+    conn: tokio::sync::Mutex<ConnSlot>,
     pub bt: bluetooth::Shared,
     pub display_state: display::Shared,
     /// Pid of the on-screen keyboard the daemon runs (0: none), restarted after a mode change.
@@ -60,6 +67,11 @@ impl Ctx {
     /// The D-Bus connection, made on first use, again after a failure, and again after the
     /// bus closed it ([`Ctx::conn_lost`]).
     pub async fn conn(&self, service: Service) -> Result<Connection, ErrorObject> {
+        self.watched_conn(service).await.map(|(c, _)| c)
+    }
+
+    /// [`Ctx::conn`] with its number, for the watchers to give to [`Ctx::conn_lost`].
+    pub async fn watched_conn(&self, service: Service) -> Result<(Connection, u64), ErrorObject> {
         if !self.enabled {
             return Err(dbus::unavailable(
                 service,
@@ -67,26 +79,26 @@ impl Ctx {
             ));
         }
         let mut slot = self.conn.lock().await;
-        if let Some(c) = &*slot {
-            return Ok(c.clone());
+        if let Some(c) = &slot.current {
+            return Ok((c.clone(), slot.number));
         }
         let c = dbus::connect(self.bus.as_deref())
             .await
             .map_err(|e| dbus::unavailable(service, format!("no D-Bus connection ({e})")))?;
-        *slot = Some(c.clone());
-        Ok(c)
+        slot.number += 1;
+        slot.current = Some(c.clone());
+        Ok((c, slot.number))
     }
 
-    /// `conn` is closed (its signal stream ended, as when the bus restarts): the next
-    /// [`Ctx::conn`] makes a new one. The network and Bluetooth watchers notice this first.
-    pub async fn conn_lost(&self, conn: &Connection) {
+    /// Connection `number` is closed (its signal stream ended, as when the bus restarts): the
+    /// next [`Ctx::conn`] makes a new one. The network and Bluetooth watchers notice this first.
+    /// The number, not the unique name, tells the connections apart: a restarted bus hands out
+    /// the same names again, and a late report must not clear the new connection.
+    pub async fn conn_lost(&self, number: u64) {
         let mut slot = self.conn.lock().await;
-        if slot
-            .as_ref()
-            .is_some_and(|c| c.unique_name() == conn.unique_name())
-        {
+        if slot.current.is_some() && slot.number == number {
             info!("the D-Bus connection closed; connecting again");
-            *slot = None;
+            slot.current = None;
         }
     }
 
@@ -159,7 +171,7 @@ impl Runtime {
                 .then(|| config.gamescope_display_setting()),
             wayland_display: config.wayland_display(),
             events,
-            conn: tokio::sync::Mutex::new(None),
+            conn: tokio::sync::Mutex::new(ConnSlot::default()),
             bt: bluetooth::Shared::default(),
             display_state: display::Shared::default(),
             osk_pid,

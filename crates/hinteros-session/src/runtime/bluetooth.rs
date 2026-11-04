@@ -801,12 +801,12 @@ async fn changed(conn: &Connection) -> Result<BtChanged, ErrorObject> {
 /// Keep the agent registered and send `bluetooth_changed`.
 pub async fn watch(ctx: Arc<Ctx>) {
     loop {
-        let Ok(conn) = ctx.conn(SVC).await else {
+        let Ok((conn, number)) = ctx.watched_conn(SVC).await else {
             sleep(Duration::from_secs(10)).await;
             continue;
         };
         let Ok(mut stream) = dbus::changes(&conn, BLUEZ).await else {
-            ctx.conn_lost(&conn).await;
+            ctx.conn_lost(number).await;
             sleep(Duration::from_secs(10)).await;
             continue;
         };
@@ -847,7 +847,7 @@ pub async fn watch(ctx: Arc<Ctx>) {
             dbus::settle(&mut stream, Duration::from_millis(300)).await;
         }
         // The stream ends only when the connection closes.
-        ctx.conn_lost(&conn).await;
+        ctx.conn_lost(number).await;
         sleep(Duration::from_secs(1)).await;
     }
 }

@@ -444,15 +444,31 @@ pub struct Profile {
     pub name: String,
 }
 
-/// A Jellyfin user name from a profile name: Jellyfin allows letters, digits, `_`, space and
+/// .NET's `\w`, which Jellyfin's name check uses: letters, non-spacing marks, decimal digits and
+/// connector punctuation (`[\p{L}\p{Mn}\p{Nd}\p{Pc}]`). Spacing marks (`Mc`, as in many Indic
+/// scripts) are not in it; non-spacing ones (a virama, combining accents) are.
+fn is_word_char(c: char) -> bool {
+    use unicode_general_category::{GeneralCategory as G, get_general_category};
+    matches!(
+        get_general_category(c),
+        G::UppercaseLetter
+            | G::LowercaseLetter
+            | G::TitlecaseLetter
+            | G::ModifierLetter
+            | G::OtherLetter
+            | G::NonspacingMark
+            | G::DecimalNumber
+            | G::ConnectorPunctuation
+    )
+}
+
+/// A Jellyfin user name from a profile name: Jellyfin allows [`is_word_char`], space and
 /// `-'.@+` (`^(?!\s)[\w\ \-'._@+]+(?<!\s)$`), so anything else is dropped; runs of spaces become
 /// one; at most 48 characters (room for a " 99" suffix). Empty (or `.`/`..`): `Profile <n>`.
 pub fn user_name_for(display: &str, profile_id: &str) -> String {
     let mut out = String::new();
     for c in display.chars() {
-        let keep = c.is_ascii_alphanumeric()
-            || matches!(c, '_' | '-' | '\'' | '.' | '@' | '+')
-            || (!c.is_ascii() && c.is_alphabetic() && !c.is_numeric());
+        let keep = is_word_char(c) || matches!(c, '-' | '\'' | '.' | '@' | '+');
         if keep {
             out.push(c);
         } else if (c == ' ' || c.is_whitespace()) && !out.ends_with(' ') && !out.is_empty() {
@@ -612,7 +628,9 @@ pub struct Synced {
 }
 
 /// Make Jellyfin's users match `profiles` and record them (under `users.lock`). Each step is
-/// recorded as soon as it is done; a failure stops the sync (the next one carries on).
+/// recorded as soon as it is done. A refused step does not stop the others (one profile's name
+/// must not leave the later profiles without users); Jellyfin not answering does. The first
+/// failure is returned (the next sync tries again).
 pub fn sync(api: &dyn Api, files: &Files, profiles: &[Profile]) -> Result<Synced, Error> {
     let lock = crate::state::lock(&files.lock_path())
         .map_err(|e| Error::Refused(format!("locking users.json: {e}")))?;
@@ -632,57 +650,75 @@ pub fn sync(api: &dyn Api, files: &Files, profiles: &[Profile]) -> Result<Synced
         s.save(&path)
             .map_err(|e| Error::Refused(format!("writing users.json: {e}")))
     };
+    let mut failed = None;
     for op in ops {
-        match op {
-            Op::Delete { profile, user_id } => {
-                if let Some(id) = user_id {
-                    api.delete_user(&id)?;
-                    done.deleted += 1;
+        match apply(api, op, &mut stored, &mut done) {
+            Ok(()) => save(&stored)?,
+            Err(e) => {
+                let stop = matches!(e, Error::Unreachable(_));
+                failed.get_or_insert(e);
+                if stop {
+                    break;
                 }
-                stored.users.remove(&profile);
-                info!(profile = %profile, "Jellyfin user deleted");
-            }
-            Op::Rename {
-                profile,
-                user_id,
-                name,
-            } => {
-                api.rename_user(&user_id, &name)?;
-                if let Some(r) = stored.users.get_mut(&profile) {
-                    r.name = name.clone();
-                }
-                done.renamed += 1;
-                info!(profile = %profile, name = %name, "Jellyfin user renamed");
-            }
-            Op::Adopt { profile, name } => {
-                if let Some(r) = stored.users.get_mut(&profile) {
-                    r.name = name;
-                }
-            }
-            Op::Create { profile, name } => {
-                let password = new_password();
-                let id = api.create_user(&name, &password)?;
-                stored.users.insert(
-                    profile.clone(),
-                    Record {
-                        jellyfin_user_id: id,
-                        name: name.clone(),
-                        password,
-                        access_token: None,
-                        extra: Default::default(),
-                    },
-                );
-                done.created += 1;
-                info!(profile = %profile, name = %name, "Jellyfin user made");
             }
         }
-        save(&stored)?;
     }
     if done == Synced::default() && !path.exists() {
         save(&stored)?;
     }
     drop(lock);
-    Ok(done)
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(done),
+    }
+}
+
+/// One step of [`sync`]: Jellyfin first, then the record (left as it was on failure).
+fn apply(api: &dyn Api, op: Op, stored: &mut UsersFile, done: &mut Synced) -> Result<(), Error> {
+    match op {
+        Op::Delete { profile, user_id } => {
+            if let Some(id) = user_id {
+                api.delete_user(&id)?;
+                done.deleted += 1;
+            }
+            stored.users.remove(&profile);
+            info!(profile = %profile, "Jellyfin user deleted");
+        }
+        Op::Rename {
+            profile,
+            user_id,
+            name,
+        } => {
+            api.rename_user(&user_id, &name)?;
+            if let Some(r) = stored.users.get_mut(&profile) {
+                r.name = name.clone();
+            }
+            done.renamed += 1;
+            info!(profile = %profile, name = %name, "Jellyfin user renamed");
+        }
+        Op::Adopt { profile, name } => {
+            if let Some(r) = stored.users.get_mut(&profile) {
+                r.name = name;
+            }
+        }
+        Op::Create { profile, name } => {
+            let password = new_password();
+            let id = api.create_user(&name, &password)?;
+            stored.users.insert(
+                profile.clone(),
+                Record {
+                    jellyfin_user_id: id,
+                    name: name.clone(),
+                    password,
+                    access_token: None,
+                    extra: Default::default(),
+                },
+            );
+            done.created += 1;
+            info!(profile = %profile, name = %name, "Jellyfin user made");
+        }
+    }
+    Ok(())
 }
 
 /// The device a profile's token belongs to.
@@ -976,6 +1012,11 @@ mod tests {
         assert_eq!(user_name_for("..", "p4"), "Profile 4");
         assert_eq!(user_name_for("a/b\\c:d", "p2"), "abcd");
         assert_eq!(user_name_for("Ⅻ²", "p5"), "Profile 5");
+        // .NET's \w: spacing marks (U+093F, U+093E) go, the virama (U+094D, non-spacing) and
+        // combining accents stay; other scripts' digits stay.
+        assert_eq!(user_name_for("प्रिया", "p2"), "प्रय");
+        assert_eq!(user_name_for("Zoe\u{308}", "p2"), "Zoe\u{308}");
+        assert_eq!(user_name_for("ア٣_x", "p2"), "ア٣_x");
         assert_eq!(user_name_for(&"x".repeat(80), "p2").len(), 48);
     }
 
@@ -1146,7 +1187,8 @@ mod tests {
     struct Fake {
         users: RefCell<Vec<User>>,
         next: RefCell<u8>,
-        fail_create: bool,
+        /// Names `create_user` refuses.
+        refuse: fn(&str) -> bool,
     }
 
     impl Api for Fake {
@@ -1154,7 +1196,7 @@ mod tests {
             Ok(self.users.borrow().clone())
         }
         fn create_user(&self, name: &str, _password: &str) -> Result<String, Error> {
-            if self.fail_create {
+            if (self.refuse)(name) {
                 return Err(Error::Refused("no".into()));
             }
             let mut n = self.next.borrow_mut();
@@ -1186,7 +1228,7 @@ mod tests {
         let fake = Fake {
             users: RefCell::new(vec![u(&hex(1), "admin")]),
             next: RefCell::new(0),
-            fail_create: false,
+            refuse: |_| false,
         };
         let s = sync(&fake, &files, &[p("p1", "Alice"), p("p2", "Bob")]).unwrap();
         assert_eq!(s.created, 2);
@@ -1217,7 +1259,7 @@ mod tests {
         let failing = Fake {
             users: RefCell::new(fake.users.borrow().clone()),
             next: RefCell::new(0),
-            fail_create: true,
+            refuse: |_| true,
         };
         assert!(sync(&failing, &files, &[p("p1", "Alicia"), p("p3", "C")]).is_err());
         assert!(
@@ -1226,6 +1268,16 @@ mod tests {
                 .users
                 .contains_key("p1")
         );
+        // One refused name: the profiles after it still get their users.
+        let picky = Fake {
+            users: RefCell::new(fake.users.borrow().clone()),
+            next: RefCell::new(0),
+            refuse: |n| n == "C",
+        };
+        let profiles = [p("p1", "Alicia"), p("p3", "C"), p("p4", "Dee")];
+        assert!(sync(&picky, &files, &profiles).is_err());
+        let users = UsersFile::load(&files.users_json()).unwrap().users;
+        assert_eq!(users.keys().collect::<Vec<_>>(), ["p1", "p4"]);
         // Secrets stay out of debug output.
         assert!(!format!("{:?}", f.users["p1"]).contains(&f.users["p1"].password));
     }
@@ -1283,7 +1335,7 @@ mod tests {
         let fake = Fake {
             users: RefCell::new(vec![u(&hex(1), "admin")]),
             next: RefCell::new(0),
-            fail_create: false,
+            refuse: |_| false,
         };
         sync(&fake, &files, &[p("p1", "Alice")]).unwrap();
         assert!(matches!(sync(&fake, &files, &[]), Err(Error::Profiles(_))));

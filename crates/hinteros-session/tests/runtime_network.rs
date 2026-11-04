@@ -59,6 +59,8 @@ struct Model {
     refuse_scan: bool,
     /// Take scans and never finish them (LastScan stays).
     hold_scan: bool,
+    /// Fail every activation with "SSID not found", as when the network went out of range.
+    out_of_range: bool,
 }
 
 type Shared = Arc<Mutex<Model>>;
@@ -159,6 +161,12 @@ impl Root {
             };
             let old = model.lock().unwrap().wifi_state;
             emit_state(&conn, 40, old, 0).await;
+            if model.lock().unwrap().out_of_range {
+                model.lock().unwrap().wifi_state = 30;
+                emit_state(&conn, 120, 40, 53).await;
+                changed(&conn).await;
+                return;
+            }
             let secured =
                 model.lock().unwrap().aps[ap].rsn != 0 || model.lock().unwrap().aps[ap].wpa != 0;
             if !ssid_ok || (secured && psk.as_deref() != Some(RIGHT_PASSWORD)) {
@@ -403,6 +411,20 @@ impl SavedConnection {
             ),
         ])
     }
+    fn get_secrets(&self, setting: &str) -> HashMap<String, HashMap<String, OwnedValue>> {
+        let m = self.0.lock().unwrap();
+        let s = m.saved.iter().find(|s| s.path == self.1).unwrap();
+        match &s.psk {
+            Some(psk) if setting == "802-11-wireless-security" => HashMap::from([(
+                setting.to_owned(),
+                HashMap::from([(
+                    "psk".to_owned(),
+                    OwnedValue::try_from(ZValue::from(psk.as_str())).unwrap(),
+                )]),
+            )]),
+            _ => HashMap::new(),
+        }
+    }
     fn update(&self, settings: HashMap<String, HashMap<String, OwnedValue>>) {
         let mut m = self.0.lock().unwrap();
         let psk = settings
@@ -497,6 +519,7 @@ impl Fake {
             scans: 0,
             refuse_scan: false,
             hold_scan: false,
+            out_of_range: false,
         }));
         let mut b = zbus::connection::Builder::address(bus.address.as_str())
             .unwrap()
@@ -672,7 +695,8 @@ async fn wrong_password_leaves_nothing_behind() {
         fake.model.lock().unwrap().saved[0].psk.as_deref(),
         Some(RIGHT_PASSWORD)
     );
-    // ... and a wrong one for a stored network is also reported (the old connection stays).
+    // ... and a wrong one for a stored network is also reported (the old connection stays,
+    // with the password that worked).
     let e = call(
         &mut c,
         "wifi.connect",
@@ -681,6 +705,34 @@ async fn wrong_password_leaves_nothing_behind() {
     .await
     .unwrap_err();
     assert_eq!(e["code"], 4003);
+    assert_eq!(fake.model.lock().unwrap().saved.len(), 2);
+    assert_eq!(
+        fake.model.lock().unwrap().saved[0].psk.as_deref(),
+        Some(RIGHT_PASSWORD),
+        "the stored password was put back"
+    );
+    assert!(!d.log().contains("different wrong 1"));
+
+    // A failure that says nothing about the password keeps the new one: the stored one was
+    // already rejected when the launcher asks for a new one.
+    fake.model.lock().unwrap().out_of_range = true;
+    let e = call(
+        &mut c,
+        "wifi.connect",
+        json!({"ssid": "Home", "password": "new new new new"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["data"]["reason"], "not_in_range", "{e}");
+    assert_eq!(
+        fake.model.lock().unwrap().saved[0].psk.as_deref(),
+        Some("new new new new")
+    );
+    // ... but a new network that did not come up is still deleted.
+    let e = call(&mut c, "wifi.connect", json!({"ssid": "Cafe"}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["data"]["reason"], "not_in_range", "{e}");
     assert_eq!(fake.model.lock().unwrap().saved.len(), 2);
 }
 
@@ -884,4 +936,33 @@ async fn scan_does_not_hold_up_the_connection() {
     let second = c.read_raw().await.unwrap().unwrap();
     assert_eq!(second["id"], 1, "{second}");
     assert!(second["result"]["networks"].is_array(), "{second}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_bus_is_joined_again() {
+    let Some(mut bus) = Bus::start() else { return };
+    let fake = Fake::start(&bus, true).await;
+    let address = bus.path_address();
+    let d = Daemon::start_with(|_| vec!["--runtime-bus".into(), address.into()]);
+    let mut c = d.client().await;
+    let status = call(&mut c, "network.status", json!({})).await.unwrap();
+    assert_eq!(status["wifi_ssid"], "Home");
+
+    drop(fake);
+    bus.restart();
+    let _fake = Fake::start(&bus, true).await;
+    // The watcher sees the old connection close; the next call uses a new one.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match call(&mut c, "network.status", json!({})).await {
+            Ok(status) => {
+                assert_eq!(status["wifi_ssid"], "Home");
+                break;
+            }
+            Err(e) => {
+                assert!(std::time::Instant::now() < deadline, "still failing: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
 }

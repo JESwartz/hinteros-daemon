@@ -10,48 +10,35 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    CreateSession {
-        username: String,
-    },
-    PostAuthMessageResponse {
-        /// The PIN: wiped when the request is dropped.
-        #[serde(serialize_with = "secret")]
-        response: Option<Zeroizing<String>>,
-    },
-    StartSession {
-        cmd: Vec<String>,
-        env: Vec<String>,
-    },
+    CreateSession { username: String },
+    PostAuthMessageResponse { response: Option<Secret> },
+    StartSession { cmd: Vec<String>, env: Vec<String> },
     CancelSession,
 }
 
-/// By hand: the PIN is never shown, not even in a debug log.
-impl std::fmt::Debug for Request {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CreateSession { username } => f
-                .debug_struct("CreateSession")
-                .field("username", username)
-                .finish(),
-            Self::PostAuthMessageResponse { response } => f
-                .debug_struct("PostAuthMessageResponse")
-                .field("response", &response.as_ref().map(|_| "<redacted>"))
-                .finish(),
-            Self::StartSession { cmd, env } => f
-                .debug_struct("StartSession")
-                .field("cmd", cmd)
-                .field("env", env)
-                .finish(),
-            Self::CancelSession => f.write_str("CancelSession"),
-        }
+/// An answer to a PAM prompt (the PIN): wiped when dropped, and never in `Debug` output.
+#[derive(Clone)]
+pub struct Secret(Zeroizing<String>);
+
+impl Secret {
+    pub fn new(s: Zeroizing<String>) -> Self {
+        Self(s)
     }
 }
 
-fn secret<S: serde::Serializer>(v: &Option<Zeroizing<String>>, s: S) -> Result<S::Ok, S::Error> {
-    v.as_deref().map(String::as_str).serialize(s)
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(..)")
+    }
+}
+
+impl Serialize for Secret {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -98,8 +85,10 @@ impl Greetd {
     }
 
     pub fn request(&mut self, r: &Request) -> std::io::Result<Response> {
-        // The PIN may be in it: keep the bytes in a wiped buffer.
-        let body = Zeroizing::new(serde_json::to_vec(r)?);
+        // The PIN may be in it: keep the bytes in a wiped buffer, big enough that growing it
+        // leaves no copy behind.
+        let mut body = Zeroizing::new(Vec::with_capacity(1024));
+        serde_json::to_writer(&mut *body, r)?;
         let len = u32::try_from(body.len()).map_err(std::io::Error::other)?;
         self.stream.write_all(&len.to_ne_bytes())?;
         self.stream.write_all(&body)?;
@@ -148,19 +137,14 @@ mod tests {
             v,
             serde_json::json!({"type": "post_auth_message_response", "response": null})
         );
-        let v = serde_json::to_value(Request::PostAuthMessageResponse {
-            response: Some(Zeroizing::new("1234".into())),
-        })
-        .unwrap();
-        assert_eq!(v["response"], "1234");
-        let debug = format!(
-            "{:?}",
-            Request::PostAuthMessageResponse {
-                response: Some(Zeroizing::new("1234".into())),
-            }
+        let r = Request::PostAuthMessageResponse {
+            response: Some(Secret::new(Zeroizing::new("4711".into()))),
+        };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            serde_json::json!({"type": "post_auth_message_response", "response": "4711"})
         );
-        assert!(!debug.contains("1234"), "{debug}");
-        assert!(debug.contains("<redacted>"), "{debug}");
+        assert!(!format!("{r:?}").contains("4711"), "the PIN is in Debug");
         let r: Response = serde_json::from_str(
             r#"{"type":"auth_message","auth_message_type":"secret","auth_message":"Password:"}"#,
         )

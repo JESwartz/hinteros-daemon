@@ -327,6 +327,34 @@ impl Bus {
             _dir: dir,
         })
     }
+
+    /// The address without the bus's GUID, which a restarted bus does not keep.
+    pub fn path_address(&self) -> String {
+        format!("unix:path={}/bus", self._dir.path().display())
+    }
+
+    /// Stop the bus and start a new one on the same socket, as a restart of dbus-broker does.
+    pub fn restart(&mut self) {
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let mut child = Command::new("dbus-daemon")
+            .arg(format!(
+                "--config-file={}",
+                self._dir.path().join("bus.conf").display()
+            ))
+            .args(["--nofork", "--print-address"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut address = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        self.child = child;
+        self.address = address.trim().into();
+    }
 }
 
 impl Drop for Bus {

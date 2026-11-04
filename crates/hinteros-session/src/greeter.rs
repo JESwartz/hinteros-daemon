@@ -21,7 +21,9 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
-use crate::greetd::{AuthMessageType, Greetd, Request, Response, locked_s, reboot_required};
+use crate::greetd::{
+    AuthMessageType, Greetd, Request, Response, Secret, locked_s, reboot_required,
+};
 use crate::{Audience, Broadcast};
 
 pub const METHODS: &[&str] = &[
@@ -466,7 +468,7 @@ impl Greeter {
                     };
                     let outcome = c
                         .request(&Request::PostAuthMessageResponse {
-                            response: Some(pin),
+                            response: Some(Secret::new(pin)),
                         })
                         .and_then(|resp| advance(c, resp, cmd));
                     // An error (a timeout, a short read) leaves the conversation out of step

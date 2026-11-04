@@ -13,9 +13,14 @@
 //! escapes `\\ \" \n \t` in quoted strings (others are kept as written), a UTF-8 BOM,
 //! `[$CONDITION]` suffixes (ignored), and `#include`/`#base` lines (ignored). Keys keep their
 //! order and may repeat; lookups are case-insensitive, as in Steam. An unbalanced or truncated
-//! document is an error, so a half-written file is skipped rather than misread.
+//! document is an error, so a half-written file is skipped rather than misread. So is one
+//! nested deeper than [`MAX_DEPTH`]: any process of the session user can write these files,
+//! and unbounded recursion would overflow the stack and abort the daemon.
 
 use std::fmt;
+
+/// The deepest block nesting accepted. Steam's own files nest fewer than ten levels.
+pub const MAX_DEPTH: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -220,12 +225,16 @@ pub fn parse(text: &str) -> Result<Obj, Error> {
         chars: text.chars().peekable(),
         line: 1,
     };
-    let root = block(&mut lx, false)?;
+    let root = block(&mut lx, 0)?;
     Ok(root)
 }
 
-/// Pairs until `}` (if `nested`) or the end of input.
-fn block(lx: &mut Lexer<'_>, nested: bool) -> Result<Obj, Error> {
+/// Pairs until `}` (if nested, `depth > 0`) or the end of input.
+fn block(lx: &mut Lexer<'_>, depth: usize) -> Result<Obj, Error> {
+    if depth > MAX_DEPTH {
+        return Err(lx.err("blocks nested too deeply"));
+    }
+    let nested = depth > 0;
     let mut pairs = Vec::new();
     loop {
         let key = match lx.next()? {
@@ -238,7 +247,7 @@ fn block(lx: &mut Lexer<'_>, nested: bool) -> Result<Obj, Error> {
         };
         let value = match lx.next()? {
             Some(Token::Str(s)) => Value::Str(s),
-            Some(Token::Open) => Value::Obj(block(lx, true)?),
+            Some(Token::Open) => Value::Obj(block(lx, depth + 1)?),
             Some(Token::Close) | None => {
                 return Err(lx.err(format!("key {key:?} has no value")));
             }
@@ -325,5 +334,15 @@ line two"
             let err = parse(bad).unwrap_err();
             assert_eq!(err.line, line, "{bad:?}: {err}");
         }
+    }
+
+    #[test]
+    fn nesting_limit() {
+        let nest = |n: usize| format!("{}{}", "a{".repeat(n), "}".repeat(n));
+        assert!(parse(&nest(MAX_DEPTH)).is_ok());
+        let err = parse(&nest(MAX_DEPTH + 1)).unwrap_err();
+        assert!(err.message.contains("nested"), "{err}");
+        // Deep enough to overflow the stack without the limit: an error, not a crash.
+        assert!(parse(&"a{".repeat(1_000_000)).is_err());
     }
 }

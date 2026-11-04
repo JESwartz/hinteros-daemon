@@ -239,7 +239,7 @@ async fn status_from(conn: &Connection, devices: &[Device]) -> Result<NetworkSta
             && let Ok(ap) = props(conn, NM, &active, I_AP).await
         {
             status.wifi_ssid = get::<Vec<u8>>(&ap, "Ssid")
-                .map(|s| String::from_utf8_lossy(&s).into_owned())
+                .map(|s| display_ssid(&s))
                 .filter(|s| !s.is_empty());
             status.wifi_signal = get::<u8>(&ap, "Strength").map(|s| s.min(100));
         }
@@ -295,7 +295,7 @@ async fn list_from(conn: &Connection, devices: &[Device]) -> Result<WifiList, Er
     let mut networks: Vec<WifiNetwork> = best
         .into_values()
         .map(|ap| WifiNetwork {
-            ssid: String::from_utf8_lossy(&ap.ssid).into_owned(),
+            ssid: display_ssid(&ap.ssid),
             signal: ap.strength,
             security: ap.security,
             known: saved.iter().any(|s| s.ssid == ap.ssid),
@@ -422,13 +422,39 @@ pub async fn disconnect(ctx: &Ctx) -> Result<NetworkStatus, ErrorObject> {
     status_from(&conn, &devices).await
 }
 
+/// The SSID as the API shows it: an SSID that is not UTF-8 has U+FFFD in place of its bad
+/// bytes.
+fn display_ssid(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw).into_owned()
+}
+
+/// Whether the raw SSID `raw` is the network the API calls `name`. `exact`: another SSID has
+/// exactly these bytes, so only that one is.
+fn named(name: &str, raw: &[u8], exact: bool) -> bool {
+    raw == name.as_bytes() || (!exact && display_ssid(raw) == name)
+}
+
+/// Whether one of `raws` is exactly `name` (see [`named`]).
+fn has_exact<'a>(name: &str, mut raws: impl Iterator<Item = &'a [u8]>) -> bool {
+    raws.any(|r| r == name.as_bytes())
+}
+
+/// The one raw SSID of `raws` that the API calls `name` (see [`named`]). When two SSIDs that
+/// are not UTF-8 show the same name, the first: forgetting both would be worse.
+fn one_named<'a>(name: &str, raws: impl Iterator<Item = &'a [u8]> + Clone) -> Option<&'a [u8]> {
+    let exact = has_exact(name, raws.clone());
+    raws.into_iter().find(|r| named(name, r, exact))
+}
+
 pub async fn forget(ctx: &Ctx, p: WifiForgetParams) -> Result<Empty, ErrorObject> {
     let conn = ctx.conn(SVC).await?;
-    for s in saved(&conn)
-        .await?
-        .into_iter()
-        .filter(|s| s.ssid == p.ssid.as_bytes())
-    {
+    let saved = saved(&conn).await?;
+    let Some(raw) = one_named(&p.ssid, saved.iter().map(|s| s.ssid.as_slice())).map(<[u8]>::to_vec)
+    else {
+        return Ok(Empty {});
+    };
+    // Every connection stored for that one network.
+    for s in saved.into_iter().filter(|s| s.ssid == raw) {
         let c = proxy(&conn, NM, &s.path, I_CONNECTION).await.map_err(map)?;
         c.call::<_, _, ()>("Delete", &()).await.map_err(map)?;
         info!(ssid = %p.ssid, "forgot a Wi-Fi connection");
@@ -463,9 +489,11 @@ fn uuid() -> String {
     )
 }
 
-/// The settings of a new system connection.
+/// The settings of a new system connection to the network with the raw SSID `ssid`, called
+/// `name`.
 fn new_settings<'a>(
-    ssid: &'a str,
+    ssid: &'a [u8],
+    name: &'a str,
     security: WifiSecurity,
     password: Option<&'a str>,
     uuid: &'a str,
@@ -474,7 +502,7 @@ fn new_settings<'a>(
     s.insert(
         "connection",
         HashMap::from([
-            ("id", Value::from(ssid)),
+            ("id", Value::from(name)),
             ("type", Value::from("802-11-wireless")),
             ("uuid", Value::from(uuid)),
             ("autoconnect", Value::from(true)),
@@ -483,7 +511,7 @@ fn new_settings<'a>(
     s.insert(
         "802-11-wireless",
         HashMap::from([
-            ("ssid", Value::from(ssid.as_bytes().to_vec())),
+            ("ssid", Value::from(ssid.to_vec())),
             ("mode", Value::from("infrastructure")),
         ]),
     );
@@ -504,6 +532,35 @@ fn new_settings<'a>(
     s.insert("ipv4", HashMap::from([("method", Value::from("auto"))]));
     s.insert("ipv6", HashMap::from([("method", Value::from("auto"))]));
     s
+}
+
+/// Connection settings as read (`GetSettings`, `GetSecrets`) turned into the argument of
+/// `Update`, leaving out the section `skip`.
+fn as_settings<'a>(all: &'a HashMap<String, PropMap>, skip: Option<&str>) -> Settings<'a> {
+    let mut out: Settings<'a> = HashMap::new();
+    for (section, values) in all {
+        if Some(section.as_str()) == skip {
+            continue;
+        }
+        let entry = out.entry(section.as_str()).or_default();
+        for (k, v) in values {
+            if let Ok(v) = v.try_clone() {
+                entry.insert(k.as_str(), Value::from(v));
+            }
+        }
+    }
+    out
+}
+
+/// `GetSettings` leaves secrets out: put the ones from `GetSecrets` back in.
+fn with_secrets(
+    mut all: HashMap<String, PropMap>,
+    secrets: HashMap<String, PropMap>,
+) -> HashMap<String, PropMap> {
+    for (section, values) in secrets {
+        all.entry(section).or_default().extend(values);
+    }
+    all
 }
 
 /// A WPA passphrase is 8 to 63 characters, or the 64 hex digits of the raw key.
@@ -604,6 +661,33 @@ async fn wait_activated(
     }
 }
 
+/// A connection `wifi.connect` created and has not proven yet. When the method's time limit
+/// drops the call halfway, the guard deletes it: otherwise a network with a wrong password
+/// would stay stored. `connect` disarms it and cleans up itself when it gets to the end.
+struct Unproven {
+    conn: Connection,
+    target: String,
+    armed: bool,
+}
+
+impl Drop for Unproven {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let conn = self.conn.clone();
+        let target = std::mem::take(&mut self.target);
+        rt.spawn(async move {
+            if let Ok(c) = proxy(&conn, NM, &target, I_CONNECTION).await {
+                let _ = c.call::<_, _, ()>("Delete", &()).await;
+            }
+        });
+    }
+}
+
 pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, ErrorObject> {
     let conn = ctx.conn(SVC).await?;
     let devices = devices(&conn).await?;
@@ -612,10 +696,11 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
     if !get(&nm, "WirelessEnabled").unwrap_or(false) {
         return Err(wifi_off());
     }
-    let ap = access_points(&conn, device)
-        .await?
+    let aps = access_points(&conn, device).await?;
+    let exact = has_exact(&p.ssid, aps.iter().map(|a| a.ssid.as_slice()));
+    let ap = aps
         .into_iter()
-        .filter(|a| a.ssid == p.ssid.as_bytes())
+        .filter(|a| named(&p.ssid, &a.ssid, exact))
         .max_by_key(|a| a.strength)
         .ok_or_else(|| not_found(format!("no network named {} in range", p.ssid)))?;
     if matches!(ap.security, WifiSecurity::Enterprise | WifiSecurity::Wep) {
@@ -635,30 +720,19 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
     if let Some(pw) = password {
         check_password(ap.security, pw)?;
     }
-    let existing = saved(&conn)
-        .await?
-        .into_iter()
-        .find(|s| s.ssid == p.ssid.as_bytes());
+    let existing = saved(&conn).await?.into_iter().find(|s| s.ssid == ap.ssid);
 
     let settings = proxy(&conn, NM, SETTINGS, I_SETTINGS).await.map_err(map)?;
+    // The stored settings and secrets before a new password replaced them, to put back if
+    // the new password does not work.
+    let mut previous: Option<HashMap<String, PropMap>> = None;
     let (target, created) = match (existing, password) {
         (Some(s), Some(pw)) => {
             // A new password for a stored network replaces the stored one.
             let c = proxy(&conn, NM, &s.path, I_CONNECTION).await.map_err(map)?;
             let current: HashMap<String, PropMap> =
                 c.call("GetSettings", &()).await.map_err(map)?;
-            let mut update: Settings<'_> = HashMap::new();
-            for (section, values) in &current {
-                if section == "802-11-wireless-security" {
-                    continue;
-                }
-                let entry = update.entry(section.as_str()).or_default();
-                for (k, v) in values {
-                    if let Ok(v) = v.try_clone() {
-                        entry.insert(k.as_str(), Value::from(v));
-                    }
-                }
-            }
+            let mut update = as_settings(&current, Some("802-11-wireless-security"));
             let key_mgmt = if ap.security == WifiSecurity::Wpa3 {
                 "sae"
             } else {
@@ -671,9 +745,21 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
                     ("psk", Value::from(pw)),
                 ]),
             );
+            // Without the old secrets there is nothing to put back; the new password is
+            // still tried.
+            let secrets = c
+                .call::<_, _, HashMap<String, PropMap>>(
+                    "GetSecrets",
+                    &("802-11-wireless-security",),
+                )
+                .await;
+            if let Err(e) = &secrets {
+                warn!(ssid = %p.ssid, "cannot read the stored Wi-Fi secrets: {e}");
+            }
             c.call::<_, _, ()>("Update", &(update,))
                 .await
                 .map_err(map)?;
+            previous = secrets.ok().map(|s| with_secrets(current, s));
             (s.path, false)
         }
         (Some(s), None) => (s.path, false),
@@ -686,35 +772,63 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
                 ));
             }
             let id = uuid();
-            let s = new_settings(&p.ssid, ap.security, pw, &id);
+            let s = new_settings(&ap.ssid, &p.ssid, ap.security, pw, &id);
             let path: OwnedObjectPath = settings.call("AddConnection", &(s,)).await.map_err(map)?;
             (path.to_string(), true)
         }
     };
 
-    let dev = proxy(&conn, NM, &device.path, I_DEVICE)
+    // Every error from here on must reach the clean-up below: the connection or password just
+    // stored is not proven yet. A dropped call skips it; then the guard deletes a connection
+    // made here. A changed password stays: the call ran out of time, so there is no proof
+    // that it is wrong.
+    let mut guard = Unproven {
+        conn: conn.clone(),
+        target: target.clone(),
+        armed: created,
+    };
+    let result = async {
+        let dev = proxy(&conn, NM, &device.path, I_DEVICE)
+            .await
+            .map_err(map)?;
+        let states = dev.receive_signal("StateChanged").await.map_err(map)?;
+        let nmp = proxy(&conn, NM, ROOT, I_NM).await.map_err(map)?;
+        let target_path = OwnedObjectPath::try_from(target.as_str())
+            .map_err(|e| failed("bad_path", e.to_string()))?;
+        let dev_path = OwnedObjectPath::try_from(device.path.as_str())
+            .map_err(|e| failed("bad_path", e.to_string()))?;
+        let ap_path = OwnedObjectPath::try_from(ap.path.as_str())
+            .map_err(|e| failed("bad_path", e.to_string()))?;
+        nmp.call::<_, _, OwnedObjectPath>(
+            "ActivateConnection",
+            &(&target_path, &dev_path, &ap_path),
+        )
         .await
         .map_err(map)?;
-    let states = dev.receive_signal("StateChanged").await.map_err(map)?;
-    let nmp = proxy(&conn, NM, ROOT, I_NM).await.map_err(map)?;
-    let target_path = OwnedObjectPath::try_from(target.as_str())
-        .map_err(|e| failed("bad_path", e.to_string()))?;
-    let dev_path = OwnedObjectPath::try_from(device.path.as_str())
-        .map_err(|e| failed("bad_path", e.to_string()))?;
-    let ap_path = OwnedObjectPath::try_from(ap.path.as_str())
-        .map_err(|e| failed("bad_path", e.to_string()))?;
-    let result = match nmp
-        .call::<_, _, OwnedObjectPath>("ActivateConnection", &(&target_path, &dev_path, &ap_path))
-        .await
-    {
-        Ok(_) => wait_activated(&conn, &device.path, &target, states, password.is_some()).await,
-        Err(e) => Err(map(e)),
-    };
+        wait_activated(&conn, &device.path, &target, states, password.is_some()).await
+    }
+    .await;
+    guard.armed = false;
     if let Err(e) = &result {
         warn!(ssid = %p.ssid, code = e.code, "Wi-Fi connect failed: {}", e.message);
         if created && let Ok(c) = proxy(&conn, NM, &target, I_CONNECTION).await {
             // Do not leave a connection with a wrong password behind.
             let _ = c.call::<_, _, ()>("Delete", &()).await;
+        }
+        // Only a rejected password goes back to the stored one. After other failures (out of
+        // range, no address, timeout) the new password is the better guess: the launcher asks
+        // for one only after the stored one was rejected.
+        if e.code == ErrorCode::WrongPassword.code()
+            && let Some(prev) = &previous
+            && let Ok(c) = proxy(&conn, NM, &target, I_CONNECTION).await
+        {
+            // The new password is wrong: keep the one that was stored.
+            if let Err(e) = c
+                .call::<_, _, ()>("Update", &(as_settings(prev, None),))
+                .await
+            {
+                warn!(ssid = %p.ssid, "cannot restore the stored Wi-Fi password: {e}");
+            }
         }
     }
     result?;
@@ -740,11 +854,12 @@ fn coarse(list: &WifiList) -> WifiList {
 /// Send `network_changed` and `wifi_list_changed` when NetworkManager reports changes.
 pub async fn watch(ctx: Arc<Ctx>) {
     loop {
-        let Ok(conn) = ctx.conn(SVC).await else {
+        let Ok((conn, number)) = ctx.watched_conn(SVC).await else {
             sleep(Duration::from_secs(10)).await;
             continue;
         };
         let Ok(mut stream) = dbus::changes(&conn, NM).await else {
+            ctx.conn_lost(number).await;
             sleep(Duration::from_secs(10)).await;
             continue;
         };
@@ -774,6 +889,8 @@ pub async fn watch(ctx: Arc<Ctx>) {
                 Err(_) => last = None,
             }
         }
+        // The stream ends only when the connection closes.
+        ctx.conn_lost(number).await;
         sleep(Duration::from_secs(1)).await;
     }
 }
@@ -812,10 +929,64 @@ mod tests {
     }
 
     #[test]
-    fn settings_do_not_carry_a_password_for_open_networks() {
-        let s = new_settings("Cafe", WifiSecurity::Open, Some("ignored"), "u");
+    fn ssids_that_are_not_utf8_match_as_shown() {
+        let latin1 = b"Caf\xe9";
+        let shown = display_ssid(latin1);
+        assert_eq!(shown, "Caf\u{fffd}");
+        assert!(named(&shown, latin1, false));
+        assert!(named("Home", b"Home", true));
+        assert!(!named("Home", b"Home2", false));
+        // A network really named "Caf\u{fffd}" is the one meant by that name.
+        let raws: [&[u8]; 2] = [latin1, shown.as_bytes()];
+        let exact = has_exact(&shown, raws.into_iter());
+        assert!(exact);
+        assert!(!named(&shown, latin1, exact));
+        assert!(named(&shown, shown.as_bytes(), exact));
+        // Two SSIDs that show the same name: only one is forgotten.
+        let both: [&[u8]; 3] = [b"Home", latin1, b"Caf\xe8"];
+        assert_eq!(one_named(&shown, both.into_iter()), Some(&latin1[..]));
+        assert_eq!(one_named(&shown, raws.into_iter()), Some(shown.as_bytes()));
+        assert_eq!(one_named("Work", both.into_iter()), None);
+    }
+
+    #[test]
+    fn restore_settings_carry_the_old_secrets() {
+        let v = |s: &str| OwnedValue::try_from(Value::from(s)).unwrap();
+        let current = HashMap::from([
+            (
+                "connection".to_owned(),
+                HashMap::from([("id".to_owned(), v("Home"))]),
+            ),
+            (
+                "802-11-wireless-security".to_owned(),
+                HashMap::from([("key-mgmt".to_owned(), v("sae"))]),
+            ),
+        ]);
+        let secrets = HashMap::from([(
+            "802-11-wireless-security".to_owned(),
+            HashMap::from([("psk".to_owned(), v("old-password"))]),
+        )]);
+        let prev = with_secrets(current, secrets);
+        let s = as_settings(&prev, None);
+        let sec = &s["802-11-wireless-security"];
+        assert_eq!(sec["key-mgmt"], Value::from("sae"));
+        assert_eq!(sec["psk"], Value::from("old-password"));
+        assert_eq!(s["connection"]["id"], Value::from("Home"));
+        let s = as_settings(&prev, Some("802-11-wireless-security"));
         assert!(!s.contains_key("802-11-wireless-security"));
-        let s = new_settings("Home", WifiSecurity::Wpa, Some("hunter2hunter2"), "u");
+    }
+
+    #[test]
+    fn settings_do_not_carry_a_password_for_open_networks() {
+        let s = new_settings(b"Cafe", "Cafe", WifiSecurity::Open, Some("ignored"), "u");
+        assert!(!s.contains_key("802-11-wireless-security"));
+        let s = new_settings(
+            b"Home",
+            "Home",
+            WifiSecurity::Wpa,
+            Some("hunter2hunter2"),
+            "u",
+        );
         assert!(s.contains_key("802-11-wireless-security"));
     }
 }

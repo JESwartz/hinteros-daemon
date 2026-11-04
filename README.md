@@ -405,7 +405,7 @@ enable = true                  # network.*, wifi.*, bluetooth.*, audio.*, displa
 
 [audio]
 pactl = "pactl"                # PipeWire's PulseAudio interface; found on PATH
-poll_ms = 2000                 # look for changes made elsewhere (only while a client is connected)
+poll_ms = 2000                 # poll for changes while `pactl subscribe` cannot run; 0: never look
 
 [display]
 # save_file = "/home/tv/.local/state/hinteros/gamescope-modes"   # [default: $GAMESCOPE_MODE_SAVE_FILE]
@@ -414,7 +414,7 @@ apply_timeout_ms = 6000        # display.set_mode: how long gamescope gets to sw
 revert_after_ms = 20000        # display.set_mode: reverted when not kept in this time (0: never)
 
 [bluetooth]
-pair_timeout_s = 45            # bluetooth.pair gives up
+pair_timeout_s = 45            # bluetooth.pair gives up (at most 60)
 confirm_timeout_s = 30         # a numeric comparison nobody answers is rejected
 
 [sandbox]                      # catalog apps in bwrap (not Steam); see "App sandbox and permissions"
@@ -602,8 +602,9 @@ preview or CI sees. Every call has a time limit (30 s; `wifi.connect` 60 s, `blu
 password, a new password replaces the stored one. WPA/WPA2 (`wpa-psk`) and WPA3 (`sae`) and open
 networks work; WEP and 802.1X are refused (`invalid_params {reason: unsupported_security}`). The
 call waits for the device to be activated; a rejected key (NetworkManager asking for secrets it
-has no agent for, or reason `NO_SECRETS`) is `wrong_password`, and a connection it created is
-deleted again. Passwords go only into the D-Bus call; they are never logged (the `Debug` of the
+has no agent for, or reason `NO_SECRETS`) is `wrong_password`, and then a replaced password is
+put back. A connection it created is deleted again after any failure, also when the time limit
+ends the call. Passwords go only into the D-Bus call; they are never logged (the `Debug` of the
 params hides them, and a test greps the daemon's debug log). `wifi.scan` returns after the scan
 (NetworkManager refuses scans right after another one; the current list comes back then).
 
@@ -626,10 +627,11 @@ sink's name, description, volume, mute state, ports and device properties (`devi
 tells Bluetooth and USB, ports and names tell HDMI), and `get-default-sink`, `set-default-sink`,
 `set-sink-volume` and `set-sink-mute` cover the rest. `wpctl` has no machine-readable listing
 (`wpctl status` is a tree for humans, `wpctl inspect` prints properties as text), so the output
-list and kinds would need fragile parsing. There is no subscription (`pactl subscribe` would be a
-child process to supervise): changes made elsewhere are found by polling every `audio.poll_ms`
-while a client is connected. Volume is capped at 100 (`invalid_params` above; a sink already
-above 100 reports 100). Outputs are sinks; `id` is the sink name, stable across restarts.
+list and kinds would need fragile parsing. Changes made elsewhere come from one long-running
+`pactl subscribe` (sink, card and server events; the state is read again after each burst), and
+from polling every `audio.poll_ms` while it cannot run, only while a client is connected. Volume
+is capped at 100 (`invalid_params` above; a sink already above 100 reports 100). Outputs are
+sinks; `id` is the sink name, stable across restarts.
 
 **Display: gamescope's mode save file plus a nudge.** What gamescope 3.16.31 offers (read from
 its source in nixpkgs): there is *no* request to change the output mode at runtime, neither in

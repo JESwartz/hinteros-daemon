@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 
 use rustix::process::{Pid, Signal, kill_process};
 use tracing::debug;
@@ -136,7 +137,12 @@ pub fn managed_app_id(
 
 /// [`managed_app_id`] on the real `/proc`.
 pub fn managed_app_id_of(procs: &[Proc], pid: u32) -> Option<u32> {
-    managed_app_id(procs, pid, |p| fs::read(format!("/proc/{p}/cmdline")).ok())
+    // A reaper inside an app's sandbox does not count: it could claim any game.
+    managed_app_id(procs, pid, |p| {
+        in_own_pid_ns(p)
+            .then(|| fs::read(format!("/proc/{p}/cmdline")).ok())
+            .flatten()
+    })
 }
 
 /// Every pid in `procs` below `root`.
@@ -171,6 +177,36 @@ pub fn list() -> Vec<Proc> {
         .collect()
 }
 
+/// Whether process `pid` (a directory name under `proc_dir`) is in this daemon's own PID
+/// namespace, and so not inside an app's sandbox (bwrap gives each its own), where a process
+/// can take any name, command line and environment: Steam, its reapers and ours never run
+/// there. A process whose namespace cannot be read is not ours. Without our own namespace link
+/// (a test's made-up `proc_dir`) every process is.
+pub fn in_own_pid_ns_at(proc_dir: &Path, pid: &str) -> bool {
+    let ns = |p: &str| {
+        fs::metadata(proc_dir.join(p).join("ns/pid"))
+            .ok()
+            .map(|m| (m.dev(), m.ino()))
+    };
+    match ns("self") {
+        Some(own) => ns(pid) == Some(own),
+        None => true,
+    }
+}
+
+/// [`in_own_pid_ns_at`] on the real `/proc`.
+pub fn in_own_pid_ns(pid: u32) -> bool {
+    in_own_pid_ns_at(Path::new("/proc"), &pid.to_string())
+}
+
+/// The session user's processes named `name` that are outside every sandbox
+/// ([`in_own_pid_ns`]).
+fn named(name: &str) -> impl Iterator<Item = Proc> {
+    list()
+        .into_iter()
+        .filter(move |p| p.comm == name && in_own_pid_ns(p.pid))
+}
+
 /// The name of process `pid` (`/proc/<pid>/comm`).
 pub fn comm(pid: u32) -> Option<String> {
     fs::read_to_string(format!("/proc/{pid}/comm"))
@@ -200,9 +236,7 @@ impl ProcessControl for Procs {
     }
 
     fn steam_reapers(&mut self, app_id: u32) -> Vec<u32> {
-        list()
-            .into_iter()
-            .filter(|p| p.comm == "reaper")
+        named("reaper")
             .filter(|p| {
                 fs::read(format!("/proc/{}/cmdline", p.pid))
                     .is_ok_and(|c| is_steam_reaper_cmdline(&c, app_id))
@@ -212,9 +246,7 @@ impl ProcessControl for Procs {
     }
 
     fn steam_games(&mut self) -> Vec<u32> {
-        let mut ids: Vec<u32> = list()
-            .into_iter()
-            .filter(|p| p.comm == "reaper")
+        let mut ids: Vec<u32> = named("reaper")
             .filter_map(|p| reaper_app_id(&fs::read(format!("/proc/{}/cmdline", p.pid)).ok()?))
             .filter(|&id| id != 0 && id != hinteros_api::session::STEAM_CLIENT_GAMESCOPE_APP_ID)
             .collect();
@@ -224,21 +256,15 @@ impl ProcessControl for Procs {
     }
 
     fn steam_running(&mut self) -> bool {
-        list().iter().any(|p| p.comm == "steam")
+        named("steam").next().is_some()
     }
 
     fn steam_clients(&mut self) -> Vec<u32> {
-        list()
-            .into_iter()
-            .filter(|p| p.comm == "steam")
-            .map(|p| p.pid)
-            .collect()
+        named("steam").map(|p| p.pid).collect()
     }
 
     fn display_users(&mut self, display: &str) -> Vec<u32> {
-        list()
-            .into_iter()
-            .filter(|p| p.comm == "reaper")
+        named("reaper")
             .filter(|p| {
                 fs::read(format!("/proc/{}/environ", p.pid))
                     .is_ok_and(|e| environ_on_display(&e, display))
@@ -394,6 +420,27 @@ mod tests {
             b"reaper\0SteamLaunch\0--\0AppId=620\0",
             620
         ));
+    }
+
+    #[test]
+    fn processes_in_another_pid_namespace_do_not_count() {
+        let me = std::process::id();
+        assert!(in_own_pid_ns(me));
+        assert!(!in_own_pid_ns(u32::MAX), "gone: not ours");
+        // A made-up /proc: `self` and a process with another namespace link.
+        let t = tempfile::tempdir().unwrap();
+        for (p, ns) in [("self", "a"), ("10", "a"), ("11", "b")] {
+            fs::create_dir_all(t.path().join(p).join("ns")).unwrap();
+            fs::write(t.path().join(ns), "").unwrap();
+            std::os::unix::fs::symlink(t.path().join(ns), t.path().join(p).join("ns/pid")).unwrap();
+        }
+        fs::create_dir(t.path().join("12")).unwrap();
+        assert!(in_own_pid_ns_at(t.path(), "10"));
+        assert!(!in_own_pid_ns_at(t.path(), "11"), "another namespace");
+        assert!(!in_own_pid_ns_at(t.path(), "12"), "unreadable");
+        // No own link (a test's /proc): everything counts.
+        let t = tempfile::tempdir().unwrap();
+        assert!(in_own_pid_ns_at(t.path(), "12"));
     }
 
     #[test]

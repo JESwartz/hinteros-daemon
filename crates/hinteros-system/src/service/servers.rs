@@ -410,7 +410,9 @@ impl Service {
         Ok(ServicesListResult { revision, services })
     }
 
-    pub(super) fn media_folders(
+    /// `media.folders`: the folder scan runs on the blocking pool (a big or slow disk must not
+    /// stall the service's one thread).
+    pub(super) async fn media_folders(
         &self,
         p: MediaFoldersParams,
     ) -> Result<MediaFoldersResult, ErrorObject> {
@@ -423,8 +425,15 @@ impl Service {
                 "not a folder id",
             ));
         }
-        let dir = &self.paths.server.media_dir;
-        let folders = match media::list(dir, p.folder_id.as_deref()) {
+        let dir = self.paths.server.media_dir.clone();
+        let id = p.folder_id.clone();
+        let listed = {
+            let dir = dir.clone();
+            tokio::task::spawn_blocking(move || media::list(&dir, id.as_deref()))
+                .await
+                .map_err(internal)?
+        };
+        let folders = match listed {
             Ok(f) => f,
             // No media folder yet: nothing to pick.
             Err(media::Resolve::Missing) if p.folder_id.is_none() => Vec::new(),

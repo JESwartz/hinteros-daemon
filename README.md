@@ -1970,7 +1970,8 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
 - **`media.folders {folder_id?}`** (read-only): one level below `/srv/media`. A folder id is the
   path relative to it (no empty, `.`, `..` or hidden part, no control characters), opened part
   by part with `O_NOFOLLOW | O_DIRECTORY` every time it is used (the request, and again in the
-  job): symlinks are neither listed nor entered.
+  job): symlinks are neither listed nor entered. The scan runs off the service's thread and
+  looks at the first 20000 entries of the folder (500 listed) and 2000 of each subfolder.
 - **Jellyfin** (`servers/jellyfin.rs`): HTTP on loopback with `Authorization: MediaBrowser
   Token="<api-key>"` (Jellyfin 10.11+/12 refuse the legacy `X-Emby-Token` unless legacy
   authorization is on; an API key counts as administrator). `jellyfin.libraries.add {pin, name,

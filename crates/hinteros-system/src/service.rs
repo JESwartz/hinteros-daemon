@@ -580,7 +580,7 @@ async fn dispatch(
         }
         system::MediaFolders::NAME => {
             let p = decode::<system::MediaFolders>(params)?;
-            encode::<system::MediaFolders>(svc.media_folders(p)?)
+            encode::<system::MediaFolders>(svc.media_folders(p).await?)
         }
         _ => Err(method_not_found(method)),
     }

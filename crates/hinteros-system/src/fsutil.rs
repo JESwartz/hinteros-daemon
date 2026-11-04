@@ -58,11 +58,18 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
         f.sync_all()?;
     }
     fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-    fs::rename(&tmp, path)
+    fs::rename(&tmp, path)?;
+    // The rename itself must last too.
+    sync_dir(if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    })
 }
 
 /// Replace directory `target` with a copy of `source`: copy next to `target` (same filesystem),
-/// fsync, exchange the two in one rename, then delete the old contents.
+/// fsync every file and directory of the copy, exchange the two in one rename, then delete the
+/// old contents.
 pub fn replace_dir(source: &Path, target: &Path, tag: &str) -> io::Result<()> {
     let parent = target.parent().unwrap_or(Path::new("/"));
     let name = target
@@ -72,7 +79,7 @@ pub fn replace_dir(source: &Path, target: &Path, tag: &str) -> io::Result<()> {
     let new: PathBuf = parent.join(format!(".{name}.new-{tag}"));
     remove(&new)?;
     copy_dir(source, &new)?;
-    sync_dir(&new)?;
+    sync_tree(&new)?;
     if target.exists() {
         renameat_with(CWD, &new, CWD, target, RenameFlags::EXCHANGE)?;
         // `new` now holds the old contents.
@@ -85,6 +92,20 @@ pub fn replace_dir(source: &Path, target: &Path, tag: &str) -> io::Result<()> {
 
 fn sync_dir(dir: &Path) -> io::Result<()> {
     fs::File::open(dir)?.sync_all()
+}
+
+/// fsync the files of `dir` (as [`copy_dir`] made them), its directories, then `dir`.
+fn sync_tree(dir: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            sync_tree(&entry.path())?;
+        } else if ty.is_file() {
+            fs::File::open(entry.path())?.sync_all()?;
+        }
+    }
+    sync_dir(dir)
 }
 
 /// Format of the files that only hold what can be had again: `{"version": 1, "data": ...}`.

@@ -980,6 +980,7 @@ impl Service {
                             ids,
                             updated_at: Some(job::now()),
                             by: Some(by),
+                            extra: Default::default(),
                         }),
                     }),
                 );

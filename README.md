@@ -2178,7 +2178,7 @@ Unknown fields are ignored. A newer file is not understood; what follows depends
 |---|---|---|
 | `profiles.json`, `services/jellyfin-server/users.json` | load and save are errors; the file stays | kept |
 | `terms-accepted.json` | reads as no acceptances; recording is an error; the file stays | kept |
-| `starter.json` | reads as none; saving is an error (the job fails); the file stays | dropped (always written whole) |
+| `starter.json` | reads as none; saving is an error (the job fails); the file stays | kept |
 | `channel-tips.json` | reads as empty; saving fails with a warning; the file stays | kept |
 | `runtime.json` | defaults; a change holds until the next boot; the file stays | kept |
 | `permissions.json`, `controller.json` (session) | defaults; a change holds in memory; the file stays | dropped |

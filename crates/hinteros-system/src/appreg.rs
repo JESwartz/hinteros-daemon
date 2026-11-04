@@ -337,6 +337,9 @@ pub struct StarterFile {
     pub updated_at: Option<i64>,
     #[serde(default)]
     pub by: Option<String>,
+    /// Fields this daemon does not know (a later 1.x), kept on a save.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl StarterFile {
@@ -350,9 +353,17 @@ impl StarterFile {
         serde_json::from_slice(&bytes).ok()
     }
 
+    /// Write it, with the fields of the file there now that this daemon does not know (the
+    /// service makes a new set from the request alone).
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         check_file_version(path, STARTER_VERSION)?;
-        let mut bytes = serde_json::to_vec_pretty(self)?;
+        let mut file = self.clone();
+        if let Some(old) = Self::load(path) {
+            for (k, v) in old.extra {
+                file.extra.entry(k).or_insert(v);
+            }
+        }
+        let mut bytes = serde_json::to_vec_pretty(&file)?;
         bytes.push(b'\n');
         fsutil::write_atomic(path, &bytes, 0o600)
     }
@@ -386,9 +397,24 @@ mod tests {
             ids: Vec::new(),
             updated_at: None,
             by: None,
+            extra: BTreeMap::new(),
         };
         assert!(f.save(&path).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+        // A field of a later 1.x stays when a new set is written.
+        std::fs::write(&path, r#"{"version":1,"ids":["a"],"order":["a"]}"#).unwrap();
+        assert_eq!(
+            StarterFile::load(&path).unwrap().extra["order"],
+            serde_json::json!(["a"])
+        );
+        let f = StarterFile {
+            ids: vec!["b".into()],
+            ..f
+        };
+        f.save(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["ids"], serde_json::json!(["b"]));
+        assert_eq!(v["order"], serde_json::json!(["a"]));
     }
     use crate::users::Users;
 

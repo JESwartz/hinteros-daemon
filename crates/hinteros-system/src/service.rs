@@ -457,6 +457,7 @@ fn internal(e: impl std::fmt::Display) -> ErrorObject {
     ErrorObject::new(ErrorCode::InternalError, e.to_string())
 }
 
+/// The read-only methods (`handle` runs every mutating one through [`mutating`], in a task).
 async fn dispatch(
     svc: &Arc<Service>,
     peer: &Peer,
@@ -464,9 +465,6 @@ async fn dispatch(
     params: Option<Value>,
     subs: &mut BTreeSet<EventName>,
 ) -> Result<Value, ErrorObject> {
-    if system::MUTATING.contains(&method) {
-        return mutating(svc, peer, method, params, false).await;
-    }
     match method {
         Ping::NAME => server::call::<Ping>(params, server::ping),
         Subscribe::NAME => {
@@ -698,8 +696,8 @@ pub(crate) enum Request {
 }
 
 impl Request {
-    pub(crate) fn decode(method: &str, params: Option<Value>) -> Result<Self, ErrorObject> {
-        if let Some(r) = servers::ServersRequest::decode(method, params.clone()) {
+    pub(crate) fn decode(method: &str, mut params: Option<Value>) -> Result<Self, ErrorObject> {
+        if let Some(r) = servers::ServersRequest::decode(method, &mut params) {
             return r.map(Self::Servers);
         }
         Ok(match method {
@@ -1241,11 +1239,7 @@ impl Service {
             Request::SettingsSet(p) => {
                 let (state, revision) = self.load_state()?;
                 if p.revision != revision {
-                    return Err(ErrorObject::with_data(
-                        ErrorCode::StateConflict,
-                        "state.json changed since settings.get",
-                        json!({ "reason": "revision" }),
-                    ));
+                    return Err(state_conflict());
                 }
                 // No settable fields yet: an empty change set is nothing to do. Each future
                 // field applies to `new` here.

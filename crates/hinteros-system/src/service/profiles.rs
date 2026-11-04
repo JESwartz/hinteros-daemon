@@ -521,8 +521,8 @@ impl Service {
         match request {
             R::SaveMode(p) => {
                 self.save_runtime(|r| {
-                    r.display_modes.insert(
-                        p.display.clone(),
+                    r.save_mode(
+                        &p.display,
                         format!("{}x{}@{}", p.width, p.height, p.refresh),
                     );
                 })?;
@@ -1133,6 +1133,8 @@ impl Service {
 
 /// Format of `runtime.json`.
 pub const RUNTIME_VERSION: u32 = 1;
+/// Displays whose mode `runtime.json` keeps.
+pub const MAX_DISPLAY_MODES: usize = 16;
 
 /// `runtime.json`: the box's display mode and audio output (shared by every profile).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1169,6 +1171,18 @@ impl Runtime {
             return Self::default();
         }
         serde_json::from_slice(&bytes).unwrap_or_default()
+    }
+
+    /// Remember `display`'s mode. At most [`MAX_DISPLAY_MODES`] displays are kept: a new one
+    /// then replaces another (a box has a few displays; names are client input).
+    pub fn save_mode(&mut self, display: &str, mode: String) {
+        if !self.display_modes.contains_key(display)
+            && self.display_modes.len() >= MAX_DISPLAY_MODES
+            && let Some(other) = self.display_modes.keys().next().cloned()
+        {
+            self.display_modes.remove(&other);
+        }
+        self.display_modes.insert(display.to_owned(), mode);
     }
 }
 
@@ -1226,5 +1240,22 @@ mod tests {
         .unwrap();
         assert!(Runtime::load(&path).display_modes.is_empty());
         assert!(check_file_version(&path, RUNTIME_VERSION).is_err());
+    }
+
+    #[test]
+    fn display_modes_are_capped() {
+        let mut r = Runtime::default();
+        for i in 0..MAX_DISPLAY_MODES + 10 {
+            r.save_mode(&format!("D-{i:02}"), "1920x1080@60".into());
+        }
+        assert_eq!(r.display_modes.len(), MAX_DISPLAY_MODES);
+        assert!(
+            r.display_modes
+                .contains_key(&format!("D-{:02}", MAX_DISPLAY_MODES + 9))
+        );
+        // A known display changes its mode in place.
+        r.save_mode("D-25", "1280x720@60".into());
+        assert_eq!(r.display_modes.len(), MAX_DISPLAY_MODES);
+        assert_eq!(r.display_modes["D-25"], "1280x720@60");
     }
 }

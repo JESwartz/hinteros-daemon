@@ -405,6 +405,7 @@ poll_ms = 2000                 # look for changes made elsewhere (only while a c
 # save_file = "/home/tv/.local/state/hinteros/gamescope-modes"   # [default: $GAMESCOPE_MODE_SAVE_FILE]
 # modes_file = "/run/user/1000/gamescope-edid.modes"            # [default: $GAMESCOPE_PATCHED_EDID_FILE + ".modes"]
 apply_timeout_ms = 6000        # display.set_mode: how long gamescope gets to switch
+revert_after_ms = 20000        # display.set_mode: reverted when not kept in this time (0: never)
 
 [bluetooth]
 pair_timeout_s = 45            # bluetooth.pair gives up
@@ -646,7 +647,11 @@ file) or without the save file. Refresh rates are whole Hz (59.94 is 60).
 Keep-or-revert: `display.set_mode` returns `{previous, current}` and remembers the mode it
 replaced; the launcher's 15 s dialog calls `display.keep` when the user keeps it and
 `display.revert` when the time runs out (also after a second change before deciding: revert goes
-back to the mode before both).
+back to the mode before both). The daemon reverts by itself when neither comes within
+`display.revert_after_ms` (20 s; the launcher may have crashed). While a change is not kept, the
+save file as it was before waits next to it (`<save file>.confirmed`); a daemon that stopped before
+keep or revert (a crash, a power cut) puts it back at its next start and nudges gamescope, so an
+unconfirmed mode never becomes the mode of every later start.
 
 **Power.** `Suspend`, `Reboot` and `PowerOff` go to logind with `interactive = false`;
 `power.capabilities` reports `CanSuspend`/`CanReboot`/`CanPowerOff` (`yes`, `no`, `challenge`,

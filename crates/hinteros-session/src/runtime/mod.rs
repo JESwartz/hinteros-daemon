@@ -147,6 +147,7 @@ impl Runtime {
             audio_last: Mutex::new(None),
         });
         if ctx.enabled {
+            display::restore_confirmed(&ctx);
             tokio::spawn(network::watch(ctx.clone()));
             tokio::spawn(bluetooth::watch(ctx.clone()));
             tokio::spawn(audio::watch(ctx.clone()));

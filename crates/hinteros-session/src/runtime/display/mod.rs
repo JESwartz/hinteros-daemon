@@ -29,12 +29,16 @@
 //! sizes only when it maps it. On a failed switch the log says what gamescope showed.
 //!
 //! The 15-second keep-or-revert flow: `display.set_mode` remembers the mode it replaced,
-//! `display.keep` forgets it, `display.revert` goes back to it.
+//! `display.keep` forgets it, `display.revert` goes back to it. The daemon reverts by itself
+//! when neither comes within `[display] revert_after_ms` (the launcher may have crashed), and
+//! puts the save file back at its next start when it stopped before either (a crash, a power
+//! cut): only a kept mode outlives the session.
 
 pub mod control;
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hinteros_api::ErrorObject;
@@ -60,6 +64,14 @@ pub struct Shared {
     op: tokio::sync::Mutex<()>,
     /// The mode the last un-kept `display.set_mode` replaced.
     pending: Mutex<Option<Mode>>,
+    /// Counts the mode changes: the daemon's own revert deadline belongs to the latest.
+    changes: AtomicU64,
+}
+
+impl Shared {
+    fn pending(&self) -> std::sync::MutexGuard<'_, Option<Mode>> {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -340,7 +352,7 @@ async fn apply(ctx: &Ctx, info: &control::Info, target: Mode) -> Result<(), Erro
     ))
 }
 
-pub async fn set_mode(ctx: &Ctx, target: Mode) -> Result<DisplaySetResult, ErrorObject> {
+pub async fn set_mode(ctx: &Arc<Ctx>, target: Mode) -> Result<DisplaySetResult, ErrorObject> {
     need_gamescope(ctx)?;
     let _one = ctx.display_state.op.lock().await;
     let info = query(ctx).await.ok_or_else(|| {
@@ -375,19 +387,116 @@ pub async fn set_mode(ctx: &Ctx, target: Mode) -> Result<DisplaySetResult, Error
     })?;
     let mut revert_to = previous;
     if previous != target {
-        apply(ctx, &info, target).await?;
-        let mut pending = ctx
-            .display_state
-            .pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let first = ctx.display_state.pending().is_none();
+        if first {
+            remember_confirmed(ctx);
+        }
+        if let Err(e) = apply(ctx, &info, target).await {
+            if first {
+                forget_confirmed(ctx);
+            }
+            return Err(e);
+        }
         // A second change before the first was kept still reverts to the mode before both.
-        revert_to = *pending.get_or_insert(previous);
+        revert_to = *ctx.display_state.pending().get_or_insert(previous);
+        let change = ctx.display_state.changes.fetch_add(1, Ordering::SeqCst) + 1;
+        revert_unless_kept(ctx, change);
     }
     Ok(DisplaySetResult {
         previous: revert_to,
         current: target,
     })
+}
+
+/// Where the save file as it was before an unconfirmed change is kept, next to it.
+fn confirmed_path(save: &Path) -> PathBuf {
+    let mut p = save.as_os_str().to_os_string();
+    p.push(".confirmed");
+    PathBuf::from(p)
+}
+
+/// Keep the save file as it is now (the last confirmed modes), until the change about to be
+/// made is kept or reverted. If the daemon stops first (a crash, a power cut), it puts this
+/// back at its next start ([`restore_confirmed`]): an unconfirmed mode must not become the mode
+/// of every later start.
+fn remember_confirmed(ctx: &Ctx) {
+    let Some(save) = save_path(ctx) else {
+        return;
+    };
+    let before = std::fs::read_to_string(&save).unwrap_or_default();
+    if let Err(e) = write_atomically(&confirmed_path(&save), &before) {
+        warn!("cannot keep a copy of {}: {e}", save.display());
+    }
+}
+
+/// The change was kept or reverted (or never made).
+fn forget_confirmed(ctx: &Ctx) {
+    if let Some(save) = save_path(ctx) {
+        let path = confirmed_path(&save);
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!("cannot remove {}: {e}", path.display());
+        }
+    }
+}
+
+/// At start: a change that was neither kept nor reverted when the daemon last stopped is
+/// undone in the save file, and gamescope is asked to pick its mode again (if it runs yet).
+pub fn restore_confirmed(ctx: &Ctx) {
+    let (Some(x), Some(save)) = (ctx.x_display.clone(), save_path(ctx)) else {
+        return;
+    };
+    let path = confirmed_path(&save);
+    let Ok(before) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    warn!(
+        "a display mode change was not kept before the last stop; restoring {}",
+        save.display()
+    );
+    if let Err(e) = write_atomically(&save, &before) {
+        warn!("cannot restore {}: {e}", save.display());
+        return;
+    }
+    if let Err(e) = std::fs::remove_file(&path) {
+        warn!("cannot remove {}: {e}", path.display());
+    }
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = nudge(&x) {
+            debug!("nudging gamescope after restoring the mode: {}", e.message);
+        }
+    });
+}
+
+/// The daemon's own deadline for a change ([`DisplayConfig::revert_after_ms`]): if neither
+/// `display.keep` nor another change comes in time, the change is reverted. The launcher's
+/// dialog does the same after 15 s; this covers a launcher that crashed or restarted meanwhile.
+///
+/// [`DisplayConfig::revert_after_ms`]: crate::config::DisplayConfig::revert_after_ms
+fn revert_unless_kept(ctx: &Arc<Ctx>, change: u64) {
+    let after = Duration::from_millis(ctx.display.revert_after_ms);
+    if after.is_zero() {
+        return;
+    }
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        sleep(after).await;
+        match revert_change(&ctx, Some(change)).await {
+            Ok(r) => warn!(
+                "display mode not kept within {after:?}; back to {}",
+                mode_text(r.current)
+            ),
+            Err(e)
+                if e.data
+                    .as_ref()
+                    .is_some_and(|d| d["reason"] == "nothing_to_revert") => {}
+            Err(e) => warn!(
+                "reverting the display mode that was not kept: {}",
+                e.message
+            ),
+        }
+    });
 }
 
 /// The on-screen keyboard is an overlay that gamescope sizes when it maps the window, so it
@@ -399,28 +508,27 @@ fn restart_osk(ctx: &Ctx) {
 }
 
 pub async fn keep(ctx: &Ctx) -> Result<Empty, ErrorObject> {
-    let changed = ctx
-        .display_state
-        .pending
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-        .is_some();
+    let changed = ctx.display_state.pending().take().is_some();
     if changed {
+        forget_confirmed(ctx);
         restart_osk(ctx);
     }
     Ok(Empty {})
 }
 
 pub async fn revert(ctx: &Ctx) -> Result<DisplayRevertResult, ErrorObject> {
+    revert_change(ctx, None).await
+}
+
+/// Revert the pending change; with `only`, only if that is still the latest change.
+async fn revert_change(ctx: &Ctx, only: Option<u64>) -> Result<DisplayRevertResult, ErrorObject> {
     let _one = ctx.display_state.op.lock().await;
+    let nothing = || failed("nothing_to_revert", "no display change to revert");
+    if only.is_some_and(|c| c != ctx.display_state.changes.load(Ordering::SeqCst)) {
+        return Err(nothing());
+    }
     // Forgotten only once the old mode is back: a failed revert can be tried again.
-    let previous = ctx
-        .display_state
-        .pending
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .ok_or_else(|| failed("nothing_to_revert", "no display change to revert"))?;
+    let previous = ctx.display_state.pending().ok_or_else(nothing)?;
     let info = query(ctx).await.ok_or_else(|| {
         unavailable(
             SVC,
@@ -434,11 +542,8 @@ pub async fn revert(ctx: &Ctx) -> Result<DisplayRevertResult, ErrorObject> {
         apply(ctx, &info, previous).await?;
         restart_osk(ctx);
     }
-    ctx.display_state
-        .pending
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take();
+    ctx.display_state.pending().take();
+    forget_confirmed(ctx);
     Ok(DisplayRevertResult { current: previous })
 }
 

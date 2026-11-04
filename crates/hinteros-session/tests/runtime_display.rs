@@ -807,3 +807,80 @@ async fn a_kept_mode_change_restarts_the_on_screen_keyboard() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(started(&d), 2);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_nobody_keeps_is_reverted_by_the_daemon() {
+    let Some(gs) = FakeGamescope::start(true, false) else {
+        return;
+    };
+    std::fs::write(gs.save_file(), "Sony TV:3840x2160@60\n").unwrap();
+    let confirmed = gs.dir.path().join("modes.save.confirmed");
+    let d = gs.daemon_with(3000, true, "revert_after_ms = 600\n");
+    let mut c = d.client().await;
+
+    // The launcher went away during its dialog: nobody keeps or reverts.
+    call(&mut c, "display.set_mode", mode(1280, 720, 60))
+        .await
+        .unwrap();
+    assert_eq!(gs.current(), M(1280, 720, 60));
+    assert_eq!(
+        std::fs::read_to_string(&confirmed).unwrap(),
+        "Sony TV:3840x2160@60\n"
+    );
+    eventually("the daemon's revert", async || {
+        (gs.current() == M(3840, 2160, 60) && !confirmed.exists()).then_some(())
+    })
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(gs.save_file()).unwrap(),
+        "Sony TV:3840x2160@60\n"
+    );
+    let e = call(&mut c, "display.revert", json!({})).await.unwrap_err();
+    assert_eq!(e["data"]["reason"], "nothing_to_revert");
+
+    // Kept in time: it stays.
+    call(&mut c, "display.set_mode", mode(1920, 1080, 60))
+        .await
+        .unwrap();
+    call(&mut c, "display.keep", json!({})).await.unwrap();
+    assert!(!confirmed.exists());
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(gs.current(), M(1920, 1080, 60));
+
+    // A second change gets its own time; the first one's deadline does nothing.
+    call(&mut c, "display.set_mode", mode(1280, 720, 60))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    call(&mut c, "display.set_mode", mode(1920, 1080, 120))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(gs.current(), M(1920, 1080, 120));
+    eventually("the second change's revert", async || {
+        (gs.current() == M(1920, 1080, 60)).then_some(())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unconfirmed_change_does_not_outlive_the_daemon() {
+    let Some(gs) = FakeGamescope::start(true, false) else {
+        return;
+    };
+    // The daemon stopped (a power cut) while a change waited for keep or revert.
+    std::fs::write(gs.save_file(), "Sony TV:1280x720@60\n").unwrap();
+    let confirmed = gs.dir.path().join("modes.save.confirmed");
+    std::fs::write(&confirmed, "Sony TV:3840x2160@60\n").unwrap();
+    let d = gs.daemon(3000, true);
+    let _c = d.client().await;
+    assert_eq!(
+        std::fs::read_to_string(gs.save_file()).unwrap(),
+        "Sony TV:3840x2160@60\n"
+    );
+    assert!(!confirmed.exists());
+    eventually("gamescope nudged", async || {
+        (gs.nudges() >= 1).then_some(())
+    })
+    .await;
+}

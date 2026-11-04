@@ -49,6 +49,10 @@ pub const TERMS_VERSION: u32 = 1;
 /// Progress lines within a stage at most this often.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long a child's pipes may stay open after it exited (a process it left still holds
+/// them) before the rest of its process group is killed.
+const PIPE_GRACE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 5 });
+
 pub fn main(run_dir: &Path, id: &str) -> ExitCode {
     if !is_job_id(id) {
         error!("bad job id {id:?}");
@@ -176,6 +180,7 @@ fn run(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
 pub enum Failure {
     Cancelled,
     Error(ErrorObject),
@@ -464,6 +469,11 @@ impl Runner {
     }
 
     /// [`Self::exec`], keeping up to `limit` bytes of stdout (the rest is read and dropped).
+    ///
+    /// Both pipes are drained to the end whatever they carry (a non-UTF-8 stderr line is
+    /// read lossily), so the child never gets SIGPIPE from us. Once the child has exited,
+    /// the pipes get [`PIPE_GRACE`] to reach EOF; something left in the process group that
+    /// still holds them is then killed, and a descendant that left the group is given up on.
     fn exec_with(
         &mut self,
         mut cmd: Command,
@@ -482,41 +492,59 @@ impl Runner {
         let pgid = Pid::from_child(&child);
         let mut stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
-        let out_thread = std::thread::spawn(move || {
+        let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
             let mut buf = Vec::new();
             let _ = stdout.by_ref().take(limit).read_to_end(&mut buf);
             let _ = std::io::copy(&mut stdout, &mut std::io::sink());
-            buf
+            let _ = out_tx.send(buf);
         });
         let (tx, rx) = mpsc::channel::<String>();
-        let err_thread = std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
+        std::thread::spawn(move || {
+            let mut stderr = BufReader::new(stderr);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match stderr.read_until(b'\n', &mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if buf.last() == Some(&b'\n') {
+                            buf.pop();
+                        }
+                        // Nobody listens any more: keep draining all the same.
+                        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
                 }
             }
         });
         let mut tail: Vec<String> = Vec::new();
+        let keep = |tail: &mut Vec<String>, line: &str| {
+            if !line.starts_with("@nix ") && !line.trim().is_empty() {
+                tail.push(line.chars().take(400).collect());
+                if tail.len() > 20 {
+                    tail.remove(0);
+                }
+            }
+        };
         let mut cancelled = false;
         let status = loop {
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(line) => {
                     if !line.starts_with("@nix ") {
                         eprintln!("{line}");
-                        if !line.trim().is_empty() {
-                            tail.push(line.chars().take(400).collect());
-                            if tail.len() > 20 {
-                                tail.remove(0);
-                            }
-                        }
                     }
+                    keep(&mut tail, &line);
                     self.touch();
                     on_line(self, &line);
                     self.tick_at(Instant::now());
                     continue;
                 }
-                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                Err(mpsc::RecvTimeoutError::Timeout) => self.tick_at(Instant::now()),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // stderr is closed but the child runs on: wait without spinning.
+                    std::thread::sleep(Duration::from_millis(100));
                     self.tick_at(Instant::now());
                 }
             }
@@ -533,25 +561,55 @@ impl Runner {
                 let _ = kill_process_group(pgid, Signal::KILL);
             }
             match child.try_wait() {
-                Ok(Some(status)) => {
-                    // Drain what is left of stderr.
-                    while let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-                        if !line.starts_with("@nix ") && !line.trim().is_empty() {
-                            tail.push(line.chars().take(400).collect());
-                        }
-                        on_line(self, &line);
-                    }
-                    break status;
-                }
+                Ok(Some(status)) => break status,
                 Ok(None) => {}
                 Err(e) => return Err(self.fail(format!("waiting for {program}: {e}"))),
             }
         };
-        let _ = err_thread.join();
+        // Drain what is left of stderr, and collect stdout.
+        let mut out = None;
+        let mut stderr_done = false;
+        let mut deadline = Instant::now() + PIPE_GRACE;
+        let mut killed = false;
+        loop {
+            if !stderr_done {
+                match rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(line) => {
+                        keep(&mut tail, &line);
+                        on_line(self, &line);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => stderr_done = true,
+                }
+            }
+            if out.is_none() {
+                out = match out_rx.try_recv() {
+                    Ok(buf) => Some(buf),
+                    Err(mpsc::TryRecvError::Disconnected) => Some(Vec::new()),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                };
+            }
+            if stderr_done && out.is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                if killed {
+                    warn!("{program} exited, but a process it started still holds its output");
+                    break;
+                }
+                warn!("{program} exited and left processes running; stopping them");
+                let _ = kill_process_group(pgid, Signal::KILL);
+                killed = true;
+                deadline = Instant::now() + PIPE_GRACE;
+            }
+            if stderr_done {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
         if let Some(line) = self.pending.take() {
             self.write_line(line, Instant::now());
         }
-        let out = out_thread.join().unwrap_or_default();
+        let out = out.unwrap_or_default();
         if cancelled {
             return Err(Failure::Cancelled);
         }
@@ -1494,6 +1552,41 @@ mod tests {
         // Without a current index every available target app is new.
         let (new, _) = catalog_changes(None, &json!({"a": "available"}), &[]).unwrap();
         assert_eq!(new[0].name, "a");
+    }
+
+    /// A non-UTF-8 stderr line does not stop the reader: the child would die of SIGPIPE on
+    /// its next line.
+    #[test]
+    fn exec_reads_non_utf8_stderr() {
+        let d = tempfile::tempdir().unwrap();
+        let mut r = test_runner(d.path());
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            r"printf 'bad \377\n' >&2; sleep 0.3
+              i=0; while [ $i -lt 2000 ]; do echo line $i >&2; i=$((i+1)); done; echo out",
+        ]);
+        let mut lines = Vec::new();
+        let out = r
+            .exec(cmd, false, &mut |_, l| lines.push(l.to_owned()))
+            .unwrap();
+        assert_eq!(out, "out\n");
+        assert_eq!(lines[0], "bad \u{FFFD}");
+        assert_eq!(lines.len(), 2001);
+        assert_eq!(lines[2000], "line 1999");
+    }
+
+    /// A process the child leaves behind with its pipes does not hold the job forever.
+    #[test]
+    fn exec_stops_leftover_processes() {
+        let d = tempfile::tempdir().unwrap();
+        let mut r = test_runner(d.path());
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 60 & echo done"]);
+        let t0 = Instant::now();
+        let out = r.exec(cmd, false, &mut |_, _| {}).unwrap();
+        assert_eq!(out, "done\n");
+        assert!(t0.elapsed() < Duration::from_secs(30), "{:?}", t0.elapsed());
     }
 
     #[test]

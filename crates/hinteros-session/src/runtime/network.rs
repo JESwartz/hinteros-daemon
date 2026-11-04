@@ -439,11 +439,22 @@ fn has_exact<'a>(name: &str, mut raws: impl Iterator<Item = &'a [u8]>) -> bool {
     raws.any(|r| r == name.as_bytes())
 }
 
+/// The one raw SSID of `raws` that the API calls `name` (see [`named`]). When two SSIDs that
+/// are not UTF-8 show the same name, the first: forgetting both would be worse.
+fn one_named<'a>(name: &str, raws: impl Iterator<Item = &'a [u8]> + Clone) -> Option<&'a [u8]> {
+    let exact = has_exact(name, raws.clone());
+    raws.into_iter().find(|r| named(name, r, exact))
+}
+
 pub async fn forget(ctx: &Ctx, p: WifiForgetParams) -> Result<Empty, ErrorObject> {
     let conn = ctx.conn(SVC).await?;
     let saved = saved(&conn).await?;
-    let exact = has_exact(&p.ssid, saved.iter().map(|s| s.ssid.as_slice()));
-    for s in saved.into_iter().filter(|s| named(&p.ssid, &s.ssid, exact)) {
+    let Some(raw) = one_named(&p.ssid, saved.iter().map(|s| s.ssid.as_slice())).map(<[u8]>::to_vec)
+    else {
+        return Ok(Empty {});
+    };
+    // Every connection stored for that one network.
+    for s in saved.into_iter().filter(|s| s.ssid == raw) {
         let c = proxy(&conn, NM, &s.path, I_CONNECTION).await.map_err(map)?;
         c.call::<_, _, ()>("Delete", &()).await.map_err(map)?;
         info!(ssid = %p.ssid, "forgot a Wi-Fi connection");
@@ -892,6 +903,11 @@ mod tests {
         assert!(exact);
         assert!(!named(&shown, latin1, exact));
         assert!(named(&shown, shown.as_bytes(), exact));
+        // Two SSIDs that show the same name: only one is forgotten.
+        let both: [&[u8]; 3] = [b"Home", latin1, b"Caf\xe8"];
+        assert_eq!(one_named(&shown, both.into_iter()), Some(&latin1[..]));
+        assert_eq!(one_named(&shown, raws.into_iter()), Some(shown.as_bytes()));
+        assert_eq!(one_named("Work", both.into_iter()), None);
     }
 
     #[test]

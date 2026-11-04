@@ -1456,7 +1456,9 @@ Design: `hinteros-docs/design/storage.md`. Every method below is relayed as `sys
   known total can pass what the disk uses (total − free): the known segments on that filesystem,
   with their children and detailed trees, are then scaled down in proportion to fill it exactly
   (largest remainder, children still add up) and `other` is 0. Up to that, nothing is scaled.
-  The clean-up estimates, `garbage_bytes` and `profiles.list`'s `usage` stay uncompressed sizes.
+  The clean-up estimates and `garbage_bytes` are scaled by the store's factor (System and Apps
+  together), as the ring is. `profiles.list`'s `usage` stays uncompressed.
+  Per-path NAR sizes still count hard links (`nix.optimise`) once per path.
 - The result goes to `/var/lib/hinteros/storage.json` (0600) with its time: `storage.get`
   (read-only, open) returns the public part (top level, every profile's total, garbage and the
   clean-up estimates for keep 1..10); `storage.tree {id, admin_pin?}` (through the mutating gate

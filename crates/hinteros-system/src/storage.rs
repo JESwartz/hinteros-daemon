@@ -54,19 +54,26 @@ impl Stored {
     }
 }
 
-/// statvfs of `dir`, like df: total, used (total minus free blocks), free (available blocks).
-/// On btrfs it is the whole filesystem from any subvolume; available is below free by what the
-/// filesystem holds back for metadata, which [`top_level`] counts as used.
+/// statvfs of `dir`: total, free (available blocks) and used (total minus free, so the three
+/// add up, as in the ring). On btrfs it is the whole filesystem from any subvolume; available
+/// is below the free blocks by what the filesystem holds back for metadata, which counts as used
+/// here and in [`top_level`].
 pub fn disk_usage(dir: &Path) -> Option<DiskUsage> {
     let s = rustix::fs::statvfs(dir).ok()?;
     let frsize = s.f_frsize.max(1);
-    let total = s.f_blocks.saturating_mul(frsize);
-    let free_blocks = s.f_bfree.saturating_mul(frsize);
-    Some(DiskUsage {
+    Some(usage(
+        s.f_blocks.saturating_mul(frsize),
+        s.f_bavail.saturating_mul(frsize),
+    ))
+}
+
+fn usage(total: u64, available: u64) -> DiskUsage {
+    let free = available.min(total);
+    DiskUsage {
         total_bytes: total,
-        used_bytes: total.saturating_sub(free_blocks),
-        free_bytes: s.f_bavail.saturating_mul(frsize),
-    })
+        used_bytes: total - free,
+        free_bytes: free,
+    }
 }
 
 /// Write out what the kernel holds for the filesystem of `dir`. Btrfs gives freed space back when
@@ -908,10 +915,12 @@ fn scale(node: &mut StorageNode, bytes: u64) {
 /// NAR sizes and `st_blocks` are uncompressed, so on a compressed filesystem what is known can be
 /// more than the disk uses (total minus free). The known segments on the disk are then scaled
 /// down in proportion to fill exactly that, and `other` is 0: the ring still adds up to the disk.
-/// `homes` are scaled in place, with their detailed trees, so `storage.tree` agrees.
+/// `homes` are scaled in place, with their detailed trees, so `storage.tree` agrees. The store's
+/// garbage and clean-up estimates (NAR sizes too) are scaled by the store's factor (System and
+/// Apps together), so a clean-up does not promise the uncompressed size.
 pub fn top_level(
     disk: DiskUsage,
-    store: &StoreTree,
+    store: &mut StoreTree,
     homes: &mut [(StorageNode, bool)],
     media: Option<(StorageNode, bool)>,
 ) -> StorageNode {
@@ -930,6 +939,19 @@ pub fn top_level(
         }
     }
     let mut known = system.bytes + apps.bytes;
+    let raw = store.system.bytes + store.apps.bytes;
+    if known < raw {
+        let f = |b: u64| (u128::from(b) * u128::from(known) / u128::from(raw)) as u64;
+        store.garbage_bytes = f(store.garbage_bytes);
+        let estimates = &mut store.estimates;
+        for e in estimates
+            .system
+            .iter_mut()
+            .chain(estimates.profiles.iter_mut())
+        {
+            e.bytes = f(e.bytes);
+        }
+    }
     let mut root = StorageNode::new(NodeKind::Disk, 0);
     root.children.push(system);
     root.children.push(apps);
@@ -1198,7 +1220,7 @@ mod tests {
                 }],
             },
         ];
-        let t = store_tree(&facts, &system, &owners);
+        let mut t = store_tree(&facts, &system, &owners);
         sum_ok(&t.system);
         sum_ok(&t.apps);
         assert_eq!(t.garbage_bytes, 9);
@@ -1266,7 +1288,7 @@ mod tests {
             n.id = Some("p2".into());
             n
         };
-        let top = top_level(disk, &t, &mut [(home, true), (empty, true)], None);
+        let top = top_level(disk, &mut t, &mut [(home, true), (empty, true)], None);
         assert_eq!(top.bytes, 10_000);
         let kinds: Vec<NodeKind> = top.children.iter().map(|c| c.kind).collect();
         assert_eq!(
@@ -1301,6 +1323,16 @@ mod tests {
 
     fn fs(p: &str) -> Option<String> {
         filesystem_in(BTRFS, Path::new(p))
+    }
+
+    #[test]
+    fn used_and_free_add_up() {
+        // Blocks held back for metadata count as used, as in the ring.
+        let u = usage(500, 296);
+        assert_eq!((u.total_bytes, u.used_bytes, u.free_bytes), (500, 204, 296));
+        assert_eq!(usage(10, 20).used_bytes, 0);
+        let real = disk_usage(Path::new("/")).unwrap();
+        assert_eq!(real.used_bytes + real.free_bytes, real.total_bytes);
     }
 
     #[test]
@@ -1385,7 +1417,7 @@ mod tests {
             used_bytes: 5_900,
             free_bytes: 4_000,
         };
-        let s = store(
+        let mut s = store(
             deep(NodeKind::System, &[3_001, 999]),
             deep(NodeKind::Apps, &[1_000, 1_000]),
         );
@@ -1395,8 +1427,17 @@ mod tests {
             // Another disk: as it is, and none of this one's used space.
             (deep(NodeKind::Profile, &[700]), false),
         ];
+        s.garbage_bytes = 600;
+        s.estimates.system.push(CleanupEstimate {
+            keep: 1,
+            generations: 2,
+            bytes: 1_200,
+        });
         let media = (StorageNode::new(NodeKind::Media, 1_998), true);
-        let top = top_level(disk, &s, &mut homes, Some(media));
+        let top = top_level(disk, &mut s, &mut homes, Some(media));
+        // The store got half: so do its garbage and estimates.
+        assert_eq!(s.garbage_bytes, 300);
+        assert_eq!(s.estimates.system[0].bytes, 600);
         sum_ok(&top);
         for c in &top.children {
             sum_ok(c);
@@ -1424,21 +1465,21 @@ mod tests {
             used_bytes: 6_000,
             free_bytes: 4_000,
         };
-        let s = store(
+        let mut s = store(
             deep(NodeKind::System, &[3_000]),
             deep(NodeKind::Apps, &[1_000]),
         );
         // Exactly the used space.
         let mut homes = [(deep(NodeKind::Profile, &[1_500]), true)];
         let media = (StorageNode::new(NodeKind::Media, 500), true);
-        let top = top_level(disk, &s, &mut homes, Some(media));
+        let top = top_level(disk, &mut s, &mut homes, Some(media));
         assert_eq!(of_kind(&top, NodeKind::System), [3_000]);
         assert_eq!(of_kind(&top, NodeKind::Media), [500]);
         assert!(of_kind(&top, NodeKind::Other).is_empty());
         assert_eq!(top.children[0], s.system);
         // Below it: other is the rest. An empty or absent `/srv` is no segment.
         let media = (StorageNode::new(NodeKind::Media, 0), true);
-        let top = top_level(disk, &s, &mut homes, Some(media));
+        let top = top_level(disk, &mut s, &mut homes, Some(media));
         assert_eq!(of_kind(&top, NodeKind::Other), [500]);
         assert!(of_kind(&top, NodeKind::Media).is_empty());
         assert_eq!(top.bytes, 10_000);

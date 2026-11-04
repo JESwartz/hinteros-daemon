@@ -180,7 +180,7 @@ impl Runner {
                 gens: gens.into_iter().map(|(g, _)| g).collect(),
             })
             .collect();
-        let store = storage::store_tree(&facts, &system, &owners);
+        let mut store = storage::store_tree(&facts, &system, &owners);
         drop(facts);
 
         // The homes: walked in-process (cancel is checked every few thousand entries).
@@ -231,7 +231,7 @@ impl Runner {
         self.set_stage(Stage::Finishing);
         let measured_at = job::now();
         // Scales `homes` too: the detailed trees stay equal to the top level.
-        let root = storage::top_level(disk, &store, &mut homes, media);
+        let root = storage::top_level(disk, &mut store, &mut homes, media);
         let detailed: BTreeMap<String, StorageNode> = ids
             .into_iter()
             .zip(homes.into_iter().map(|(h, _)| h))

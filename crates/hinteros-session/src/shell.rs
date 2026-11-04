@@ -2566,7 +2566,7 @@ impl Shell {
                 }
                 return;
             }
-            for (action, release) in self.debounce.take_pad(&input.source) {
+            for (action, release) in self.debounce.take_before(action, &input.source) {
                 self.nav_input(&release, action, now);
             }
         } else {
@@ -3578,9 +3578,17 @@ mod tests {
         }
 
         fn input(&mut self, event: &str, value: f64) {
+            self.input_from(
+                "/org/shadowblip/InputPlumber/devices/target/dbus0",
+                event,
+                value,
+            );
+        }
+
+        fn input_from(&mut self, source: &str, event: &str, value: f64) {
             self.shell.handle(
                 Msg::Input(RawInput {
-                    source: "/org/shadowblip/InputPlumber/devices/target/dbus0".into(),
+                    source: source.into(),
                     event: event.into(),
                     value,
                 }),
@@ -6334,6 +6342,38 @@ mod tests {
         let repeats = phases.iter().filter(|p| *p == "down repeat").count();
         assert!(repeats >= 3, "{phases:?}");
         assert_eq!(phases.len(), repeats + 2, "{phases:?}");
+    }
+
+    #[test]
+    fn a_held_back_release_comes_before_another_pads_press() {
+        let mut t = T::new();
+        t.events();
+        let (p, q) = (
+            "/org/shadowblip/InputPlumber/devices/target/dbus0",
+            "/org/shadowblip/InputPlumber/devices/target/dbus1",
+        );
+        // Pad p lets go of Down; pad q presses Down 10 ms later, in p's chatter window.
+        t.input_from(p, "ui_down", 1.0);
+        t.advance(MS(100));
+        t.input_from(p, "ui_down", 0.0);
+        t.advance(MS(10));
+        t.input_from(q, "ui_down", 1.0);
+        t.advance(MS(100));
+        let phases: Vec<String> = t
+            .events()
+            .into_iter()
+            .filter(|(n, _)| *n == EventName::InputNav)
+            .map(|(_, p)| {
+                format!(
+                    "{} {}",
+                    p["action"].as_str().unwrap(),
+                    p["phase"].as_str().unwrap()
+                )
+            })
+            .collect();
+        // q still holds Down: its press comes last.
+        assert_eq!(phases, ["down press", "down release", "down press"]);
+        assert!(t.shell.held.contains(&NavAction::Down));
     }
 
     #[test]

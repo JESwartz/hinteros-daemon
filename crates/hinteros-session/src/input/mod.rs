@@ -304,7 +304,8 @@ impl Repeat {
 /// press/release pairs. So a direction's release is held back for `window`: a press of the
 /// same direction on the same pad in that time is chatter, and both are dropped (the hold goes
 /// on; a repeat it stopped goes on too). Otherwise the release is passed on when the time is
-/// up, or at once when that pad presses another direction. The repeat itself stops at the
+/// up, or at once when that pad presses another direction or another pad presses the same one
+/// (so the release still comes before the new hold). The repeat itself stops at the
 /// release (the caller stops it), so a real release never repeats once more. Nobody presses
 /// the same D-pad direction twice within a few tens of milliseconds.
 #[derive(Debug)]
@@ -362,9 +363,10 @@ impl Debounce {
             .map(|p| p.repeat)
     }
 
-    /// The releases held back for `source` (to pass on before its next press), oldest first.
-    pub fn take_pad(&mut self, source: &str) -> Vec<(NavAction, RawInput)> {
-        self.take(|(_, s), _| s == source)
+    /// The releases to pass on before a press of `action` on `source` that is not chatter,
+    /// oldest first: all of that pad's, and those of `action` on any other pad.
+    pub fn take_before(&mut self, action: NavAction, source: &str) -> Vec<(NavAction, RawInput)> {
+        self.take(|(a, s), _| s == source || *a == action)
     }
 
     /// The releases whose time is up, oldest first.
@@ -527,9 +529,17 @@ mod tests {
         // stay.
         assert!(d.hold_release(l, &raw("p", "ui_left"), t, None));
         assert!(d.hold_release(r, &raw("q", "ui_right"), t + ms(1), None));
-        assert_eq!(d.chatter(r, "p"), None);
-        assert_eq!(d.take_pad("p"), [(l, raw("p", "ui_left"))]);
+        assert_eq!(d.chatter(NavAction::Up, "p"), None);
+        assert_eq!(
+            d.take_before(NavAction::Up, "p"),
+            [(l, raw("p", "ui_left"))]
+        );
         assert_eq!(d.deadline(), Some(t + ms(41)));
+        // The same direction on another pad is not chatter, and takes that release first: it
+        // comes before the new hold.
+        assert_eq!(d.chatter(r, "s"), None);
+        assert_eq!(d.take_before(r, "s"), [(r, raw("q", "ui_right"))]);
+        assert_eq!(d.deadline(), None);
         // Buttons, and no window: never held back.
         let mut off = Debounce::new(Duration::ZERO);
         assert!(!off.hold_release(l, &raw("p", "ui_left"), t0, None));

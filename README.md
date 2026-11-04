@@ -78,6 +78,8 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   InputPlumber turns the left stick into directions at one
   threshold (0.60) without hysteresis, so a direction re-pressed within
   `[input] direction_debounce_ms` (40) of its release is chatter and dropped with its release.
+  A held-back release still comes before the next press on that pad, or of that direction on
+  any pad.
 - **Apps** (`apps.rs`, `shell.rs`): `apps.launch` runs a command, or hands a
   `steam://rungameid/<id>` URL to `steam -silent`, and tracks it (`app_started`,
   `app_exited`, `focus_changed`). A command app has exited when its process tree has; a Steam

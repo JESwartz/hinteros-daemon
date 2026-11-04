@@ -214,6 +214,9 @@ pub struct Account {
     pub user: String,
 }
 
+/// The highest profile number ([`is_profile_id`]).
+pub const MAX_PROFILE_NUMBER: u32 = 999;
+
 /// `^p[1-9][0-9]{0,2}$`: a profile id.
 pub fn is_profile_id(s: &str) -> bool {
     let b = s.as_bytes();

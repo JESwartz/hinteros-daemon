@@ -6,7 +6,7 @@
 //! neither. `profiles.json` is root-only, written atomically, and never rolled back (names and
 //! the counter survive a system rollback).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use hinteros_api::common::{check_file_version, check_version};
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::fsutil;
-use crate::state::{self, Account, State};
+use crate::state::{self, Account, MAX_PROFILE_NUMBER, State};
 use crate::users::Users;
 
 pub const FILE_VERSION: u32 = 1;
@@ -152,10 +152,10 @@ impl ProfilesFile {
     }
 
     /// Take the next profile id: never below one plus the highest number in `state.json`,
-    /// `profiles.json` or the user database, and the counter only increases.
+    /// `profiles.json` or the user database, and the counter only increases. Past the last
+    /// id (`p999`), the lowest number none of them uses (a removed profile's home is gone).
     pub fn take_id(&mut self, state: &State, users: &Users) -> String {
-        let mut n = self.next.max(1);
-        let highest = state
+        let used: BTreeSet<u32> = state
             .accounts()
             .iter()
             .filter_map(|a| state::profile_number(&a.id))
@@ -165,11 +165,15 @@ impl ProfilesFile {
                     .filter_map(|id| state::profile_number(id)),
             )
             .chain(users.profile_numbers())
-            .max()
-            .unwrap_or(0);
-        n = n.max(highest + 1);
-        self.next = n + 1;
-        format!("p{n}")
+            .collect();
+        let highest = used.last().copied().unwrap_or(0);
+        let n = self.next.max(1).max(highest + 1);
+        if n <= MAX_PROFILE_NUMBER {
+            self.next = n + 1;
+            return format!("p{n}");
+        }
+        let free = (1..=MAX_PROFILE_NUMBER).find(|k| !used.contains(k));
+        format!("p{}", free.unwrap_or(n))
     }
 }
 
@@ -368,6 +372,14 @@ mod tests {
         f.profiles
             .insert("p9".into(), test_file(&state).profiles["p1"].clone());
         assert_eq!(f.take_id(&state, &Users::default()), "p10");
+        // Past p999: the lowest free number, so a profile can still be created.
+        let mut f = ProfilesFile {
+            next: 999,
+            ..Default::default()
+        };
+        assert_eq!(f.take_id(&state, &Users::default()), "p999");
+        assert_eq!(f.take_id(&state, &Users::default()), "p2", "p1 is in use");
+        assert_eq!(f.take_id(&state, &users), "p2");
     }
 
     #[test]

@@ -139,6 +139,11 @@ pub enum Msg {
         focus: FieldFocus,
         clicked: bool,
     },
+    /// A text field focus reporter's connection ended (after its last [`Msg::TextFocus`]): its
+    /// app is no longer remembered.
+    ReporterGone {
+        reporter: u64,
+    },
 }
 
 /// The methods the shell answers (the connection handles the rest).
@@ -534,7 +539,8 @@ pub struct Shell {
     switching: bool,
     /// Launches of apps that are still closing.
     waiting: Vec<WaitingLaunch>,
-    /// The app of each text field focus reporter ([`Msg::TextFocus`]) that had one.
+    /// The app of each text field focus reporter ([`Msg::TextFocus`]) that had one, until its
+    /// connection ends ([`Msg::ReporterGone`]) or the app exits.
     reporters: BTreeMap<u64, String>,
     /// The Steam library watcher's last scan ([`crate::steam::watch`]).
     games: GameCache,
@@ -723,6 +729,9 @@ impl Shell {
                 focus,
                 clicked,
             } => self.text_focus(pid, reporter, focus, clicked, now),
+            Msg::ReporterGone { reporter } => {
+                self.reporters.remove(&reporter);
+            }
         }
         self.retry_launches(now);
     }
@@ -6594,6 +6603,9 @@ mod tests {
         t.procs.lock().unwrap().trees.insert(root, vec![root + 1]);
         t.text_focus(555, FieldFocus::None);
         assert!(t.shell.text_fields.is_empty());
+        // The app stays open; the host comes and goes many times: no entry is kept for it.
+        t.shell.handle(Msg::ReporterGone { reporter: 1 }, t.now);
+        assert!(t.shell.reporters.is_empty());
     }
 
     #[test]

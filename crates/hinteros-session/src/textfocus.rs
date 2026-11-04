@@ -321,6 +321,7 @@ async fn connection(stream: tokio::net::UnixStream, shell: mpsc::UnboundedSender
             clicked: false,
         });
     }
+    let _ = shell.send(Msg::ReporterGone { reporter });
     debug!(?pid, "osk.sock: reporter disconnected");
 }
 
@@ -506,6 +507,13 @@ mod tests {
         }
     }
 
+    async fn next_gone(rx: &mut mpsc::UnboundedReceiver<Msg>) -> u64 {
+        match rx.recv().await.unwrap() {
+            Msg::ReporterGone { reporter } => reporter,
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn daemon_side_reports_focus_and_a_closed_connection() {
         let dir = tempfile::tempdir().unwrap();
@@ -544,9 +552,11 @@ mod tests {
         }
         drop(d);
         assert_eq!(next_focus(&mut rx).await, (me, b, FieldFocus::None));
+        assert_eq!(next_gone(&mut rx).await, b);
 
         drop(c);
         assert_eq!(next_focus(&mut rx).await, (me, a, FieldFocus::None));
+        assert_eq!(next_gone(&mut rx).await, a);
         server.abort();
     }
 }

@@ -146,7 +146,7 @@ impl Runner {
         if !up {
             return Err(self.failed("Jellyfin does not answer", "unreachable"));
         }
-        jellyfin::Client::new(&files, addr, HTTP_TIMEOUT)
+        jellyfin::Client::new(&files, addr, &paths.users, HTTP_TIMEOUT)
             .map_err(|e| self.failed(e.to_string(), e.reason()))
     }
 

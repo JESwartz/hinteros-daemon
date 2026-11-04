@@ -5,7 +5,9 @@
 //! `/var/lib/hinteros/services/jellyfin-server/` (0700 root): `setup-done` (the first-run wizard is
 //! done), `admin-password` (user `admin`) and `api-key`. API keys count as administrator in
 //! Jellyfin and are sent as `Authorization: MediaBrowser Token="<key>"` (Jellyfin 10.11+ refuses
-//! the legacy `X-Emby-Token`). JSON is PascalCase; ids are 32 lowercase hex digits.
+//! the legacy `X-Emby-Token`). JSON is PascalCase; ids are 32 lowercase hex digits. The key,
+//! passwords and tokens go only to a server that runs as the [`USER`] account (port 8096 is not
+//! privileged: while Jellyfin is stopped, any local process could listen on it).
 //!
 //! Profile users: `users.json` (0600) maps a profile id to `{jellyfin_user_id, name, password}`.
 //! [`sync`] makes Jellyfin match the profiles: a user for every profile (named after the
@@ -32,6 +34,8 @@ use crate::fsutil;
 pub const ID: &str = "jellyfin-server";
 /// The administrator the setup unit makes.
 pub const ADMIN_USER: &str = "admin";
+/// The system account Jellyfin runs as (NixOS `services.jellyfin.user`).
+pub const USER: &str = "jellyfin";
 /// Longest library name.
 pub const MAX_LIBRARY_NAME: usize = 64;
 
@@ -212,17 +216,30 @@ pub trait Api {
 pub struct Client {
     pub addr: SocketAddr,
     key: String,
+    /// Jellyfin's uid: requests go only to a server running as it.
+    owner: u32,
     pub timeout: Duration,
 }
 
 impl Client {
-    /// A client once setup is done (`Err(NotReady)` before).
-    pub fn new(files: &Files, addr: SocketAddr, timeout: Duration) -> Result<Self, Error> {
+    /// A client once setup is done (`Err(NotReady)` before, or without a [`USER`] account).
+    pub fn new(
+        files: &Files,
+        addr: SocketAddr,
+        users: &crate::users::Users,
+        timeout: Duration,
+    ) -> Result<Self, Error> {
         if !files.setup_done() {
             return Err(Error::NotReady);
         }
         let key = files.api_key().ok_or(Error::NotReady)?;
-        Ok(Self { addr, key, timeout })
+        let owner = users.by_name(USER).ok_or(Error::NotReady)?.uid;
+        Ok(Self {
+            addr,
+            key,
+            owner,
+            timeout,
+        })
     }
 
     fn call(
@@ -234,7 +251,7 @@ impl Client {
         let auth = format!("MediaBrowser Token=\"{}\"", self.key);
         let bytes = body.map(|b| b.to_string().into_bytes());
         let r = http::request(
-            Target::Tcp(self.addr),
+            Target::TcpOwnedBy(self.addr, self.owner),
             method,
             path,
             &[("Authorization", &auth), ("Accept", "application/json")],
@@ -682,7 +699,7 @@ impl Client {
     /// Jellyfin's server id (`GET /System/Info/Public`).
     pub fn server_id(&self) -> Result<String, Error> {
         let r = http::request(
-            Target::Tcp(self.addr),
+            Target::TcpOwnedBy(self.addr, self.owner),
             "GET",
             "/System/Info/Public",
             &[],
@@ -703,7 +720,7 @@ impl Client {
     pub fn token_valid(&self, token: &str) -> Result<bool, Error> {
         let auth = format!("MediaBrowser Token=\"{token}\"");
         let r = http::request(
-            Target::Tcp(self.addr),
+            Target::TcpOwnedBy(self.addr, self.owner),
             "GET",
             "/System/Info",
             &[("Authorization", &auth)],
@@ -732,7 +749,7 @@ impl Client {
         );
         let body = json!({ "Username": user, "Pw": password }).to_string();
         let r = http::request(
-            Target::Tcp(self.addr),
+            Target::TcpOwnedBy(self.addr, self.owner),
             "POST",
             "/Users/AuthenticateByName",
             &[("Authorization", &auth), ("Accept", "application/json")],
@@ -844,7 +861,12 @@ pub fn sync_if_ready(paths: &crate::config::Paths, server: &crate::config::Serve
         return;
     }
     let files = Files::new(&paths.services_dir());
-    match Client::new(&files, server.jellyfin, Duration::from_secs(5)) {
+    match Client::new(
+        &files,
+        server.jellyfin,
+        &paths.users,
+        Duration::from_secs(5),
+    ) {
         Ok(c) => match profiles(paths).and_then(|p| sync(&c, &files, &p)) {
             Ok(s) if s != Synced::default() => info!(?s, "Jellyfin users synced"),
             Ok(_) => {}

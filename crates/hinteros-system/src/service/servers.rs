@@ -230,6 +230,7 @@ fn check_service_ids(ids: &[String]) -> Result<(), ErrorObject> {
 struct DetailCtx {
     server: ServerPaths,
     services_dir: std::path::PathBuf,
+    users: crate::users::Users,
     local_ip: Option<Ipv4Addr>,
     port: Option<u16>,
 }
@@ -243,7 +244,7 @@ impl DetailCtx {
 
 fn jellyfin_detail(c: &DetailCtx) -> JellyfinDetail {
     let files = jellyfin::Files::new(&c.services_dir);
-    let live = jellyfin::Client::new(&files, c.server.jellyfin, READ_TIMEOUT)
+    let live = jellyfin::Client::new(&files, c.server.jellyfin, &c.users, READ_TIMEOUT)
         .and_then(|cl| cl.virtual_folders());
     // Live, else what the last job or read saw (Jellyfin restarting, an update).
     let folders = match live {
@@ -357,6 +358,7 @@ impl Service {
                 let ctx = DetailCtx {
                     server: self.server_paths(),
                     services_dir: self.paths.services_dir(),
+                    users: self.paths.users.clone(),
                     local_ip,
                     port: entry.and_then(|e| e.tcp_port()),
                 };
@@ -458,7 +460,12 @@ impl Service {
         let profile = id.clone();
         let made = tokio::task::spawn_blocking(move || {
             let files = jellyfin::Files::new(&paths.services_dir());
-            let c = jellyfin::Client::new(&files, paths.server.jellyfin, Duration::from_secs(5))?;
+            let c = jellyfin::Client::new(
+                &files,
+                paths.server.jellyfin,
+                &paths.users,
+                Duration::from_secs(5),
+            )?;
             jellyfin::client_token(&c, &files, &jellyfin::profiles(&paths)?, &profile)
         })
         .await
@@ -876,8 +883,9 @@ impl Service {
     async fn jellyfin_folders(&self) -> Option<Vec<jellyfin::VirtualFolder>> {
         let files = jellyfin::Files::new(&self.paths.services_dir());
         let addr = self.paths.server.jellyfin;
+        let users = self.paths.users.clone();
         tokio::task::spawn_blocking(move || {
-            jellyfin::Client::new(&files, addr, READ_TIMEOUT)
+            jellyfin::Client::new(&files, addr, &users, READ_TIMEOUT)
                 .and_then(|c| c.virtual_folders())
                 .ok()
         })
@@ -906,9 +914,12 @@ fn reveal(paths: &crate::config::Paths) -> JellyfinUsersRevealResult {
     let files = jellyfin::Files::new(&paths.services_dir());
     let profiles = match jellyfin::profiles(paths) {
         Ok(p) => {
-            if let Ok(c) =
-                jellyfin::Client::new(&files, paths.server.jellyfin, Duration::from_secs(3))
-                && let Err(e) = jellyfin::sync(&c, &files, &p)
+            if let Ok(c) = jellyfin::Client::new(
+                &files,
+                paths.server.jellyfin,
+                &paths.users,
+                Duration::from_secs(3),
+            ) && let Err(e) = jellyfin::sync(&c, &files, &p)
             {
                 warn!("Jellyfin users not synced: {e}");
             }

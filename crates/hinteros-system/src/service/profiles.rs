@@ -246,7 +246,8 @@ impl ProfilesRequest {
 
 impl Service {
     /// Check `pin` against profile `id`'s with the shared backoff. A profile without a PIN yet
-    /// passes. The audit records which PIN and the outcome, never the PIN.
+    /// passes; for the admin PIN only when the caller is the admin profile. The audit records
+    /// which PIN and the outcome, never the PIN.
     pub(super) async fn check_pin(
         &self,
         uid: u32,
@@ -257,6 +258,17 @@ impl Service {
     ) -> Result<(), ErrorObject> {
         let pins = Pins::new(self.paths.pins_dir());
         if !pins.is_set(id) {
+            // The admin PIN is not set yet (after `reset-pin`): only the admin profile itself
+            // passes (to set one); no other profile acts as the admin meanwhile.
+            if which == Which::Admin && !self.is_own_profile(uid, id) {
+                self.audit
+                    .pin_check(uid, method, which.name(), "not_set_refused");
+                return Err(pin_required(
+                    which,
+                    None,
+                    "the admin profile has no PIN yet",
+                ));
+            }
             self.audit.pin_check(uid, method, which.name(), "not_set");
             return Ok(());
         }
@@ -305,8 +317,9 @@ impl Service {
     /// update, from every profile, the guest's included). Like every admin
     /// action: `pin_required {pin: admin}` when it is missing or wrong (no backoff, J4; ten
     /// wrong tries a boot, then `reboot_required`), and
-    /// when there is no admin profile (first-boot mode); an admin profile without a PIN yet
-    /// passes. Exempt: root (the box's administrator, e.g. a terminal or a bootstrap tool; root
+    /// when there is no admin profile (first-boot mode, or a `profiles.json` that cannot be
+    /// read); an admin profile without a PIN yet passes only for itself. Exempt: root (the box's
+    /// administrator, e.g. a terminal or a bootstrap tool; root
     /// is past every other check too).
     pub(super) async fn check_box_admin(
         &self,
@@ -319,12 +332,19 @@ impl Service {
         }
         let (state, _) = self.load_state()?;
         let file = self.profiles_file();
-        let admin = self.admin_id(&state, &file).ok_or_else(|| {
+        let admin = self.admin_for_pin(&state, &file).inspect_err(|_| {
             self.audit
                 .pin_check(uid, method, Which::Admin.name(), "no_admin");
-            pin_required(Which::Admin, None, "there is no admin profile")
         })?;
         self.check_pin(uid, method, &admin, pin, Which::Admin).await
+    }
+
+    /// Whether `uid` is profile `id`'s account.
+    fn is_own_profile(&self, uid: u32, id: &str) -> bool {
+        self.load_state().is_ok_and(|(state, _)| {
+            let caller = self.caller(uid, &state);
+            caller.role == Role::Profile && caller.id.as_deref() == Some(id)
+        })
     }
 
     /// Whether `id` is the admin profile (of the running accounts).
@@ -359,15 +379,20 @@ impl Service {
             .send((hinteros_api::system::EventName::ProfilesChanged, json!({})));
     }
 
-    fn save_file(&self, file: &ProfilesFile) -> Result<(), ErrorObject> {
-        file.save(&self.paths.profiles_json()).map_err(internal)
+    /// Change `profiles.json` under its lock ([`ProfilesFile::update`]): `f` sees it as it is
+    /// now, after any await of the caller. A file that cannot be read is not overwritten.
+    fn update_file<T>(
+        &self,
+        f: impl FnOnce(&mut ProfilesFile) -> Result<T, ErrorObject>,
+    ) -> Result<T, ErrorObject> {
+        ProfilesFile::update(&self.paths.profiles_json(), f).map_err(internal)?
     }
 
-    /// The caller's own profile (id, metadata).
-    fn own_profile(&self, uid: u32, state: &State) -> Result<(String, ProfilesFile), ErrorObject> {
+    /// The caller's own profile id.
+    fn own_profile(&self, uid: u32, state: &State) -> Result<String, ErrorObject> {
         let caller = self.caller(uid, state);
         match (caller.role, caller.id) {
-            (Role::Profile, Some(id)) => Ok((id, self.profiles_file())),
+            (Role::Profile, Some(id)) => Ok(id),
             _ => Err(profiles::not_a_profile(PROFILES_ACTION)),
         }
     }
@@ -375,6 +400,19 @@ impl Service {
     /// The admin profile's id, if there is one.
     fn admin_id(&self, state: &State, file: &ProfilesFile) -> Option<String> {
         file.admin(state).map(|(a, _)| a.id)
+    }
+
+    /// The admin profile's id for an admin-PIN check: `pin_required {pin: admin}` without one
+    /// (first-boot mode, or a `profiles.json` that cannot be read).
+    fn admin_for_pin(&self, state: &State, file: &ProfilesFile) -> Result<String, ErrorObject> {
+        self.admin_id(state, file).ok_or_else(|| {
+            let why = if file.unreadable {
+                "the profiles file cannot be read"
+            } else {
+                "there is no admin profile"
+            };
+            pin_required(Which::Admin, None, why)
+        })
     }
 
     pub(super) async fn profiles_list(
@@ -491,7 +529,7 @@ impl Service {
                 if p.revision != revision {
                     return Err(state_conflict());
                 }
-                let mut file = self.profiles_file();
+                let file = self.profiles_file();
                 if file.visible(&state).len() >= MAX_PROFILES
                     || state.profiles.len() >= MAX_PROFILES
                 {
@@ -506,9 +544,8 @@ impl Service {
                     return Err(e);
                 }
                 let name = profiles::check_name(&p.name)?;
-                let id = file.take_id(&state, &self.users);
                 // The counter keeps the number even if the job fails.
-                self.save_file(&file)?;
+                let id = self.update_file(|file| Ok(file.take_id(&state, &self.users)))?;
                 let user = state::user_for(&id);
                 let mut new = state.clone();
                 new.profiles.push(Profile {
@@ -558,13 +595,13 @@ impl Service {
             R::SetupAdmin(p) => {
                 let (state, _) = self.load_state()?;
                 let caller = self.caller(uid, &state);
-                let mut file = self.profiles_file();
                 let (Role::Spare, Some(id)) = (&caller.role, &caller.id) else {
                     return Err(profiles::not_a_profile(PROFILES_ACTION));
                 };
-                if !file.first_boot(&state) {
+                if !self.profiles_file().first_boot(&state) {
                     return Err(profiles::not_a_profile(PROFILES_ACTION));
                 }
+                let name = profiles::check_name(&p.name)?;
                 let pin = Zeroizing::new(p.pin.clone());
                 let pins = Pins::new(self.paths.pins_dir());
                 let id2 = id.clone();
@@ -572,20 +609,26 @@ impl Service {
                     .await
                     .map_err(internal)?
                     .map_err(internal)?;
-                file.profiles.insert(
-                    id.clone(),
-                    Meta {
-                        name: profiles::check_name(&p.name)?,
-                        color: p.color.unwrap_or_else(|| profiles::COLORS[0].into()),
-                        admin: true,
-                        locked: p.locked,
-                        created_at: job::now(),
-                        last_used_at: Some(job::now()),
-                        appearance: Appearance::default(),
-                        extra: Default::default(),
-                    },
-                );
-                self.save_file(&file)?;
+                // Checked again under the lock: another setup_admin may have won meanwhile.
+                self.update_file(|file| {
+                    if !file.first_boot(&state) || file.profiles.contains_key(id) {
+                        return Err(profiles::not_a_profile(PROFILES_ACTION));
+                    }
+                    file.profiles.insert(
+                        id.clone(),
+                        Meta {
+                            name,
+                            color: p.color.unwrap_or_else(|| profiles::COLORS[0].into()),
+                            admin: true,
+                            locked: p.locked,
+                            created_at: job::now(),
+                            last_used_at: Some(job::now()),
+                            appearance: Appearance::default(),
+                            extra: Default::default(),
+                        },
+                    );
+                    Ok(())
+                })?;
                 info!(profile = %id, "admin profile created (first boot)");
                 self.profiles_changed();
                 // Its apps: the starter env, as soon as the box is idle.
@@ -595,20 +638,25 @@ impl Service {
             R::Rename(p) => {
                 let (state, _) = self.load_state()?;
                 let caller = self.caller(uid, &state);
-                let mut file = self.profiles_file();
+                let file = self.profiles_file();
                 if !file.visible(&state).iter().any(|(a, _)| a.id == p.id) {
                     return Err(ErrorObject::new(ErrorCode::NotFound, "no such profile"));
                 }
+                let name = profiles::check_name(&p.name)?;
                 if caller.id.as_deref() != Some(&p.id) || caller.role != Role::Profile {
-                    let admin = self.admin_id(&state, &file).ok_or_else(|| {
-                        pin_required(Which::Admin, None, "there is no admin profile")
-                    })?;
+                    let admin = self.admin_for_pin(&state, &file)?;
                     self.check_pin(uid, method, &admin, p.pin.as_deref(), Which::Admin)
                         .await?;
                 }
-                file.profiles.get_mut(&p.id).expect("visible").name =
-                    profiles::check_name(&p.name)?;
-                self.save_file(&file)?;
+                // Only the name changes, in the file as it is after the PIN check.
+                self.update_file(|file| {
+                    let m = file
+                        .profiles
+                        .get_mut(&p.id)
+                        .ok_or_else(|| ErrorObject::new(ErrorCode::NotFound, "no such profile"))?;
+                    m.name = name;
+                    Ok(())
+                })?;
                 self.profiles_changed();
                 // The profile's Jellyfin user follows the new name.
                 self.jellyfin_sync_later();
@@ -616,27 +664,32 @@ impl Service {
             }
             R::SetAppearance(p) => {
                 let (state, _) = self.load_state()?;
-                let (id, mut file) = self.own_profile(uid, &state)?;
-                let m = file.profiles.get_mut(&id).expect("own profile");
-                if let Some(c) = p.color {
-                    m.color = c;
-                }
-                if let Some(s) = p.text_scale {
-                    m.appearance.text_scale = s;
-                }
-                if let Some(b) = p.high_contrast {
-                    m.appearance.high_contrast = b;
-                }
-                if let Some(b) = p.reduce_motion {
-                    m.appearance.reduce_motion = b;
-                }
-                self.save_file(&file)?;
+                let id = self.own_profile(uid, &state)?;
+                self.update_file(|file| {
+                    let m = file
+                        .profiles
+                        .get_mut(&id)
+                        .ok_or_else(|| profiles::not_a_profile(PROFILES_ACTION))?;
+                    if let Some(c) = p.color {
+                        m.color = c;
+                    }
+                    if let Some(s) = p.text_scale {
+                        m.appearance.text_scale = s;
+                    }
+                    if let Some(b) = p.high_contrast {
+                        m.appearance.high_contrast = b;
+                    }
+                    if let Some(b) = p.reduce_motion {
+                        m.appearance.reduce_motion = b;
+                    }
+                    Ok(())
+                })?;
                 self.profiles_changed();
                 empty()
             }
             R::SetPin(p) => {
                 let (state, _) = self.load_state()?;
-                let (id, _) = self.own_profile(uid, &state)?;
+                let id = self.own_profile(uid, &state)?;
                 self.check_pin(uid, method, &id, p.current_pin.as_deref(), Which::Own)
                     .await?;
                 let pin = Zeroizing::new(p.pin.clone());
@@ -650,11 +703,17 @@ impl Service {
             }
             R::SetLocked(p) => {
                 let (state, _) = self.load_state()?;
-                let (id, mut file) = self.own_profile(uid, &state)?;
+                let id = self.own_profile(uid, &state)?;
                 self.check_pin(uid, method, &id, Some(&p.pin), Which::Own)
                     .await?;
-                file.profiles.get_mut(&id).expect("own profile").locked = p.locked;
-                self.save_file(&file)?;
+                self.update_file(|file| {
+                    let m = file
+                        .profiles
+                        .get_mut(&id)
+                        .ok_or_else(|| profiles::not_a_profile(PROFILES_ACTION))?;
+                    m.locked = p.locked;
+                    Ok(())
+                })?;
                 self.profiles_changed();
                 empty()
             }
@@ -676,9 +735,7 @@ impl Service {
                     .await
                     .map_err(|d| d.error(RECOVER_ACTION))?;
                 } else {
-                    let admin = self.admin_id(&state, &file).ok_or_else(|| {
-                        pin_required(Which::Admin, None, "there is no admin profile")
-                    })?;
+                    let admin = self.admin_for_pin(&state, &file)?;
                     self.check_pin(uid, method, &admin, p.admin_pin.as_deref(), Which::Admin)
                         .await?;
                 }
@@ -716,9 +773,7 @@ impl Service {
                     self.check_pin(uid, method, &p.id, Some(&p.pin), Which::Own)
                         .await?;
                 } else {
-                    let admin = self.admin_id(&state, &file).ok_or_else(|| {
-                        pin_required(Which::Admin, None, "there is no admin profile")
-                    })?;
+                    let admin = self.admin_for_pin(&state, &file)?;
                     self.check_pin(uid, method, &admin, Some(&p.pin), Which::Admin)
                         .await?;
                 }
@@ -843,7 +898,7 @@ impl Service {
             }
             R::Unlock(p) => {
                 let (state, _) = self.load_state()?;
-                let (id, _) = self.own_profile(uid, &state)?;
+                let id = self.own_profile(uid, &state)?;
                 self.check_pin(uid, method, &id, Some(&p.pin), Which::Own)
                     .await?;
                 empty()
@@ -851,9 +906,7 @@ impl Service {
             R::GuestSet(p) => {
                 let (state, _) = self.load_state()?;
                 let file = self.profiles_file();
-                let admin = self
-                    .admin_id(&state, &file)
-                    .ok_or_else(|| pin_required(Which::Admin, None, "there is no admin profile"))?;
+                let admin = self.admin_for_pin(&state, &file)?;
                 self.check_pin(uid, method, &admin, Some(&p.admin_pin), Which::Admin)
                     .await?;
                 if state.guest_enabled() == p.enabled {

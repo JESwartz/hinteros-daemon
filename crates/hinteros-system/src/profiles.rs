@@ -4,7 +4,12 @@
 //! An **account** is a `state.json` profile entry (a NixOS user); it is a **profile** once
 //! `profiles.json` has its metadata, otherwise a **spare**. The guest (`hinteros-guest`) is
 //! neither. `profiles.json` is root-only, written atomically, and never rolled back (names and
-//! the counter survive a system rollback).
+//! the counter survive a system rollback). Every writer (the service, jobs, the PAM helper)
+//! changes it in [`ProfilesFile::update`], under one `flock`.
+//!
+//! A file this binary cannot read (damaged, or written by a later version before a rollback)
+//! fails closed ([`ProfilesFile::load_or_locked`]): no admin, no first-boot mode, no spares, so
+//! every PIN-protected action is refused, and nothing overwrites it. Recovery is from the console.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -13,6 +18,7 @@ use hinteros_api::common::{check_file_version, check_version};
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracing::warn;
 
 use crate::fsutil;
 use crate::state::{self, Account, State};
@@ -76,6 +82,9 @@ pub struct ProfilesFile {
     pub profiles: BTreeMap<String, Meta>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+    /// The file exists but cannot be read: locked down (see the module docs). Never saved.
+    #[serde(skip)]
+    pub unreadable: bool,
 }
 
 impl Default for ProfilesFile {
@@ -85,6 +94,7 @@ impl Default for ProfilesFile {
             next: 1,
             profiles: BTreeMap::new(),
             extra: BTreeMap::new(),
+            unreadable: false,
         }
     }
 }
@@ -108,11 +118,41 @@ impl ProfilesFile {
         }
     }
 
-    pub fn exists(path: &Path) -> bool {
-        path.exists()
+    /// [`Self::load`] for the checks: a file that cannot be read is an empty, locked-down one
+    /// ([`Self::unreadable`]): never first-boot mode, no admin, no spares, never saved.
+    pub fn load_or_locked(path: &Path) -> Self {
+        Self::load(path).unwrap_or_else(|e| {
+            warn!("{e}; PIN-protected actions are refused until it is fixed");
+            Self {
+                unreadable: true,
+                ..Self::default()
+            }
+        })
+    }
+
+    /// Read-modify-write under an exclusive `flock` (`profiles.json.lock`), so writers in other
+    /// tasks and processes never lose each other's changes. `f` sees the file as it is now; an
+    /// `Err` from it saves nothing. A file that cannot be read is never overwritten.
+    pub fn update<T, E>(
+        path: &Path,
+        f: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<Result<T, E>, std::io::Error> {
+        let _lock = fsutil::lock_beside(path)?;
+        let mut file = Self::load(path)?;
+        let out = f(&mut file);
+        if out.is_ok() {
+            file.save(path)?;
+        }
+        Ok(out)
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if self.unreadable {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{}: cannot be read; not overwritten", path.display()),
+            ));
+        }
         check_file_version(path, FILE_VERSION)?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -137,13 +177,17 @@ impl ProfilesFile {
         self.visible(state).into_iter().find(|(_, m)| m.admin)
     }
 
-    /// No admin profile exists: first-boot mode.
+    /// No admin profile exists: first-boot mode (never while the file cannot be read).
     pub fn first_boot(&self, state: &State) -> bool {
-        self.admin(state).is_none()
+        !self.unreadable && self.admin(state).is_none()
     }
 
-    /// The accounts without metadata.
+    /// The accounts without metadata (none while the file cannot be read: the greeter offers
+    /// no spare).
     pub fn spares(&self, state: &State) -> Vec<Account> {
+        if self.unreadable {
+            return Vec::new();
+        }
         state
             .accounts()
             .into_iter()
@@ -380,6 +424,73 @@ mod tests {
         assert!(e.to_string().contains("has version 2"), "{e}");
         assert!(ProfilesFile::default().save(&path).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_locked_down_and_kept() {
+        let state = st(
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],
+               "profiles":[{"id":"p1"},{"id":"p2"}]}"#,
+        );
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("profiles.json");
+        for bad in [
+            r#"{"version":2,"next":1,"profiles":{}}"#,
+            "{\"version\":1,\"ne",
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            let f = ProfilesFile::load_or_locked(&path);
+            assert!(f.unreadable, "{bad}");
+            // Not first-boot mode: no spare may become the admin; no admin either.
+            assert!(!f.first_boot(&state));
+            assert!(f.admin(&state).is_none());
+            assert!(f.spares(&state).is_empty());
+            assert!(f.save(&path).is_err());
+            assert!(ProfilesFile::update(&path, |_| Ok::<_, ()>(())).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), bad);
+        }
+        // A missing file is first-boot mode.
+        std::fs::remove_file(&path).unwrap();
+        let f = ProfilesFile::load_or_locked(&path);
+        assert!(!f.unreadable && f.first_boot(&state));
+        assert_eq!(f.spares(&state).len(), 2);
+    }
+
+    #[test]
+    fn updates_from_many_writers_are_all_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("profiles.json");
+        let state = st(
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],
+               "profiles":[{"id":"p1"}]}"#,
+        );
+        let meta = test_file(&state).profiles["p1"].clone();
+        let threads: Vec<_> = (1..=8)
+            .map(|i| {
+                let (path, meta) = (path.clone(), meta.clone());
+                std::thread::spawn(move || {
+                    ProfilesFile::update(&path, |f| {
+                        // A slow change: without the lock, writers would overwrite each other.
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        f.profiles.insert(format!("p{i}"), meta);
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap()
+                    .unwrap();
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(ProfilesFile::load(&path).unwrap().profiles.len(), 8);
+        // An Err from the change saves nothing.
+        let r = ProfilesFile::update(&path, |f| {
+            f.profiles.clear();
+            Err::<(), _>("no")
+        });
+        assert_eq!(r.unwrap(), Err("no"));
+        assert_eq!(ProfilesFile::load(&path).unwrap().profiles.len(), 8);
     }
 
     #[test]

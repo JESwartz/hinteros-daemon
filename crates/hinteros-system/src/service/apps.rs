@@ -11,7 +11,7 @@ use hinteros_api::system::{
 };
 use hinteros_api::{ErrorCode, ErrorObject};
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::info;
 
 use super::{Service, internal, job_ref, state_conflict};
 use crate::appreg::{self, Owner, Registry};
@@ -24,11 +24,9 @@ use crate::{runner, store};
 const APPS_ACTION: &str = "org.hinteros.system.apps";
 
 impl Service {
+    /// `profiles.json` now; a file that cannot be read is locked down (fails closed).
     pub(super) fn profiles_file(&self) -> ProfilesFile {
-        ProfilesFile::load(&self.paths.profiles_json()).unwrap_or_else(|e| {
-            warn!("{e}");
-            ProfilesFile::default()
-        })
+        ProfilesFile::load_or_locked(&self.paths.profiles_json())
     }
 
     pub(super) fn caller(&self, uid: u32, state: &State) -> Caller {

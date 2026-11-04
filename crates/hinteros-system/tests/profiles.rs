@@ -662,6 +662,42 @@ async fn first_boot_and_the_greeter_socket() {
     assert_eq!(public(root)["next"]["fast"], true);
 }
 
+/// A `profiles.json` this binary cannot read (damaged, or newer after a rollback) fails closed:
+/// not first-boot mode, no spare, no admin PIN accepted, and the file is never overwritten.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_profiles_file_fails_closed() {
+    let newer = PROFILES.replace(r#""version": 1"#, r#""version": 2"#);
+    for bad in [newer.as_str(), r#"{"version": 1, "next""#] {
+        let Some(sys) = System::start(root_with(Some(bad)), &[]).await else {
+            return;
+        };
+        let root = &sys.root;
+        let mut c = sys.client().await;
+        let l = call(&mut c, "profiles.list", json!({})).await.unwrap();
+        assert_eq!(l["first_boot"], false, "{bad}");
+        assert_eq!(l["profiles"], json!([]));
+        assert_eq!(public(root)["first_boot"], false);
+        assert_eq!(public(root)["spare"], Value::Null);
+        let e = call(
+            &mut c,
+            "profiles.setup_admin",
+            json!({"name": "Kid", "pin": "1111", "locked": false}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code(&e), ErrorCode::PermissionDenied.code(), "{e}");
+        for (method, params) in [
+            ("rollback", json!({"admin_pin": ADMIN_PIN})),
+            ("time_zone.set", json!({"zone": "UTC"})),
+        ] {
+            let e = call(&mut c, method, params).await.unwrap_err();
+            assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{method}: {e}");
+        }
+        assert!(!pam_ok(root, "unlocked", "hinteros-p1"));
+        assert_eq!(root.read("var/lib/hinteros/profiles.json"), bad);
+    }
+}
+
 /// `hinteros-system pin <verb>` as pam_exec runs it: `PAM_USER`, the PIN on stdin, status lines
 /// on stdout.
 #[test]
@@ -982,7 +1018,8 @@ async fn the_admin_pin_locks_until_a_reboot() {
 /// (update.apply) need the admin profile's PIN
 /// Missing or wrong is `pin_required {pin: admin}` before anything else
 /// happens; right, the method goes on as before. Without an admin profile (first-boot mode)
-/// they are refused like every admin action; an admin profile without a PIN yet passes.
+/// they are refused like every admin action; an admin profile without a PIN yet passes for
+/// itself.
 #[tokio::test(flavor = "multi_thread")]
 async fn box_wide_actions_need_the_admin_pin() {
     let Some(sys) = System::start(root_with(Some(PROFILES)), &[]).await else {
@@ -1064,7 +1101,7 @@ async fn box_wide_actions_need_the_admin_pin() {
         );
     }
 
-    // An admin profile without a PIN yet passes without one.
+    // An admin profile without a PIN yet passes without one (the caller is the admin profile).
     std::fs::remove_file(root.p("var/lib/hinteros/pins/p1")).unwrap();
     let r = call(&mut c, "base.set", json!({"base": "unstable"}))
         .await
@@ -1093,6 +1130,33 @@ async fn box_wide_actions_without_an_admin_profile() {
         let e = call(&mut c, method, params).await.unwrap_err();
         assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{method}: {e}");
         assert_eq!(e["data"]["pin"], "admin");
+    }
+}
+
+/// While the admin profile has no PIN (after `reset-pin`), only the admin profile itself passes
+/// the admin-PIN checks; another profile gets `pin_required {pin: admin}`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admin_profile_without_a_pin_passes_only_for_itself() {
+    // p2 is the admin profile, without a PIN; the caller is p1, an ordinary profile.
+    let profiles = r#"{"version": 1, "next": 3, "profiles": {
+      "p1": {"name": "Sam", "color": "teal"},
+      "p2": {"name": "James", "color": "blue", "admin": true}}}"#;
+    let Some(sys) = System::start(root_with(Some(profiles)), &[]).await else {
+        return;
+    };
+    settled(&sys).await;
+    let mut c = sys.client().await;
+    for (method, params) in [
+        ("base.set", json!({"base": "unstable"})),
+        ("profiles.rename", json!({"id": "p2", "name": "X"})),
+        (
+            "profiles.reset_pin",
+            json!({"id": "p1", "new_pin": "1111", "admin_pin": "0000"}),
+        ),
+    ] {
+        let e = call(&mut c, method, params).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{method}: {e}");
+        assert_eq!(e["data"], json!({"pin": "admin"}), "{method}");
     }
 }
 

@@ -1,5 +1,6 @@
 //! Profile jobs (profiles.md "Creating a profile", "Removing a profile").
 
+use std::convert::Infallible;
 use std::fs;
 use std::path::Path;
 
@@ -24,11 +25,11 @@ impl Runner {
         self.set_stage(Stage::Finishing);
         let paths = self.spec.paths.clone();
         // Metadata and PIN only after the account exists: a failed job leaves neither.
-        let mut file = ProfilesFile::load(&paths.profiles_json())
-            .map_err(|e| self.fail(format!("profiles.json: {e}")))?;
-        file.profiles.insert(j.id.clone(), j.meta.clone());
-        file.save(&paths.profiles_json())
-            .map_err(|e| self.fail(format!("writing profiles.json: {e}")))?;
+        let Ok(file) = ProfilesFile::update(&paths.profiles_json(), |file| {
+            file.profiles.insert(j.id.clone(), j.meta.clone());
+            Ok::<_, Infallible>(file.clone())
+        })
+        .map_err(|e| self.fail(format!("profiles.json: {e}")))?;
         Pins::new(paths.pins_dir())
             .set_hash(&j.id, &j.pin_hash)
             .map_err(|e| self.fail(format!("writing the PIN: {e}")))?;
@@ -81,12 +82,12 @@ impl Runner {
             delete_home(home, uid);
         }
         Pins::new(paths.pins_dir()).remove(&j.id);
-        if let Ok(mut file) = ProfilesFile::load(&paths.profiles_json()) {
+        match ProfilesFile::update(&paths.profiles_json(), |file| {
             file.profiles.remove(&j.id);
-            if let Err(e) = file.save(&paths.profiles_json()) {
-                warn!("profiles.json: {e}");
-            }
-            public::publish(&paths, &j.state, &file, job::now());
+            Ok::<_, Infallible>(file.clone())
+        }) {
+            Ok(Ok(file)) => public::publish(&paths, &j.state, &file, job::now()),
+            Err(e) => warn!("profiles.json: {e}"),
         }
         let link = paths.app_profile(&j.user);
         if let Some(dir) = link.parent()

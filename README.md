@@ -1337,11 +1337,19 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   the switch hint with one-time tokens `/run/hinteros/switch.json` (0600) (`public.rs`),
   `runtime.json` → `/run/hinteros/gamescope-modes` and `audio-output`, `usage.json`
   (`hinteros-system usage`, started over D-Bus when `profiles.list` sees data older than an hour).
+- `profiles.json` is changed only under an `flock` on `profiles.json.lock`, re-read inside it
+  (`ProfilesFile::update`; the service after any PIN check, the profile jobs, the PAM helper's
+  `last_used_at`), so no writer loses another's change. **A `profiles.json` that cannot be read**
+  (damaged, or newer than this binary after a rollback) fails closed: no admin profile, not
+  first-boot mode, no spare (`profiles.list` and the public view list no profiles,
+  `first_boot: false`), so `setup_admin`, every admin-PIN action and every profile login are
+  refused (the guest still plays), and nothing overwrites the file. Recovery is from the console.
 - Methods (`service/profiles.rs`): `profiles.list/create/setup_admin/rename/set_appearance/
   set_pin/set_locked/reset_pin/remove/switch/switch_cancel/unlock`, `guest.set`, `starter_set.get/set`,
   `display.save_mode`, `audio.save_output`; event `profiles_changed`. Which PIN each checks:
   own changes `self`, anything on another profile or the box `admin`; a profile without a PIN yet
-  passes. `pin_required` (3016) names it, with `retry_after_ms` during the lock and
+  passes (the admin PIN only for the admin profile itself: after `reset-pin`, no other profile
+  acts as the admin until it sets a new one). `pin_required` (3016) names it, with `retry_after_ms` during the lock and
   `reboot_required: true` while the admin PIN is refused until a reboot; the audit has
   `HINTEROS_PIN_CHECK`/`_PIN_OUTCOME` and every PIN field is `***` in `HINTEROS_PARAMS`.
   `profiles.create`/`remove`/`guest.set`/`starter_set.set` are jobs (`profiles_create`,
@@ -1353,7 +1361,7 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   and `hardware.redetect` take `admin_pin`; it is checked first (`pin_required
   {pin: admin}` when missing or wrong, or without an admin profile), from every profile, the
   guest included (installing a system update always needs it). Not for root; an
-  admin profile without a PIN yet passes. `update.check` stays open.
+  admin profile without a PIN yet passes only for itself. `update.check` stays open.
 - **End guest session** (`guest.rs`, `runner/profiles.rs`): `guest.end` (the guest only;
   job `guest_end`) checks the account (`hinteros-guest`, `--guest-uid` 20000, the uid maps back to
   the name, home `…/hinteros-guest`), hides the guest from the picker and PAM while it runs, ends
@@ -2170,7 +2178,8 @@ Unknown fields are ignored. A newer file is not understood; what follows depends
 
 | File | Newer file | Unknown fields on a rewrite |
 |---|---|---|
-| `profiles.json`, `services/jellyfin-server/users.json` | load and save are errors; the file stays | kept |
+| `profiles.json` | locked down (below); saving is an error; the file stays | kept |
+| `services/jellyfin-server/users.json` | load and save are errors; the file stays | kept |
 | `terms-accepted.json` | reads as no acceptances; recording is an error; the file stays | kept |
 | `starter.json` | reads as none; saving is an error (the job fails); the file stays | dropped (always written whole) |
 | `channel-tips.json` | reads as empty; saving fails with a warning; the file stays | kept |

@@ -4,9 +4,11 @@
 //! (`cmd/cloudflared/tunnel/subcommands.go` `ParseToken`, `connection.TunnelToken`) reads it as
 //! standard, padded base64 of a JSON object `{"a": <account tag>, "s": <secret, base64>,
 //! "t": <tunnel UUID>, "e": <endpoint, optional>}`. It is checked strictly here before it is
-//! written: exactly these keys (`e` optional; cloudflared knows only `fed`), each once, the account
-//! tag 32 hex digits, the tunnel id a UUID, the secret base64 of 32 to 256 bytes, the whole at most
-//! [`MAX_TUNNEL_TOKEN_BYTES`]. The token never reaches a log.
+//! written: these keys (`e` optional; cloudflared knows only `fed`), each once, the account tag
+//! 32 hex digits, the tunnel id a UUID, the secret base64 of 32 to 256 bytes, the whole at most
+//! [`MAX_TUNNEL_TOKEN_BYTES`]. Other keys are ignored, as cloudflared ignores them: a key that a
+//! later cloudflared adds must not make the dashboard's tokens fail here. The token never reaches
+//! a log.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -22,7 +24,6 @@ use super::http::{self, Target};
 pub const UNIT: &str = "hinteros-cloudflared.service";
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Token {
     a: String,
     s: String,
@@ -50,7 +51,7 @@ pub fn check_token(token: &str) -> Result<(), &'static str> {
         return Err("bad_length");
     }
     let json = STANDARD.decode(token).map_err(|_| "not_base64")?;
-    // Duplicate keys are an error for a derived struct; unknown keys too.
+    // Duplicate known keys are an error for a derived struct; unknown keys are ignored.
     let t: Token = serde_json::from_slice(&json).map_err(|_| "not_a_token")?;
     if !is_hex(&t.a, 32) {
         return Err("bad_account");
@@ -110,6 +111,11 @@ pub mod tests {
             r#"{{"a":"0123456789abcdef0123456789abcdef","t":"6f1c8a2e-3b4d-4e5f-8a9b-0c1d2e3f4a5b","s":"{s}","e":"fed"}}"#
         ));
         assert_eq!(check_token(&fed), Ok(()));
+        // A key cloudflared may add later.
+        let newer = token(&format!(
+            r#"{{"a":"0123456789abcdef0123456789abcdef","t":"6f1c8a2e-3b4d-4e5f-8a9b-0c1d2e3f4a5b","s":"{s}","v":2}}"#
+        ));
+        assert_eq!(check_token(&newer), Ok(()));
         let cases = [
             (String::new(), "bad_length"),
             ("A".repeat(513), "bad_length"),
@@ -117,12 +123,6 @@ pub mod tests {
             // Unpadded base64 is refused, as cloudflared refuses it.
             (unpadded(), "not_base64"),
             (token("[]"), "not_a_token"),
-            (
-                token(&format!(
-                    r#"{{"a":"0123456789abcdef0123456789abcdef","t":"6f1c8a2e-3b4d-4e5f-8a9b-0c1d2e3f4a5b","s":"{s}","x":1}}"#
-                )),
-                "not_a_token",
-            ),
             (
                 token(&format!(
                     r#"{{"a":"0123456789abcdef0123456789abcdef","a":"0123456789abcdef0123456789abcdef","t":"6f1c8a2e-3b4d-4e5f-8a9b-0c1d2e3f4a5b","s":"{s}"}}"#

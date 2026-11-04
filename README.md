@@ -2003,7 +2003,7 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   logout`. Both answer `job_id: null` when the state is already the asked one.
 - **`cloudflare.set_token {pin, token}`**: checked strictly (cloudflared's `ParseToken`: padded
   standard base64 of `{"a": 32 hex, "t": UUID, "s": base64 of 32..256 bytes, "e"?: endpoint}`,
-  no other or repeated key, ≤ 512); the service writes it 0600 atomically (the directory 0700) so
+  no repeated key; other keys are ignored, as cloudflared ignores them; ≤ 512); the service writes it 0600 atomically (the directory 0700) so
   it is never in a job spec; the job restarts `hinteros-cloudflared.service` (D-Bus) and waits 30 s
   for `/ready`. `cloudflare.clear_token {pin}` (job) stops the unit and deletes the file.
 - polkit action `org.hinteros.system.services` for every write (the admin PIN is the service's

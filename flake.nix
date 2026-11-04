@@ -22,6 +22,9 @@
       pkgs = nixpkgs.legacyPackages.${system};
       inherit (pkgs) lib;
 
+      # One version for the whole workspace (hello reports it as the build version).
+      version = (lib.importTOML ./Cargo.toml).workspace.package.version;
+
       # Everything the Rust build needs: sources, manifests and the API schema
       # (the API crate embeds schema/*.json).
       src = lib.fileset.toSource {
@@ -43,7 +46,7 @@
             inherit src;
             strictDeps = true;
             pname = "hinteros-daemon";
-            version = "0.1.0";
+            inherit version;
           };
           # Dependencies are built once and shared by every package and check.
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -92,7 +95,7 @@
         pkgs:
         pkgs.stdenvNoCC.mkDerivation {
           pname = "hinteros-osk-firefox-extension";
-          version = "0.2.0";
+          inherit (lib.importJSON ./firefox-extension/manifest.json) version;
           src = lib.fileset.toSource {
             root = ./firefox-extension;
             fileset = lib.fileset.unions [
@@ -153,7 +156,7 @@
         inherit (rust) hinteros-session hinteros-system;
         hinteros-osk-firefox-extension = firefox-extension;
         default = pkgs.symlinkJoin {
-          name = "hinteros-daemon-0.1.0";
+          name = "hinteros-daemon-${version}";
           paths = [
             rust.hinteros-session
             rust.hinteros-system

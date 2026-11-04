@@ -562,7 +562,7 @@ pub struct AvailableUpdate {
     #[serde(default, deserialize_with = "nullable")]
     pub removed_apps: Option<Vec<RemovedApp>>,
     /// The release `rev` carries: its `release/version` file if that is a semantic version,
-    /// otherwise the first 12 hex digits of `rev`. Absent from services before M6.
+    /// otherwise the first 12 hex digits of `rev`.
     #[serde(default, deserialize_with = "nullable")]
     pub version: Option<String>,
     /// The newest `Security-Summary:` trailer among the new commits (one line, at most 120
@@ -702,7 +702,7 @@ impl Method for BaseSet {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Store (M8)
+// Store
 
 /// `apps.install`: catalog ids (1 to 8) to install, with their dependencies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2189,6 +2189,10 @@ pub struct AppNotUpdated {
     pub reason: String,
 }
 
+/// A finished job's result. The job's `kind` sets the shape, not its fields: untagged decoding
+/// takes the first variant that fits, and a later minor may add a kind whose result has the same
+/// required fields as another (it then reads as that variant). So match the kind and the variant
+/// together, and ignore the result of a kind you do not handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum JobResult {
@@ -2703,3 +2707,10 @@ pub const INTERACTIVE_ACTIONS: &[&str] = &[
     "org.hinteros.system.ssh",
     "org.hinteros.system.profiles.recover",
 ];
+
+/// Whether a call may wait for the admin password: its action is interactive, or it checks one
+/// (`profiles.reset_pin` of the admin profile checks `profiles.recover`).
+pub fn may_interact(method: &str) -> bool {
+    method == ProfilesResetPin::NAME
+        || polkit_action(method).is_some_and(|a| INTERACTIVE_ACTIONS.contains(&a))
+}

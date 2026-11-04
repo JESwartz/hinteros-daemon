@@ -988,8 +988,9 @@ For `daemon.nix` (and the VM tests) in the system repo:
   `RuntimeDirectory=hinteros` with `RuntimeDirectoryMode=0755` and
   **`RuntimeDirectoryPreserve=yes`** (the job directories in `/run/hinteros/jobs` must survive a
   restart of the service during a switch), `UMask=0077` or `0007`. It reads `/etc/hinteros`,
-  `/var/lib/hinteros/update-check.json` and `channel-check.json`, `/proc`, the profile links and `/run/current-system`;
-  writes only `/run/hinteros`. So: `ProtectSystem=strict`, `ReadWritePaths=/run/hinteros`,
+  `/proc`, the profile links and `/run/current-system`; writes `/run/hinteros` and its state in
+  `/var/lib/hinteros` (`StateDirectory=hinteros`, 0700). So: `ProtectSystem=strict`,
+  `ReadWritePaths=/run/hinteros /var/lib/hinteros`,
   `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`,
   `RestrictAddressFamilies=AF_UNIX` (D-Bus, journal), `SystemCallFilter=@system-service`,
   `MemoryDenyWriteExecute=yes`, `CapabilityBoundingSet=CAP_SYS_PTRACE` (only so `HINTEROS_EXE`
@@ -1000,26 +1001,33 @@ For `daemon.nix` (and the VM tests) in the system repo:
   `IOSchedulingClass=idle`, `KillMode=control-group`, `path` with `nix`, `git`, `openssh`
   (`ssh-keygen`), `nixos-facter`, `coreutils`, `SSL_CERT_FILE` for git over https, and
   **`restartIfChanged = false; stopIfChanged = false`** (`X-RestartIfChanged=false`) so the
-  switch it performs never restarts the running instance. `StateDirectory=hinteros` (0700)
-  for `/var/lib/hinteros` on either unit.
+  switch it performs never restarts the running instance. **No `StateDirectory`**: the job uses
+  the service's `/var/lib/hinteros`. With its own, systemd chowns the whole tree at every job
+  start, and the job fails (ENOENT) when the service replaces a file during that walk (an update
+  check during a switch).
 - **Keyboards**: no profile account may read a keyboard (no uaccess rule for keyboards, no
   group `input`). `hinteros-keyboard.service`: `ExecStart=hinteros-system keyboard-home`,
   `DynamicUser`, `SupplementaryGroups=input hinteros-keyboard`, `DeviceAllow=char-input r`,
   no network, no capabilities. Group `hinteros-keyboard`, and `hinteros-system.service` in it
   (it chgrps `keyboard.sock` without `CAP_CHOWN`). `hinteros-system --freeze-inactive`.
-- **polkit** `share/polkit-1/actions/org.hinteros.system.policy` with the actions
-  `org.hinteros.system.{settings,rebuild,update.check,update.apply,rollback,channel,jobs.cancel,apps}`
-  (defaults `no/no/no`) and `org.hinteros.system.ssh` (defaults `auth_admin` for
-  any/inactive/active: the admin password). The rules file grants the first group to
-  `hinteros` members and must **not** return YES for `org.hinteros.system.ssh`:
+- **polkit** `share/polkit-1/actions/org.hinteros.system.policy` with every action of
+  `system::POLKIT_ACTIONS`:
+  `org.hinteros.system.{settings,rebuild,update.check,update.apply,rollback,channel,jobs.cancel,apps,profiles,profiles.create,starter,services}`
+  (defaults `no/no/no`), and `org.hinteros.system.ssh` and `org.hinteros.system.profiles.recover`
+  (`system::INTERACTIVE_ACTIONS`; defaults `auth_admin` for any/inactive/active: the admin
+  password). The rules file grants the first group to `hinteros` members and must **not** return
+  YES for the two `auth_admin` actions (`profiles.recover` resets the admin profile's PIN):
   ```js
   polkit.addRule(function (action, subject) {
     if (action.id.indexOf("org.hinteros.system.") === 0 &&
-        action.id !== "org.hinteros.system.ssh" && subject.isInGroup("hinteros")) {
+        action.id !== "org.hinteros.system.ssh" &&
+        action.id !== "org.hinteros.system.profiles.recover" && subject.isInGroup("hinteros")) {
       return polkit.Result.YES;
     }
   });
   ```
+  With the greeter on, a second rule grants only `org.hinteros.system.profiles.create` to the
+  greeter's user (`subject.user`).
   (`hardening.nix`'s `org.hinteros.system.ssh.admin` action is no longer used; the SSH toggle
   itself is `org.hinteros.system.ssh`.) `security.polkit.adminIdentities` decides whose password
   that is.
@@ -1109,7 +1117,8 @@ The password is taken out of the request into a zeroizing buffer, the request li
 it is written only to the helper's stdin (or socket) and wiped; it is never logged (a test greps
 the debug log). Responses to `system.*`, `auth.*`, `store.list` and `session.restart` may come out
 of order on a connection (they run as tasks, so the launcher can send `auth.respond` while
-`system.ssh.set` waits; relayed interactive calls wait up to 330 s).
+`system.ssh.set` waits; relayed calls that may ask for the password, `system.ssh.set` and
+`system.profiles.reset_pin` (the admin profile's own), wait up to 330 s, others 60 s).
 
 Verified here: the agent against a fake polkit authority on a private bus that plays polkitd
 (registration subject, `BeginAuthentication`/`CancelAuthentication`, a caller that is not
@@ -1238,7 +1247,7 @@ server, `--icon-allow-http`, a hidden test flag).
   `security.polkit.adminIdentities` names the admin account whose password is asked (polkit sends
   the identities; root is only used if nothing else is offered).
 - **polkit actions**: `org.hinteros.system.apps` (defaults `no/no/no`, granted to `hinteros` by the
-  existing rule; the rule must keep excluding `org.hinteros.system.ssh`, which stays `auth_admin`
+  existing rule; the rule must keep excluding `org.hinteros.system.ssh` and `profiles.recover`, which stay `auth_admin`
   with a `message` the launcher shows, e.g. "Authentication is required to turn remote login (SSH)
   on or off"). The user must be allowed to call `RegisterAuthenticationAgent` (polkit allows any
   user to register for its own process).
@@ -1247,8 +1256,8 @@ server, `--icon-allow-http`, a hidden test flag).
   `pathsToLink` `/share/hinteros`).
 - **`lib.catalogIds`** in the system flake: `{ "<id>": { name, status, statusReason } }` (status
   `available|retired|removed`), evaluable without building anything.
-- **`/var/lib/hinteros/terms-accepted.json`**: created by the job (the job unit already has
-  `StateDirectory=hinteros`); the installer writes the same format.
+- **`/var/lib/hinteros/terms-accepted.json`**: created by the job in the service's state directory
+  (the job unit has no `StateDirectory` of its own); the installer writes the same format.
 - **greetd** with `default_session = initial_session` (as `session.nix` has it) and the session
   daemon as the user unit `hinteros-session.service` (found from its cgroup); the daemon needs the
   user's session bus (`DBUS_SESSION_BUS_ADDRESS`, set for user units) for `RestartUnit`.
@@ -1312,7 +1321,9 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   `apps.accept_terms {id, version}` (records `{version, accepted_at, by, profile}`). A spare
   account, root or the admin account gets `permission_denied {reason: profile}`.
 - **Box features**: an install or rollback whose apps need a feature that is off runs the `box`
-  stage first (the apply flow with `requirements` = every needed feature plus the new ones).
+  stage first (the apply flow with `requirements` = every needed feature plus the new ones). A
+  catalog entry that needs a feature this daemon does not know is not installable (like an
+  unknown status) and that feature asks nothing; the rest of the index stays usable.
   Every other job that rebuilds the system writes `requirements` = what the owners' envs need,
   so unneeded features go only then. Update, channel, base and rollback jobs end with an `apps`
   stage that rebuilds every owner's env against the new system (tombstoned ids dropped); an env
@@ -2057,6 +2068,9 @@ off (+ delete data when `has_data`, second confirmation); `job_failed.data.reaso
 Per profile (`controller.rs`), in `$XDG_STATE_HOME/hinteros/controller.json`: only what the user
 changed, exactly as `input.settings.set` got it (written atomically). A missing file is the
 defaults; an unreadable or wrong one too, with a warning (the session never fails on it).
+Unknown fields are ignored and written back on the next save. A new action, button or key name
+is not safe to ignore: a version that adds one bumps the file's version, so an older session
+leaves the file alone.
 
 ```json
 {
@@ -2146,18 +2160,22 @@ Both APIs are 1.0. A client works with a server of the same major and an equal o
   (`#[serde(other)]`; Jellyfin's library kind has `other`, `Connectivity` and `UnitState` their
   own `unknown`), `ServiceInfo.setup`, `ServiceInfo.detail` and `result` of a job read as null
   when they are not known, and an error code outside `ErrorCode` is `ErrorObject::kind() == None`.
-- **Results and events never deny unknown fields.** Only `input.settings.*` still does, in
-  `settings`: `ControllerSettings` is the `controller.json` format.
+- **Results and events never deny unknown fields.** Neither does `controller.json`
+  (`ControllerSettings`, also `input.settings.*`'s `settings`).
 - **Requests stay closed where that protects something.** A server's minor is never lower than
   its client's, so it sees only fields it knows. Every system API params type denies unknown
   fields (a root service). In the session API, so do the ones that carry a credential or choose
   an account: `session.switch_profile`, `session.unlock`, `greeter.pin`, `greeter.login`,
-  `greeter.create`, `wifi.connect`, `input.settings.set`, the runtime methods without params
-  (`power.reboot {force: true}` must not reboot anyway), and `hello` in both APIs.
+  `greeter.create`, `wifi.connect`, the runtime methods without params
+  (`power.reboot {force: true}` must not reboot anyway), and `hello` in both APIs. `hello`
+  reads `api_version` first: a client of another version gets `version_mismatch` whatever else
+  its params hold, so a later major or minor may add `hello` fields.
 - **Enums a client also sends are closed:** a new value of `Channel`, `Base`,
   `CleanupFrequency`, `LibraryKind`, `Key`, `Modifier`, `KeyAction`, `ControllerButton` or either
   `EventName` is a new major. A catch-all there would let an unknown value through to the server
-  or into `state.json`.
+  or into `state.json`; the server refuses an unknown value (`invalid_params`). A client that also
+  reads one (the launcher: `Channel`, `Base`, `CleanupFrequency` in `system.info`, job subjects and
+  `cleanup.get`) has its own catch-all for it and never sends that back.
 
 The schema documents list exactly what their version sends (`additionalProperties: false`), so
 the conformance tests catch a server that sends what is not documented. An item a later minor
@@ -2175,7 +2193,8 @@ Unknown fields are ignored. A newer file is not understood; what follows depends
 | `starter.json` | reads as none; saving is an error (the job fails); the file stays | dropped (always written whole) |
 | `channel-tips.json` | reads as empty; saving fails with a warning; the file stays | kept |
 | `runtime.json` | defaults; a change holds until the next boot; the file stays | kept |
-| `permissions.json`, `controller.json` (session) | defaults; a change holds in memory; the file stays | dropped |
+| `permissions.json` (session) | defaults; a change holds in memory; the file stays | dropped |
+| `controller.json` (session) | defaults; a change holds in memory; the file stays | kept |
 | `apps/registry.json`, `storage.json` | discarded and overwritten (rebuilt from the env manifests, the next measure) | dropped |
 | `usage.json`, `update-check.json`, `channel-check.json`, `libraries.json`, `pins/<id>.state`, `pins/<id>.tries` | discarded and overwritten | dropped |
 

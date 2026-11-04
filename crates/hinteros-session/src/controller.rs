@@ -5,7 +5,9 @@
 //! launcher sends them, only what the user changed ([`ControllerSettings`]).
 //! [`Controller::check`] turns them into what the shell uses; a missing file is the defaults, a
 //! bad one too (with a warning: it never stops the session). A file of a newer version (after a
-//! rollback) is the defaults and stays as it is: nothing is saved over it.
+//! rollback) is the defaults and stays as it is: nothing is saved over it. Unknown fields (a
+//! later version that kept version 1) are ignored and written back on a save; a new name in a
+//! map (action, button, key) is not safe to ignore, so a version that adds one bumps the file's.
 //! `input.settings.set` checks the new settings, saves them atomically and the shell
 //! applies them at once.
 //!
@@ -404,6 +406,48 @@ pub struct ControllerStore {
     file: Option<PathBuf>,
     saved: ControllerSettings,
     current: Controller,
+    /// The file as first loaded, for the fields this version does not know (a later one wrote
+    /// them): they are written back on every save. It is kept for the life of the store and is
+    /// not updated on a save, as the known fields always come from the new settings.
+    loaded: serde_json::Value,
+}
+
+/// The fields this version knows, by level: what is not here is kept from the loaded file.
+const FILE_FIELDS: &[&str] = &["version", "settings"];
+const SETTINGS_FIELDS: &[&str] = &["general", "keyboard", "apps", "pointer"];
+const POINTER_FIELDS: &[&str] = &["speed", "swap_sticks", "left_click", "right_click"];
+
+/// Copy the fields of `old` that are not in `known` into `new` (both objects, else nothing).
+fn keep_unknown(new: &mut serde_json::Value, old: &serde_json::Value, known: &[&str]) {
+    let (Some(new), Some(old)) = (new.as_object_mut(), old.as_object()) else {
+        return;
+    };
+    for (k, v) in old {
+        if !known.contains(&k.as_str()) {
+            new.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+}
+
+/// The file to write for `s`, with the unknown fields of `loaded` kept at every level.
+fn file_value(s: &ControllerSettings, loaded: &serde_json::Value) -> serde_json::Value {
+    let mut file = serde_json::json!({ "version": FILE_VERSION, "settings": s });
+    keep_unknown(&mut file, loaded, FILE_FIELDS);
+    let old = &loaded["settings"];
+    let new = &mut file["settings"];
+    keep_unknown(new, old, SETTINGS_FIELDS);
+    if old["pointer"].is_object() {
+        if new.get("pointer").is_none() {
+            new["pointer"] = serde_json::json!({});
+        }
+        keep_unknown(&mut new["pointer"], &old["pointer"], POINTER_FIELDS);
+        if new["pointer"].as_object().is_some_and(|p| p.is_empty())
+            && let Some(o) = new.as_object_mut()
+        {
+            o.remove("pointer");
+        }
+    }
+    file
 }
 
 impl Default for ControllerStore {
@@ -426,6 +470,7 @@ impl ControllerStore {
             file,
             saved: ControllerSettings::default(),
             current: Controller::default(),
+            loaded: serde_json::Value::Null,
         };
         let Some(path) = store.file.as_deref() else {
             return store;
@@ -456,6 +501,7 @@ impl ControllerStore {
                 info!(file = %path.display(), "controller settings loaded");
                 store.saved = saved;
                 store.current = current;
+                store.loaded = serde_json::from_str(&text).unwrap_or_default();
             }
             Err(e) => {
                 warn!(file = %path.display(), "controller settings ignored, using the defaults: {e}")
@@ -484,7 +530,7 @@ impl ControllerStore {
         };
         let current = Controller::check(&s, known).map_err(SetError::Invalid)?;
         if let Some(path) = &self.file {
-            save(path, &s).map_err(SetError::Io)?;
+            save(path, &file_value(&s, &self.loaded)).map_err(SetError::Io)?;
         }
         self.saved = s;
         self.current = current;
@@ -493,7 +539,7 @@ impl ControllerStore {
 }
 
 /// Write the file atomically (a temporary file in the same directory, then rename).
-fn save(path: &Path, s: &ControllerSettings) -> std::io::Result<()> {
+fn save(path: &Path, file: &serde_json::Value) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::DirBuilder::new()
@@ -501,13 +547,7 @@ fn save(path: &Path, s: &ControllerSettings) -> std::io::Result<()> {
         .mode(0o700)
         .create(dir)?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    serde_json::to_writer_pretty(
-        &mut tmp,
-        &SettingsFile {
-            version: FILE_VERSION,
-            settings: s,
-        },
-    )?;
+    serde_json::to_writer_pretty(&mut tmp, file)?;
     writeln!(tmp)?;
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
@@ -516,6 +556,7 @@ fn save(path: &Path, s: &ControllerSettings) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use hinteros_api::session::PointerSettings;
     use serde_json::json;
 
     use super::*;
@@ -690,8 +731,11 @@ mod tests {
         assert_eq!(c.click(ControllerButton::Rt), Some(MouseButton::Right));
         assert_eq!(c.click(ControllerButton::Lt), None);
         assert!(c.tuning.swap_sticks);
-        // Unknown fields are refused, not dropped.
-        assert!(serde_json::from_value::<ControllerSettings>(json!({"mouse": {}})).is_err());
+        // Unknown fields are ignored (a later version's; the store keeps those of its file).
+        assert_eq!(
+            settings(json!({"mouse": {}, "pointer": {"invert_y": true}})),
+            settings(json!({"pointer": {}}))
+        );
     }
 
     fn keyboard_app(id: &str) -> AppConfig {
@@ -811,7 +855,8 @@ mod tests {
             r#"{"general": {"accept": "a"}}"#,
             r#"{"version": 1, "settings": {"general": {"accept": "b"}}}"#,
             r#"{"version": 1, "settings": {"pointer": {"speed": 7}}}"#,
-            r#"{"version": 1, "settings": {"extra": 1}}"#,
+            // A new name in a map is not safe to ignore: a later version bumps the file's.
+            r#"{"version": 1, "settings": {"general": {"accept": "paddle1"}}}"#,
         ] {
             std::fs::write(&path, text).unwrap();
             let store = ControllerStore::load(Some(path.clone()));
@@ -826,6 +871,59 @@ mod tests {
         .unwrap();
         let store = ControllerStore::load(Some(path.clone()));
         assert!(store.saved().apps.as_ref().unwrap().contains_key("gone"));
+    }
+
+    #[test]
+    fn unknown_fields_load_and_are_saved_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("controller.json");
+        // What a later version of the same file version may write.
+        std::fs::write(
+            &path,
+            r#"{"version": 1, "note": "x", "settings": {"general": {"accept": "b", "back": "a"},
+                "triggers": {"lt": 0.5}, "pointer": {"speed": 150, "invert_y": true}}}"#,
+        )
+        .unwrap();
+        let mut store = ControllerStore::load(Some(path.clone()));
+        assert_eq!(store.get().action(ControllerButton::A), NavAction::Back);
+        assert_eq!(store.get().tuning.speed, 150);
+        // A change keeps them, also where the change drops the whole object.
+        store
+            .set(settings(json!({"keyboard": {"back": "backspace"}})), &[])
+            .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved,
+            json!({"version": 1, "note": "x", "settings": {"keyboard": {"back": "backspace"},
+                "triggers": {"lt": 0.5}, "pointer": {"invert_y": true}}})
+        );
+        // A known field is never brought back from the file once it is dropped.
+        let again = ControllerStore::load(Some(path.clone()));
+        assert_eq!(again.saved().pointer, Some(PointerSettings::default()));
+        assert_eq!(again.get().tuning.speed, POINTER_SPEED_DEFAULT);
+    }
+
+    #[test]
+    fn the_known_field_lists_match_the_types() {
+        let all = settings(json!({
+            "general": {}, "keyboard": {}, "apps": {},
+            "pointer": {"speed": 100, "swap_sticks": false, "left_click": "rt", "right_click": "lt"}
+        }));
+        let v = file_value(&all, &serde_json::Value::Null);
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let sorted = |l: &[&str]| -> Vec<String> {
+            let mut k: Vec<String> = l.iter().map(|s| s.to_string()).collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&v), sorted(FILE_FIELDS));
+        assert_eq!(keys(&v["settings"]), sorted(SETTINGS_FIELDS));
+        assert_eq!(keys(&v["settings"]["pointer"]), sorted(POINTER_FIELDS));
     }
 
     #[test]

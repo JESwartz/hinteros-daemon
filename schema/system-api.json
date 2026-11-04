@@ -12,6 +12,7 @@
   "methods": {
     "hello": {
       "summary": "Version handshake. Must be the first request on a connection, within 5 seconds.",
+      "description": "The server takes the same major and an equal or lower minor; the result carries the client's version. On a mismatch the server answers with version_mismatch and closes the connection; it reads api_version first, so a client of another version gets version_mismatch even when its params have fields this server does not know.",
       "handshake": true,
       "params": {
         "type": "object",
@@ -3019,7 +3020,7 @@
           }
         },
         "features_readded": {
-          "description": "0.5 (rollback jobs): box features turned back on after the rollback, because the profiles' apps need them and the restored generation lacked them. Absent when there were none.",
+          "description": "Rollback jobs: box features turned back on after the rollback, because the profiles' apps need them and the restored generation lacked them. Absent when there were none.",
           "type": "array",
           "minItems": 1,
           "items": { "$ref": "#/$defs/BoxFeature" }
@@ -3027,7 +3028,7 @@
       }
     },
     "JobResult": {
-      "description": "update_check jobs: an UpdateCheckResult; jobs that change the system: an AppliedResult; storage_measure: a MeasuredResult; cleanup_system and cleanup_profiles: a CleanedResult; channel_check: a ChannelCheckResult.",
+      "description": "The shape is set by the job's kind, not by its fields: update_check jobs: an UpdateCheckResult; jobs that change the system: an AppliedResult; storage_measure: a MeasuredResult; cleanup_system and cleanup_profiles: a CleanedResult; channel_check: a ChannelCheckResult. Pick the shape by kind; a later minor may add a kind with a new shape that has the same required fields as another (a kind this client does not know: ignore the result).",
       "oneOf": [{ "$ref": "#/$defs/UpdateCheckResult" }, { "$ref": "#/$defs/AppliedResult" }, { "$ref": "#/$defs/MeasuredResult" }, { "$ref": "#/$defs/CleanedResult" }, { "$ref": "#/$defs/ChannelCheckResult" }]
     },
     "Keep": { "description": "Generations to keep (the running, booted and current ones always stay).", "type": "integer", "minimum": 1, "maximum": 10 },
@@ -3143,14 +3144,14 @@
       }
     },
     "MeasuredResult": {
-      "description": "0.6, storage_measure jobs.",
+      "description": "storage_measure jobs.",
       "type": "object",
       "required": ["measured_at"],
       "additionalProperties": false,
       "properties": { "measured_at": { "type": "integer" } }
     },
     "CleanedResult": {
-      "description": "0.6, cleanup_system and cleanup_profiles jobs. freed_bytes: free space after minus before on the store's filesystem (never negative).",
+      "description": "cleanup_system and cleanup_profiles jobs. freed_bytes: free space after minus before on the store's filesystem (never negative).",
       "type": "object",
       "required": ["freed_bytes", "generations_removed"],
       "additionalProperties": false,

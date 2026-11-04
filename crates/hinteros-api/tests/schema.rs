@@ -898,6 +898,15 @@ fn system_rust_params_are_closed() {
             "{m} has no polkit action"
         );
     }
+    // The session relay waits longer for these (the admin password). The launcher's
+    // `DaemonClient._interactive` (lib/src/api/client.dart) lists the same methods: change both.
+    let waits: Vec<&str> = system::API
+        .methods
+        .iter()
+        .map(|m| m.name)
+        .filter(|m| system::may_interact(m))
+        .collect();
+    assert_eq!(waits, ["ssh.set", "profiles.reset_pin"]);
 }
 
 /// Inline every `#/$defs/...` reference, so schemas from two documents can be compared. A

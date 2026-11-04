@@ -176,7 +176,10 @@ fn read_count(path: &Path) -> Option<u32> {
     match text.trim().parse::<u32>() {
         Ok(n) if (APP_DISPLAYS_MIN..=APP_DISPLAYS_MAX).contains(&n) => Some(n),
         _ => {
-            warn!(file = %path.display(), "ignoring the number of app displays: not 1 to 8");
+            warn!(
+                file = %path.display(),
+                "ignoring the number of app displays: not {APP_DISPLAYS_MIN} to {APP_DISPLAYS_MAX}"
+            );
             None
         }
     }

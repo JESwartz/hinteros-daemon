@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::auth::Auth;
 use crate::restart::Restarter;
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, Turn};
 use crate::shell::{METHODS, Msg};
 use crate::store::Store;
 use crate::system::Relay;
@@ -99,21 +99,26 @@ pub async fn handle(
                     Step::Ignore => debug!("ignoring client notification"),
                     Step::Dispatch(req) => {
                         let id = req.id.expect("dispatched requests have an id");
-                        if crate::appseed::wants(&req.method, req.params.as_ref()) {
-                            // The Jellyfin app: its sign-in seed first (a system call), then the
-                            // launch, without holding up the connection.
+                        if req.method == session::AppsLaunch::NAME {
+                            // Without holding up the connection: a launch of an app that is
+                            // still closing waits for it to go; the Jellyfin app gets its
+                            // sign-in seed first (a system call).
+                            let seed = crate::appseed::wants(&req.method, req.params.as_ref());
                             let (shell, relay, tx) =
                                 (shell.clone(), services.relay.clone(), answers_tx.clone());
                             tokio::spawn(async move {
-                                crate::appseed::before_launch(&shell, &relay).await;
+                                if seed {
+                                    crate::appseed::before_launch(&shell, &relay).await;
+                                }
                                 let outcome = shell_call(&shell, &req.method, req.params).await;
                                 let _ = tx.send(jsonrpc::response(&id, outcome));
                             });
                         } else if concurrent(&req.method) {
                             let client = conn.negotiated().map(|(_, c)| c.name.clone());
+                            let turn = services.runtime.turn(&req.method);
                             let (services, tx) = (services.clone(), answers_tx.clone());
                             tokio::spawn(async move {
-                                let outcome = slow(&req.method, req.params, client.as_deref(), &services).await;
+                                let outcome = slow(&req.method, req.params, client.as_deref(), turn, &services).await;
                                 let _ = tx.send(jsonrpc::response(&id, outcome));
                             });
                         } else {
@@ -132,7 +137,10 @@ pub async fn handle(
                 if let (false, Some((version, client))) = (was_handshaken, conn.negotiated()) {
                     info!(client = %client.name, client_version = %client.version, api_version = %version, "handshake done");
                 }
-                // The line may have carried a password (auth.respond): wipe it.
+                // The line may have carried a password (auth.respond): wipe it. Best effort:
+                // auth.respond moves the parsed password into a Zeroizing string (never a copy
+                // of the params), but the socket's read buffer keeps the bytes until it is
+                // filled again.
                 zeroize::Zeroize::zeroize(&mut line.into_bytes());
             }
             Some(answer) = answers.recv() => write_message(&mut w, &answer).await?,
@@ -141,7 +149,12 @@ pub async fn handle(
                     write_message(&mut w, &jsonrpc::notification(name.wire_name(), params)).await?;
                 }
                 Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(n)) => warn!("client lagging, dropped {n} events"),
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    // It missed events (an app_exited, a focus_changed) and its state is wrong:
+                    // close, so that it connects again and reads the state anew.
+                    warn!("client lagging, dropped {n} events; closing the connection");
+                    break;
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
         }
@@ -178,7 +191,7 @@ async fn dispatch(
     if Runtime::handles(method) {
         let kept = params.clone();
         let result = runtime.call(method, params).await?;
-        persist_shared(method, kept.as_ref(), relay);
+        persist_shared(method, kept.as_ref(), None, runtime, relay);
         return Ok(result);
     }
     match method {
@@ -223,33 +236,32 @@ async fn shell_call(
 
 /// The display mode and the audio output are the box's, not the profile's (profiles.md): a kept
 /// mode and a chosen output are saved with the system service, which publishes them for every
-/// profile's session. Best effort, in the background.
-fn persist_shared(method: &str, params: Option<&Value>, relay: &Relay) {
+/// profile's session. Best effort, in the background; `turn` (the call's place in its lane) is
+/// kept until the save is answered, so that two saves cannot end in the wrong order.
+fn persist_shared(
+    method: &str,
+    params: Option<&Value>,
+    mut turn: Option<Turn>,
+    runtime: &Runtime,
+    relay: &Relay,
+) {
     let calls: Vec<(&'static str, Value)> = match method {
-        "display.keep" => {
-            let Some(file) = std::env::var_os("GAMESCOPE_MODE_SAVE_FILE") else {
-                return;
-            };
-            let text = std::fs::read_to_string(file).unwrap_or_default();
-            text.lines()
-                .take(2)
-                .filter_map(|l| {
-                    let (display, mode) = l.split_once(':')?;
-                    let mode = mode.split_whitespace().next()?;
-                    let (wh, hz) = mode.split_once('@')?;
-                    let (w, h) = wh.split_once('x')?;
-                    Some((
-                        hinteros_api::system::DisplaySaveMode::NAME,
-                        serde_json::json!({
-                            "display": display,
-                            "width": w.parse::<u32>().ok()?,
-                            "height": h.parse::<u32>().ok()?,
-                            "refresh": hz.parse::<f64>().ok()?.round() as u32,
-                        }),
-                    ))
-                })
-                .collect()
-        }
+        // The display the kept change is on: gamescope's save file has a line for every
+        // display it has seen.
+        "display.keep" => runtime
+            .take_kept_display()
+            .map(|(display, mode)| {
+                vec![(
+                    hinteros_api::system::DisplaySaveMode::NAME,
+                    serde_json::json!({
+                        "display": display,
+                        "width": mode.width,
+                        "height": mode.height,
+                        "refresh": mode.refresh,
+                    }),
+                )]
+            })
+            .unwrap_or_default(),
         "audio.set_output" => params
             .and_then(|p| p.get("id"))
             .and_then(Value::as_str)
@@ -263,11 +275,12 @@ fn persist_shared(method: &str, params: Option<&Value>, relay: &Relay) {
         _ => return,
     };
     for (m, p) in calls {
-        let relay = relay.clone();
+        let (relay, turn) = (relay.clone(), turn.take());
         tokio::spawn(async move {
             if let Err(e) = relay.call(m, Some(p)).await {
                 debug!("not saved for every profile ({m}): {}", e.message);
             }
+            drop(turn);
         });
     }
 }
@@ -277,6 +290,7 @@ async fn slow(
     method: &str,
     params: Option<Value>,
     client: Option<&str>,
+    mut turn: Option<Turn>,
     s: &Services,
 ) -> Result<Value, ErrorObject> {
     if let Some(target) = session::relay_target(method) {
@@ -299,7 +313,15 @@ async fn slow(
             hinteros_api::server::decode_params::<session::SessionRestart>(params.clone())?;
             s.restarter.restart(params).await
         }
-        m if Runtime::waits(m) => s.runtime.call(m, params).await,
+        m if Runtime::waits(m) => {
+            let kept = params.clone();
+            if let Some(turn) = &mut turn {
+                turn.wait().await;
+            }
+            let result = s.runtime.call(m, params).await?;
+            persist_shared(m, kept.as_ref(), turn, &s.runtime, &s.relay);
+            Ok(result)
+        }
         m if crate::profile::METHODS.contains(&m) => s.profiles.call(m, params).await,
         m if crate::greeter::METHODS.contains(&m) => match &s.greeter {
             Some(g) => g.call(m, params, client).await,

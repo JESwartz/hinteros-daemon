@@ -7,7 +7,8 @@
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -174,35 +175,59 @@ pub fn next_job(pending: &mut VecDeque<Job>, now: Instant) -> Option<Job> {
 /// [`KeyInjector`] backed by a [`Worker`] on its own thread.
 pub struct ThreadInjector {
     caps: KeyCaps,
-    tx: mpsc::Sender<Job>,
+    /// Jobs, each with the clear count it was queued under.
+    tx: mpsc::Sender<(u64, Job)>,
+    /// How often [`KeyInjector::clear`] was called: jobs queued before the last call are
+    /// dropped, and a job being typed stops.
+    cleared: Arc<AtomicU64>,
 }
 
 impl ThreadInjector {
     pub fn spawn(mut worker: Worker) -> Self {
         let caps = worker.caps();
-        let (tx, rx) = mpsc::channel::<Job>();
+        let (tx, rx) = mpsc::channel::<(u64, Job)>();
+        let cleared = Arc::new(AtomicU64::new(0));
+        let current = cleared.clone();
         thread::Builder::new()
             .name("keys".into())
             .spawn(move || {
                 let mut pending = VecDeque::new();
+                // The clear count the jobs in `pending` were queued under.
+                let mut queued_under = 0;
                 loop {
-                    if pending.is_empty() {
+                    let first = if pending.is_empty() {
                         match rx.recv() {
-                            Ok(job) => pending.push_back(job),
+                            Ok(item) => Some(item),
                             Err(_) => return,
                         }
-                    }
+                    } else {
+                        None
+                    };
                     // Look at everything that arrived meanwhile before choosing.
-                    pending.extend(rx.try_iter());
+                    for (count, job) in first.into_iter().chain(rx.try_iter()) {
+                        if count != queued_under {
+                            pending.clear();
+                            queued_under = count;
+                        }
+                        pending.push_back(job);
+                    }
+                    if current.load(Ordering::SeqCst) != queued_under {
+                        debug!("focus moved on; dropping queued keys");
+                        pending.clear();
+                        continue;
+                    }
                     if let Some(job) = next_job(&mut pending, Instant::now()) {
                         for op in &job.ops {
+                            if current.load(Ordering::SeqCst) != queued_under {
+                                break;
+                            }
                             worker.run(op);
                         }
                     }
                 }
             })
             .expect("spawning the key injection thread");
-        Self { caps, tx }
+        Self { caps, tx, cleared }
     }
 
     fn queue(&mut self, ops: Vec<KeyOp>, nav: bool) {
@@ -211,7 +236,8 @@ impl ThreadInjector {
             nav,
             queued: Instant::now(),
         };
-        if !job.ops.is_empty() && self.tx.send(job).is_err() {
+        let count = self.cleared.load(Ordering::SeqCst);
+        if !job.ops.is_empty() && self.tx.send((count, job)).is_err() {
             warn!("key injection thread is gone");
         }
     }
@@ -228,6 +254,10 @@ impl KeyInjector for ThreadInjector {
 
     fn send_nav(&mut self, op: KeyOp) {
         self.queue(vec![op], true);
+    }
+
+    fn clear(&mut self) {
+        self.cleared.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -403,6 +433,39 @@ pub(crate) mod tests {
         // Non-navigation jobs are never stale.
         let mut pending = VecDeque::from([job(KEY_ENTER, false, ms(0))]);
         assert!(next_job(&mut pending, t0 + Duration::from_secs(60)).is_some());
+    }
+
+    #[test]
+    fn clear_stops_the_text_being_typed() {
+        let rec = Recorder::default();
+        let slow = Timing {
+            key_delay: Duration::from_millis(5),
+            ime_delay: Duration::ZERO,
+        };
+        let mut inj = ThreadInjector::spawn(Worker::new(Some(Box::new(rec.clone())), None, slow));
+        let tap = |code| KeyOp::Tap { code, mods: vec![] };
+        // 200 taps: 2 s of typing.
+        inj.send((0..200).map(|_| tap(30)).collect());
+        inj.send(vec![tap(31)]);
+        // Clear once the typing has started (not after a fixed time: the key thread may start
+        // late on a busy machine).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        while !seen.contains(&"down 30".to_string()) {
+            assert!(Instant::now() < deadline, "no typing: {seen:?}");
+            thread::sleep(Duration::from_millis(1));
+            seen.extend(rec.take());
+        }
+        inj.clear();
+        inj.send(vec![tap(KEY_ENTER)]);
+        while !seen.contains(&format!("up {KEY_ENTER}")) {
+            assert!(Instant::now() < deadline, "no Enter: {seen:?}");
+            thread::sleep(Duration::from_millis(10));
+            seen.extend(rec.take());
+        }
+        let typed = seen.iter().filter(|e| *e == "down 30").count();
+        assert!(typed > 0 && typed < 200, "{typed} taps typed");
+        assert!(!seen.contains(&"down 31".to_string()), "a queued job ran");
     }
 
     #[test]

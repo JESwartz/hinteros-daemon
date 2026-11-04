@@ -6,6 +6,7 @@
 use std::collections::BTreeSet;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,13 +39,17 @@ pub fn watched_dirs(steam: &Path) -> BTreeSet<PathBuf> {
     dirs
 }
 
+/// The watcher's last scan, for `games.list` (`None`: no scan yet).
+pub type GameCache = Arc<Mutex<Option<Vec<Game>>>>;
+
 /// Watch the library of the Steam directory `configured` (or the one found under `$HOME`) on a
 /// background thread. Calls `changed` after the scan result changed (not for the first scan);
-/// stops when it returns `false`.
+/// stops when it returns `false`. Every scan result goes to `cache` first.
 pub fn spawn(
     configured: Option<PathBuf>,
     debounce: Duration,
     poll_interval: Duration,
+    cache: GameCache,
     mut changed: impl FnMut(&[Game]) -> bool + Send + 'static,
 ) -> thread::JoinHandle<()> {
     thread::Builder::new()
@@ -57,6 +62,7 @@ pub fn spawn(
             };
             let (mut last, mut dirs) = scan();
             info!(games = last.len(), "Steam library");
+            *lock(&cache) = Some(last.clone());
             let mut fd = watch(&dirs);
             let mut due: Option<Instant> = None;
             loop {
@@ -97,6 +103,7 @@ pub fn spawn(
                 if games != last {
                     info!(games = games.len(), "Steam library changed");
                     last = games;
+                    *lock(&cache) = Some(last.clone());
                     if !changed(&last) {
                         return;
                     }
@@ -104,6 +111,11 @@ pub fn spawn(
             }
         })
         .expect("spawning the Steam library watcher thread")
+}
+
+/// The cache, also after a panic while it was held.
+pub fn lock(cache: &GameCache) -> MutexGuard<'_, Option<Vec<Game>>> {
+    cache.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// An inotify instance watching `dirs`; `None` if there is nothing to watch (or no inotify).
@@ -183,16 +195,28 @@ mod tests {
         .unwrap();
 
         let (tx, rx) = mpsc::channel::<Vec<u32>>();
+        let cache = GameCache::default();
         spawn(
             Some(steam.clone()),
             Duration::from_millis(50),
             Duration::from_secs(3600), // inotify only
+            cache.clone(),
             move |games| {
                 tx.send(games.iter().map(|g| g.steam_app_id).collect())
                     .is_ok()
             },
         );
         thread::sleep(Duration::from_millis(200));
+        // The first scan is cached, not reported.
+        let cached = || -> Vec<u32> {
+            lock(&cache)
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|g| g.steam_app_id)
+                .collect()
+        };
+        assert_eq!(cached(), [10]);
         let next = || {
             rx.recv_timeout(Duration::from_secs(10))
                 .expect("no change reported")
@@ -203,6 +227,7 @@ mod tests {
         fs::write(&tmp, manifest(20, "B")).unwrap();
         fs::rename(&tmp, steam.join("steamapps/appmanifest_20.acf")).unwrap();
         assert_eq!(next(), [10, 20]);
+        assert_eq!(cached(), [10, 20]);
 
         // Rewriting a manifest without a visible change is not reported.
         fs::write(
@@ -224,6 +249,7 @@ mod tests {
             Some(steam.clone()),
             Duration::from_millis(10),
             Duration::from_millis(100),
+            GameCache::default(),
             move |games| tx.send(games.len()).is_ok(),
         );
         thread::sleep(Duration::from_millis(300));

@@ -85,7 +85,8 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   `apps.close` sends SIGTERM (a command app: to its reaper, which forwards it to the app's
   process group; a Steam game: to every process under Steam's `reaper SteamLaunch AppId=<id>`,
   never to Steam), SIGKILLs what is left after `close.timeout_ms`, and reports
-  `app_exited {reason: closed}` (`procs.rs`).
+  `app_exited {reason: closed}` (`procs.rs`). Launching an app that is still closing waits for
+  it to go (until its SIGKILL, plus 1 s), then starts it.
 - **Steam library** (`steam/library.rs`, `steam/vdf.rs`, `steam/watch.rs`): `games.list` reads
   `steamapps/libraryfolders.vdf` and every library's `appmanifest_<appid>.acf` (own KeyValues
   parser) from the Steam directory (`steam.dir`, else `~/.local/share/Steam`, else
@@ -417,7 +418,7 @@ pulse_socket = "pulse/native"  # sound for apps, relative to XDG_RUNTIME_DIR
 pulse_record_socket = "pulse/native"  # with mic; the same as pulse_socket: mic is not listed
 
 [[apps]]                       # what apps.list returns after the built-in "steam" (a stub list if none)
-id = "jellyfin-desktop"
+id = "jellyfin-desktop"        # not "steam", "cmd-<n>" or "steam-<n>": the daemon's own
 name = "Jellyfin"
 command = ["jellyfin-desktop"]
 desktop_id = "org.jellyfin.JellyfinDesktop"   # icon from its .desktop file (or: icon = "/path.png")
@@ -1287,7 +1288,10 @@ server, `--icon-allow-http`, a hidden test flag).
 ### What the launcher must do
 
 Say hello with client name `hinteros-launcher`, match responses by id (they may come out of
-order), and:
+order: `apps.launch`, relayed calls and the runtime methods except volume and mute are answered
+from tasks of their own; changes to one service, such as `wifi.enable` or `audio.set_output`,
+still run in the order they came), connect again and read the state anew when the daemon
+closes the connection (it does when the client falls 256 events behind), and:
 
 - Subscribe to `authentication_requested`/`authentication_finished`. On a request show the admin
   password dialog (`adminPasswordUi` on) with `message` and the first identity's name; send
@@ -1435,12 +1439,14 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
 
 - `session.toml` `[apps] profile = "/run/hinteros/apps/%u"` (instead of `[[apps]]`): apps, Steam's
   path and icons from the env; the whole link chain is watched. `apps.list` entries get
-  `needs_terms`; `apps.launch` refuses them (`terms_required`); Steam's autostart waits for its
-  terms. `store.list` uses the profile's ids and hides services.
+  `needs_terms`; `apps.launch` refuses them (`terms_required`), and Steam games while Steam needs
+  its terms and is not running; Steam's autostart waits for its terms. `store.list` uses the
+  profile's ids and hides services.
 - `profile.current`, `session.switch_profile` (+ `switch_wait`, `switch_force_close`,
   `switch_cancel`; events `switch_progress {stage: closing_apps|closing_steam|ending|cancelled}`,
   `switch_blocked {app, waited_s}`; `[switch] wait_s = 10`, `steam_wait_s = 15`; nothing is
-  killed without `switch_force_close`), `session.end_guest` (closes the apps, then `system.guest.end` ends the session and wipes the guest
+  killed without `switch_force_close`; no app starts while a switch runs, and a cancelled switch
+  leaves the apps that did not quit running as before), `session.end_guest` (closes the apps, then `system.guest.end` ends the session and wipes the guest
   now), the sleep lock (logind delay
   inhibitor; `lock_changed`, `session.lock_state`, `session.unlock`), `profiles_changed {profiles}`.
   `display.keep` and `audio.set_output` also save the mode/output for every profile; at start the

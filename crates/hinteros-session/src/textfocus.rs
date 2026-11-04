@@ -238,14 +238,25 @@ pub fn run_host(args: &[String]) -> i32 {
     }
 }
 
+/// At most this many reporters at once (Firefox has two per app).
+const MAX_REPORTERS: usize = 32;
+
 /// Serve the internal socket: every connection's lines become [`Msg::TextFocus`] with the
 /// peer's pid. Only the session user may connect.
 pub async fn serve(listener: UnixListener, shell: mpsc::UnboundedSender<Msg>) {
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_REPORTERS));
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
+                let Ok(slot) = slots.clone().try_acquire_owned() else {
+                    debug!("osk.sock: too many reporters; connection refused");
+                    continue;
+                };
                 let shell = shell.clone();
-                tokio::spawn(async move { connection(stream, shell).await });
+                tokio::spawn(async move {
+                    connection(stream, shell).await;
+                    drop(slot);
+                });
             }
             Err(e) => {
                 warn!("osk.sock: accept failed: {e}");
@@ -310,6 +321,7 @@ async fn connection(stream: tokio::net::UnixStream, shell: mpsc::UnboundedSender
             clicked: false,
         });
     }
+    let _ = shell.send(Msg::ReporterGone { reporter });
     debug!(?pid, "osk.sock: reporter disconnected");
 }
 
@@ -495,6 +507,13 @@ mod tests {
         }
     }
 
+    async fn next_gone(rx: &mut mpsc::UnboundedReceiver<Msg>) -> u64 {
+        match rx.recv().await.unwrap() {
+            Msg::ReporterGone { reporter } => reporter,
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn daemon_side_reports_focus_and_a_closed_connection() {
         let dir = tempfile::tempdir().unwrap();
@@ -533,9 +552,11 @@ mod tests {
         }
         drop(d);
         assert_eq!(next_focus(&mut rx).await, (me, b, FieldFocus::None));
+        assert_eq!(next_gone(&mut rx).await, b);
 
         drop(c);
         assert_eq!(next_focus(&mut rx).await, (me, a, FieldFocus::None));
+        assert_eq!(next_gone(&mut rx).await, a);
         server.abort();
     }
 }

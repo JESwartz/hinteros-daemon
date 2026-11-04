@@ -1088,6 +1088,16 @@ pub fn valid_app_id(id: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
+/// The ids the daemon gives apps it starts without a config entry: `cmd-<n>` (`apps.launch
+/// {command}`) and `steam-<appid>` (a Steam game by URL, or one found running). No configured
+/// app may have one.
+pub fn reserved_app_id(id: &str) -> bool {
+    ["cmd-", "steam-"].iter().any(|p| {
+        id.strip_prefix(p)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
 impl Config {
     pub fn parse(text: &str) -> Result<Self> {
         let mut config: Config = toml::from_str(text)?;
@@ -1352,6 +1362,11 @@ impl Config {
         let mut seen = BTreeSet::new();
         for app in &self.apps {
             ensure!(valid_app_id(&app.id), "invalid app id '{}'", app.id);
+            ensure!(
+                !reserved_app_id(&app.id),
+                "app id '{}' is reserved for apps started by command or Steam URL",
+                app.id
+            );
             ensure!(
                 app.id != STEAM_CLIENT_APP_ID,
                 "app id '{STEAM_CLIENT_APP_ID}' is reserved for the built-in Steam entry"
@@ -1858,6 +1873,13 @@ mod tests {
     fn app_ids() {
         assert!(valid_app_id("steam-570") && valid_app_id("cmd-1") && valid_app_id("a.b_c"));
         assert!(!valid_app_id("") && !valid_app_id("-a") && !valid_app_id("A"));
+        // Valid, but the daemon's own for apps without a config entry.
+        assert!(reserved_app_id("steam-570") && reserved_app_id("cmd-1"));
+        assert!(!reserved_app_id("steam-rom-manager") && !reserved_app_id("cmd-"));
+        assert!(!reserved_app_id("steam") && !reserved_app_id("x-steam-1"));
+        let app = |id: &str| format!("[[apps]]\nid = \"{id}\"\nname = \"X\"\ncommand = [\"x\"]\n");
+        assert!(Config::parse(&app("cmd-1")).is_err());
+        assert!(Config::parse(&app("cmd-one")).is_ok());
     }
     #[test]
     fn keyboard_profiles_and_keymaps() {

@@ -490,11 +490,16 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
         ),
     };
 
-    // How long to wait after a failed accept (zero: the last one worked).
+    // How long to wait after a failed accept (zero: the last one worked), and until when. The
+    // other arms (Home, the signals) still run while it waits.
     let mut accept_wait = Duration::ZERO;
+    let mut accept_after: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
-            accepted = listener.accept() => match accepted {
+            _ = tokio::time::sleep_until(accept_after.unwrap_or_else(tokio::time::Instant::now)), if accept_after.is_some() => {
+                accept_after = None;
+            }
+            accepted = listener.accept(), if accept_after.is_none() => match accepted {
                 Ok((stream, _)) => {
                     accept_wait = Duration::ZERO;
                     let rx = events.subscribe();
@@ -512,7 +517,7 @@ async fn serve(cli: Cli, config: Config) -> Result<()> {
                         warn!("accept failed: {e}");
                     }
                     accept_wait = (accept_wait * 2).clamp(Duration::from_millis(100), Duration::from_secs(1));
-                    tokio::time::sleep(accept_wait).await;
+                    accept_after = Some(tokio::time::Instant::now() + accept_wait);
                 }
             },
             _ = usr1.recv() => {

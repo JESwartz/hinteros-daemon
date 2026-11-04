@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::auth::Auth;
 use crate::restart::Restarter;
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, Turn};
 use crate::shell::{METHODS, Msg};
 use crate::store::Store;
 use crate::system::Relay;
@@ -115,9 +115,10 @@ pub async fn handle(
                             });
                         } else if concurrent(&req.method) {
                             let client = conn.negotiated().map(|(_, c)| c.name.clone());
+                            let turn = services.runtime.turn(&req.method);
                             let (services, tx) = (services.clone(), answers_tx.clone());
                             tokio::spawn(async move {
-                                let outcome = slow(&req.method, req.params, client.as_deref(), &services).await;
+                                let outcome = slow(&req.method, req.params, client.as_deref(), turn, &services).await;
                                 let _ = tx.send(jsonrpc::response(&id, outcome));
                             });
                         } else {
@@ -190,7 +191,7 @@ async fn dispatch(
     if Runtime::handles(method) {
         let kept = params.clone();
         let result = runtime.call(method, params).await?;
-        persist_shared(method, kept.as_ref(), runtime, relay);
+        persist_shared(method, kept.as_ref(), None, runtime, relay);
         return Ok(result);
     }
     match method {
@@ -235,8 +236,15 @@ async fn shell_call(
 
 /// The display mode and the audio output are the box's, not the profile's (profiles.md): a kept
 /// mode and a chosen output are saved with the system service, which publishes them for every
-/// profile's session. Best effort, in the background.
-fn persist_shared(method: &str, params: Option<&Value>, runtime: &Runtime, relay: &Relay) {
+/// profile's session. Best effort, in the background; `turn` (the call's place in its lane) is
+/// kept until the save is answered, so that two saves cannot end in the wrong order.
+fn persist_shared(
+    method: &str,
+    params: Option<&Value>,
+    mut turn: Option<Turn>,
+    runtime: &Runtime,
+    relay: &Relay,
+) {
     let calls: Vec<(&'static str, Value)> = match method {
         // The display the kept change is on: gamescope's save file has a line for every
         // display it has seen.
@@ -267,11 +275,12 @@ fn persist_shared(method: &str, params: Option<&Value>, runtime: &Runtime, relay
         _ => return,
     };
     for (m, p) in calls {
-        let relay = relay.clone();
+        let (relay, turn) = (relay.clone(), turn.take());
         tokio::spawn(async move {
             if let Err(e) = relay.call(m, Some(p)).await {
                 debug!("not saved for every profile ({m}): {}", e.message);
             }
+            drop(turn);
         });
     }
 }
@@ -281,6 +290,7 @@ async fn slow(
     method: &str,
     params: Option<Value>,
     client: Option<&str>,
+    mut turn: Option<Turn>,
     s: &Services,
 ) -> Result<Value, ErrorObject> {
     if let Some(target) = session::relay_target(method) {
@@ -305,8 +315,11 @@ async fn slow(
         }
         m if Runtime::waits(m) => {
             let kept = params.clone();
+            if let Some(turn) = &mut turn {
+                turn.wait().await;
+            }
             let result = s.runtime.call(m, params).await?;
-            persist_shared(m, kept.as_ref(), &s.runtime, &s.relay);
+            persist_shared(m, kept.as_ref(), turn, &s.runtime, &s.relay);
             Ok(result)
         }
         m if crate::profile::METHODS.contains(&m) => s.profiles.call(m, params).await,

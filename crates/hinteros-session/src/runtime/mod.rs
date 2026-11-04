@@ -27,7 +27,7 @@ use hinteros_api::session::{self, EventName, Service};
 use hinteros_api::{ErrorObject, Method};
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::{OnceCell, broadcast};
+use tokio::sync::{OnceCell, broadcast, oneshot};
 use tracing::{debug, info};
 use zbus::Connection;
 
@@ -53,6 +53,59 @@ pub struct Ctx {
     pub osk_pid: Arc<AtomicU32>,
     /// The audio state the clients last heard.
     pub audio_last: Mutex<Option<hinteros_api::session::AudioState>>,
+    /// The end of each [`lane`].
+    lanes: [Lane; LANES],
+}
+
+/// How many [`lane`]s there are.
+const LANES: usize = 4;
+
+/// The lane of a method that changes a service's state. Each call runs in a task of its own
+/// ([`Runtime::waits`]), and two quick changes (Wi-Fi off then on, output A then B) must not end
+/// in the wrong order: in a lane they run one after the other, in the order they came. Queries
+/// stay out, and so do the slow `wifi.connect`, `bluetooth.pair` and `bluetooth.connect` (a
+/// disconnect cancels them).
+fn lane(method: &str) -> Option<usize> {
+    match method {
+        "wifi.enable" | "wifi.disconnect" | "wifi.forget" => Some(0),
+        "bluetooth.disconnect" | "bluetooth.forget" => Some(1),
+        "audio.set_output" => Some(2),
+        "display.set_mode" | "display.keep" | "display.revert" => Some(3),
+        _ => None,
+    }
+}
+
+/// The calls of one lane: the last one's end.
+#[derive(Default)]
+struct Lane {
+    last: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl Lane {
+    fn take(&self) -> Turn {
+        let (done, end) = oneshot::channel();
+        let before = std::mem::replace(&mut *self.last.lock().unwrap(), Some(end));
+        Turn {
+            before,
+            _done: done,
+        }
+    }
+}
+
+/// A place in a [`lane`], taken when the call comes. [`Turn::wait`] waits for the call before it;
+/// the next call waits until this one is dropped.
+pub struct Turn {
+    before: Option<oneshot::Receiver<()>>,
+    _done: oneshot::Sender<()>,
+}
+
+impl Turn {
+    /// Wait until the call before this one ends (its turn is dropped).
+    pub async fn wait(&mut self) {
+        if let Some(before) = self.before.take() {
+            let _ = before.await;
+        }
+    }
 }
 
 impl Ctx {
@@ -145,6 +198,7 @@ impl Runtime {
             display_state: display::Shared::default(),
             osk_pid,
             audio_last: Mutex::new(None),
+            lanes: Default::default(),
         });
         if ctx.enabled {
             tokio::spawn(network::watch(ctx.clone()));
@@ -168,6 +222,13 @@ impl Runtime {
     /// input included. Not the volume and mute: they are set in the order they come.
     pub fn waits(method: &str) -> bool {
         Self::handles(method) && !matches!(method, "audio.volume" | "audio.mute")
+    }
+
+    /// A place in the method's [`lane`], if it has one. Take it when the call comes, before its
+    /// task starts (tasks start in any order), and keep it until the call and its shared save
+    /// are done.
+    pub fn turn(&self, method: &str) -> Option<Turn> {
+        lane(method).map(|i| self.ctx.lanes[i].take())
     }
 
     /// The display whose mode the last `display.keep` kept and that mode, once (see
@@ -267,5 +328,54 @@ impl Runtime {
             }
             other => Err(hinteros_api::server::method_not_found(other)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use super::{Lane, lane};
+
+    #[test]
+    fn changes_have_lanes_and_queries_do_not() {
+        assert_eq!(lane("wifi.enable"), lane("wifi.disconnect"));
+        assert_eq!(lane("audio.set_output"), Some(2));
+        assert_ne!(lane("audio.set_output"), lane("display.set_mode"));
+        for query in ["wifi.list", "wifi.scan", "audio.outputs", "display.modes"] {
+            assert_eq!(lane(query), None, "{query}");
+        }
+        // A disconnect must be able to stop a connect or a pairing.
+        for slow in ["wifi.connect", "bluetooth.pair", "bluetooth.connect"] {
+            assert_eq!(lane(slow), None, "{slow}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lane_runs_its_calls_in_the_order_they_came() {
+        let lane = Lane::default();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        // Taken in order A, B, C; started in order C, B, A.
+        let turns: Vec<_> = ["a", "b", "c"].map(|n| (n, lane.take())).into();
+        let mut tasks = Vec::new();
+        for (name, mut turn) in turns.into_iter().rev() {
+            let order = order.clone();
+            tasks.push(tokio::spawn(async move {
+                turn.wait().await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                order.lock().unwrap().push(name);
+                drop(turn);
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(*order.lock().unwrap(), ["a", "b", "c"]);
+        // The turn after a dropped one does not wait.
+        drop(lane.take());
+        tokio::time::timeout(Duration::from_secs(1), lane.take().wait())
+            .await
+            .unwrap();
     }
 }

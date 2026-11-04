@@ -22,7 +22,9 @@ impl Peer {
     }
 }
 
-/// `hello`'s params. Closed: unknown fields (here or in `client`) are `invalid_params`.
+/// `hello`'s params. Closed: unknown fields (here or in `client`) are `invalid_params`. The
+/// server reads `api_version` first, so a client of a version it cannot speak (which may send
+/// more fields) gets `version_mismatch` instead (`server::Connection::step`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "StrictHello")]
 pub struct HelloParams {

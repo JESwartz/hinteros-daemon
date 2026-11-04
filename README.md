@@ -2153,7 +2153,9 @@ Both APIs are 1.0. A client works with a server of the same major and an equal o
   fields (a root service). In the session API, so do the ones that carry a credential or choose
   an account: `session.switch_profile`, `session.unlock`, `greeter.pin`, `greeter.login`,
   `greeter.create`, `wifi.connect`, `input.settings.set`, the runtime methods without params
-  (`power.reboot {force: true}` must not reboot anyway), and `hello` in both APIs.
+  (`power.reboot {force: true}` must not reboot anyway), and `hello` in both APIs. `hello`
+  reads `api_version` first: a client of another version gets `version_mismatch` whatever else
+  its params hold, so a later major or minor may add `hello` fields.
 - **Enums a client also sends are closed:** a new value of `Channel`, `Base`,
   `CleanupFrequency`, `LibraryKind`, `Key`, `Modifier`, `KeyAction`, `ControllerButton` or either
   `EventName` is a new major. A catch-all there would let an unknown value through to the server

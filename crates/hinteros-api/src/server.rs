@@ -62,7 +62,10 @@ impl Connection {
                 let err = ErrorObject::new(ErrorCode::AlreadyHandshaken, "handshake already done");
                 return Step::Reply(jsonrpc::error_response(Some(id), err));
             }
-            let outcome = call::<Hello>(req.params, |p| self.hello(p));
+            let outcome = match self.foreign_version(req.params.as_ref()) {
+                Some(client) => Err(ErrorObject::version_mismatch(client, self.server_version)),
+                None => call::<Hello>(req.params, |p| self.hello(p)),
+            };
             let close =
                 matches!(&outcome, Err(e) if e.kind().is_some_and(ErrorCode::closes_connection));
             let reply = jsonrpc::response(&id, outcome);
@@ -80,6 +83,17 @@ impl Connection {
             return Step::Reply(jsonrpc::error_response(Some(id), err));
         }
         Step::Dispatch(req)
+    }
+
+    /// The client's `api_version` when this server cannot speak it, read before the params are
+    /// decoded: `hello` params are closed, and a client of another version (a later minor or
+    /// major may send more fields) must still get `version_mismatch`, not `invalid_params`.
+    fn foreign_version(&self, params: Option<&Value>) -> Option<ApiVersion> {
+        let client: ApiVersion = params?.get("api_version")?.as_str()?.parse().ok()?;
+        self.server_version
+            .negotiate(client)
+            .is_none()
+            .then_some(client)
     }
 
     fn hello(&mut self, p: HelloParams) -> Result<HelloResult, ErrorObject> {
@@ -229,6 +243,30 @@ mod tests {
         };
         assert_eq!(r["error"]["code"], 1002);
         assert_eq!(r["error"]["data"]["server_api_version"], "0.1");
+        assert!(c.negotiated().is_none());
+    }
+
+    #[test]
+    fn another_version_is_a_mismatch_whatever_else_hello_holds() {
+        // A later client may send fields this server does not know.
+        for line in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.2","client":{"name":"t","version":"1"},"features":[]}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"1.0","client":{"name":"t","version":"1","build":"x"}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"2.0"}}"#,
+        ] {
+            let mut c = conn();
+            let Step::ReplyAndClose(r) = c.step(line) else {
+                panic!("expected ReplyAndClose for {line}")
+            };
+            assert_eq!(r["error"]["code"], 1002, "{line}");
+            assert_eq!(r["error"]["data"]["server_api_version"], "0.1");
+        }
+        // A client this server speaks to has hello closed: it sends only what the server knows.
+        let mut c = conn();
+        let r = reply(c.step(
+            r#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"api_version":"0.1","client":{"name":"t","version":"1"},"features":[]}}"#,
+        ));
+        assert_eq!(r["error"]["code"], -32602);
         assert!(c.negotiated().is_none());
     }
 

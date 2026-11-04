@@ -12,6 +12,7 @@
   "methods": {
     "hello": {
       "summary": "Version handshake. Must be the first request on a connection, within 5 seconds.",
+      "description": "The server takes the same major and an equal or lower minor; the result carries the client's version. On a mismatch the server answers with version_mismatch and closes the connection; it reads api_version first, so a client of another version gets version_mismatch even when its params have fields this server does not know.",
       "handshake": true,
       "params": {
         "type": "object",

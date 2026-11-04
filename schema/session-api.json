@@ -12,7 +12,7 @@
   "methods": {
     "hello": {
       "summary": "Version handshake. Must be the first request on a connection.",
-      "description": "The client sends the API version it was built against. The server takes the same major and an equal or lower minor. The result carries the negotiated version: the client's. On a mismatch the server answers with version_mismatch and closes the connection. The client name 'hinteros-osk' is reserved for the on-screen keyboard: such connections receive input_nav while the keyboard is visible, and only then.",
+      "description": "The client sends the API version it was built against. The server takes the same major and an equal or lower minor. The result carries the negotiated version: the client's. On a mismatch the server answers with version_mismatch and closes the connection; it reads api_version first, so a client of another version gets version_mismatch even when its params have fields this server does not know. The client name 'hinteros-osk' is reserved for the on-screen keyboard: such connections receive input_nav while the keyboard is visible, and only then.",
       "handshake": true,
       "params": {
         "type": "object",

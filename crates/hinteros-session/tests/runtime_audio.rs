@@ -368,6 +368,56 @@ async fn changes_are_found_by_polling_without_pactl_subscribe() {
     changes_are_pushed_and_found(false).await;
 }
 
+/// A steady stream of events (a held TV volume key, a game opening streams) does not hold
+/// the new state back until the events stop.
+#[tokio::test]
+async fn a_steady_stream_of_events_does_not_hold_changes_back() {
+    let (d, state) = start();
+    let mut watcher = d.client().await;
+    call(
+        &mut watcher,
+        "subscribe",
+        json!({"events": ["audio_changed"]}),
+    )
+    .await
+    .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !calls(&state).iter().any(|c| c == "subscribe") {
+        assert!(std::time::Instant::now() < deadline, "no pactl subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let events = {
+        let (state, stop) = (state.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut n = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let what = if n % 2 == 0 {
+                    "sink #50"
+                } else {
+                    "sink-input #7"
+                };
+                append_event(&state, &format!("Event 'change' on {what}"));
+                n += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::fs::write(state.join(format!("volume-{HDMI}")), "10").unwrap();
+    let found = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            if event_named(&mut watcher, "audio_changed").await["volume"] == 10 {
+                break;
+            }
+        }
+    })
+    .await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    events.join().unwrap();
+    assert!(found.is_ok(), "the change waited for the events to stop");
+}
+
 #[tokio::test]
 async fn pactl_missing_or_the_sound_server_down() {
     // The default for tests: no pactl at all.

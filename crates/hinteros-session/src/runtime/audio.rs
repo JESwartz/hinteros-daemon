@@ -28,7 +28,7 @@ use hinteros_api::session::{
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep, timeout, timeout_at};
 use tracing::debug;
 
 use super::Ctx;
@@ -577,6 +577,10 @@ async fn make_default(
 /// is a burst of sink, card and server events).
 const EVENT_SETTLE: Duration = Duration::from_millis(200);
 
+/// The longest wait after the first event of a burst: a steady stream of events (a held TV
+/// volume key) must not hold the new state back.
+const EVENT_SETTLE_MAX: Duration = Duration::from_secs(1);
+
 /// Whether a `pactl subscribe` line ("Event 'change' on sink #56") is about what [`read`]
 /// reports: sinks, cards, and the server (its default sink). The streams of apps come and go
 /// all the time and are left out.
@@ -630,7 +634,17 @@ async fn follow(ctx: &Ctx) -> std::io::Result<()> {
         if !relevant_event(&line) {
             continue;
         }
-        while let Ok(Ok(Some(_))) = timeout(EVENT_SETTLE, lines.next_line()).await {}
+        // Only relevant events make the wait longer, and never past EVENT_SETTLE_MAX.
+        let give_up = Instant::now() + EVENT_SETTLE_MAX;
+        let mut quiet_at = Instant::now() + EVENT_SETTLE;
+        while let Ok(next) = timeout_at(quiet_at.min(give_up), lines.next_line()).await {
+            match next? {
+                Some(line) if relevant_event(&line) => quiet_at = Instant::now() + EVENT_SETTLE,
+                Some(_) => {}
+                // The outer loop sees the end too.
+                None => break,
+            }
+        }
         poll(ctx).await;
     }
     child.wait().await?;

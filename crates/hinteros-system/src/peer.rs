@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use nix::sys::socket::{getsockopt, sockopt};
 use rustix::event::{PollFd, PollFlags, poll};
 use tokio::net::UnixStream;
+use tokio::sync::watch;
 
 #[derive(Debug)]
 pub struct Peer {
@@ -17,10 +18,13 @@ pub struct Peer {
     pub pidfd: Option<OwnedFd>,
     /// `/proc/<pid>/exe` at accept time (audit only).
     pub exe: Option<PathBuf>,
+    /// Its sender is dropped when the connection ends ([`Peer::gone`]).
+    closed: watch::Receiver<()>,
 }
 
 impl Peer {
-    pub fn of(stream: &UnixStream) -> std::io::Result<Self> {
+    /// The peer of `stream`; `closed`'s sender is dropped when the service stops serving it.
+    pub fn of(stream: &UnixStream, closed: watch::Receiver<()>) -> std::io::Result<Self> {
         let cred = stream.peer_cred()?;
         let pidfd = getsockopt(&stream.as_fd(), sockopt::PeerPidfd).ok();
         let pid = cred.pid().and_then(|p| u32::try_from(p).ok());
@@ -31,7 +35,14 @@ impl Peer {
             pid,
             pidfd,
             exe,
+            closed,
         })
+    }
+
+    /// Resolves once the connection has ended (a task still working for it can stop).
+    pub async fn gone(&self) {
+        let mut closed = self.closed.clone();
+        while closed.changed().await.is_ok() {}
     }
 
     /// Whether the peer process still exists (a pidfd becomes readable when it exits).
@@ -73,12 +84,20 @@ mod tests {
     #[tokio::test]
     async fn identifies_the_peer() {
         let (a, _b) = UnixStream::pair().unwrap();
-        let p = Peer::of(&a).unwrap();
+        let (open, closed) = watch::channel(());
+        let p = Peer::of(&a, closed).unwrap();
         assert_eq!(p.uid, rustix::process::getuid().as_raw());
         assert_eq!(p.pid, Some(std::process::id()));
         assert!(p.pidfd.is_some(), "this kernel has SO_PEERPIDFD");
         assert!(p.alive());
         assert!(p.start_time().is_some());
         assert!(p.exe.is_some());
+        // Gone once the connection ends.
+        let gone = p.gone();
+        tokio::pin!(gone);
+        let wait = std::time::Duration::from_millis(50);
+        assert!(tokio::time::timeout(wait, gone.as_mut()).await.is_err());
+        drop(open);
+        gone.await;
     }
 }

@@ -304,7 +304,9 @@ async fn serve_keyboard(svc: Arc<Service>, listener: tokio::net::UnixListener) {
 }
 
 async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<()> {
-    let peer = Arc::new(Peer::of(&stream)?);
+    // Dropped when this connection ends: an interactive polkit check for it stops then.
+    let (open, closed) = tokio::sync::watch::channel(());
+    let peer = Arc::new(Peer::of(&stream, closed)?);
     info!(
         uid = peer.uid,
         gid = peer.gid,
@@ -426,6 +428,7 @@ async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<
     // Every `break` above is a deliberate close; make sure the client gets what we sent.
     // The slot is free as soon as we stop serving; draining must not hold it.
     drop(_slot);
+    drop(open);
     close_gracefully(&mut reader, &mut w).await;
     Ok(())
 }

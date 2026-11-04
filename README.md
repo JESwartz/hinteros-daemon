@@ -1086,7 +1086,8 @@ onto the launcher's `lib/src/system` repository interfaces:
 2. `hinteros-system` checks the action with `CheckAuthorization` **with `AllowUserInteraction`**
    (only the actions in `system::INTERACTIVE_ACTIONS`, today just this one) and a `unix-process`
    subject for its peer, the session daemon. The request waits (at most `--auth-timeout-s`, 300 s;
-   then `CancelCheckAuthorization`), while the connection keeps serving other requests.
+   then `CancelCheckAuthorization`; also at once when the client's connection ends, so nobody
+   approves an action whose requester is gone), while the connection keeps serving other requests.
 3. polkit finds the agent registered for that process: the session daemon (`auth/`) registers one
    at startup with `RegisterAuthenticationAgent`, subject `unix-process` with its own pidfd, pid,
    start time and uid (again whenever polkit restarts). A process-scoped agent works although the

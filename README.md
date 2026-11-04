@@ -1646,9 +1646,10 @@ link), `service/timezone.rs` (the methods).
   while a job runs.
 - Jobs: a job that replaces `/etc/hinteros` takes the same lock and first copies the live
   `settings.timeZone` into its staged `state.json`, so a zone set while it ran (or after its
-  state was computed) is kept. A rollback restores the generation's `state.json` (its zone) and
-  then points `/etc/localtime` at that zone (the switch ran before the restore); the service
-  sends `time_zone_changed` after any job when the zone that applies changed.
+  state was computed) is kept. A rollback restores the generation's `state.json` but keeps a
+  live zone, as `hinteros-config-sync` does at boot, and then points `/etc/localtime` at the
+  zone that applies (the switch ran before the restore); the service sends `time_zone_changed`
+  after any job when the zone that applies changed.
 
 ### What the system repo must do
 
@@ -1658,8 +1659,8 @@ link), `service/timezone.rs` (the methods).
 - `hinteros-config-sync`: `time_zone.set` changes `/etc/hinteros/state.json` in place without a
   new generation, so the running generation's snapshot differs in `settings.timeZone` only.
   The sync must not undo that at the next boot: compare `state.json` without `settings.timeZone`
-  and keep the live zone when it restores (a rollback, which changes the generation, restores
-  the snapshot's zone, as the daemon's own rollback does).
+  and keep the live zone when it restores, after a rollback too (as the daemon's own rollback
+  does).
 - `hinteros-time-zone-apply.service`: oneshot, root, `ExecStart=hinteros-system
   time-zone-apply`, `ProtectSystem=strict`, `ReadWritePaths=/etc /run/hinteros`, no network.
   The service only needs `/run/hinteros` writable (no `/etc`) and may start this unit (it is

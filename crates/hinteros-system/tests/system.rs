@@ -584,7 +584,20 @@ async fn settings_ssh_rebuild_rollback() {
     }
     root.rm("build-fail");
 
-    // A failed switch: the profile goes back to the old generation, /etc/hinteros unchanged.
+    // A failed switch: the profile goes back to the old generation (no new one), the failed
+    // generation is deleted, /etc/hinteros unchanged.
+    let links = || {
+        let mut v: Vec<String> = std::fs::read_dir(root.p("profiles"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("system-"))
+            .collect();
+        v.sort();
+        v
+    };
+    let links_before = links();
+    let generation_before = std::fs::read_link(root.p("profiles/system")).unwrap();
     root.touch("switch-fail");
     let r = call(&mut c, "ssh.set", json!({"enabled": false}))
         .await
@@ -601,6 +614,8 @@ async fn settings_ssh_rebuild_rollback() {
         root.p("store/gen3"),
         "{profile:?}"
     );
+    assert_eq!(profile, generation_before);
+    assert_eq!(links(), links_before, "the failed generation is gone");
     assert!(
         root.read("switch.log")
             .contains(&format!("{} boot", root.p("store/gen3").display()))

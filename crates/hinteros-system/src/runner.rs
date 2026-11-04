@@ -838,6 +838,7 @@ impl Runner {
             }
         }
         let old_toplevel = fs::canonicalize(&paths.profile).ok();
+        let old_generation = generations::current_generation(&paths.profile);
 
         // Fetch and verify the target revision.
         let mut lock_url = None;
@@ -880,6 +881,27 @@ impl Runner {
                 }
             });
             lock_url = Some(format!("{}&rev={rev}", u.input_url));
+        }
+
+        // /etc/hinteros must describe the running system: a job that activated but could not
+        // replace it left the old config, which would build the old revision again. Restore it
+        // from that generation's snapshot first, as hinteros-config-sync does at boot. Only
+        // when the running system is the profile's (not after a failed switch, nor when an
+        // older generation was booted from the boot menu).
+        if let Some(snapshot) = old_toplevel.as_ref().map(|t| t.join("hinteros"))
+            && fs::canonicalize(&paths.current_system).ok() == old_toplevel
+            && config_behind(&snapshot, &paths.config_dir)
+        {
+            warn!("/etc/hinteros does not match the system's snapshot; restoring it");
+            let _lock = crate::state::lock(&paths.state_lock())
+                .map_err(|e| self.fail(format!("locking state.json: {e}")))?;
+            sync_config(
+                &snapshot,
+                &paths.config_dir,
+                &paths.staging(),
+                &self.spec.id,
+            )
+            .map_err(|e| self.fail(format!("restoring the config snapshot: {e}")))?;
         }
 
         // Staging: a copy of /etc/hinteros with the edit applied.
@@ -967,7 +989,7 @@ impl Runner {
         let jellyfin_stopped = self.jellyfin_backup(old_toplevel.as_deref(), &toplevel)?;
         let activated = self.activate(&toplevel);
         if activated.is_err() {
-            self.restore(old_toplevel.as_deref());
+            self.restore(old_generation, old_toplevel.as_deref());
         }
         self.jellyfin_start(jellyfin_stopped);
         activated?;
@@ -1024,24 +1046,43 @@ impl Runner {
         Ok(())
     }
 
-    /// After a failed activation: point the profile back at the old system and make it the
-    /// boot default again (best effort; the failure is reported either way).
-    fn restore(&mut self, old: Option<&Path>) {
+    /// After a failed activation: point the profile back at the old generation, delete the
+    /// generation that failed (so it is no rollback target), and make the old system the boot
+    /// default again (best effort; the failure is reported either way). Without a generation
+    /// number, the profile is set to the old system.
+    fn restore(&mut self, old_generation: Option<u32>, old: Option<&Path>) {
         let Some(old) = old else { return };
         warn!(
             "activation failed; restoring the profile to {}",
             old.display()
         );
+        let profile = self.spec.paths.profile.clone();
+        let failed =
+            generations::current_generation(&profile).filter(|g| old_generation < Some(*g));
         let mut cmd = Command::new(&self.spec.tools.nix_env);
-        cmd.arg("-p")
-            .arg(&self.spec.paths.profile)
-            .arg("--set")
-            .arg(old);
-        if self.exec(cmd, false, &mut |_, _| {}).is_ok() {
-            let mut cmd = Command::new(old.join("bin/switch-to-configuration"));
-            cmd.arg("boot");
-            let _ = self.exec(cmd, false, &mut |_, _| {});
+        cmd.arg("-p").arg(&profile);
+        match old_generation {
+            Some(g) => cmd.arg("--switch-generation").arg(g.to_string()),
+            None => cmd.arg("--set").arg(old),
+        };
+        if self.exec(cmd, false, &mut |_, _| {}).is_err() {
+            return;
         }
+        if old_generation.is_some()
+            && let Some(f) = failed
+        {
+            let mut cmd = Command::new(&self.spec.tools.nix_env);
+            cmd.arg("-p")
+                .arg(&profile)
+                .arg("--delete-generations")
+                .arg(f.to_string());
+            if let Err(Failure::Error(e)) = self.exec(cmd, false, &mut |_, _| {}) {
+                warn!("the failed generation {f} stays: {}", e.message);
+            }
+        }
+        let mut cmd = Command::new(old.join("bin/switch-to-configuration"));
+        cmd.arg("boot");
+        let _ = self.exec(cmd, false, &mut |_, _| {});
     }
 
     /// A rollback's switch: the profile to `generation`, then its `switch-to-configuration
@@ -1118,7 +1159,7 @@ impl Runner {
             )
             .map_err(|e| self.fail(format!("restoring the config snapshot: {e}")))?;
             // The switch set /etc/localtime from the state.json before the restore: follow the
-            // restored one (its time zone, or UTC).
+            // restored one (the live time zone if one was set, else the snapshot's, or UTC).
             match crate::timezone::apply_state(&paths) {
                 Ok(zone) => info!(zone, "time zone of the restored state applied"),
                 Err(e) => warn!("cannot apply the restored time zone: {e}"),
@@ -1138,8 +1179,6 @@ impl Runner {
     }
 }
 
-/// What `hinteros-config-sync` does at boot, for a rollback from Settings: make the managed
-/// files of `config_dir` equal the generation's snapshot (other files, e.g. facter.json, stay).
 /// Record a verified `rev` as `branch`'s newest tip if it descends from the recorded one;
 /// returns whether the record changed.
 fn record_tip(git: &Git, tips: &mut SeenTips, branch: &str, rev: &str) -> bool {
@@ -1169,6 +1208,10 @@ fn record_other(git: &Git, source: &job::UpdateSource, tips: &mut SeenTips, bran
     changed
 }
 
+/// What `hinteros-config-sync` does at boot, for a rollback from Settings: make the managed
+/// files of `config_dir` equal the generation's snapshot (other files, e.g. facter.json, stay),
+/// except a time zone in the live `state.json`, which is kept (`time_zone.set` changes it in
+/// place, without a generation; time-zone.md). The caller holds [`crate::state::lock`].
 pub fn sync_config(
     snapshot: &Path,
     config_dir: &Path,
@@ -1196,8 +1239,28 @@ pub fn sync_config(
             )?;
         }
     }
+    let live = config_dir.join("state.json");
+    let staged = scratch.join("state.json");
+    if staged.is_file()
+        && crate::state::State::load(&live).is_ok_and(|(s, _)| s.settings.time_zone.is_some())
+    {
+        match crate::timezone::carry_live_zone(&live, &staged) {
+            Ok(true) => info!("kept the live time zone"),
+            Ok(false) => {}
+            Err(e) => warn!("cannot keep the live time zone: {e}"),
+        }
+    }
     fsutil::replace_dir(scratch, config_dir, tag)?;
     fsutil::remove(scratch)
+}
+
+/// Whether `config_dir`'s `flake.nix` or `flake.lock` differs from the generation's `snapshot`
+/// (`state.json` may differ in its live time zone). No snapshot: no.
+fn config_behind(snapshot: &Path, config_dir: &Path) -> bool {
+    ["flake.nix", "flake.lock"].iter().any(|f| {
+        fs::read(snapshot.join(f))
+            .is_ok_and(|want| fs::read(config_dir.join(f)).ok().as_ref() != Some(&want))
+    })
 }
 
 /// Whether the new system has a different session daemon or system service package than the
@@ -1595,6 +1658,67 @@ mod tests {
         let out = r.exec(cmd, false, &mut |_, _| {}).unwrap();
         assert_eq!(out, "done\n");
         assert!(t0.elapsed() < Duration::from_secs(30), "{:?}", t0.elapsed());
+    }
+
+    /// A rollback restores the snapshot's managed files, but keeps a live time zone (as the
+    /// boot-time sync does); other files stay.
+    #[test]
+    fn sync_config_keeps_the_live_time_zone() {
+        let d = tempfile::tempdir().unwrap();
+        let (config, snapshot) = (d.path().join("etc"), d.path().join("snap"));
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(&snapshot).unwrap();
+        let state = |zone: Option<&str>| {
+            let mut s = crate::state::State::parse(include_bytes!(
+                "../tests/fixtures/state/vm-system-a.json"
+            ))
+            .unwrap();
+            s.settings.time_zone = zone.map(str::to_owned);
+            s.to_canonical_json()
+        };
+        let zone = |dir: &Path| {
+            crate::state::State::load(&dir.join("state.json"))
+                .unwrap()
+                .0
+                .settings
+                .time_zone
+        };
+        fs::write(snapshot.join("flake.lock"), "old").unwrap();
+        fs::write(snapshot.join("state.json"), state(Some("America/Chicago"))).unwrap();
+        fs::write(config.join("flake.lock"), "new").unwrap();
+        fs::write(config.join("facter.json"), "{}").unwrap();
+        fs::write(config.join("state.json"), state(Some("Europe/Berlin"))).unwrap();
+        let scratch = d.path().join("scratch");
+        sync_config(&snapshot, &config, &scratch, "t").unwrap();
+        assert_eq!(
+            fs::read_to_string(config.join("flake.lock")).unwrap(),
+            "old"
+        );
+        assert!(config.join("facter.json").exists());
+        assert_eq!(zone(&config).as_deref(), Some("Europe/Berlin"));
+        // No live zone: the snapshot's.
+        fs::write(config.join("state.json"), state(None)).unwrap();
+        sync_config(&snapshot, &config, &scratch, "t").unwrap();
+        assert_eq!(zone(&config).as_deref(), Some("America/Chicago"));
+    }
+
+    #[test]
+    fn config_behind_its_snapshot() {
+        let d = tempfile::tempdir().unwrap();
+        let (config, snapshot) = (d.path().join("etc"), d.path().join("snap"));
+        assert!(!config_behind(&snapshot, &config), "no snapshot");
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(&snapshot).unwrap();
+        for dir in [&config, &snapshot] {
+            fs::write(dir.join("flake.nix"), "{}").unwrap();
+            fs::write(dir.join("flake.lock"), "r2").unwrap();
+        }
+        fs::write(config.join("state.json"), "live zone").unwrap();
+        assert!(!config_behind(&snapshot, &config));
+        fs::write(config.join("flake.lock"), "r1").unwrap();
+        assert!(config_behind(&snapshot, &config));
+        fs::remove_file(config.join("flake.lock")).unwrap();
+        assert!(config_behind(&snapshot, &config));
     }
 
     #[test]

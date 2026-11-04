@@ -4,7 +4,7 @@
 //! favicon), read the manifest's `icons`, and take the best candidate (the largest square icon
 //! of at least 192 px, preferring ones not made only for masking), falling back to
 //! `/favicon.ico`. From an `icon_url`: just that file, and only if its SHA-256 is the pinned
-//! one, when the catalog gives one. Only https is used and only internet hosts (not this box or
+//! one (always required with it). Only https is used and only internet hosts (not this box or
 //! the home network), also for every redirect; requests have timeouts, responses are limited to
 //! [`MAX_BYTES`] and must be an image (checked by Content-Type and by the file's first bytes).
 

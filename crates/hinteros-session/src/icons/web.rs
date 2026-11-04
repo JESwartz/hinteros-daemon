@@ -4,11 +4,12 @@
 //! favicon), read the manifest's `icons`, and take the best candidate (the largest square icon
 //! of at least 192 px, preferring ones not made only for masking), falling back to
 //! `/favicon.ico`. From an `icon_url`: just that file, and only if its SHA-256 is the pinned
-//! one, when the catalog gives one. Only https is used (also for every redirect), requests have
-//! timeouts, responses are limited to [`MAX_BYTES`] and must be an image (checked by
-//! Content-Type and by the file's first bytes).
+//! one, when the catalog gives one. Only https is used and only internet hosts (not this box or
+//! the home network), also for every redirect; requests have timeouts, responses are limited to
+//! [`MAX_BYTES`] and must be an image (checked by Content-Type and by the file's first bytes).
 
 use std::io::Read;
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -98,11 +99,37 @@ impl Fetcher {
         Ok(())
     }
 
+    /// A site, page or redirect may name any host, and the daemon is not behind the local
+    /// network filter: refuse hosts that are (or resolve to) this box or the home network.
+    /// Checked before each request and redirect; the request resolves the name again, so this
+    /// does not stop DNS rebinding, but TLS (a public certificate) still has to pass then.
+    /// Not with `allow_http` (tests against a local server).
+    fn check_host(&self, url: &Url) -> Result<()> {
+        if self.allow_http {
+            return Ok(());
+        }
+        let local = match url.host() {
+            Some(url::Host::Ipv4(a)) => !is_global(a.into()),
+            Some(url::Host::Ipv6(a)) => !is_global(a.into()),
+            Some(url::Host::Domain(d)) => {
+                let addrs: Vec<_> = (d, url.port_or_known_default().unwrap_or(443))
+                    .to_socket_addrs()
+                    .with_context(|| format!("resolving {d}"))?
+                    .collect();
+                addrs.is_empty() || addrs.iter().any(|a| !is_global(a.ip()))
+            }
+            None => true,
+        };
+        ensure!(!local, "{url}: not an internet host");
+        Ok(())
+    }
+
     /// GET with manual redirects (https only), a size limit and the final URL.
     fn get(&self, url: &Url) -> Result<(Url, Option<String>, Vec<u8>)> {
         let mut url = url.clone();
         for _ in 0..=MAX_REDIRECTS {
             self.check_scheme(&url)?;
+            self.check_host(&url)?;
             let mut resp = self
                 .agent
                 .get(url.as_str())
@@ -188,6 +215,52 @@ impl Fetcher {
             }
         }
         Err(last.unwrap_or_else(|| anyhow::anyhow!("{page}: no icon candidates")))
+    }
+}
+
+/// Whether `ip` is on the internet: not loopback, private (RFC 1918, unique local), link-local,
+/// CGNAT, multicast or another special-purpose range (as the local network filter's list),
+/// also through an IPv4-mapped, NAT64 or 6to4 address.
+pub fn is_global(ip: IpAddr) -> bool {
+    let v4 = |a: Ipv4Addr| {
+        let [b0, b1, b2, _] = a.octets();
+        !(a.is_unspecified()
+            || a.is_loopback()
+            || a.is_private()
+            || a.is_link_local()
+            || a.is_multicast()
+            || a.is_broadcast()
+            || b0 == 0
+            || b0 >= 240
+            || (b0 == 100 && (64..128).contains(&b1))
+            || (b0 == 192 && b1 == 0 && b2 == 0)
+            || (b0 == 198 && (18..20).contains(&b1)))
+    };
+    match ip {
+        IpAddr::V4(a) => v4(a),
+        IpAddr::V6(a) => {
+            let s = a.segments();
+            if let Some(m) = a.to_ipv4_mapped() {
+                return v4(m);
+            }
+            let embedded = |hi: u16, lo: u16| Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return v4(embedded(s[6], s[7]));
+            }
+            if s[0] == 0x2002 {
+                return v4(embedded(s[1], s[2]));
+            }
+            !(a.is_unspecified()
+                || a.is_loopback()
+                || a.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00
+                || (s[0] & 0xffc0) == 0xfe80
+                || (s[0] & 0xffc0) == 0xfec0
+                || s[..3] == [0x64, 0xff9b, 1]
+                || s[..4] == [0x100, 0, 0, 0]
+                || s[..3] == [0x2001, 2, 0]
+                || s[0] == 0x5f00)
+        }
     }
 }
 
@@ -593,6 +666,53 @@ mod tests {
                 "/favicon.ico"
             ]
         );
+    }
+
+    #[test]
+    fn only_internet_hosts_are_fetched() {
+        for local in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fd00::1",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:192.168.1.1",
+            "64:ff9b::c0a8:101",
+            "2002:c0a8:101::1",
+        ] {
+            assert!(!is_global(local.parse().unwrap()), "{local}");
+        }
+        for global in [
+            "1.1.1.1",
+            "93.184.216.34",
+            "2606:4700::1111",
+            "64:ff9b::101:101",
+        ] {
+            assert!(is_global(global.parse().unwrap()), "{global}");
+        }
+        // Refused before any request (nothing listens there anyway).
+        let f = Fetcher::new(false);
+        for url in [
+            "https://127.0.0.1:1/icon.png",
+            "https://[::1]:1/",
+            "https://localhost:1/",
+            "https://192.168.0.1/cgi-bin/reboot",
+        ] {
+            let e = f.fetch_icon(&Source::Site(url.into())).unwrap_err();
+            assert!(
+                format!("{e:#}").contains("not an internet host"),
+                "{url}: {e:#}"
+            );
+        }
     }
 
     #[test]

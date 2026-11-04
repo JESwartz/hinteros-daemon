@@ -1321,7 +1321,9 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   `apps.accept_terms {id, version}` (records `{version, accepted_at, by, profile}`). A spare
   account, root or the admin account gets `permission_denied {reason: profile}`.
 - **Box features**: an install or rollback whose apps need a feature that is off runs the `box`
-  stage first (the apply flow with `requirements` = every needed feature plus the new ones).
+  stage first (the apply flow with `requirements` = every needed feature plus the new ones). A
+  catalog entry that needs a feature this daemon does not know is not installable (like an
+  unknown status) and that feature asks nothing; the rest of the index stays usable.
   Every other job that rebuilds the system writes `requirements` = what the owners' envs need,
   so unneeded features go only then. Update, channel, base and rollback jobs end with an `apps`
   stage that rebuilds every owner's env against the new system (tombstoned ids dropped); an env

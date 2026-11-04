@@ -102,7 +102,8 @@ pub enum Status {
     Retired,
     Removed,
     /// A status this code does not know: treated like `retired` (keeps working, not
-    /// installable).
+    /// installable). Also the status of an available entry that needs a box feature this code
+    /// does not know.
     #[serde(other)]
     Unknown,
 }
@@ -373,8 +374,17 @@ impl Index {
         let raw: RawIndex =
             serde_json::from_slice(bytes).map_err(|e| ParseError::Invalid(e.to_string()))?;
         let mut entries = BTreeMap::new();
-        for e in raw.entries {
+        for mut e in raw.entries {
             check_entry(&e).map_err(ParseError::Invalid)?;
+            // A box feature this code does not know (a newer catalog): the entry is not
+            // installable, like an unknown status (an installed app keeps working), and the
+            // feature asks nothing of this system. The rest of the index stays usable.
+            if !e.box_features.iter().all(|f| is_box_feature(f)) {
+                e.box_features.retain(|f| is_box_feature(f));
+                if e.status == Status::Available {
+                    e.status = Status::Unknown;
+                }
+            }
             if entries.insert(e.id.clone(), e).is_some() {
                 return Err(ParseError::Invalid("duplicate id".into()));
             }
@@ -459,11 +469,6 @@ fn check_entry(e: &Entry) -> Result<(), String> {
     }
     if e.icon.icon_url.is_some() && e.icon.sha256.is_none() {
         return Err(format!("{}: iconUrl needs sha256", e.id));
-    }
-    for f in &e.box_features {
-        if !is_box_feature(f) {
-            return Err(format!("{}: unknown box feature {f:?}", e.id));
-        }
     }
     for d in e
         .depends
@@ -644,13 +649,6 @@ mod tests {
 
     #[test]
     fn refuses_bad_entries() {
-        assert!(
-            Index::parse(
-                br#"{"indexVersion":4,"entries":[{"id":"a","kind":"app","name":"x","status":"available","boxFeatures":["x86"]}]}"#,
-                "/".into()
-            )
-            .is_err()
-        );
         for bad in [
             r#"{"indexVersion":4,"entries":[{"id":"../x","name":"x","status":"available"}]}"#,
             r#"{"indexVersion":4,"entries":[{"id":"a","name":"x","status":"available","dataPaths":["../../etc"]}]}"#,
@@ -677,6 +675,25 @@ mod tests {
         assert_eq!(i.get("a").unwrap().status, Status::Unknown);
         assert_eq!(i.get("b").unwrap().kind, EntryKind::Unknown);
         assert!(i.app("b").is_none());
+    }
+
+    #[test]
+    fn an_unknown_box_feature_makes_only_its_entry_not_installable() {
+        let i = Index::parse(
+            br#"{"indexVersion":4,"entries":[
+              {"id":"a","kind":"app","name":"x","status":"available","boxFeatures":["graphics32","hidraw"]},
+              {"id":"b","kind":"app","name":"y","status":"removed","boxFeatures":["hidraw"]},
+              {"id":"c","kind":"app","name":"z","status":"available","boxFeatures":["graphics32"]}]}"#,
+            "/".into(),
+        )
+        .unwrap();
+        let a = i.get("a").unwrap();
+        assert_eq!(a.status, Status::Unknown);
+        assert_eq!(a.box_features, ["graphics32"]);
+        assert_eq!(i.get("b").unwrap().status, Status::Removed);
+        assert_eq!(i.get("c").unwrap().status, Status::Available);
+        let ids = ["a".to_string(), "c".to_string()];
+        assert_eq!(i.box_features(&ids), ["graphics32"]);
     }
 
     #[test]

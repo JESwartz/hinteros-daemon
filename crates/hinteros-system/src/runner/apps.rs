@@ -321,8 +321,9 @@ impl Runner {
     }
 
     /// The final stage of a job that switched the system to another revision: rebuild every
-    /// owner's env against it, in one evaluation. An env that fails keeps its generation (it
-    /// still works) and is reported.
+    /// owner's env against it, in one evaluation. An env that fails, or has an app the
+    /// catalog does not have ([`stage_ids`]), keeps its generation (it still works) and is
+    /// reported.
     pub(super) fn apps_stage(&mut self) -> Result<Option<Vec<AppNotUpdated>>, Failure> {
         let Some(state) = self.config_state() else {
             return Ok(None);
@@ -333,17 +334,23 @@ impl Runner {
             .map_err(|e| warn!("no catalog after the switch: {e}"))
             .ok();
         let mut work: Vec<(Owner, Vec<String>)> = Vec::new();
+        let mut not_updated = Vec::new();
         for owner in appreg::owners(&state) {
             if let Some(c) = appreg::current(&owner, &paths) {
-                // Ids the new catalog removed (tombstones) or no longer has are dropped.
-                let ids: Vec<String> = c
-                    .manifest
-                    .ids
-                    .iter()
-                    .filter(|id| index.as_ref().is_none_or(|i| i.app(id).is_some()))
-                    .cloned()
-                    .collect();
-                work.push((owner, ids));
+                match stage_ids(index.as_ref(), &c.manifest.ids) {
+                    Ok(ids) => work.push((owner, ids)),
+                    Err(unknown) => {
+                        warn!(owner = %owner.key(), ids = ?unknown, "apps not in this catalog; the env keeps its generation");
+                        not_updated.push(AppNotUpdated {
+                            owner: owner.key(),
+                            ids: c.manifest.ids.clone(),
+                            reason: format!("not in this catalog: {}", unknown.join(", "))
+                                .chars()
+                                .take(300)
+                                .collect(),
+                        });
+                    }
+                }
             }
         }
         let mut sets: Vec<Vec<String>> = work.iter().map(|(_, ids)| ids.clone()).collect();
@@ -358,7 +365,6 @@ impl Runner {
                 .collect(),
         };
         self.set_stage(Stage::Apps);
-        let mut not_updated = Vec::new();
         for (owner, ids) in work {
             let reason = match built.get(&ids) {
                 Some(Ok(env)) => match self.set_env(&owner, env) {
@@ -448,6 +454,29 @@ impl Runner {
 }
 
 /// Features in `needed` that `state` does not turn on (sorted).
+/// The ids an owner's env is rebuilt with in the `apps` stage: apps the catalog removed
+/// (tombstones) are dropped; an app the catalog does not have at all (an older catalog after a
+/// rollback) is `Err`, and the env keeps its generation, so the app is still there after the
+/// next update. Without a catalog, every id.
+fn stage_ids(index: Option<&Index>, ids: &[String]) -> Result<Vec<String>, Vec<String>> {
+    let Some(index) = index else {
+        return Ok(ids.to_vec());
+    };
+    let unknown: Vec<String> = ids
+        .iter()
+        .filter(|id| index.get(id).is_none())
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        return Err(unknown);
+    }
+    Ok(ids
+        .iter()
+        .filter(|id| index.app(id).is_some())
+        .cloned()
+        .collect())
+}
+
 pub fn missing_features(state: &State, needed: &std::collections::BTreeSet<String>) -> Vec<String> {
     needed
         .iter()
@@ -486,5 +515,27 @@ mod tests {
         assert!(e.contains(r#"readFile "/run/x/\"\$y\".json""#), "{e}");
         assert!(store_path_ok("/nix/store/abc-hinteros-apps"));
         assert!(!store_path_ok("relative") && !store_path_ok("/nix/../x"));
+    }
+
+    #[test]
+    fn stage_drops_tombstones_and_keeps_envs_with_unknown_apps() {
+        let index = Index::parse(
+            br#"{"indexVersion":4,"entries":[
+              {"id":"steam","name":"Steam","status":"available"},
+              {"id":"old","name":"Old","status":"removed","statusReason":"x"}]}"#,
+            "/".into(),
+        )
+        .unwrap();
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            stage_ids(Some(&index), &ids(&["old", "steam"])),
+            Ok(ids(&["steam"]))
+        );
+        // An app the (older) catalog does not know: the env is not rebuilt.
+        assert_eq!(
+            stage_ids(Some(&index), &ids(&["steam", "later"])),
+            Err(ids(&["later"]))
+        );
+        assert_eq!(stage_ids(None, &ids(&["later"])), Ok(ids(&["later"])));
     }
 }

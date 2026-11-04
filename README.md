@@ -1316,7 +1316,8 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   Every other job that rebuilds the system writes `requirements` = what the owners' envs need,
   so unneeded features go only then. Update, channel, base and rollback jobs end with an `apps`
   stage that rebuilds every owner's env against the new system (tombstoned ids dropped); an env
-  that fails keeps its generation and is listed in `apps_not_updated`, the job still succeeds.
+  that fails, or has an app the catalog does not have (an older catalog after a rollback), keeps
+  its generation and is listed in `apps_not_updated`, the job still succeeds.
 - **Rollback re-adds features**: after a rollback's `apps` stage, features the envs need that
   the restored generation lacks are turned back on in a `box` stage (the apply flow on the restored
   configuration with `requirements` = what the envs need; a new generation). The result lists

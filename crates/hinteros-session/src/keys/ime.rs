@@ -5,8 +5,13 @@
 //! commit and presses real keys through its seat, so X11 and Wayland clients both get the text.
 //! It is private: pin gamescope and keep the VM test (spike 5) when updating it.
 
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
@@ -44,6 +49,37 @@ pub fn socket_path(display: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(dir).join(display))
 }
 
+/// How long gamescope has to answer.
+pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Run `f`, blocking Wayland calls on `stream`, for at most `timeout`; then the socket is shut
+/// down, so they fail. A read timeout on the socket does not help: wayland-client waits in
+/// poll() with no timeout.
+pub fn with_timeout<T>(
+    stream: &UnixStream,
+    timeout: Duration,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let fired = AtomicBool::new(false);
+    let (done, wait) = mpsc::channel::<()>();
+    let out = thread::scope(|s| {
+        let fired = &fired;
+        s.spawn(move || {
+            if wait.recv_timeout(timeout) == Err(mpsc::RecvTimeoutError::Timeout) {
+                fired.store(true, Ordering::SeqCst);
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        });
+        let out = f();
+        drop(done);
+        out
+    });
+    if fired.load(Ordering::SeqCst) {
+        bail!("gamescope did not answer in {timeout:?}");
+    }
+    out
+}
+
 #[derive(Default)]
 struct State {
     serial: u32,
@@ -54,6 +90,9 @@ pub struct GamescopeIme {
     queue: EventQueue<State>,
     state: State,
     im: GamescopeInputMethod,
+    /// The connection's socket, to shut down when gamescope stops answering.
+    stream: UnixStream,
+    timeout: Duration,
 }
 
 impl GamescopeIme {
@@ -66,25 +105,48 @@ impl GamescopeIme {
     }
 
     pub fn from_stream(stream: UnixStream) -> Result<Self> {
-        let conn = Connection::from_socket(stream)?;
-        let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
-        let qh = queue.handle();
-        let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=1, ()).context("no wl_seat")?;
-        let manager: GamescopeInputMethodManager = globals
-            .bind(&qh, 1..=3, ())
-            .context("no gamescope_input_method_manager (is this gamescope?)")?;
-        let im = manager.create_input_method(&seat, &qh, ());
-        let mut state = State::default();
-        queue.roundtrip(&mut state)?;
+        Self::from_stream_timeout(stream, ANSWER_TIMEOUT)
+    }
+
+    /// Like [`Self::from_stream`]; every wait for gamescope fails after `timeout` (the
+    /// connection is then broken, and the caller connects again).
+    fn from_stream_timeout(stream: UnixStream, timeout: Duration) -> Result<Self> {
+        let watched = stream.try_clone()?;
+        let (queue, state, im) = with_timeout(&watched, timeout, || {
+            let conn = Connection::from_socket(stream)?;
+            let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
+            let qh = queue.handle();
+            let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=1, ()).context("no wl_seat")?;
+            let manager: GamescopeInputMethodManager = globals
+                .bind(&qh, 1..=3, ())
+                .context("no gamescope_input_method_manager (is this gamescope?)")?;
+            let im = manager.create_input_method(&seat, &qh, ());
+            let mut state = State::default();
+            queue.roundtrip(&mut state)?;
+            Ok((queue, state, im))
+        })?;
         if state.unavailable {
             bail!("gamescope's input method is taken (Steam's keyboard?)");
         }
-        Ok(Self { queue, state, im })
+        Ok(Self {
+            queue,
+            state,
+            im,
+            stream: watched,
+            timeout,
+        })
     }
 
     fn commit(&mut self) -> Result<()> {
         self.im.commit(self.state.serial);
-        self.queue.roundtrip(&mut self.state)?;
+        let Self {
+            queue,
+            state,
+            stream,
+            timeout,
+            ..
+        } = self;
+        with_timeout(stream, *timeout, || Ok(queue.roundtrip(state)?))?;
         if self.state.unavailable {
             bail!("gamescope's input method became unavailable");
         }
@@ -308,6 +370,8 @@ mod tests {
     /// Run a fake compositor on one end of a socket pair until the guard is dropped.
     struct Server {
         stop: Arc<AtomicBool>,
+        /// Stop answering (gamescope hangs with the socket open).
+        hang: Arc<AtomicBool>,
         thread: Option<thread::JoinHandle<()>>,
         log: Arc<Mutex<Vec<String>>>,
     }
@@ -316,8 +380,9 @@ mod tests {
         fn start(taken: bool) -> (Self, UnixStream) {
             let (ours, theirs) = UnixStream::pair().unwrap();
             let stop = Arc::new(AtomicBool::new(false));
+            let hang = Arc::new(AtomicBool::new(false));
             let log = Arc::new(Mutex::new(Vec::new()));
-            let (s, l) = (stop.clone(), log.clone());
+            let (s, h, l) = (stop.clone(), hang.clone(), log.clone());
             let thread = thread::spawn(move || {
                 let mut display = Display::<Fake>::new().unwrap();
                 let dh = display.handle();
@@ -333,6 +398,10 @@ mod tests {
                     ..Fake::default()
                 };
                 while !s.load(Ordering::SeqCst) {
+                    if h.load(Ordering::SeqCst) {
+                        thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
                     let _ = display.dispatch_clients(&mut state);
                     let _ = display.flush_clients();
                     thread::sleep(Duration::from_millis(1));
@@ -341,6 +410,7 @@ mod tests {
             (
                 Self {
                     stop,
+                    hang,
                     thread: Some(thread),
                     log,
                 },
@@ -377,6 +447,24 @@ mod tests {
         let (_server, stream) = Server::start(true);
         let err = GamescopeIme::from_stream(stream).err().unwrap();
         assert!(format!("{err:#}").contains("taken"), "{err:#}");
+    }
+
+    #[test]
+    fn gives_up_when_gamescope_does_not_answer() {
+        let ms = Duration::from_millis;
+        // Nobody reads the other end.
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let err = GamescopeIme::from_stream_timeout(ours, ms(100))
+            .err()
+            .unwrap();
+        assert!(format!("{err:#}").contains("did not answer"), "{err:#}");
+        // It answers at first, then hangs with the socket open.
+        let (server, stream) = Server::start(false);
+        let mut ime = GamescopeIme::from_stream_timeout(stream, ms(100)).unwrap();
+        ime.text("a").unwrap();
+        server.hang.store(true, Ordering::SeqCst);
+        let err = ime.text("b").unwrap_err();
+        assert!(format!("{err:#}").contains("did not answer"), "{err:#}");
     }
 
     #[test]

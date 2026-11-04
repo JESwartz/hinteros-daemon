@@ -72,32 +72,59 @@ fn unescape(s: &str) -> String {
     out
 }
 
-/// The attributes of the `<Preferences>` element (`None`: not that file).
+/// The attributes of the `<Preferences>` element (`None`: not that file). The element ends at
+/// the first `>` outside a quoted value (XML allows `>` unescaped in one).
 pub fn attributes(xml: &str) -> Option<BTreeMap<String, String>> {
     let start = xml.find("<Preferences")?;
-    let tail = &xml[start + "<Preferences".len()..];
-    let end = tail.find('>')?;
-    let mut body = tail[..end].trim_end_matches('/');
+    let mut body = &xml[start + "<Preferences".len()..];
     let mut out = BTreeMap::new();
     loop {
         body = body.trim_start();
-        let Some(eq) = body.find('=') else { break };
-        let name = body[..eq].trim().to_owned();
+        if body.starts_with('>') || body.starts_with("/>") {
+            return Some(out);
+        }
+        let eq = body.find('=')?;
+        let name = body[..eq].trim();
+        if name.is_empty() || name.contains(|c: char| c.is_whitespace() || "<>/\"'".contains(c)) {
+            return None;
+        }
         let after = body[eq + 1..].trim_start();
         let quote = after.chars().next()?;
         if quote != '"' && quote != '\'' {
             return None;
         }
         let close = after[1..].find(quote)?;
-        out.insert(name, unescape(&after[1..1 + close]));
+        out.insert(name.to_owned(), unescape(&after[1..1 + close]));
         body = &after[close + 2..];
     }
-    Some(out)
+}
+
+/// Largest `Preferences.xml` read (a few KiB in practice).
+const MAX_PREFS: u64 = 1 << 20;
+
+/// The text of `Preferences.xml`. The plex user owns its folder: the file is opened without
+/// following a symlink and non-blocking (a FIFO does not hang the service), must be a regular
+/// file, and at most [`MAX_PREFS`] bytes are read.
+fn read_text(path: &Path) -> Option<String> {
+    use rustix::fs::{FileType, Mode, OFlags};
+    use std::io::Read;
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = rustix::fs::open(path, flags, Mode::empty()).ok()?;
+    let st = rustix::fs::fstat(&fd).ok()?;
+    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::from(fd)
+        .take(MAX_PREFS)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Read `Preferences.xml` (`None`: missing or unreadable: Plex has not started yet).
 pub fn read(path: &Path) -> Option<Prefs> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = read_text(path)?;
     let a = attributes(&text)?;
     let clean = |k: &str| {
         a.get(k)
@@ -182,6 +209,33 @@ mod tests {
             "A&bogus;"
         );
         assert_eq!(read(&d.path().join("none")), None);
+        // A '>' in a value does not end the element.
+        let a = attributes(r#"<Preferences FriendlyName="TV > Den" PlexOnlineToken="t">"#).unwrap();
+        assert_eq!(
+            (a["FriendlyName"].as_str(), a["PlexOnlineToken"].as_str()),
+            ("TV > Den", "t")
+        );
+        assert_eq!(attributes(r#"<Preferences a="1""#), None);
+        // Not through a symlink, not a FIFO or device, at most MAX_PREFS bytes.
+        let link = d.path().join("link.xml");
+        std::os::unix::fs::symlink(&p, &link).unwrap();
+        assert_eq!(read(&link), None);
+        let fifo = d.path().join("fifo.xml");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR,
+            0,
+        )
+        .unwrap();
+        assert_eq!(read(&fifo), None);
+        assert_eq!(read(Path::new("/dev/zero")), None);
+        let mut big = PREFS_UNCLAIMED.to_owned();
+        big.push_str(&" ".repeat(MAX_PREFS as usize));
+        big.push('\u{e9}');
+        std::fs::write(&p, &big).unwrap();
+        assert_eq!(read_text(&p).unwrap().len(), MAX_PREFS as usize);
         assert_eq!(attributes("<Other/>"), None);
         assert_eq!(attributes("<Preferences a=1/>"), None);
         // A fresh install: no name, not claimed.

@@ -92,7 +92,7 @@ impl StorageRequest {
 pub fn cleanup_settings(c: CleanupState) -> CleanupSettings {
     CleanupSettings {
         enabled: c.enable,
-        frequency: c.frequency,
+        frequency: c.frequency.known_or(system::CleanupFrequency::Weekly),
         keep_system: c.keep_system,
         keep_profiles: c.keep_profiles,
     }
@@ -225,7 +225,7 @@ impl Service {
                 let (state, _) = self.load_state()?;
                 let wanted = CleanupState {
                     enable: p.enabled,
-                    frequency: p.frequency,
+                    frequency: p.frequency.into(),
                     keep_system: p.keep_system,
                     keep_profiles: p.keep_profiles,
                     extra: state.cleanup().extra,

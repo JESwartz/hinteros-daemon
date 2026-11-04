@@ -11,7 +11,7 @@
 //! fails closed ([`ProfilesFile::load_or_locked`]): no admin, no first-boot mode, no spares, so
 //! every PIN-protected action is refused, and nothing overwrites it. Recovery is from the console.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use hinteros_api::common::{check_file_version, check_version};
@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use tracing::warn;
 
 use crate::fsutil;
-use crate::state::{self, Account, State};
+use crate::state::{self, Account, MAX_PROFILE_NUMBER, State};
 use crate::users::Users;
 
 pub const FILE_VERSION: u32 = 1;
@@ -146,7 +146,9 @@ impl ProfilesFile {
         Ok(out)
     }
 
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+    /// Write it. Only inside [`Self::update`], under the lock, from a copy read inside the
+    /// lock: a copy read before could overwrite another writer's change.
+    pub(crate) fn save(&self, path: &Path) -> std::io::Result<()> {
         if self.unreadable {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -196,10 +198,12 @@ impl ProfilesFile {
     }
 
     /// Take the next profile id: never below one plus the highest number in `state.json`,
-    /// `profiles.json` or the user database, and the counter only increases.
-    pub fn take_id(&mut self, state: &State, users: &Users) -> String {
-        let mut n = self.next.max(1);
-        let highest = state
+    /// `profiles.json` or the user database, and the counter only increases. Past the last
+    /// id (`p999`), the lowest number none of them uses and that `left` does not name: a
+    /// removed profile's home or PIN files that stayed (deleting them is best effort) must not
+    /// go to a new profile with the same uid.
+    pub fn take_id(&mut self, state: &State, users: &Users, left: impl Fn(u32) -> bool) -> String {
+        let used: BTreeSet<u32> = state
             .accounts()
             .iter()
             .filter_map(|a| state::profile_number(&a.id))
@@ -209,11 +213,15 @@ impl ProfilesFile {
                     .filter_map(|id| state::profile_number(id)),
             )
             .chain(users.profile_numbers())
-            .max()
-            .unwrap_or(0);
-        n = n.max(highest + 1);
-        self.next = n + 1;
-        format!("p{n}")
+            .collect();
+        let highest = used.last().copied().unwrap_or(0);
+        let n = self.next.max(1).max(highest + 1);
+        if n <= MAX_PROFILE_NUMBER {
+            self.next = n + 1;
+            return format!("p{n}");
+        }
+        let free = (1..=MAX_PROFILE_NUMBER).find(|k| !used.contains(k) && !left(*k));
+        format!("p{}", free.unwrap_or(n))
     }
 }
 
@@ -401,17 +409,71 @@ mod tests {
             group: None,
         };
         let mut f = ProfilesFile::default();
-        assert_eq!(f.take_id(&state, &users), "p7", "above passwd's p6");
-        assert_eq!(f.take_id(&state, &users), "p8");
+        assert_eq!(
+            f.take_id(&state, &users, |_| false),
+            "p7",
+            "above passwd's p6"
+        );
+        assert_eq!(f.take_id(&state, &users, |_| false), "p8");
         let mut f = ProfilesFile {
             next: 20,
             ..Default::default()
         };
-        assert_eq!(f.take_id(&state, &users), "p20");
+        assert_eq!(f.take_id(&state, &users, |_| false), "p20");
         let mut f = ProfilesFile::default();
         f.profiles
             .insert("p9".into(), test_file(&state).profiles["p1"].clone());
-        assert_eq!(f.take_id(&state, &Users::default()), "p10");
+        assert_eq!(f.take_id(&state, &Users::default(), |_| false), "p10");
+        // Past p999: the lowest free number, so a profile can still be created.
+        let mut f = ProfilesFile {
+            next: 999,
+            ..Default::default()
+        };
+        assert_eq!(f.take_id(&state, &Users::default(), |_| false), "p999");
+        assert_eq!(
+            f.take_id(&state, &Users::default(), |_| false),
+            "p2",
+            "p1 is in use"
+        );
+        assert_eq!(f.take_id(&state, &users, |_| false), "p2");
+        assert_eq!(
+            f.take_id(&state, &users, |k| k == 2),
+            "p3",
+            "p2's home or PIN files are still there"
+        );
+    }
+
+    /// Two writers (the service and a job): the service read its copy for its checks, then a
+    /// job wrote; the service's change, made in `update`, keeps the job's.
+    #[test]
+    fn no_lost_updates() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("profiles.json");
+        let state = st(
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],
+               "profiles":[{"id":"p1"}]}"#,
+        );
+        let meta = test_file(&state).profiles["p1"].clone();
+        let service = ProfilesFile::load(&path).unwrap();
+        assert!(service.profiles.is_empty());
+        ProfilesFile::update(&path, |f| {
+            f.profiles.insert("p2".into(), meta.clone());
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
+        let file = ProfilesFile::update(&path, |f| {
+            f.profiles.insert("p1".into(), meta.clone());
+            Ok::<_, ()>(f.clone())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(file.profiles.len(), 2);
+        assert_eq!(ProfilesFile::load(&path).unwrap(), file);
+        // A file made from nothing is written as before.
+        std::fs::remove_file(&path).unwrap();
+        ProfilesFile::default().save(&path).unwrap();
+        assert_eq!(ProfilesFile::load(&path).unwrap(), ProfilesFile::default());
     }
 
     #[test]

@@ -74,9 +74,6 @@ pub enum Command {
         #[command(flatten)]
         dirs: HelperDirs,
     },
-    /// Apply the time zone `time_zone.set` asked for (`hinteros-time-zone-apply.service`):
-    /// the zone in `<run-dir>/time-zone.request` into `<config-dir>/state.json` and the
-    /// localtime link
     /// Read every keyboard for Ctrl + Super + D and report each press on the service's keyboard
     /// socket (`hinteros-keyboard.service`: the only reader of keyboards; read-only, never grabbed)
     KeyboardHome {
@@ -87,6 +84,9 @@ pub enum Command {
         #[arg(long, default_value = "/dev/input")]
         input_dir: PathBuf,
     },
+    /// Apply the time zone `time_zone.set` asked for (`hinteros-time-zone-apply.service`):
+    /// the zone in `<run-dir>/time-zone.request` into `<config-dir>/state.json` and the
+    /// localtime link
     TimeZoneApply {
         #[command(flatten)]
         dirs: HelperDirs,

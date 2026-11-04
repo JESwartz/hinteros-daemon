@@ -389,6 +389,25 @@ impl Service {
             .send((hinteros_api::system::EventName::ProfilesChanged, json!({})));
     }
 
+    /// A removed profile `p<k>` left its PIN files or its home (next to the other profiles'
+    /// homes, or in /home): the number is not given out again (`take_id`).
+    fn left_behind(&self, state: &State, k: u32) -> bool {
+        let id = format!("p{k}");
+        if Pins::new(self.paths.pins_dir()).any(&id) {
+            return true;
+        }
+        let user = state::user_for(&id);
+        let mut dirs: BTreeSet<std::path::PathBuf> = state
+            .accounts()
+            .iter()
+            .filter_map(|a| self.users.by_name(&state::user_for(&a.id)))
+            .filter_map(|u| u.home.parent().map(std::path::Path::to_path_buf))
+            .collect();
+        dirs.insert("/home".into());
+        dirs.iter()
+            .any(|d| d.join(&user).symlink_metadata().is_ok())
+    }
+
     /// Change `profiles.json` under its lock ([`ProfilesFile::update`]): `f` sees it as it is
     /// now, after any await of the caller. A file that cannot be read is not overwritten.
     fn update_file<T>(
@@ -565,7 +584,9 @@ impl Service {
                 }
                 let name = profiles::check_name(&p.name)?;
                 // The counter keeps the number even if the job fails.
-                let id = self.update_file(|file| Ok(file.take_id(&state, &self.users)))?;
+                let id = self.update_file(|file| {
+                    Ok(file.take_id(&state, &self.users, |k| self.left_behind(&state, k)))
+                })?;
                 let user = state::user_for(&id);
                 let mut new = state.clone();
                 new.profiles.push(Profile {
@@ -1053,6 +1074,7 @@ impl Service {
                             ids,
                             updated_at: Some(job::now()),
                             by: Some(by),
+                            extra: Default::default(),
                         }),
                     }),
                 );

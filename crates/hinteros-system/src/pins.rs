@@ -206,6 +206,13 @@ impl Pins {
         removed
     }
 
+    /// Any PIN file of `id` is there (a removed profile's files that stayed).
+    pub fn any(&self, id: &str) -> bool {
+        [self.hash_path(id), self.state_path(id), self.tries_path(id)]
+            .iter()
+            .any(|p| p.symlink_metadata().is_ok())
+    }
+
     pub fn remove(&self, id: &str) {
         let _ = fs::remove_file(self.hash_path(id));
         let _ = fs::remove_file(self.state_path(id));

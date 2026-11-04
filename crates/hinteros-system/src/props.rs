@@ -91,9 +91,9 @@ proptest! {
             extra.into_iter().map(|(k, v)| (k, Value::from(v))).collect();
         let s = State {
             schema_version: 2,
-            base: if stable { Base::Stable } else { Base::Unstable },
+            base: if stable { Base::Stable } else { Base::Unstable }.into(),
             state_version: "26.11".to_string(),
-            settings: StateSettings { hostname: host, ssh: SshState { enable, extra: extra.clone() }, admin: None, guest: None, cleanup: cleanup.map(|(enable, f, keep_system, keep_profiles)| crate::state::CleanupState { enable, frequency: hinteros_api::system::CleanupFrequency::ALL[f], keep_system, keep_profiles, extra: extra.clone() }), time_zone: zone, extra: extra.clone() },
+            settings: StateSettings { hostname: host, ssh: SshState { enable, extra: extra.clone() }, admin: None, guest: None, cleanup: cleanup.map(|(enable, f, keep_system, keep_profiles)| crate::state::CleanupState { enable, frequency: hinteros_api::system::CleanupFrequency::ALL[f].into(), keep_system, keep_profiles, extra: extra.clone() }), time_zone: zone, extra: extra.clone() },
             disk: None,
             requirements: Vec::new(),
             services,

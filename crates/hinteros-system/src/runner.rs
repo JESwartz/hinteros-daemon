@@ -49,6 +49,10 @@ pub const TERMS_VERSION: u32 = 1;
 /// Progress lines within a stage at most this often.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long a child's pipes may stay open after it exited (a process it left still holds
+/// them) before the rest of its process group is killed.
+const PIPE_GRACE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 5 });
+
 pub fn main(run_dir: &Path, id: &str) -> ExitCode {
     if !is_job_id(id) {
         error!("bad job id {id:?}");
@@ -176,6 +180,7 @@ fn run(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
 pub enum Failure {
     Cancelled,
     Error(ErrorObject),
@@ -464,6 +469,11 @@ impl Runner {
     }
 
     /// [`Self::exec`], keeping up to `limit` bytes of stdout (the rest is read and dropped).
+    ///
+    /// Both pipes are drained to the end whatever they carry (a non-UTF-8 stderr line is
+    /// read lossily), so the child never gets SIGPIPE from us. Once the child has exited,
+    /// the pipes get [`PIPE_GRACE`] to reach EOF; something left in the process group that
+    /// still holds them is then killed, and a descendant that left the group is given up on.
     fn exec_with(
         &mut self,
         mut cmd: Command,
@@ -482,41 +492,59 @@ impl Runner {
         let pgid = Pid::from_child(&child);
         let mut stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
-        let out_thread = std::thread::spawn(move || {
+        let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
             let mut buf = Vec::new();
             let _ = stdout.by_ref().take(limit).read_to_end(&mut buf);
             let _ = std::io::copy(&mut stdout, &mut std::io::sink());
-            buf
+            let _ = out_tx.send(buf);
         });
         let (tx, rx) = mpsc::channel::<String>();
-        let err_thread = std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
+        std::thread::spawn(move || {
+            let mut stderr = BufReader::new(stderr);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match stderr.read_until(b'\n', &mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if buf.last() == Some(&b'\n') {
+                            buf.pop();
+                        }
+                        // Nobody listens any more: keep draining all the same.
+                        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
                 }
             }
         });
         let mut tail: Vec<String> = Vec::new();
+        let keep = |tail: &mut Vec<String>, line: &str| {
+            if !line.starts_with("@nix ") && !line.trim().is_empty() {
+                tail.push(line.chars().take(400).collect());
+                if tail.len() > 20 {
+                    tail.remove(0);
+                }
+            }
+        };
         let mut cancelled = false;
         let status = loop {
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(line) => {
                     if !line.starts_with("@nix ") {
                         eprintln!("{line}");
-                        if !line.trim().is_empty() {
-                            tail.push(line.chars().take(400).collect());
-                            if tail.len() > 20 {
-                                tail.remove(0);
-                            }
-                        }
                     }
+                    keep(&mut tail, &line);
                     self.touch();
                     on_line(self, &line);
                     self.tick_at(Instant::now());
                     continue;
                 }
-                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                Err(mpsc::RecvTimeoutError::Timeout) => self.tick_at(Instant::now()),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // stderr is closed but the child runs on: wait without spinning.
+                    std::thread::sleep(Duration::from_millis(100));
                     self.tick_at(Instant::now());
                 }
             }
@@ -533,25 +561,58 @@ impl Runner {
                 let _ = kill_process_group(pgid, Signal::KILL);
             }
             match child.try_wait() {
-                Ok(Some(status)) => {
-                    // Drain what is left of stderr.
-                    while let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-                        if !line.starts_with("@nix ") && !line.trim().is_empty() {
-                            tail.push(line.chars().take(400).collect());
-                        }
-                        on_line(self, &line);
-                    }
-                    break status;
-                }
+                Ok(Some(status)) => break status,
                 Ok(None) => {}
                 Err(e) => return Err(self.fail(format!("waiting for {program}: {e}"))),
             }
         };
-        let _ = err_thread.join();
+        // Drain what is left of stderr, and collect stdout.
+        let mut out = None;
+        let mut stderr_done = false;
+        let mut deadline = Instant::now() + PIPE_GRACE;
+        let mut killed = false;
+        loop {
+            if !stderr_done {
+                match rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(line) => {
+                        keep(&mut tail, &line);
+                        on_line(self, &line);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => stderr_done = true,
+                }
+            }
+            if out.is_none() {
+                out = match out_rx.try_recv() {
+                    Ok(buf) => Some(buf),
+                    Err(mpsc::TryRecvError::Disconnected) => Some(Vec::new()),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                };
+            }
+            if stderr_done && out.is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                if killed {
+                    warn!("{program} exited, but a process it started still holds its output");
+                    break;
+                }
+                warn!("{program} exited and left processes running; stopping them");
+                // The leader is reaped, so the group id is free once its last member is gone.
+                // Accepted: pids grow up to pid_max (4194304) before they wrap, so a new group
+                // with this id within PIPE_GRACE is not a real case.
+                let _ = kill_process_group(pgid, Signal::KILL);
+                killed = true;
+                deadline = Instant::now() + PIPE_GRACE;
+            }
+            if stderr_done {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
         if let Some(line) = self.pending.take() {
             self.write_line(line, Instant::now());
         }
-        let out = out_thread.join().unwrap_or_default();
+        let out = out.unwrap_or_default();
         if cancelled {
             return Err(Failure::Cancelled);
         }
@@ -671,9 +732,20 @@ impl Runner {
             .init()
             .and_then(|()| git.fetch_tip(&source.repo, &source.branch))
             .map_err(|e| self.git_error(&source, e))?;
+        // The locked revision must be local to compare with: fetch the branch the box follows
+        // when it is not (best effort; else the target is described on its own).
+        let current = source.current_rev.as_deref();
+        if let Some(c) = current
+            && !git.has_commit(c)
+        {
+            for branch in &source.others {
+                if let Err(e) = git.fetch(&source.repo, branch) {
+                    warn!("cannot fetch {branch}: {e}");
+                }
+            }
+        }
         self.check_cancel()?;
         self.set_stage(Stage::Verifying);
-        let current = source.current_rev.as_deref();
         let target = git
             .describe(
                 &tip,
@@ -683,7 +755,8 @@ impl Runner {
                 &source.allowed_signers,
             )
             .map_err(|e| self.git_error(&source, e))?;
-        let older = match current {
+        // Not known when the locked revision is still not local.
+        let older = match current.filter(|c| git.has_commit(c)) {
             Some(c) => !git
                 .is_ancestor(c, &tip)
                 .map_err(|e| self.git_error(&source, e))?,
@@ -768,6 +841,7 @@ impl Runner {
             }
         }
         let old_toplevel = fs::canonicalize(&paths.profile).ok();
+        let old_generation = generations::current_generation(&paths.profile);
 
         // Fetch and verify the target revision.
         let mut lock_url = None;
@@ -775,18 +849,14 @@ impl Runner {
             self.check_cancel()?;
             self.set_stage(Stage::Fetching);
             let git = self.git(&u.source);
-            let fetched = git
+            // Without a checked revision, the tip that was fetched (no race with ls-remote).
+            let tip = git
                 .init()
-                .and_then(|()| git.fetch(&u.source.repo, &u.source.branch));
-            fetched.map_err(|e| self.git_error(&u.source, e))?;
+                .and_then(|()| git.fetch_tip(&u.source.repo, &u.source.branch))
+                .map_err(|e| self.git_error(&u.source, e))?;
             self.check_cancel()?;
             self.set_stage(Stage::Verifying);
-            let rev = match &u.rev {
-                Some(r) => r.clone(),
-                None => git
-                    .ls_remote(&u.source.repo, &u.source.branch)
-                    .map_err(|e| self.git_error(&u.source, e))?,
-            };
+            let rev = u.rev.clone().unwrap_or(tip);
             let require_ff = u.not_fast_forward != NotFastForward::Allow;
             // Never older than the newest tip this box verified on the target branch (also on
             // a switch, which may go back from the locked revision).
@@ -814,6 +884,27 @@ impl Runner {
                 }
             });
             lock_url = Some(format!("{}&rev={rev}", u.input_url));
+        }
+
+        // /etc/hinteros must describe the running system: a job that activated but could not
+        // replace it left the old config, which would build the old revision again. Restore it
+        // from that generation's snapshot first, as hinteros-config-sync does at boot. Only
+        // when the running system is the profile's (not after a failed switch, nor when an
+        // older generation was booted from the boot menu).
+        if let Some(snapshot) = old_toplevel.as_ref().map(|t| t.join("hinteros"))
+            && fs::canonicalize(&paths.current_system).ok() == old_toplevel
+            && config_behind(&snapshot, &paths.config_dir)
+        {
+            warn!("/etc/hinteros does not match the system's snapshot; restoring it");
+            let _lock = crate::state::lock(&paths.state_lock())
+                .map_err(|e| self.fail(format!("locking state.json: {e}")))?;
+            sync_config(
+                &snapshot,
+                &paths.config_dir,
+                &paths.staging(),
+                &self.spec.id,
+            )
+            .map_err(|e| self.fail(format!("restoring the config snapshot: {e}")))?;
         }
 
         // Staging: a copy of /etc/hinteros with the edit applied.
@@ -899,9 +990,15 @@ impl Runner {
         self.check_cancel()?;
         self.enter_activation()?;
         let jellyfin_stopped = self.jellyfin_backup(old_toplevel.as_deref(), &toplevel)?;
+        // `nix-env --set` reuses the newest generation when it has the same toplevel (after a
+        // rollback): only a generation this job made is deleted when the switch fails.
+        let generations_before: Vec<u32> = generations::links(&paths.profile)
+            .iter()
+            .map(|l| l.generation)
+            .collect();
         let activated = self.activate(&toplevel);
         if activated.is_err() {
-            self.restore(old_toplevel.as_deref());
+            self.restore(old_generation, &generations_before, old_toplevel.as_deref());
         }
         self.jellyfin_start(jellyfin_stopped);
         activated?;
@@ -958,24 +1055,44 @@ impl Runner {
         Ok(())
     }
 
-    /// After a failed activation: point the profile back at the old system and make it the
-    /// boot default again (best effort; the failure is reported either way).
-    fn restore(&mut self, old: Option<&Path>) {
+    /// After a failed activation: point the profile back at the old generation, delete the
+    /// generation that failed if the job made it (so it is no rollback target; one that was
+    /// there before, in `before`, stays), and make the old system the boot default again (best
+    /// effort; the failure is reported either way). Without a generation number, the profile
+    /// is set to the old system.
+    fn restore(&mut self, old_generation: Option<u32>, before: &[u32], old: Option<&Path>) {
         let Some(old) = old else { return };
         warn!(
             "activation failed; restoring the profile to {}",
             old.display()
         );
+        let profile = self.spec.paths.profile.clone();
+        let failed = generations::current_generation(&profile)
+            .filter(|g| old_generation != Some(*g) && !before.contains(g));
         let mut cmd = Command::new(&self.spec.tools.nix_env);
-        cmd.arg("-p")
-            .arg(&self.spec.paths.profile)
-            .arg("--set")
-            .arg(old);
-        if self.exec(cmd, false, &mut |_, _| {}).is_ok() {
-            let mut cmd = Command::new(old.join("bin/switch-to-configuration"));
-            cmd.arg("boot");
-            let _ = self.exec(cmd, false, &mut |_, _| {});
+        cmd.arg("-p").arg(&profile);
+        match old_generation {
+            Some(g) => cmd.arg("--switch-generation").arg(g.to_string()),
+            None => cmd.arg("--set").arg(old),
+        };
+        if self.exec(cmd, false, &mut |_, _| {}).is_err() {
+            return;
         }
+        if old_generation.is_some()
+            && let Some(f) = failed
+        {
+            let mut cmd = Command::new(&self.spec.tools.nix_env);
+            cmd.arg("-p")
+                .arg(&profile)
+                .arg("--delete-generations")
+                .arg(f.to_string());
+            if let Err(Failure::Error(e)) = self.exec(cmd, false, &mut |_, _| {}) {
+                warn!("the failed generation {f} stays: {}", e.message);
+            }
+        }
+        let mut cmd = Command::new(old.join("bin/switch-to-configuration"));
+        cmd.arg("boot");
+        let _ = self.exec(cmd, false, &mut |_, _| {});
     }
 
     /// A rollback's switch: the profile to `generation`, then its `switch-to-configuration
@@ -1052,7 +1169,7 @@ impl Runner {
             )
             .map_err(|e| self.fail(format!("restoring the config snapshot: {e}")))?;
             // The switch set /etc/localtime from the state.json before the restore: follow the
-            // restored one (its time zone, or UTC).
+            // restored one (the live time zone if one was set, else the snapshot's, or UTC).
             match crate::timezone::apply_state(&paths) {
                 Ok(zone) => info!(zone, "time zone of the restored state applied"),
                 Err(e) => warn!("cannot apply the restored time zone: {e}"),
@@ -1072,8 +1189,6 @@ impl Runner {
     }
 }
 
-/// What `hinteros-config-sync` does at boot, for a rollback from Settings: make the managed
-/// files of `config_dir` equal the generation's snapshot (other files, e.g. facter.json, stay).
 /// Record a verified `rev` as `branch`'s newest tip if it descends from the recorded one;
 /// returns whether the record changed.
 fn record_tip(git: &Git, tips: &mut SeenTips, branch: &str, rev: &str) -> bool {
@@ -1103,6 +1218,10 @@ fn record_other(git: &Git, source: &job::UpdateSource, tips: &mut SeenTips, bran
     changed
 }
 
+/// What `hinteros-config-sync` does at boot, for a rollback from Settings: make the managed
+/// files of `config_dir` equal the generation's snapshot (other files, e.g. facter.json, stay),
+/// except a time zone in the live `state.json`, which is kept (`time_zone.set` changes it in
+/// place, without a generation; time-zone.md). The caller holds [`crate::state::lock`].
 pub fn sync_config(
     snapshot: &Path,
     config_dir: &Path,
@@ -1130,8 +1249,31 @@ pub fn sync_config(
             )?;
         }
     }
+    let live = config_dir.join("state.json");
+    let staged = scratch.join("state.json");
+    if staged.is_file()
+        && crate::state::State::load(&live).is_ok_and(|(s, _)| s.settings.time_zone.is_some())
+    {
+        match crate::timezone::carry_live_zone(&live, &staged) {
+            Ok(true) => info!("kept the live time zone"),
+            Ok(false) => {}
+            Err(e) => warn!("cannot keep the live time zone: {e}"),
+        }
+    }
     fsutil::replace_dir(scratch, config_dir, tag)?;
     fsutil::remove(scratch)
+}
+
+/// Whether `config_dir`'s `flake.nix` or `flake.lock` differs from the generation's `snapshot`
+/// (`state.json` may differ in its live time zone). No snapshot: no. A stale `state.json` alone
+/// (a settings-only job that switched but could not replace /etc/hinteros) is not healed here:
+/// the service made this job's state from /etc/hinteros before the job ran, so only
+/// hinteros-config-sync at the next boot can bring it in line (the failed job was reported).
+fn config_behind(snapshot: &Path, config_dir: &Path) -> bool {
+    ["flake.nix", "flake.lock"].iter().any(|f| {
+        fs::read(snapshot.join(f))
+            .is_ok_and(|want| fs::read(config_dir.join(f)).ok().as_ref() != Some(&want))
+    })
 }
 
 /// Whether the new system has a different session daemon or system service package than the
@@ -1145,13 +1287,13 @@ pub fn session_restart_required(old: Option<&Path>, new: &Path) -> bool {
     })
 }
 
+/// Apps an update adds and removes.
+pub type CatalogChanges = (Vec<CatalogApp>, Vec<RemovedApp>);
+
 /// Compare the target's `lib.catalogIds` with the running catalog. The target is an object of
 /// id to `{name, status, statusReason?}` (or to just the status string). New: available in the
 /// target and not available now. Removed: installed, and removed from or missing in the
 /// target. `None` if the target is not such an object.
-/// Apps an update adds and removes.
-pub type CatalogChanges = (Vec<CatalogApp>, Vec<RemovedApp>);
-
 pub fn catalog_changes(
     current: Option<&hinteros_api::catalog::Index>,
     target: &serde_json::Value,
@@ -1496,6 +1638,102 @@ mod tests {
         // Without a current index every available target app is new.
         let (new, _) = catalog_changes(None, &json!({"a": "available"}), &[]).unwrap();
         assert_eq!(new[0].name, "a");
+    }
+
+    /// A non-UTF-8 stderr line does not stop the reader: the child would die of SIGPIPE on
+    /// its next line.
+    #[test]
+    fn exec_reads_non_utf8_stderr() {
+        let d = tempfile::tempdir().unwrap();
+        let mut r = test_runner(d.path());
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            r"printf 'bad \377\n' >&2; sleep 0.3
+              i=0; while [ $i -lt 2000 ]; do echo line $i >&2; i=$((i+1)); done; echo out",
+        ]);
+        let mut lines = Vec::new();
+        let out = r
+            .exec(cmd, false, &mut |_, l| lines.push(l.to_owned()))
+            .unwrap();
+        assert_eq!(out, "out\n");
+        assert_eq!(lines[0], "bad \u{FFFD}");
+        assert_eq!(lines.len(), 2001);
+        assert_eq!(lines[2000], "line 1999");
+    }
+
+    /// A process the child leaves behind with its pipes does not hold the job forever.
+    #[test]
+    fn exec_stops_leftover_processes() {
+        let d = tempfile::tempdir().unwrap();
+        let mut r = test_runner(d.path());
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 60 & echo done"]);
+        let t0 = Instant::now();
+        let out = r.exec(cmd, false, &mut |_, _| {}).unwrap();
+        assert_eq!(out, "done\n");
+        assert!(t0.elapsed() < Duration::from_secs(30), "{:?}", t0.elapsed());
+    }
+
+    /// A rollback restores the snapshot's managed files, but keeps a live time zone (as the
+    /// boot-time sync does); other files stay.
+    #[test]
+    fn sync_config_keeps_the_live_time_zone() {
+        let d = tempfile::tempdir().unwrap();
+        let (config, snapshot) = (d.path().join("etc"), d.path().join("snap"));
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(&snapshot).unwrap();
+        let state = |zone: Option<&str>| {
+            let mut s = crate::state::State::parse(include_bytes!(
+                "../tests/fixtures/state/vm-system-a.json"
+            ))
+            .unwrap();
+            s.settings.time_zone = zone.map(str::to_owned);
+            s.to_canonical_json()
+        };
+        let zone = |dir: &Path| {
+            crate::state::State::load(&dir.join("state.json"))
+                .unwrap()
+                .0
+                .settings
+                .time_zone
+        };
+        fs::write(snapshot.join("flake.lock"), "old").unwrap();
+        fs::write(snapshot.join("state.json"), state(Some("America/Chicago"))).unwrap();
+        fs::write(config.join("flake.lock"), "new").unwrap();
+        fs::write(config.join("facter.json"), "{}").unwrap();
+        fs::write(config.join("state.json"), state(Some("Europe/Berlin"))).unwrap();
+        let scratch = d.path().join("scratch");
+        sync_config(&snapshot, &config, &scratch, "t").unwrap();
+        assert_eq!(
+            fs::read_to_string(config.join("flake.lock")).unwrap(),
+            "old"
+        );
+        assert!(config.join("facter.json").exists());
+        assert_eq!(zone(&config).as_deref(), Some("Europe/Berlin"));
+        // No live zone: the snapshot's.
+        fs::write(config.join("state.json"), state(None)).unwrap();
+        sync_config(&snapshot, &config, &scratch, "t").unwrap();
+        assert_eq!(zone(&config).as_deref(), Some("America/Chicago"));
+    }
+
+    #[test]
+    fn config_behind_its_snapshot() {
+        let d = tempfile::tempdir().unwrap();
+        let (config, snapshot) = (d.path().join("etc"), d.path().join("snap"));
+        assert!(!config_behind(&snapshot, &config), "no snapshot");
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(&snapshot).unwrap();
+        for dir in [&config, &snapshot] {
+            fs::write(dir.join("flake.nix"), "{}").unwrap();
+            fs::write(dir.join("flake.lock"), "r2").unwrap();
+        }
+        fs::write(config.join("state.json"), "live zone").unwrap();
+        assert!(!config_behind(&snapshot, &config));
+        fs::write(config.join("flake.lock"), "r1").unwrap();
+        assert!(config_behind(&snapshot, &config));
+        fs::remove_file(config.join("flake.lock")).unwrap();
+        assert!(config_behind(&snapshot, &config));
     }
 
     #[test]

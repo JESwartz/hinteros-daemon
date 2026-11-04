@@ -1188,8 +1188,10 @@ delete_data}` (polkit `org.hinteros.system.apps`, seat check, rate limit, audit)
   (a broken generation), but not with `delete_data`.
 - The job writes `state.json`'s `apps` from the typed state and runs the apply flow (job kinds
   `apps_install`, `apps_remove`). With `delete_data`, after a successful switch it deletes the
-  removed apps' `dataPaths` (from the index, checked again: relative, no `.`/`..`, no wildcards)
-  in every profile home: the caller's home plus the homes of `state.json`'s profile users (M7),
+  removed apps' `dataPaths` (from the index, checked again: relative, no `.`/`..`, no wildcards;
+  never a shared directory such as `.config` or `.local/share`, nor a path equal to or above a
+  `dataPaths` entry of an app that stays installed; `apps.clear_data` likewise) in every profile
+  home: the caller's home plus the homes of `state.json`'s profile users (M7),
   from the user database, never root's. `datadel.rs` opens the home with `O_NOFOLLOW` (it must be a
   directory owned by the profile's uid), every component with `openat(O_NOFOLLOW|O_DIRECTORY)`,
   removes trees with `unlinkat` relative to directory descriptors, unlinks symlinks without
@@ -1343,7 +1345,8 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   Every other job that rebuilds the system writes `requirements` = what the owners' envs need,
   so unneeded features go only then. Update, channel, base and rollback jobs end with an `apps`
   stage that rebuilds every owner's env against the new system (tombstoned ids dropped); an env
-  that fails keeps its generation and is listed in `apps_not_updated`, the job still succeeds.
+  that fails, or has an app the catalog does not have (an older catalog after a rollback), keeps
+  its generation and is listed in `apps_not_updated`, the job still succeeds.
 - **Rollback re-adds features**: after a rollback's `apps` stage, features the envs need that
   the restored generation lacks are turned back on in a `box` stage (the apply flow on the restored
   configuration with `requirements` = what the envs need; a new generation). The result lists
@@ -1683,9 +1686,10 @@ link), `service/timezone.rs` (the methods).
   while a job runs.
 - Jobs: a job that replaces `/etc/hinteros` takes the same lock and first copies the live
   `settings.timeZone` into its staged `state.json`, so a zone set while it ran (or after its
-  state was computed) is kept. A rollback restores the generation's `state.json` (its zone) and
-  then points `/etc/localtime` at that zone (the switch ran before the restore); the service
-  sends `time_zone_changed` after any job when the zone that applies changed.
+  state was computed) is kept. A rollback restores the generation's `state.json` but keeps a
+  live zone, as `hinteros-config-sync` does at boot, and then points `/etc/localtime` at the
+  zone that applies (the switch ran before the restore); the service sends `time_zone_changed`
+  after any job when the zone that applies changed.
 
 ### What the system repo must do
 
@@ -1695,8 +1699,8 @@ link), `service/timezone.rs` (the methods).
 - `hinteros-config-sync`: `time_zone.set` changes `/etc/hinteros/state.json` in place without a
   new generation, so the running generation's snapshot differs in `settings.timeZone` only.
   The sync must not undo that at the next boot: compare `state.json` without `settings.timeZone`
-  and keep the live zone when it restores (a rollback, which changes the generation, restores
-  the snapshot's zone, as the daemon's own rollback does).
+  and keep the live zone when it restores, after a rollback too (as the daemon's own rollback
+  does).
 - `hinteros-time-zone-apply.service`: oneshot, root, `ExecStart=hinteros-system
   time-zone-apply`, `ProtectSystem=strict`, `ReadWritePaths=/etc /run/hinteros`, no network.
   The service only needs `/run/hinteros` writable (no `/etc`) and may start this unit (it is
@@ -2037,7 +2041,9 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
 - **`tailscale.login {pin}`** (job): `tailscale up --reset --json --timeout=600s` (defaults: no
   exit node, routes or Tailscale SSH; `--force-reauth` for an expired key); its pretty-printed
   JSON objects are decoded as a stream; each new `AuthURL` (https, printable ASCII, ≤ 512) is
-  `job_progress {stage: signing_in, detail: {auth_url}}`; done at `{"BackendState":"Running"}`
+  `job_progress {stage: signing_in, detail: {auth_url}}`, sent (and shown by `jobs.get` and
+  `jobs.list`) only to connections of the uid that started the job and of root: whoever opens
+  the URL first adds the box to their tailnet; done at `{"BackendState":"Running"}`
   and exit 0. `jobs.cancel` kills the CLI. `tailscale.logout {pin}` (job) runs `tailscale
   logout`. Both answer `job_id: null` when the state is already the asked one.
 - **`cloudflare.set_token {pin, token}`**: checked strictly (cloudflared's `ParseToken`: padded
@@ -2167,6 +2173,10 @@ supported. Required: `schemaVersion`, `base`, `stateVersion`, `requirements`, `s
 Unknown fields load, at every level, and are written back after the known ones, sorted: a box
 that switches to an older channel still has to read the newer file. A change that is not safe
 to ignore bumps `schemaVersion`. Bad values of known fields are errors. `check-state` follows.
+The checks on load are about shape, so a later 1.x may add values without a new schema: an
+unknown `base` or `settings.cleanup.frequency` loads and is written back as it was (the API shows
+`unstable` and `weekly`), a well-formed box feature this daemon does not know stays in
+`requirements`, and the 8-profile limit applies to `profiles.create`, not to loading.
 
 `base.set` to a base that is not built (`state::BUILT_BASES`, `unstable` only) is refused with
 `unavailable {service: base, reason: not_built}`, before the downgrade check.
@@ -2220,7 +2230,7 @@ Unknown fields are ignored. A newer file is not understood; what follows depends
 | `profiles.json` | locked down (below); saving is an error; the file stays | kept |
 | `services/jellyfin-server/users.json` | load and save are errors; the file stays | kept |
 | `terms-accepted.json` | reads as no acceptances; recording is an error; the file stays | kept |
-| `starter.json` | reads as none; saving is an error (the job fails); the file stays | dropped (always written whole) |
+| `starter.json` | reads as none; saving is an error (the job fails); the file stays | kept |
 | `channel-tips.json` | reads as empty; saving fails with a warning; the file stays | kept |
 | `runtime.json` | defaults; a change holds until the next boot; the file stays | kept |
 | `permissions.json` (session) | defaults; a change holds in memory; the file stays | dropped |

@@ -239,7 +239,7 @@ impl Service {
         let delete_data = match (&index, p.delete_data) {
             (Some(index), true) => Some(DeleteData {
                 homes: self.own_homes(peer, &caller),
-                paths: store::data_paths(index, &removing),
+                paths: store::data_paths(index, &removing, &ids),
             }),
             _ => None,
         };
@@ -307,9 +307,12 @@ impl Service {
             ));
         }
         let ids = vec![p.id.clone()];
+        let installed = appreg::current(&owner, &self.paths)
+            .map(|c| c.manifest.ids)
+            .unwrap_or_default();
         let delete = DeleteData {
             homes: self.own_homes(peer, &caller),
-            paths: store::data_paths(&index, &ids),
+            paths: store::data_paths(&index, &ids, &installed),
         };
         let subject = JobSubject {
             apps: Some(self.subject_apps(&ids)),

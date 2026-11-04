@@ -554,7 +554,8 @@ pub fn script(path: &Path, body: &str) {
 
 /// The fake `nix`: `flake lock --override-input hinteros <url> path:<dir>` writes a lock with
 /// the URL's ref and rev; `build ... path:<dir>#...` prints internal-json progress and creates
-/// a new "store path" (a generation toplevel with the config snapshot).
+/// a new "store path" (a generation toplevel with the config snapshot), or the path in
+/// `build-out` when that file exists (a build of a toplevel that is already there).
 const FAKE_NIX: &str = r#"
 echo "$@" >> "$FAKE_ROOT/nix.log"
 while [ "$1" = "--extra-experimental-features" ]; do shift 2; done
@@ -620,6 +621,7 @@ build)
   done
   echo '@nix {"action":"stop","id":2}' >&2
   echo '@nix {"action":"result","id":3,"type":105,"fields":[2,2,0,0]}' >&2
+  [ -e "$FAKE_ROOT/build-out" ] && { cat "$FAKE_ROOT/build-out"; exit 0; }
   n=$(cat "$FAKE_ROOT/counter")
   n=$((n+1)); echo "$n" > "$FAKE_ROOT/counter"
   out="$FAKE_ROOT/store/gen$n"
@@ -680,6 +682,8 @@ EOF
 chmod +x "$out/bin/switch-to-configuration"
 "#;
 
+/// The fake `nix-env`: like nix, `--set` reuses the newest generation when it already points
+/// at the same path.
 const FAKE_NIX_ENV: &str = r#"
 echo "$@" >> "$FAKE_ROOT/nix-env.log"
 p="$2"; dir=$(dirname "$p"); base=$(basename "$p")
@@ -690,6 +694,9 @@ case "$3" in
     n="${l##*/}"; n="${n#$base-}"; n="${n%-link}"
     [ "$n" -gt "$max" ] && max="$n"
   done
+  if [ "$max" -gt 0 ] && [ "$(readlink "$dir/$base-$max-link")" = "$4" ]; then
+    ln -sfn "$base-$max-link" "$p"; exit 0
+  fi
   n=$((max+1))
   ln -s "$4" "$dir/$base-$n-link"
   ln -sfn "$base-$n-link" "$p"

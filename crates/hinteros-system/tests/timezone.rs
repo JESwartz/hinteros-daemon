@@ -1,7 +1,7 @@
 //! Time zone (time-zone.md) against the real binary and a fake root: the zone
 //! and list from tzdata fixtures, `time_zone.set` (state.json, the localtime link, the event),
 //! its errors, the admin PIN and first-boot mode, a job that runs across a change, and a
-//! rollback that restores another zone. The helper unit (`hinteros-time-zone-apply.service`) is
+//! rollback that keeps the live zone. The helper unit (`hinteros-time-zone-apply.service`) is
 //! the real `time-zone-apply` subcommand, run by the fake systemd.
 
 use hinteros_api::ErrorCode;
@@ -205,18 +205,20 @@ async fn get_list_set_and_a_job_across_it() {
         "{audit:?}"
     );
 
-    // A rollback to generation 1 restores its state.json (no zone): UTC, and the event.
+    // A rollback to generation 1 restores its state.json (no zone), but keeps the live zone,
+    // as the sync at boot does.
     let r = call(&mut c, "rollback", json!({"generation": 1}))
         .await
         .unwrap();
     let id = r["job_id"].as_str().unwrap().to_owned();
     let done = finished(&until_finished(&mut c, &id).await).clone();
     assert_eq!(done["ok"], true, "{}", sys.job_log(&id));
-    assert!(root.etc_state()["settings"].get("timeZone").is_none());
-    assert_eq!(localtime(root), zoneinfo_fixtures().join("UTC"));
-    let ev = zone_event(&mut w).await;
-    assert_eq!(ev["zone"], "UTC");
-    assert_eq!(call(&mut c, "time_zone.get", json!({})).await.unwrap(), ev);
+    assert_eq!(root.etc_state()["settings"]["timeZone"], "Asia/Tokyo");
+    assert_eq!(localtime(root), zoneinfo_fixtures().join("Asia/Tokyo"));
+    assert_eq!(
+        call(&mut c, "time_zone.get", json!({})).await.unwrap()["zone"],
+        "Asia/Tokyo"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -584,7 +584,20 @@ async fn settings_ssh_rebuild_rollback() {
     }
     root.rm("build-fail");
 
-    // A failed switch: the profile goes back to the old generation, /etc/hinteros unchanged.
+    // A failed switch: the profile goes back to the old generation (no new one), the failed
+    // generation is deleted, /etc/hinteros unchanged.
+    let links = || {
+        let mut v: Vec<String> = std::fs::read_dir(root.p("profiles"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("system-"))
+            .collect();
+        v.sort();
+        v
+    };
+    let links_before = links();
+    let generation_before = std::fs::read_link(root.p("profiles/system")).unwrap();
     root.touch("switch-fail");
     let r = call(&mut c, "ssh.set", json!({"enabled": false}))
         .await
@@ -601,6 +614,8 @@ async fn settings_ssh_rebuild_rollback() {
         root.p("store/gen3"),
         "{profile:?}"
     );
+    assert_eq!(profile, generation_before);
+    assert_eq!(links(), links_before, "the failed generation is gone");
     assert!(
         root.read("switch.log")
             .contains(&format!("{} boot", root.p("store/gen3").display()))
@@ -660,6 +675,56 @@ async fn settings_ssh_rebuild_rollback() {
     // Finished jobs are listed (the running one and the last ten).
     let list = call(&mut c, "jobs.list", json!({})).await.unwrap();
     assert!(list["jobs"].as_array().unwrap().len() >= 8);
+}
+
+/// After a rollback, a job that builds the newest generation's toplevel again reuses that
+/// generation (as `nix-env --set` does). When its switch fails, that generation was there
+/// before the job, so it stays a rollback target.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_switch_keeps_a_reused_generation() {
+    let Some(sys) = System::start(Root::create(), &[]).await else {
+        return;
+    };
+    let root = &sys.root;
+    let mut c = sys.subscriber().await;
+    let r = call(&mut c, "ssh.set", json!({"enabled": true}))
+        .await
+        .unwrap();
+    let id = r["job_id"].as_str().unwrap().to_owned();
+    let done = finished(&until_finished(&mut c, &id).await).clone();
+    assert_eq!(done["ok"], true, "{}", sys.job_log(&id));
+    let r = call(&mut c, "rollback", json!({"generation": 1}))
+        .await
+        .unwrap();
+    let id = r["job_id"].as_str().unwrap().to_owned();
+    let done = finished(&until_finished(&mut c, &id).await).clone();
+    assert_eq!(done["ok"], true, "{}", sys.job_log(&id));
+
+    std::fs::write(
+        root.p("build-out"),
+        root.p("store/gen2").display().to_string(),
+    )
+    .unwrap();
+    root.touch("switch-fail");
+    let r = call(&mut c, "ssh.set", json!({"enabled": true}))
+        .await
+        .unwrap();
+    let id = r["job_id"].as_str().unwrap().to_owned();
+    let done = finished(&until_finished(&mut c, &id).await).clone();
+    root.rm("switch-fail");
+    root.rm("build-out");
+    assert_eq!(done["ok"], false, "{}", sys.job_log(&id));
+    assert_eq!(done["error"]["data"]["stage"], "activating");
+    assert_eq!(
+        std::fs::read_link(root.p("profiles/system")).unwrap(),
+        std::path::Path::new("system-1-link")
+    );
+    assert_eq!(
+        std::fs::canonicalize(root.p("profiles/system-2-link")).unwrap(),
+        root.p("store/gen2"),
+        "the reused generation stays"
+    );
+    assert!(!root.read("nix-env.log").contains("--delete-generations"));
 }
 
 /// While nix compiles: what is building, the count, heartbeats with a moving
@@ -1587,8 +1652,8 @@ mod check_state {
         assert!(stdout(&o).starts_with(&format!("invalid {}: ", f.display())));
     }
 
-    /// `settings.cleanup` (storage.md): accepted with its defaults filled in, refused out of range
-    /// or with an unknown frequency; a field it does not know is kept.
+    /// `settings.cleanup` (storage.md): accepted with its defaults filled in, refused out of range;
+    /// a field or a frequency it does not know (a later 1.x) is kept.
     #[test]
     fn cleanup_setting() {
         let dir = tempfile::tempdir().unwrap();
@@ -1609,6 +1674,7 @@ mod check_state {
             with("empty.json", serde_json::json!({})),
             with("some.json", serde_json::json!({"frequency": "daily"})),
             with("extra.json", serde_json::json!({"enable": true, "keep": 3})),
+            with("hourly.json", serde_json::json!({"frequency": "hourly"})),
         ];
         for f in &good {
             let o = run(&[f]);
@@ -1617,7 +1683,7 @@ mod check_state {
         for (name, bad) in [
             ("zero.json", serde_json::json!({"keepSystem": 0})),
             ("eleven.json", serde_json::json!({"keepProfiles": 11})),
-            ("hourly.json", serde_json::json!({"frequency": "hourly"})),
+            ("number.json", serde_json::json!({"frequency": 1})),
             ("string.json", serde_json::json!({"keepSystem": "5"})),
         ] {
             let f = with(name, bad);

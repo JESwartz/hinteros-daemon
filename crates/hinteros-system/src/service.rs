@@ -38,7 +38,7 @@ use crate::config::{Paths, ServeArgs, Tools};
 use crate::flake::{self, ChannelTable, Release};
 use crate::generations;
 use crate::job::{self, Action, Apply, ApplyUpdate, JobSpec, NotFastForward, UpdateSource};
-use crate::jobs::Jobs;
+use crate::jobs::{self, Jobs};
 use crate::peer::Peer;
 use crate::state::{self, State};
 use crate::store;
@@ -420,7 +420,14 @@ async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             event = events.recv() => match event {
-                Ok((name, params)) if subscriptions.contains(&name) => {
+                Ok((name, mut params)) if subscriptions.contains(&name) => {
+                    // The Tailscale sign-in URL only to whoever started the sign-in.
+                    if name == EventName::JobProgress {
+                        let job_uid = params["job_id"].as_str().and_then(|id| svc.jobs.lock().unwrap().uid_of(id));
+                        if greeter || !jobs::sees_auth_url(peer.uid, job_uid) {
+                            jobs::strip_auth_url(&mut params);
+                        }
+                    }
                     write_message(&mut w, &jsonrpc::notification(name.wire_name(), params)).await?;
                 }
                 Ok(_) => {}
@@ -500,7 +507,7 @@ async fn dispatch(
             encode::<SettingsGet>(SettingsGetResult {
                 revision,
                 settings: Settings {
-                    base: state.base,
+                    base: state.base.known_or(system::Base::Unstable),
                     ssh: SshSettings {
                         enabled: state.settings.ssh.enable,
                     },
@@ -530,13 +537,18 @@ async fn dispatch(
             let p: JobIdParams = decode::<JobsGet>(params)?;
             check_job_id(&p.job_id)?;
             let job = svc.jobs.lock().unwrap().get(&p.job_id);
-            let job = job.ok_or_else(|| ErrorObject::new(ErrorCode::NotFound, "no such job"))?;
+            let mut job =
+                job.ok_or_else(|| ErrorObject::new(ErrorCode::NotFound, "no such job"))?;
+            jobs::redact_job(&mut job, peer.uid);
             encode::<JobsGet>(JobsGetResult { job })
         }
         JobsList::NAME => {
             decode::<JobsList>(params)?;
-            let jobs = svc.jobs.lock().unwrap().list();
-            encode::<JobsList>(JobsListResult { jobs })
+            let mut list = svc.jobs.lock().unwrap().list();
+            for j in &mut list {
+                jobs::redact_job(j, peer.uid);
+            }
+            encode::<JobsList>(JobsListResult { jobs: list })
         }
         AppsList::NAME => {
             decode::<AppsList>(params)?;
@@ -1102,7 +1114,7 @@ impl Service {
             channel: flake::current_channel(&lock, table.as_ref()),
             base: state
                 .as_ref()
-                .map(|s| s.base)
+                .and_then(|s| s.base.known())
                 .unwrap_or(system::Base::Unstable),
             rev: lock.rev,
             generation: generations::current_generation(&self.paths.profile),
@@ -1323,11 +1335,11 @@ impl Service {
                     .await?;
                 let (mut state, _) = self.load_state()?;
                 let ack = p.acknowledge_downgrade.unwrap_or(false);
-                let Some(base) = state::base_change(state.base, p.base, ack)? else {
+                let Some(base) = state::base_change(&state.base, p.base, ack)? else {
                     return job_ref(None);
                 };
-                let from_base = state.base;
-                state.base = base;
+                let from_base = state.base.known();
+                state.base = base.into();
                 let state = self.requirements_update(&state).unwrap_or(state);
                 self.preflight()?;
                 let spec = self
@@ -1342,7 +1354,7 @@ impl Service {
                     )
                     .about(system::JobSubject {
                         base: Some(base),
-                        from_base: Some(from_base),
+                        from_base,
                         ..Default::default()
                     });
                 job_ref(Some(self.start(spec).await?))
@@ -1506,7 +1518,13 @@ impl Service {
                 if from == Some(p.channel) {
                     return job_ref(None);
                 }
-                let source = self.update_source(&table, p.channel, lock.rev.clone())?;
+                let mut source = self.update_source(&table, p.channel, lock.rev.clone())?;
+                // The branch the box follows: fetched if the locked revision is not local.
+                source.others = from
+                    .and_then(|c| table.branch(c))
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect();
                 let subject = system::JobSubject {
                     channel: Some(p.channel),
                     from_channel: from,

@@ -565,8 +565,12 @@ impl Profiles {
             }
             None => zbus::Connection::system().await?,
         };
+        // Only logind's own signal: any account on the system bus may emit one with this name,
+        // and a fake one would lock the screen and let go of the inhibitor.
         let rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
+            .sender("org.freedesktop.login1")?
+            .path("/org/freedesktop/login1")?
             .interface("org.freedesktop.login1.Manager")?
             .member("PrepareForSleep")?
             .build();

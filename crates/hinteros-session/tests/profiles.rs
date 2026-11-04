@@ -1,7 +1,8 @@
 //! The session's side of profiles: `profile.current`, the profile switch
 //! against a fake system service (no silent force-close: a TERM-ignoring app produces
 //! `switch_blocked` and lives until `switch_force_close`; `switch_cancel` keeps the session),
-//! `session.unlock`, and `profiles_changed` from the system's event.
+//! `session.unlock`, `profiles_changed` from the system's event, and the sleep lock (only
+//! logind's own PrepareForSleep counts).
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -347,5 +348,87 @@ async fn end_guest_session_asks_for_the_wipe() {
             .iter()
             .any(|(m, _)| m == "profiles.switch")
     );
+    task.abort();
+}
+
+/// logind's Inhibit: hands out a delay lock (here /dev/null) and counts the calls.
+struct Login1(Arc<Mutex<u32>>);
+
+#[zbus::interface(name = "org.freedesktop.login1.Manager")]
+impl Login1 {
+    fn inhibit(&self, _what: &str, _who: &str, _why: &str, _mode: &str) -> zbus::zvariant::OwnedFd {
+        *self.0.lock().unwrap() += 1;
+        let f = std::fs::File::open("/dev/null").unwrap();
+        std::os::fd::OwnedFd::from(f).into()
+    }
+}
+
+/// PrepareForSleep(true) locks a locked profile only when logind sends it: the same signal from
+/// another bus client, or from logind on another path, changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_logind_puts_the_profile_to_sleep() {
+    let Some(bus) = Bus::start() else { return };
+    let inhibits = Arc::new(Mutex::new(0));
+    let logind = zbus::connection::Builder::address(bus.address.as_str())
+        .unwrap()
+        .serve_at("/org/freedesktop/login1", Login1(inhibits.clone()))
+        .unwrap()
+        .name("org.freedesktop.login1")
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let d = Daemon::start_with(|dir| {
+        std::fs::create_dir_all(dir.join("proc")).unwrap();
+        let mut args: Vec<std::ffi::OsString> = vec![
+            "--test-no-session-end".into(),
+            "--test-proc-dir".into(),
+            dir.join("proc").into(),
+        ];
+        args.extend(runtime_bus(&bus));
+        args
+    });
+    let task = fake_system(&d.dir.path().join("system.sock"), Calls::default());
+    let mut c = d.client().await;
+    eventually("the relay", async || {
+        call(&mut c, "profile.current", json!({})).await.ok()
+    })
+    .await;
+    // The watch is up once it holds its delay lock.
+    eventually("the inhibitor", async || {
+        (*inhibits.lock().unwrap() > 0).then_some(())
+    })
+    .await;
+
+    let sleep = async |conn: &zbus::Connection, path: &str| {
+        conn.emit_signal(
+            None::<zbus::names::BusName<'_>>,
+            path,
+            "org.freedesktop.login1.Manager",
+            "PrepareForSleep",
+            &(true,),
+        )
+        .await
+        .unwrap();
+    };
+    let stranger = zbus::connection::Builder::address(bus.address.as_str())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    sleep(&stranger, "/org/freedesktop/login1").await;
+    sleep(&logind, "/org/freedesktop/login1/other").await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(
+        call(&mut c, "session.lock_state", json!({})).await.unwrap(),
+        json!({"locked": false})
+    );
+
+    sleep(&logind, "/org/freedesktop/login1").await;
+    eventually("the sleep lock", async || {
+        let s = call(&mut c, "session.lock_state", json!({})).await.ok()?;
+        (s == json!({"locked": true})).then_some(())
+    })
+    .await;
     task.abort();
 }

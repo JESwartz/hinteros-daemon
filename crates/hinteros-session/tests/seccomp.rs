@@ -1,8 +1,9 @@
 //! The app sandbox's system call filter (`src/sandbox/seccomp.rs`) in the kernel: bwrap loads
 //! it (`--seccomp <fd>`, as the daemon passes it) and runs this program again inside as a probe.
 //! Compared with the same probe in bwrap without the filter: a user namespace (nested
-//! sandboxes) still works; `AF_PACKET` in that namespace and `personality(ADDR_NO_RANDOMIZE)`
-//! fail. The calls that need `unsafe` (keyctl, io_uring, TIOCSTI, i386) are checked by the
+//! sandboxes) still works and so does a route netlink socket; `AF_PACKET` and nf_tables netlink
+//! in that namespace and `personality(ADDR_NO_RANDOMIZE)` fail. The calls that need `unsafe`
+//! (keyctl, io_uring, TIOCSTI, i386) are checked by the
 //! system repo's VM test `sandbox`; [`hinteros_session::sandbox::seccomp`]'s unit tests check
 //! the program for all of them.
 //!
@@ -15,7 +16,7 @@ use std::process::Command;
 use hinteros_session::sandbox::seccomp;
 use nix::sched::{CloneFlags, unshare};
 use nix::sys::personality::{self, Persona};
-use nix::sys::socket::{AddressFamily, SockFlag, SockType, socket};
+use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType, socket};
 
 const PROBE: &str = "HINTEROS_SECCOMP_PROBE";
 
@@ -49,6 +50,21 @@ fn probe() {
             None,
         ))
     );
+    // nf_tables (CAP_NET_ADMIN in our own network namespace), and the route socket apps need.
+    for (k, p) in [
+        ("netfilter", SockProtocol::NetlinkNetFilter),
+        ("route", SockProtocol::NetlinkRoute),
+    ] {
+        println!(
+            "{k}={}",
+            result(socket(
+                AddressFamily::Netlink,
+                SockType::Raw,
+                SockFlag::SOCK_CLOEXEC,
+                Some(p),
+            ))
+        );
+    }
     let current = personality::get();
     println!("personality_get={}", result(current));
     println!(
@@ -105,7 +121,7 @@ fn main() {
     };
     println!("without the filter: {open:?}\nwith the filter: {filtered:?}");
     // What works without the filter still works with it.
-    for k in ["userns", "inet", "personality_get"] {
+    for k in ["userns", "inet", "route", "personality_get"] {
         assert_eq!(get(&filtered, k), get(&open, k), "{k}");
     }
     if get(&open, "userns") == "ok" {
@@ -113,6 +129,7 @@ fn main() {
         assert_eq!(get(&filtered, "userns"), "ok", "nested sandboxes");
     }
     assert_eq!(get(&filtered, "packet"), "EAFNOSUPPORT");
+    assert_eq!(get(&filtered, "netfilter"), "EPROTONOSUPPORT");
     assert_eq!(get(&open, "no_randomize"), "ok");
     assert_eq!(get(&filtered, "no_randomize"), "EPERM");
     println!("seccomp: ok");

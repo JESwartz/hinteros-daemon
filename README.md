@@ -1774,9 +1774,10 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   policy, modules, kexec, reboot, swap, clocks, `syslog`, quotas, `acct`, `open_by_handle_at`,
   `iopl`/`ioperm`, `vhangup`, obsolete calls (`EPERM`); the new mount API (`ENOSYS`); `ioctl`
   `TIOCSTI`/`TIOCLINUX`; `personality` other than Linux/32-bit/`UNAME26`/query; sockets other
-  than Unix, IPv4, IPv6, netlink (`EAFNOSUPPORT`). Only the x86-64 ABI (i386 kills the process,
-  x32 gets `ENOSYS`). User namespaces, `mount`, `pivot_root`, `chroot` stay allowed (Firefox,
-  Chromium and Plex's FHS bwrap sandbox themselves inside). No filter, no launch
+  than Unix, IPv4, IPv6, netlink (`EAFNOSUPPORT`), netlink other than route and uevent
+  (`EPROTONOSUPPORT`: no nf_tables in a nested network namespace). Only the x86-64 ABI (i386
+  kills the process, x32 gets `ENOSYS`). User namespaces, `mount`, `pivot_root`, `chroot` stay
+  allowed (Firefox, Chromium and Plex's FHS bwrap sandbox themselves inside). No filter, no launch
   (`app_launch_failed`, "no sandbox: no system call filter"); bwrap that cannot load it starts
   nothing.
 - `--new-session` puts the app out of reach of the reaper's group signal, so the reaper sends

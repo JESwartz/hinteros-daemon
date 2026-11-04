@@ -16,7 +16,8 @@
 //! - `ioctl` `TIOCSTI` and `TIOCLINUX` (typing into the terminal).
 //! - `personality`: only [`PERSONALITIES`] (Linux, 32-bit uname, the query).
 //! - `socket`: only [`SOCKET_FAMILIES`] (Unix, IPv4, IPv6, netlink); no `AF_PACKET`, `AF_ALG`,
-//!   `AF_VSOCK` and the like, also not in a nested network namespace.
+//!   `AF_VSOCK` and the like, also not in a nested network namespace. Netlink only for
+//!   [`NETLINK_PROTOCOLS`] (route, uevent): no nf_tables, XFRM, generic netlink.
 //!
 //! [`program`] is pure. [`pipe`] gives bwrap the program on an inherited file descriptor. When
 //! the filter cannot be made, the launch fails; when bwrap cannot load it, bwrap exits before
@@ -139,6 +140,15 @@ pub const SOCKET_FAMILIES: &[u32] = &[
     libc::AF_NETLINK as u32,
 ];
 
+/// The only netlink protocols allowed; others fail (`EPROTONOSUPPORT`). Apps read interfaces
+/// and addresses (`NETLINK_ROUTE`) and watch devices (`NETLINK_KOBJECT_UEVENT`). The rest, and
+/// above all `NETLINK_NETFILTER` (nf_tables, with `CAP_NET_ADMIN` in a nested user and network
+/// namespace), has a history of kernel bugs.
+pub const NETLINK_PROTOCOLS: &[u32] = &[
+    libc::NETLINK_ROUTE as u32,
+    libc::NETLINK_KOBJECT_UEVENT as u32,
+];
+
 /// One classic BPF instruction (`struct sock_filter`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Insn {
@@ -235,16 +245,34 @@ pub fn instructions() -> Vec<Insn> {
         false,
         libc::EPERM,
     );
-    arg_rule(
-        &mut out,
-        libc::SYS_socket,
-        0,
-        SOCKET_FAMILIES,
-        false,
-        libc::EAFNOSUPPORT,
-    );
+    socket_rule(&mut out);
     out.push(ret(Verdict::Allow));
     out
+}
+
+/// `socket`: only [`SOCKET_FAMILIES`] (else `EAFNOSUPPORT`), and for `AF_NETLINK` only
+/// [`NETLINK_PROTOCOLS`] (else `EPROTONOSUPPORT`).
+fn socket_rule(out: &mut Vec<Insn>) {
+    let np = u8::try_from(NETLINK_PROTOCOLS.len()).expect("few values");
+    let nf = u8::try_from(SOCKET_FAMILIES.len()).expect("few values");
+    // The netlink part: ld; one jeq per protocol; two returns.
+    let netlink = np + 3;
+    // The family part: one jeq per family; two returns.
+    let families = nf + 2;
+    out.push(jeq(libc::SYS_socket as u32, 0, 2 + netlink + families));
+    out.push(ld(off_arg_low(0)));
+    out.push(jeq(libc::AF_NETLINK as u32, 0, netlink));
+    out.push(ld(off_arg_low(2)));
+    for (i, p) in NETLINK_PROTOCOLS.iter().enumerate() {
+        out.push(jeq(*p, np - i as u8, 0));
+    }
+    out.push(ret(Verdict::Errno(libc::EPROTONOSUPPORT)));
+    out.push(ret(Verdict::Allow));
+    for (i, f) in SOCKET_FAMILIES.iter().enumerate() {
+        out.push(jeq(*f, nf - i as u8, 0));
+    }
+    out.push(ret(Verdict::Errno(libc::EAFNOSUPPORT)));
+    out.push(ret(Verdict::Allow));
 }
 
 /// The filter as bwrap reads it: `struct sock_filter` array, native byte order.
@@ -423,6 +451,47 @@ mod tests {
         ] {
             assert_eq!(socket(f), Verdict::Errno(libc::EAFNOSUPPORT), "{f}");
         }
+        // Netlink: route and uevent only; the protocol's high bits are ignored like the
+        // kernel's (an int).
+        let netlink = |p: u64| {
+            call(
+                libc::SYS_socket,
+                [libc::AF_NETLINK as u64, libc::SOCK_RAW as u64, p, 0, 0, 0],
+            )
+        };
+        for p in [libc::NETLINK_ROUTE, libc::NETLINK_KOBJECT_UEVENT] {
+            assert_eq!(netlink(p as u64), Verdict::Allow, "{p}");
+            assert_eq!(netlink(0xffff_0000_0000_0000 | p as u64), Verdict::Allow);
+        }
+        for p in [
+            libc::NETLINK_NETFILTER,
+            libc::NETLINK_XFRM,
+            libc::NETLINK_GENERIC,
+            libc::NETLINK_SOCK_DIAG,
+            libc::NETLINK_AUDIT,
+            libc::NETLINK_CRYPTO,
+            libc::NETLINK_RDMA,
+            -1,
+        ] {
+            assert_eq!(
+                netlink(p as u32 as u64),
+                Verdict::Errno(libc::EPROTONOSUPPORT),
+                "{p}"
+            );
+        }
+        // The protocol matters only for netlink.
+        assert_eq!(
+            call(
+                libc::SYS_socket,
+                [libc::AF_INET as u64, libc::SOCK_RAW as u64, 12, 0, 0, 0]
+            ),
+            Verdict::Allow
+        );
+        // Other calls are not affected by the socket rule.
+        assert_eq!(
+            call(libc::SYS_getpid, [libc::AF_NETLINK as u64, 0, 12, 0, 0, 0]),
+            Verdict::Allow
+        );
     }
 
     #[test]

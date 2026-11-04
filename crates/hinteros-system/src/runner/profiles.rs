@@ -23,15 +23,20 @@ impl Runner {
         })?;
         self.set_stage(Stage::Finishing);
         let paths = self.spec.paths.clone();
-        // Metadata and PIN only after the account exists: a failed job leaves neither.
+        // Metadata and PIN only after the account exists: a failed job leaves neither. The PIN
+        // first: a profile without its PIN would let anyone in.
         let mut file = ProfilesFile::load(&paths.profiles_json())
             .map_err(|e| self.fail(format!("profiles.json: {e}")))?;
+        let pins = Pins::new(paths.pins_dir());
+        if let Err(e) = pins.set_hash(&j.id, &j.pin_hash) {
+            pins.remove(&j.id);
+            return Err(self.fail(format!("writing the PIN: {e}")));
+        }
         file.profiles.insert(j.id.clone(), j.meta.clone());
-        file.save(&paths.profiles_json())
-            .map_err(|e| self.fail(format!("writing profiles.json: {e}")))?;
-        Pins::new(paths.pins_dir())
-            .set_hash(&j.id, &j.pin_hash)
-            .map_err(|e| self.fail(format!("writing the PIN: {e}")))?;
+        if let Err(e) = file.save(&paths.profiles_json()) {
+            pins.remove(&j.id);
+            return Err(self.fail(format!("writing profiles.json: {e}")));
+        }
         // Its apps: the starter env (nothing to evaluate).
         let owner = Owner::Profile {
             id: j.id.clone(),

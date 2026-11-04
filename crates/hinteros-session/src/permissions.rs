@@ -7,6 +7,12 @@
 //! record has every permission (existing installs and starter sets keep working). A required
 //! permission is never denied. A change applies the next time the app starts.
 //!
+//! The file fails closed: when it is there but cannot be read, does not parse, or is newer than
+//! this daemon (a rollback), every optional permission is denied, no change is accepted and the
+//! file is never written. Apps still start, with their required permissions only. The format
+//! grows only by new fields (ignored here, kept on a rewrite), so `version` stays 1 unless a
+//! change cannot be read by 1.0.
+//!
 //! Only enforced permissions are listed: none while the sandbox is off, not `mic` while the
 //! sound socket for `mic` is the same as the one every app gets, and not `lan` without the local
 //! network filter (`[sandbox] lan_filter`, [`crate::lan`]).
@@ -42,11 +48,14 @@ pub struct Grants {
     pub lan: bool,
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct File {
     version: u32,
     #[serde(default)]
     denied: BTreeMap<String, BTreeSet<String>>,
+    /// Fields a later 1.x added: kept on a rewrite.
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The default file: `$XDG_STATE_HOME/hinteros/permissions.json`, else under
@@ -81,7 +90,9 @@ pub fn enforced(cfg: &SandboxConfig) -> Vec<&'static str> {
 pub struct Permissions {
     path: Option<PathBuf>,
     enforced: Vec<&'static str>,
-    denied: Arc<Mutex<BTreeMap<String, BTreeSet<String>>>>,
+    stored: Arc<Mutex<File>>,
+    /// Why the file cannot be used (see the module doc), when it cannot.
+    locked: Option<Arc<str>>,
 }
 
 impl Default for Permissions {
@@ -92,18 +103,22 @@ impl Default for Permissions {
 }
 
 impl Permissions {
-    /// Read `path` (missing: nothing denied; unreadable: logged, nothing denied). A newer file
-    /// is not understood: nothing denied, and changes stay in memory so that it is not saved
-    /// over.
+    /// Read `path` (missing: nothing denied). A file that is unreadable, broken or newer locks
+    /// the choices: every optional permission denied, no change accepted, nothing written.
     pub fn new(path: Option<PathBuf>, enforced: Vec<&'static str>) -> Self {
-        let (denied, keep) = match path.as_deref() {
-            Some(p) => load(p),
-            None => (BTreeMap::new(), true),
+        let (stored, locked) = match path.as_deref().map(load) {
+            None => (File::default(), None),
+            Some(Ok(f)) => (f, None),
+            Some(Err(e)) => {
+                warn!("app permissions locked, optional ones denied: {e}");
+                (File::default(), Some(Arc::from(e)))
+            }
         };
         Self {
-            path: path.filter(|_| keep),
+            path,
             enforced,
-            denied: Arc::new(Mutex::new(denied)),
+            stored: Arc::new(Mutex::new(stored)),
+            locked,
         }
     }
 
@@ -119,8 +134,8 @@ impl Permissions {
     /// An app's permissions for `apps.list` / `store.list`: the declared ones this box
     /// enforces, in display order.
     pub fn list(&self, id: &str, declared: &BTreeMap<String, Need>) -> Vec<AppPermission> {
-        let denied = self.denied.lock().unwrap();
-        let denied = denied.get(id);
+        let stored = self.stored.lock().unwrap();
+        let denied = stored.denied.get(id);
         self.enforced
             .iter()
             .filter_map(|name| {
@@ -128,7 +143,8 @@ impl Permissions {
                 Some(AppPermission {
                     name: (*name).to_owned(),
                     required,
-                    granted: required || !denied.is_some_and(|d| d.contains(*name)),
+                    granted: required
+                        || (self.locked.is_none() && !denied.is_some_and(|d| d.contains(*name))),
                 })
             })
             .collect()
@@ -177,16 +193,23 @@ impl Permissions {
                 ))
             };
         }
-        let mut denied = self.denied.lock().unwrap();
-        let mut next = denied.clone();
-        let set = next.entry(id.to_owned()).or_default();
+        if let Some(why) = &self.locked {
+            // Never written over: recovery is from the console.
+            return Err(ErrorObject::new(
+                ErrorCode::InternalError,
+                format!("app permissions cannot change: {why}"),
+            ));
+        }
+        let mut stored = self.stored.lock().unwrap();
+        let mut next = stored.clone();
+        let set = next.denied.entry(id.to_owned()).or_default();
         let changed = if granted {
             set.remove(permission)
         } else {
             set.insert(permission.to_owned())
         };
         if set.is_empty() {
-            next.remove(id);
+            next.denied.remove(id);
         }
         if !changed {
             return Ok(false);
@@ -199,36 +222,24 @@ impl Permissions {
                 )
             })?;
         }
-        *denied = next;
+        *stored = next;
         Ok(true)
     }
 }
 
-/// What `path` denies, and whether it may be saved over.
-fn load(path: &Path) -> (BTreeMap<String, BTreeSet<String>>, bool) {
+/// The file at `path` (missing: nothing denied); `Err` (why) when it is there but cannot be used.
+fn load(path: &Path) -> Result<File, String> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (BTreeMap::new(), true),
-        Err(e) => {
-            warn!(file = %path.display(), "ignoring app permissions: {e}");
-            return (BTreeMap::new(), true);
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(File::default()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    if let Err(e) = check_version(path, &bytes, VERSION) {
-        warn!("ignoring app permissions: {e}");
-        return (BTreeMap::new(), false);
-    }
-    match serde_json::from_slice::<File>(&bytes) {
-        Ok(f) => (f.denied, true),
-        Err(e) => {
-            warn!(file = %path.display(), "ignoring app permissions: {e}");
-            (BTreeMap::new(), true)
-        }
-    }
+    check_version(path, &bytes, VERSION).map_err(|e| e.to_string())?;
+    serde_json::from_slice::<File>(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Write the file atomically (a temporary file in the same directory, then rename).
-fn save(path: &Path, denied: &BTreeMap<String, BTreeSet<String>>) -> std::io::Result<()> {
+fn save(path: &Path, stored: &File) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::DirBuilder::new()
@@ -237,7 +248,7 @@ fn save(path: &Path, denied: &BTreeMap<String, BTreeSet<String>>) -> std::io::Re
         .create(dir)?;
     let file = File {
         version: VERSION,
-        denied: denied.clone(),
+        ..stored.clone()
     };
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     serde_json::to_writer(&mut tmp, &file)?;
@@ -445,18 +456,81 @@ mod tests {
         let d = declared(&[("gamepad", Need::Required), ("mic", Need::Optional)]);
         let g = p.grants("app", &d);
         assert!(g.gamepad && !g.mic);
-        // Broken or future files: everything granted.
-        for bad in ["{", r#"{"version":2,"denied":{"app":["mic"]}}"#] {
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_used_fails_closed() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("permissions.json");
+        let d = declared(&[
+            ("gamepad", Need::Required),
+            ("mic", Need::Optional),
+            ("downloads", Need::Optional),
+        ]);
+        let lan = enforced(&SandboxConfig {
+            lan_filter: true,
+            ..on()
+        });
+        let ld = declared(&[("gamepad", Need::Required), ("lan", Need::Optional)]);
+        // Broken, newer (a rollback) or unreadable (a directory): optional ones denied, the
+        // required one kept, no change accepted, the file left as it was.
+        for bad in [
+            "{",
+            "",
+            r#"{"denied":{}}"#,
+            r#"{"version":1,"denied":{"app":"mic"}}"#,
+            r#"{"version":2,"denied":{}}"#,
+        ] {
             std::fs::write(&path, bad).unwrap();
             let p = Permissions::new(Some(path.clone()), enforced(&on()));
-            assert!(p.grants("app", &d).mic, "{bad}");
+            assert_eq!(
+                p.grants("app", &d),
+                Grants {
+                    gamepad: true,
+                    lan: true,
+                    ..Grants::default()
+                },
+                "{bad}"
+            );
+            assert!(p.list("app", &d).iter().all(|a| a.granted == a.required));
+            for granted in [true, false] {
+                assert_eq!(
+                    p.set("app", Some(&d), "mic", granted)
+                        .unwrap_err()
+                        .kind()
+                        .unwrap(),
+                    ErrorCode::InternalError,
+                    "{bad}"
+                );
+            }
+            assert!(!p.set("app", Some(&d), "gamepad", true).unwrap());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), bad);
+            let p = Permissions::new(Some(path.clone()), lan.clone());
+            assert!(!p.grants("app", &ld).lan, "{bad}: no local network");
         }
-        // A newer file is not saved over; a change holds in memory.
-        let newer = r#"{"version":2,"denied":{"app":["mic"]}}"#;
-        std::fs::write(&path, newer).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
         let p = Permissions::new(Some(path.clone()), enforced(&on()));
-        assert!(p.set("app", Some(&d), "mic", false).unwrap());
-        assert!(!p.grants("app", &d).mic);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+        assert!(!p.grants("app", &d).mic && p.grants("app", &d).gamepad);
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn fields_a_later_version_added_are_kept() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("permissions.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"denied":{"app":["mic"]},"granted_at":{"app":3}}"#,
+        )
+        .unwrap();
+        let p = Permissions::new(Some(path.clone()), enforced(&on()));
+        let d = declared(&[("mic", Need::Optional), ("downloads", Need::Optional)]);
+        assert!(!p.grants("app", &d).mic && p.grants("app", &d).downloads);
+        assert!(p.set("app", Some(&d), "downloads", false).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"version\":1,\"denied\":{\"app\":[\"downloads\",\"mic\"]},\"granted_at\":{\"app\":3}}\n"
+        );
     }
 }

@@ -1787,7 +1787,9 @@ Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command
   (`~/Downloads`, created, read-write). The profile's opt-outs are in
   `$XDG_STATE_HOME/hinteros/permissions.json` (`{"version":1,"denied":{"<id>":["mic"]}}`,
   written atomically); no record means every permission, a required one is never denied, a
-  change applies at the next start. Only enforced permissions are listed: none while the sandbox
+  change applies at the next start. A file that is there but cannot be read, does not parse or
+  is newer fails closed: every optional permission is denied, `apps.set_permission` is an error
+  and the file is never written (recover from the console). Only enforced permissions are listed: none while the sandbox
   is off, and not `mic` while `pulse_record_socket` equals `pulse_socket` (both default
   `pulse/native`), and not `lan` without `[sandbox] lan_filter`. `[sandbox]` changes need a
   daemon restart.
@@ -2175,7 +2177,8 @@ Unknown fields are ignored. A newer file is not understood; what follows depends
 | `starter.json` | reads as none; saving is an error (the job fails); the file stays | dropped (always written whole) |
 | `channel-tips.json` | reads as empty; saving fails with a warning; the file stays | kept |
 | `runtime.json` | defaults; a change holds until the next boot; the file stays | kept |
-| `permissions.json`, `controller.json` (session) | defaults; a change holds in memory; the file stays | dropped |
+| `permissions.json` (session) | optional permissions denied; a change is an error; the file stays (also when damaged or unreadable) | kept |
+| `controller.json` (session) | defaults; a change holds in memory; the file stays | dropped |
 | `apps/registry.json`, `storage.json` | discarded and overwritten (rebuilt from the env manifests, the next measure) | dropped |
 | `usage.json`, `update-check.json`, `channel-check.json`, `libraries.json`, `pins/<id>.state`, `pins/<id>.tries` | discarded and overwritten | dropped |
 

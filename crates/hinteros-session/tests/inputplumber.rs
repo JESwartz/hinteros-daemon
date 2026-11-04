@@ -1475,3 +1475,25 @@ async fn a_bad_signal_does_not_end_the_integration() {
     fake.add_device().await;
     ready(&fake, 1, 2).await;
 }
+
+/// A long Guide press while Steam is in front, but focus moved to the launcher before the
+/// pad's worker got to the tap (the game quit): the routing is ALL and already applied. The
+/// stale tap must not put the pad in PASS (where its input goes to the virtual pad, which apps
+/// can read) until the next watchdog check.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guide_tap_after_the_routing_changed_is_dropped() {
+    use hinteros_session::input::inputplumber;
+    use hinteros_session::input::{InputControl, InterceptMode};
+
+    let Some(bus) = Bus::start() else { return };
+    let fake = Fake::start(&bus.address).await;
+    let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+    let mut input = inputplumber::spawn(task_settings(&bus, InterceptMode::Pass), tx);
+    ready(&fake, 0, 1).await;
+    input.set_mode(InterceptMode::All);
+    ready(&fake, 0, 2).await;
+    input.guide_tap(TARGET, InterceptMode::Pass);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert_eq!(fake.mode(0), 2, "the stale tap left the pad in PASS");
+    assert!(fake.calls.take().is_empty(), "a Guide tap was sent");
+}

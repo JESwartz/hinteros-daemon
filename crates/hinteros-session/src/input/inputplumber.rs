@@ -976,9 +976,17 @@ impl Worker {
     /// press and release Guide with `SendEvent`. Both go through the composite device's one
     /// command queue in the order we await them, so the mode is in place before the press.
     /// If the mode cannot be set, or is one in which the tap would come back to us, no tap.
+    /// The session asks with the routing's mode; if the routing has another mode by now (focus
+    /// moved to the launcher meanwhile), the tap is for nobody, and setting `mode` would leave
+    /// the pad in it until the next watchdog check: no tap either.
     async fn guide_tap(&mut self, mode: InterceptMode) {
         if !mode.reaches_pad() {
             warn!(device = %self.path, ?mode, "no Guide tap: it would come back as ui_guide");
+            return;
+        }
+        let routed = self.routing.borrow().mode;
+        if routed != mode {
+            info!(device = %self.path, ?mode, ?routed, "no Guide tap: the routing changed since the press");
             return;
         }
         let proxy = match device_proxy(&self.conn, &self.path).await {
@@ -1010,9 +1018,9 @@ impl Worker {
                 self.dirty = true;
             }
         }
-        // The routing may have changed meanwhile (the next apply sets it), or not be `mode`.
+        // The routing changed during the tap: the pad is in `mode`; put it in the routing's now.
         if self.routing.borrow().mode != mode {
-            self.dirty = true;
+            self.apply().await;
         }
     }
 }

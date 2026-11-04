@@ -74,7 +74,11 @@ pub struct Backoff {
 impl Backoff {
     /// After one more failure at `now`.
     pub fn fail(self, now: i64) -> Self {
-        let failures = self.failures.saturating_add(1);
+        Self::after(self.failures.saturating_add(1), now)
+    }
+
+    /// After `failures` failures, the last at `now`.
+    pub fn after(failures: u32, now: i64) -> Self {
         let locked_until = if failures > FREE_FAILURES {
             let n = failures - FREE_FAILURES - 1;
             now + (1i64 << n.min(16)).min(MAX_LOCK_S)
@@ -282,7 +286,8 @@ impl Pins {
     }
 
     /// Check `pin` for profile `id` at `now`, applying the backoff: a lock refuses at once; the
-    /// outcome is recorded under the lock, counted from when the (slow) hash check ended.
+    /// try is counted under the lock before the (slow) hash check, so tries at the same time never
+    /// pass a wait; the wait counts from when the check ended, and a right PIN resets it.
     pub fn verify(&self, id: &str, pin: &str, now: i64) -> std::io::Result<Verify> {
         self.verify_with(id, pin, now, true)
     }
@@ -337,7 +342,14 @@ impl Pins {
                 Verify::Wrong { locked_for: 0 }
             });
         }
-        let left = self.backoff(id).remaining(now);
+        // The lock is checked and the try counted as a failure in one step under the lock,
+        // before the (slow) hash check: tries that run at the same time (the API and PAM) see
+        // each other's, so none gets past a wait.
+        let mut left = 0;
+        self.with_state(id, |b| {
+            left = b.remaining(now);
+            if left > 0 { b } else { b.fail(now) }
+        })?;
         if left > 0 {
             return Ok(Verify::Locked { seconds: left });
         }
@@ -349,7 +361,13 @@ impl Pins {
             if ok {
                 Backoff::default()
             } else {
-                let after = b.fail(now);
+                // Counted already (at least this try, if a right PIN reset it meanwhile); the
+                // wait starts when the check ended.
+                let after = Backoff::after(b.failures.max(1), now);
+                let after = Backoff {
+                    locked_until: after.locked_until.max(b.locked_until),
+                    ..after
+                };
                 outcome = Verify::Wrong {
                     locked_for: after.remaining(now),
                 };
@@ -618,12 +636,16 @@ mod tests {
                 std::thread::spawn(move || Pins::new(dir).verify("p2", "0000", 50).unwrap())
             })
             .collect();
-        for t in threads {
-            t.join().unwrap();
-        }
-        // Every failure counted once, whatever the interleaving (some saw the lock).
+        let outcomes: Vec<Verify> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        // Each try is counted before its hash check: the free ones and the one that starts the
+        // wait are checked, every other try at the same time sees the wait.
+        let checked = outcomes
+            .iter()
+            .filter(|o| matches!(o, Verify::Wrong { .. }))
+            .count();
+        assert_eq!(checked, FREE_FAILURES as usize + 1, "{outcomes:?}");
         let b = Pins::new(&dir).backoff("p2");
-        assert!((4..=8).contains(&b.failures), "{b:?}");
+        assert_eq!(b.failures, FREE_FAILURES + 1, "{b:?}");
         assert!(b.remaining(50) >= 1);
     }
 

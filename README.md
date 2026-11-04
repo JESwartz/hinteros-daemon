@@ -1329,7 +1329,8 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
 ### Profiles, PINs, greeter (system service)
 
 - `profiles.json` (`profiles.rs`), PINs (`pins.rs`: argon2id PHC strings in `pins/<id>`, backoff
-  in `pins/<id>.state` under `flock`, 3 free failures then 1 s doubling to 5 min, the lock counted
+  in `pins/<id>.state` under `flock`, 3 free failures then 1 s doubling to 5 min, each try counted
+  under the lock before the hash check (tries at the same time never pass a wait), the wait counted
   from when the hash check ended; **no wait for the admin profile's PIN**, and a stale wait file of
   the admin is ignored and cleared at service start; instead **10 wrong admin-PIN tries a boot**
   (owner): `pins/<id>.tries` = `{boot_id, failures}` (the kernel's

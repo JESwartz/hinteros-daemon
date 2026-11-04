@@ -1,6 +1,7 @@
 //! The service's view of jobs: one mutating job at a time, started as a transient instance of
 //! `hinteros-job@.service` over systemd's D-Bus API, followed through its job directory, and
-//! re-attached after a restart of the service (a switch restarts it while the job runs on).
+//! re-attached after a restart of the service (a switch restarts it while the job runs on; after a
+//! rollback the older service reads what it can of a later version's job and waits for the rest).
 
 use std::collections::VecDeque;
 use std::fs;
@@ -15,6 +16,7 @@ use hinteros_api::system::{
 };
 use hinteros_api::{ErrorCode, ErrorObject};
 use rustix::fs::{FlockOperation, flock};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::warn;
 
@@ -45,17 +47,61 @@ struct Active {
 
 impl Active {
     fn new(spec: &JobSpec) -> Self {
+        Self::of(&spec.id, Head::from(spec), spec.kind)
+    }
+
+    fn of(id: &str, head: Head, kind: JobKind) -> Self {
         Self {
-            id: spec.id.clone(),
-            kind: spec.kind,
-            uid: spec.uid,
-            created_at: spec.created_at,
+            id: id.to_owned(),
+            kind,
+            uid: head.uid,
+            created_at: head.created_at,
             offset: 0,
             stage: None,
-            subject: spec.subject.clone(),
+            subject: head.subject.unwrap_or_default(),
             last: None,
             emitted_at: None,
         }
+    }
+}
+
+/// What the service needs of a job's `spec.json`, read leniently: the job unit runs on through
+/// the switch it makes, so after a rollback an older service reads a later version's spec (the
+/// job reads its full [`JobSpec`] itself, strictly: the same binary wrote it).
+#[derive(Debug, Clone, Default, Deserialize)]
+struct Head {
+    #[serde(default)]
+    uid: u32,
+    #[serde(default)]
+    created_at: i64,
+    /// `None`: a kind this binary does not know.
+    #[serde(default, deserialize_with = "job::lenient")]
+    kind: Option<JobKind>,
+    #[serde(default, deserialize_with = "job::lenient")]
+    subject: Option<JobSubject>,
+}
+
+impl From<&JobSpec> for Head {
+    fn from(spec: &JobSpec) -> Self {
+        Self {
+            uid: spec.uid,
+            created_at: spec.created_at,
+            kind: Some(spec.kind),
+            subject: Some(spec.subject.clone()),
+        }
+    }
+}
+
+impl Head {
+    fn finished(&self, id: &str, kind: JobKind, status: &Status) -> Job {
+        finished_job(
+            id,
+            kind,
+            self.uid,
+            self.created_at,
+            &self.subject.clone().unwrap_or_default(),
+            status,
+        )
     }
 }
 
@@ -69,6 +115,9 @@ pub struct Jobs {
     paths: Paths,
     active: Option<Active>,
     finished: VecDeque<Job>,
+    /// An unfinished job this binary cannot follow (its spec is a later version's, after a
+    /// rollback, or damaged) while its process holds the lock: nothing else starts meanwhile.
+    foreign: Option<String>,
 }
 
 impl Jobs {
@@ -78,13 +127,14 @@ impl Jobs {
             paths,
             active: None,
             finished: VecDeque::new(),
+            foreign: None,
         };
         let dir = jobs.paths.jobs_dir();
         let _ = fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&dir);
-        let mut found: Vec<(i64, String, JobSpec)> = fs::read_dir(&dir)
+        let mut found: Vec<(i64, String, Option<Head>)> = fs::read_dir(&dir)
             .into_iter()
             .flatten()
             .flatten()
@@ -93,21 +143,32 @@ impl Jobs {
                 if !is_job_id(&id) {
                     return None;
                 }
-                let spec: JobSpec = job::read_json(&e.path().join(job::SPEC))?;
-                Some((spec.created_at, id, spec))
+                let head: Option<Head> = job::read_json(&e.path().join(job::SPEC));
+                Some((head.as_ref().map_or(0, |h| h.created_at), id, head))
             })
             .collect();
         found.sort_by_key(|(t, _, _)| *t);
-        for (_, id, spec) in found {
+        for (_, id, head) in found {
             let jd = dir.join(&id);
-            match job::read_json::<Status>(&jd.join(job::STATUS)) {
-                Some(status) => jobs.push_finished(to_job(&spec, &status)),
-                None => {
+            let kind = head.as_ref().and_then(|h| h.kind);
+            match (job::read_json::<Status>(&jd.join(job::STATUS)), kind, head) {
+                (Some(status), Some(kind), Some(head)) => {
+                    jobs.push_finished(head.finished(&id, kind, &status));
+                }
+                // Finished, but not a job this binary can show; its directory stays until reboot.
+                _ if jd.join(job::STATUS).exists() => {}
+                (None, Some(kind), Some(head)) => {
                     if let Some(prev) = jobs.active.take() {
                         // Two unfinished jobs: the older one is lost.
                         jobs.lose(&prev.id, prev.stage, "superseded");
                     }
-                    jobs.active = Some(Active::new(&spec));
+                    jobs.active = Some(Active::of(&id, head, kind));
+                }
+                _ => {
+                    if locked(&jd.join(job::LOCK)) {
+                        warn!(job = %id, "a running job this version cannot read; waiting for it");
+                        jobs.foreign = Some(id);
+                    }
                 }
             }
         }
@@ -119,9 +180,12 @@ impl Jobs {
         self.paths.jobs_dir().join(id)
     }
 
-    /// The running job, if any.
+    /// The running job, if any (also one this binary cannot follow).
     pub fn busy(&self) -> Option<&str> {
-        self.active.as_ref().map(|a| a.id.as_str())
+        self.active
+            .as_ref()
+            .map(|a| a.id.as_str())
+            .or(self.foreign.as_deref())
     }
 
     pub fn busy_error(&self) -> Option<ErrorObject> {
@@ -187,6 +251,11 @@ impl Jobs {
     /// [`Self::poll`] at `now` (heartbeats are due [`HEARTBEAT`] after the last `job_progress`).
     pub fn poll_at(&mut self, now: Instant) -> (Vec<(EventName, Value)>, Option<Finished>) {
         let mut events = Vec::new();
+        if let Some(id) = &self.foreign
+            && !locked(&self.dir(id).join(job::LOCK))
+        {
+            self.foreign = None;
+        }
         let Some(active) = self.active.as_mut() else {
             return (events, None);
         };
@@ -257,6 +326,12 @@ impl Jobs {
                     None
                 } else if let Some(s) = job::read_json::<Status>(&dir.join(job::STATUS)) {
                     Some(s) // finished between the two reads
+                } else if dir.join(job::STATUS).exists() {
+                    // Written, but this binary cannot read it: never overwrite the outcome.
+                    Some(Status::lost(
+                        active.stage,
+                        "the job's result cannot be read",
+                    ))
                 } else {
                     let s = Status::lost(active.stage, "the job ended without a result");
                     let _ = fsutil::write_atomic(
@@ -321,8 +396,10 @@ impl Jobs {
             &serde_json::to_vec(&s).unwrap_or_default(),
             0o600,
         );
-        if let Some(spec) = job::read_json::<JobSpec>(&dir.join(job::SPEC)) {
-            self.push_finished(to_job(&spec, &s));
+        if let Some(head) = job::read_json::<Head>(&dir.join(job::SPEC))
+            && let Some(kind) = head.kind
+        {
+            self.push_finished(head.finished(id, kind, &s));
         }
     }
 
@@ -417,17 +494,6 @@ fn running(a: &Active) -> Job {
         detail: a.last.as_ref().and_then(|l| l.detail.clone()),
         last_activity_at: a.last.as_ref().and_then(|l| l.last_activity_at),
     }
-}
-
-fn to_job(spec: &JobSpec, status: &Status) -> Job {
-    finished_job(
-        &spec.id,
-        spec.kind,
-        spec.uid,
-        spec.created_at,
-        &spec.subject,
-        status,
-    )
 }
 
 fn finished_job(
@@ -689,6 +755,74 @@ mod tests {
             jobs.poll_at(t0 + ms(20_000)).0.is_empty(),
             "no heartbeat after the end"
         );
+    }
+
+    /// After a rollback the older service re-attaches to the job a later version started (it
+    /// runs on through the switch): a spec and status with what this binary does not know.
+    #[test]
+    fn a_later_versions_job_keeps_the_box_busy() {
+        let d = tempfile::tempdir().unwrap();
+        let jobs_dir = d.path().join("run/jobs");
+        let write_job = |id: &str, spec: Value| {
+            let jd = jobs_dir.join(id);
+            fs::create_dir_all(&jd).unwrap();
+            fs::write(jd.join(job::SPEC), spec.to_string()).unwrap();
+            fs::write(jd.join(job::PROGRESS), "").unwrap();
+            let lock = fs::File::create(jd.join(job::LOCK)).unwrap();
+            flock(&lock, FlockOperation::NonBlockingLockExclusive).unwrap();
+            fs::write(jd.join(job::PID), "1").unwrap();
+            (jd, lock)
+        };
+        // A known kind, but fields this binary does not know (a later Paths, a new action).
+        let mut s = serde_json::to_value(spec(d.path(), "0123456789abcdef")).unwrap();
+        s["paths"]["later"] = json!("/x");
+        s["action"] = json!({"type": "later_action"});
+        s["subject"]["later"] = json!(1);
+        let (jd, lock) = write_job("0123456789abcdef", s);
+        let mut jobs = Jobs::load(paths(d.path()));
+        assert_eq!(jobs.busy(), Some("0123456789abcdef"));
+        assert!(jobs.poll().1.is_none());
+        // Its status, with a result and a stage this binary does not know: shown, never replaced.
+        drop(lock);
+        let status = json!({"state": "succeeded", "stage": "later_stage", "error": null,
+            "result": {"later": true}, "session_restart_required": false, "finished_at": 7,
+            "later": 1});
+        fs::write(jd.join(job::STATUS), status.to_string()).unwrap();
+        let fin = jobs.poll().1.unwrap();
+        assert_eq!(fin.job.state, JobState::Succeeded);
+        assert_eq!(fin.job.stage, Some(Stage::Unknown));
+        assert_eq!(fin.job.result, None);
+        assert!(jobs.busy().is_none());
+        let on_disk: Value =
+            serde_json::from_slice(&fs::read(jd.join(job::STATUS)).unwrap()).unwrap();
+        assert_eq!(on_disk, status);
+
+        // A kind this binary does not know: followed as `unknown`.
+        let mut s = serde_json::to_value(spec(d.path(), "1123456789abcdef")).unwrap();
+        s["kind"] = json!("later_kind");
+        let (jd, lock) = write_job("1123456789abcdef", s);
+        let mut jobs = Jobs::load(paths(d.path()));
+        assert_eq!(jobs.busy(), Some("1123456789abcdef"));
+        assert_eq!(jobs.get("1123456789abcdef").unwrap().kind, JobKind::Unknown);
+        drop(lock);
+        fs::write(jd.join(job::STATUS), status.to_string()).unwrap();
+        assert!(jobs.poll().1.is_some());
+
+        // A spec this binary cannot read at all: not shown, but nothing else starts while its
+        // process holds the lock.
+        let (jd, lock) = write_job("2123456789abcdef", json!({}));
+        fs::write(jd.join(job::SPEC), "{\"id\":").unwrap();
+        let mut jobs = Jobs::load(paths(d.path()));
+        assert_eq!(jobs.busy(), Some("2123456789abcdef"));
+        assert!(jobs.create(&spec(d.path(), "3123456789abcdef")).is_err());
+        assert!(jobs.get("2123456789abcdef").is_none());
+        assert!(jobs.poll().1.is_none());
+        assert_eq!(jobs.busy(), Some("2123456789abcdef"));
+        // It ends: the box is free again.
+        drop(lock);
+        jobs.poll();
+        assert!(jobs.busy().is_none());
+        jobs.create(&spec(d.path(), "3123456789abcdef")).unwrap();
     }
 
     #[test]

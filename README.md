@@ -652,8 +652,9 @@ replaced; the launcher's 15 s dialog calls `display.keep` when the user keeps it
 back to the mode before both). The daemon reverts by itself when neither comes within
 `display.revert_after_ms` (20 s; the launcher may have crashed). While a change is not kept, the
 save file as it was before waits next to it (`<save file>.confirmed`); a daemon that stopped before
-keep or revert (a crash, a power cut) puts it back at its next start and nudges gamescope, so an
-unconfirmed mode never becomes the mode of every later start.
+keep or revert (a crash, a power cut) puts it back at its next start (removes the save file if
+there was none) and nudges gamescope, so an unconfirmed mode never becomes the mode of every later
+start.
 
 **Power.** `Suspend`, `Reboot` and `PowerOff` go to logind with `interactive = false`;
 `power.capabilities` reports `CanSuspend`/`CanReboot`/`CanPowerOff` (`yes`, `no`, `challenge`,

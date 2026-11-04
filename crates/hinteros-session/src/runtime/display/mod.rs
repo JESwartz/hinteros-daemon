@@ -442,9 +442,10 @@ fn forget_confirmed(ctx: &Ctx) {
 }
 
 /// At start: a change that was neither kept nor reverted when the daemon last stopped is
-/// undone in the save file, and gamescope is asked to pick its mode again (if it runs yet).
+/// undone in the save file, and gamescope is asked to pick its mode again (if it runs yet and
+/// is known). An empty copy means there was no save file: it is removed again.
 pub fn restore_confirmed(ctx: &Ctx) {
-    let (Some(x), Some(save)) = (ctx.x_display.clone(), save_path(ctx)) else {
+    let Some(save) = save_path(ctx) else {
         return;
     };
     let path = confirmed_path(&save);
@@ -455,13 +456,24 @@ pub fn restore_confirmed(ctx: &Ctx) {
         "a display mode change was not kept before the last stop; restoring {}",
         save.display()
     );
-    if let Err(e) = write_atomically(&save, &before) {
+    let restored = if before.is_empty() {
+        std::fs::remove_file(&save).or_else(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(e),
+        })
+    } else {
+        write_atomically(&save, &before)
+    };
+    if let Err(e) = restored {
         warn!("cannot restore {}: {e}", save.display());
         return;
     }
     if let Err(e) = std::fs::remove_file(&path) {
         warn!("cannot remove {}: {e}", path.display());
     }
+    let Some(x) = ctx.x_display.clone() else {
+        return;
+    };
     tokio::task::spawn_blocking(move || {
         if let Err(e) = nudge(&x) {
             debug!("nudging gamescope after restoring the mode: {}", e.message);

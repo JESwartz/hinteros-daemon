@@ -884,3 +884,18 @@ async fn an_unconfirmed_change_does_not_outlive_the_daemon() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unconfirmed_first_save_file_is_removed() {
+    let Some(gs) = FakeGamescope::start(true, false) else {
+        return;
+    };
+    // There was no save file before the change (an empty copy): there is none after.
+    std::fs::write(gs.save_file(), "Sony TV:1280x720@60\n").unwrap();
+    let confirmed = gs.dir.path().join("modes.save.confirmed");
+    std::fs::write(&confirmed, "").unwrap();
+    let d = gs.daemon(3000, true);
+    let _c = d.client().await;
+    assert!(!gs.save_file().exists());
+    assert!(!confirmed.exists());
+}

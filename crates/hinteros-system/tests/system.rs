@@ -1536,8 +1536,8 @@ mod check_state {
         assert!(stdout(&o).starts_with(&format!("invalid {}: ", f.display())));
     }
 
-    /// `settings.cleanup` (storage.md): accepted with its defaults filled in, refused out of range
-    /// or with an unknown frequency; a field it does not know is kept.
+    /// `settings.cleanup` (storage.md): accepted with its defaults filled in, refused out of range;
+    /// a field or a frequency it does not know (a later 1.x) is kept.
     #[test]
     fn cleanup_setting() {
         let dir = tempfile::tempdir().unwrap();
@@ -1558,6 +1558,7 @@ mod check_state {
             with("empty.json", serde_json::json!({})),
             with("some.json", serde_json::json!({"frequency": "daily"})),
             with("extra.json", serde_json::json!({"enable": true, "keep": 3})),
+            with("hourly.json", serde_json::json!({"frequency": "hourly"})),
         ];
         for f in &good {
             let o = run(&[f]);
@@ -1566,7 +1567,7 @@ mod check_state {
         for (name, bad) in [
             ("zero.json", serde_json::json!({"keepSystem": 0})),
             ("eleven.json", serde_json::json!({"keepProfiles": 11})),
-            ("hourly.json", serde_json::json!({"frequency": "hourly"})),
+            ("number.json", serde_json::json!({"frequency": 1})),
             ("string.json", serde_json::json!({"keepSystem": "5"})),
         ] {
             let f = with(name, bad);

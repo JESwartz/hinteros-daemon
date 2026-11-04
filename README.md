@@ -418,7 +418,7 @@ pulse_socket = "pulse/native"  # sound for apps, relative to XDG_RUNTIME_DIR
 pulse_record_socket = "pulse/native"  # with mic; the same as pulse_socket: mic is not listed
 
 [[apps]]                       # what apps.list returns after the built-in "steam" (a stub list if none)
-id = "jellyfin-desktop"
+id = "jellyfin-desktop"        # not "steam", "cmd-<n>" or "steam-<n>": the daemon's own
 name = "Jellyfin"
 command = ["jellyfin-desktop"]
 desktop_id = "org.jellyfin.JellyfinDesktop"   # icon from its .desktop file (or: icon = "/path.png")

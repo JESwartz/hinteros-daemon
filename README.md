@@ -1006,6 +1006,10 @@ uses, without starting the service (no root, sockets or D-Bus). It prints `ok <f
 that cannot be read (that file is reported as `invalid <file>: reading: ...`). The system repo
 runs it in a Nix check over every state.json the installer can write.
 
+`hinteros-system check-catalog FILE...` does the same for catalog index files (`catalog.json`)
+with `Index::parse`, which the service and the session daemon use. One entry it refuses makes the
+whole index unusable, so the system repo runs it on the index it ships.
+
 ### What the system module must provide
 
 For `daemon.nix` (and the VM tests) in the system repo:

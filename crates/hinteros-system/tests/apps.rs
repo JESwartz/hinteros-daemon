@@ -35,7 +35,8 @@ const CATALOG3: &str = r#"{"indexVersion": 4, "entries": [
    "dataPaths": [".config/Moonlight Game Streaming Project"]},
   {"id": "youtube", "kind": "app", "name": "YouTube", "status": "available", "sizeMiB": 1},
   {"id": "jellyfin-server", "kind": "service", "name": "Jellyfin server", "status": "available", "sizeMiB": 300},
-  {"id": "old", "kind": "app", "name": "Old", "status": "removed", "statusReason": "Gone."}
+  {"id": "old", "kind": "app", "name": "Old", "status": "removed", "statusReason": "Gone.",
+   "dataPaths": [".local/share/hinteros/sandbox/old"]}
 ]}"#;
 
 /// Profile p1's (the test user's) app profile.
@@ -244,10 +245,17 @@ async fn profile_apps_install_remove_rollback() {
             .exists()
     );
     assert_eq!(root.read("switch.log"), switches);
-    let e = call(&mut c, "apps.clear_data", json!({"id": "nope"}))
-        .await
-        .unwrap_err();
-    assert_eq!(code(&e), ErrorCode::NotFound.code());
+    // A removed app's data (its tombstone keeps dataPaths) can still be deleted.
+    std::fs::create_dir_all(root.p("home/.local/share/hinteros/sandbox/old")).unwrap();
+    let r = run_job(&sys, &mut c, "apps.clear_data", json!({"id": "old"})).await;
+    assert_eq!(r["subject"]["apps"], json!([{"id": "old", "name": "Old"}]));
+    assert!(!root.p("home/.local/share/hinteros/sandbox/old").exists());
+    for id in ["nope", "jellyfin-server"] {
+        let e = call(&mut c, "apps.clear_data", json!({ "id": id }))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&e), ErrorCode::NotFound.code());
+    }
 
     // Generations and rollback.
     let g = call(&mut c, "apps.generations", json!({})).await.unwrap();

@@ -274,7 +274,8 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   Some sites refuse non-browser fetches (Crunchyroll answers 403): for those, `firefox_profile`
   (the app's kiosk profile, `~/` allowed; needs `site_url`) names the profile whose
   `favicons.sqlite` Firefox filled when it visited the site. The daemon copies that database (and
-  its `-wal`) to a temporary directory, never opening Firefox's own files, takes the largest icon
+  its `-wal`, only regular files under 32 MiB, following no symlink below `$HOME`) to a temporary
+  directory, never opening Firefox's own files, takes the largest icon
   stored for the site, and exports it as `<app-id>.firefox.<ext>` in the icon cache. It is read
   at startup, when a download fails, and again whenever the app exits (`app_exited`), sending
   `apps_changed` if the icon changed; a downloaded icon always replaces it.

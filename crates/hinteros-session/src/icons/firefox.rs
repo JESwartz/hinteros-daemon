@@ -8,18 +8,21 @@
 //! temporary directory and the copy is read (SQLite replays the copied WAL, so the newest
 //! icons are seen). The largest image stored for the app's site wins.
 //!
-//! A sandboxed app writes its profile, so the files are copied only when regular (no symlink
-//! followed, no FIFO) and not too large, and the copy is opened in SQLite's defensive mode
-//! without a trusted schema.
+//! A sandboxed app writes its profile and every directory below its sandbox home, so below
+//! `$HOME` no symlink is followed (each directory is opened relative to its parent), the files
+//! are copied only when regular (no FIFO) and not too large, and the copy is opened in
+//! SQLite's defensive mode without a trusted schema.
 
 use std::fs;
+use std::io;
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use nix::libc;
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags, params};
+use rustix::fs::{Mode, OFlags, openat};
 use url::Url;
 
 use super::web::{self, Image};
@@ -33,6 +36,19 @@ const MAX_FILE: u64 = 32 << 20;
 /// The best favicon Firefox stored for `site_url`, if any. `Ok(None)`: no profile database
 /// yet, or no icon for this site.
 pub fn favicon(profile: &Path, site_url: &str) -> Result<Option<Image>> {
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    favicon_beneath(home.as_deref(), profile, site_url)
+}
+
+/// [`favicon`], following no symlink below `trusted` (the profile's home, which holds the
+/// sandbox homes).
+fn favicon_beneath(
+    trusted: Option<&Path>,
+    profile: &Path,
+    site_url: &str,
+) -> Result<Option<Image>> {
     let db = profile.join("favicons.sqlite");
     let site = Url::parse(site_url).with_context(|| format!("site_url {site_url}"))?;
     let Some(host) = site.host_str() else {
@@ -40,14 +56,22 @@ pub fn favicon(profile: &Path, site_url: &str) -> Result<Option<Image>> {
     };
     let prefix = format!("{}://{host}", site.scheme());
 
+    let dir = match open_profile(trusted, profile) {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("opening {}", profile.display())),
+    };
     let tmp = tempfile::tempdir().context("temporary directory")?;
     let copy = tmp.path().join("favicons.sqlite");
-    if !copy_regular(&db, &copy).with_context(|| format!("copying {}", db.display()))? {
+    if !copy_regular(&dir, "favicons.sqlite", &copy)
+        .with_context(|| format!("copying {}", db.display()))?
+    {
         return Ok(None);
     }
     // Best effort: Firefox may checkpoint (and delete) it right now.
     let _ = copy_regular(
-        &profile.join("favicons.sqlite-wal"),
+        &dir,
+        "favicons.sqlite-wal",
         &tmp.path().join("favicons.sqlite-wal"),
     );
     let conn = Connection::open_with_flags(
@@ -62,19 +86,41 @@ pub fn favicon(profile: &Path, site_url: &str) -> Result<Option<Image>> {
     best_icon(&conn, &prefix, site_url)
 }
 
-/// Copy `from` to `to` (new) when it is a regular file of at most [`MAX_FILE`] bytes. The
-/// profile is in the app's sandbox home, which the app controls: a symlink there is not
+/// The profile directory. Below `trusted` every component is opened relative to its parent
+/// and never through a symlink: the app owns its sandbox home and could link a directory there
+/// to another app's profile. A profile outside `trusted` is not in a sandbox home.
+fn open_profile(trusted: Option<&Path>, profile: &Path) -> io::Result<OwnedFd> {
+    const DIR: OFlags = OFlags::RDONLY
+        .union(OFlags::DIRECTORY)
+        .union(OFlags::CLOEXEC);
+    let Some((trusted, rest)) = trusted.and_then(|t| Some((t, profile.strip_prefix(t).ok()?)))
+    else {
+        return Ok(rustix::fs::open(profile, DIR, Mode::empty())?);
+    };
+    let mut fd = rustix::fs::open(trusted, DIR, Mode::empty())?;
+    for c in rest.components() {
+        let Component::Normal(name) = c else {
+            return Err(io::Error::other("not a plain path"));
+        };
+        fd = openat(&fd, name, DIR | OFlags::NOFOLLOW, Mode::empty())?;
+    }
+    Ok(fd)
+}
+
+/// Copy `name` in `dir` to `to` (new) when it is a regular file of at most [`MAX_FILE`] bytes.
+/// The profile is in the app's sandbox home, which the app controls: a symlink there is not
 /// followed, and a FIFO, device or huge file is refused. `Ok(false)`: no such file.
-fn copy_regular(from: &Path, to: &Path) -> Result<bool> {
+fn copy_regular(dir: &OwnedFd, name: &str, to: &Path) -> Result<bool> {
     use std::io::Read;
-    let mut src = match fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(from)
-    {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e.into()),
+    let mut src = match openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fs::File::from(fd),
+        Err(e) if e == rustix::io::Errno::NOENT => return Ok(false),
+        Err(e) => return Err(io::Error::from(e).into()),
     };
     let meta = src.metadata()?;
     if !meta.is_file() {
@@ -269,6 +315,42 @@ pub(crate) mod tests {
         assert_eq!(
             favicon(t.path(), "https://a.test/").unwrap().unwrap().bytes,
             PNG
+        );
+    }
+
+    #[test]
+    fn no_directory_below_home_is_a_symlink() {
+        let other = profile(&[("https://a.test/", "https://a.test/i.png", 64, PNG)]);
+        let home = tempfile::tempdir().unwrap();
+        let app = home.path().join("sandbox/app");
+        fs::create_dir_all(app.join(".local/share")).unwrap();
+        // The app links its profile directory, or a parent of it, to another app's profile.
+        std::os::unix::fs::symlink(other.path(), app.join(".local/share/ff")).unwrap();
+        let linked = app.join(".local/share/ff");
+        assert!(favicon_beneath(Some(home.path()), &linked, "https://a.test/").is_err());
+        std::os::unix::fs::symlink(app.join(".local/share"), app.join(".up")).unwrap();
+        let through = app.join(".up/ff");
+        assert!(favicon_beneath(Some(home.path()), &through, "https://a.test/").is_err());
+        // Outside the trusted home, as before; a real directory below it works.
+        assert!(
+            favicon_beneath(None, &linked, "https://a.test/")
+                .unwrap()
+                .is_some()
+        );
+        let real = app.join(".local/share/real");
+        fs::create_dir(&real).unwrap();
+        fs::copy(
+            other.path().join("favicons.sqlite"),
+            real.join("favicons.sqlite"),
+        )
+        .unwrap();
+        let img = favicon_beneath(Some(home.path()), &real, "https://a.test/").unwrap();
+        assert_eq!(img.unwrap().bytes, PNG);
+        // A missing directory is no icon, not an error.
+        let gone = app.join("gone/ff");
+        assert_eq!(
+            favicon_beneath(Some(home.path()), &gone, "https://a.test/").unwrap(),
+            None
         );
     }
 

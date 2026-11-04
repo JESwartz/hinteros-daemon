@@ -262,6 +262,7 @@ fn jellyfin_detail(c: &DetailCtx) -> JellyfinDetail {
         users: users
             .users
             .iter()
+            .filter(|(_, r)| !r.is_pending())
             .map(|(p, r)| JellyfinUserRef {
                 profile_id: p.clone(),
                 jellyfin_user: r.name.clone(),
@@ -939,7 +940,7 @@ fn reveal(paths: &crate::config::Paths) -> JellyfinUsersRevealResult {
         users: profiles
             .iter()
             .filter_map(|p| {
-                let r = stored.users.get(&p.id)?;
+                let r = stored.users.get(&p.id).filter(|r| !r.is_pending())?;
                 Some(JellyfinProfileAccount {
                     profile_id: p.id.clone(),
                     profile_name: p.name.clone(),

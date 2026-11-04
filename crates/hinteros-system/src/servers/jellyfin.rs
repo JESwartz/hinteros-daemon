@@ -206,8 +206,10 @@ pub struct User {
 /// What [`sync`] needs from Jellyfin (the HTTP client, or a fake in tests).
 pub trait Api {
     fn users(&self) -> Result<Vec<User>, Error>;
-    /// Make a user (not an administrator, no media deletion); returns its id.
+    /// Make a user; returns its id.
     fn create_user(&self, name: &str, password: &str) -> Result<String, Error>;
+    /// Make sure a user is no administrator and may not delete media.
+    fn set_policy(&self, id: &str) -> Result<(), Error>;
     fn rename_user(&self, id: &str, name: &str) -> Result<(), Error>;
     fn delete_user(&self, id: &str) -> Result<(), Error>;
 }
@@ -344,13 +346,17 @@ impl Api for Client {
         )?;
         let user: Value = serde_json::from_slice(&r.body)
             .map_err(|e| Error::Refused(format!("POST /Users/New: {e}")))?;
-        let id = user["Id"]
+        Ok(user["Id"]
             .as_str()
             .filter(|i| is_id(i))
             .ok_or_else(|| Error::Refused("POST /Users/New: no id".into()))?
-            .to_owned();
+            .to_owned())
+    }
+
+    fn set_policy(&self, id: &str) -> Result<(), Error> {
         // New users are no administrators and may not delete media already (Jellyfin's
         // defaults); say so explicitly. The whole policy goes back (missing fields reset).
+        let user: Value = self.json(&format!("/Users/{id}"))?;
         let mut policy = user["Policy"].clone();
         if policy.is_object() {
             policy["IsAdministrator"] = json!(false);
@@ -358,7 +364,7 @@ impl Api for Client {
             policy["EnableContentDeletionFromFolders"] = json!([]);
             self.call("POST", &format!("/Users/{id}/Policy"), Some(&policy))?;
         }
-        Ok(id)
+        Ok(())
     }
 
     fn rename_user(&self, id: &str, name: &str) -> Result<(), Error> {
@@ -380,6 +386,8 @@ impl Api for Client {
 /// One profile's Jellyfin user (`users.json`).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
+    /// Empty while pending: recorded before `POST /Users/New`, which may make the user even when
+    /// no answer comes back; the next sync takes that user (by name, with this password).
     pub jellyfin_user_id: String,
     pub name: String,
     pub password: String,
@@ -396,6 +404,13 @@ impl std::fmt::Debug for Record {
             .field("jellyfin_user_id", &self.jellyfin_user_id)
             .field("name", &self.name)
             .finish_non_exhaustive()
+    }
+}
+
+impl Record {
+    /// Made before its Jellyfin user was (see `jellyfin_user_id`).
+    pub fn is_pending(&self) -> bool {
+        self.jellyfin_user_id.is_empty()
     }
 }
 
@@ -512,6 +527,11 @@ pub enum Op {
         profile: String,
         name: String,
     },
+    /// A pending record's user, made by a create that got no answer: record its id.
+    Claim {
+        profile: String,
+        user_id: String,
+    },
     Create {
         profile: String,
         name: String,
@@ -538,15 +558,27 @@ pub fn plan(profiles: &[Profile], stored: &UsersFile, existing: &[User]) -> Vec<
         })
         .collect();
     taken.entry(key(ADMIN_USER)).or_insert(None);
+    // Pending records whose create went through: a user of that name that no record owns.
+    let claimable: BTreeMap<&str, &User> = stored
+        .users
+        .iter()
+        .filter(|(_, r)| r.is_pending() && key(&r.name) != key(ADMIN_USER))
+        .filter_map(|(p, r)| {
+            let u = existing.iter().find(|u| key(&u.name) == key(&r.name))?;
+            (taken.get(&key(&u.name)) == Some(&None)).then_some((p.as_str(), u))
+        })
+        .collect();
     for (profile, r) in &stored.users {
         if !wanted.contains(profile.as_str()) {
-            let user_id = by_id.get(r.jellyfin_user_id.as_str()).map(|u| u.id.clone());
-            if let Some(u) = by_id.get(r.jellyfin_user_id.as_str()) {
+            let user = by_id
+                .get(r.jellyfin_user_id.as_str())
+                .or(claimable.get(profile.as_str()));
+            if let Some(u) = user {
                 taken.remove(&key(&u.name));
             }
             ops.push(Op::Delete {
                 profile: profile.clone(),
-                user_id,
+                user_id: user.map(|u| u.id.clone()),
             });
         }
     }
@@ -589,7 +621,15 @@ pub fn plan(profiles: &[Profile], stored: &UsersFile, existing: &[User]) -> Vec<
                 }
             }
             None => {
-                if let Some(name) = candidates(&base).find(|c| !taken.contains_key(&key(c))) {
+                if let Some(u) = claimable.get(p.id.as_str()) {
+                    // Renamed on the next sync, if the profile's name changed meanwhile.
+                    taken.insert(key(&u.name), Some(p.id.clone()));
+                    ops.push(Op::Claim {
+                        profile: p.id.clone(),
+                        user_id: u.id.clone(),
+                    });
+                } else if let Some(name) = candidates(&base).find(|c| !taken.contains_key(&key(c)))
+                {
                     taken.insert(key(&name), Some(p.id.clone()));
                     ops.push(Op::Create {
                         profile: p.id.clone(),
@@ -652,7 +692,7 @@ pub fn sync(api: &dyn Api, files: &Files, profiles: &[Profile]) -> Result<Synced
     };
     let mut failed = None;
     for op in ops {
-        match apply(api, op, &mut stored, &mut done) {
+        match apply(api, op, &mut stored, &mut done, &save) {
             Ok(()) => save(&stored)?,
             Err(e) => {
                 let stop = matches!(e, Error::Unreachable(_));
@@ -673,8 +713,15 @@ pub fn sync(api: &dyn Api, files: &Files, profiles: &[Profile]) -> Result<Synced
     }
 }
 
-/// One step of [`sync`]: Jellyfin first, then the record (left as it was on failure).
-fn apply(api: &dyn Api, op: Op, stored: &mut UsersFile, done: &mut Synced) -> Result<(), Error> {
+/// One step of [`sync`]: Jellyfin first, then the record (left as it was on failure; a create
+/// leaves a pending record).
+fn apply(
+    api: &dyn Api,
+    op: Op,
+    stored: &mut UsersFile,
+    done: &mut Synced,
+    save: &dyn Fn(&UsersFile) -> Result<(), Error>,
+) -> Result<(), Error> {
     match op {
         Op::Delete { profile, user_id } => {
             if let Some(id) = user_id {
@@ -701,19 +748,34 @@ fn apply(api: &dyn Api, op: Op, stored: &mut UsersFile, done: &mut Synced) -> Re
                 r.name = name;
             }
         }
+        Op::Claim { profile, user_id } => {
+            api.set_policy(&user_id)?;
+            if let Some(r) = stored.users.get_mut(&profile) {
+                r.jellyfin_user_id = user_id;
+            }
+            done.created += 1;
+            info!(profile = %profile, "Jellyfin user taken over after a lost answer");
+        }
         Op::Create { profile, name } => {
+            // Pending first: if Jellyfin makes the user but the answer is lost, the next sync
+            // takes it over (with this password) instead of making "<name> 2" beside it.
             let password = new_password();
-            let id = api.create_user(&name, &password)?;
             stored.users.insert(
                 profile.clone(),
                 Record {
-                    jellyfin_user_id: id,
+                    jellyfin_user_id: String::new(),
                     name: name.clone(),
-                    password,
+                    password: password.clone(),
                     access_token: None,
                     extra: Default::default(),
                 },
             );
+            save(stored)?;
+            let id = api.create_user(&name, &password)?;
+            api.set_policy(&id)?;
+            if let Some(r) = stored.users.get_mut(&profile) {
+                r.jellyfin_user_id = id;
+            }
             done.created += 1;
             info!(profile = %profile, name = %name, "Jellyfin user made");
         }
@@ -821,7 +883,8 @@ pub fn client_token(
     profiles: &[Profile],
     id: &str,
 ) -> Result<hinteros_api::system::JellyfinClientTokenResult, Error> {
-    let has_user = UsersFile::load(&files.users_json()).is_ok_and(|f| f.users.contains_key(id));
+    let has_user = UsersFile::load(&files.users_json())
+        .is_ok_and(|f| f.users.get(id).is_some_and(|r| !r.is_pending()));
     if !has_user {
         sync(c, files, profiles)?;
     }
@@ -831,7 +894,7 @@ pub fn client_token(
     let path = files.users_json();
     let mut stored =
         UsersFile::load(&path).map_err(|e| Error::Refused(format!("users.json: {e}")))?;
-    let Some(r) = stored.users.get_mut(id) else {
+    let Some(r) = stored.users.get_mut(id).filter(|r| !r.is_pending()) else {
         return Err(Error::Refused("the profile has no Jellyfin user".into()));
     };
     let device = device_id(id);
@@ -1189,6 +1252,8 @@ mod tests {
         next: RefCell<u8>,
         /// Names `create_user` refuses.
         refuse: fn(&str) -> bool,
+        /// `create_user` makes the user, then times out.
+        lose_answers: bool,
     }
 
     impl Api for Fake {
@@ -1203,7 +1268,14 @@ mod tests {
             *n += 1;
             let id = hex(100 + *n);
             self.users.borrow_mut().push(u(&id, name));
+            if self.lose_answers {
+                return Err(Error::Unreachable("timed out".into()));
+            }
             Ok(id)
+        }
+        fn set_policy(&self, id: &str) -> Result<(), Error> {
+            assert!(self.users.borrow().iter().any(|x| x.id == id));
+            Ok(())
         }
         fn rename_user(&self, id: &str, name: &str) -> Result<(), Error> {
             for x in self.users.borrow_mut().iter_mut() {
@@ -1229,6 +1301,7 @@ mod tests {
             users: RefCell::new(vec![u(&hex(1), "admin")]),
             next: RefCell::new(0),
             refuse: |_| false,
+            lose_answers: false,
         };
         let s = sync(&fake, &files, &[p("p1", "Alice"), p("p2", "Bob")]).unwrap();
         assert_eq!(s.created, 2);
@@ -1260,6 +1333,7 @@ mod tests {
             users: RefCell::new(fake.users.borrow().clone()),
             next: RefCell::new(0),
             refuse: |_| true,
+            lose_answers: false,
         };
         assert!(sync(&failing, &files, &[p("p1", "Alicia"), p("p3", "C")]).is_err());
         assert!(
@@ -1273,13 +1347,81 @@ mod tests {
             users: RefCell::new(fake.users.borrow().clone()),
             next: RefCell::new(0),
             refuse: |n| n == "C",
+            lose_answers: false,
         };
         let profiles = [p("p1", "Alicia"), p("p3", "C"), p("p4", "Dee")];
         assert!(sync(&picky, &files, &profiles).is_err());
         let users = UsersFile::load(&files.users_json()).unwrap().users;
-        assert_eq!(users.keys().collect::<Vec<_>>(), ["p1", "p4"]);
+        assert_eq!(users.keys().collect::<Vec<_>>(), ["p1", "p3", "p4"]);
+        assert!(users["p3"].is_pending() && !users["p4"].is_pending());
         // Secrets stay out of debug output.
         assert!(!format!("{:?}", f.users["p1"]).contains(&f.users["p1"].password));
+    }
+
+    #[test]
+    fn a_lost_create_answer_is_taken_over() {
+        let d = tempfile::tempdir().unwrap();
+        let files = Files {
+            dir: d.path().to_owned(),
+        };
+        let slow = Fake {
+            users: RefCell::new(vec![u(&hex(1), "admin")]),
+            next: RefCell::new(0),
+            refuse: |_| false,
+            lose_answers: true,
+        };
+        let profiles = [p("p1", "Alice")];
+        assert!(matches!(
+            sync(&slow, &files, &profiles),
+            Err(Error::Unreachable(_))
+        ));
+        let pending = UsersFile::load(&files.users_json()).unwrap().users["p1"].clone();
+        assert!(pending.is_pending());
+        // Next time: the user Jellyfin made is recorded, not "Alice 2" beside it.
+        let fake = Fake {
+            users: RefCell::new(slow.users.borrow().clone()),
+            next: RefCell::new(5),
+            refuse: |_| false,
+            lose_answers: false,
+        };
+        assert_eq!(
+            plan(
+                &profiles,
+                &UsersFile::load(&files.users_json()).unwrap(),
+                &fake.users.borrow()
+            ),
+            [Op::Claim {
+                profile: "p1".into(),
+                user_id: hex(101)
+            }]
+        );
+        assert_eq!(sync(&fake, &files, &profiles).unwrap().created, 1);
+        let r = &UsersFile::load(&files.users_json()).unwrap().users["p1"];
+        assert_eq!(
+            (r.jellyfin_user_id.as_str(), r.name.as_str()),
+            (&*hex(101), "Alice")
+        );
+        assert_eq!(r.password, pending.password);
+        assert_eq!(fake.users.borrow().len(), 2);
+        // A pending record whose user never came: made again. One whose profile went: its user
+        // goes too.
+        let mut stored = UsersFile::default();
+        stored.users.insert("p2".into(), rec("", "Bob"));
+        stored.users.insert("p3".into(), rec("", "Carol"));
+        let existing = [u(&hex(7), "Carol")];
+        assert_eq!(
+            plan(&[p("p2", "Bob")], &stored, &existing),
+            [
+                Op::Delete {
+                    profile: "p3".into(),
+                    user_id: Some(hex(7))
+                },
+                Op::Create {
+                    profile: "p2".into(),
+                    name: "Bob".into()
+                }
+            ]
+        );
     }
 
     #[test]
@@ -1336,6 +1478,7 @@ mod tests {
             users: RefCell::new(vec![u(&hex(1), "admin")]),
             next: RefCell::new(0),
             refuse: |_| false,
+            lose_answers: false,
         };
         sync(&fake, &files, &[p("p1", "Alice")]).unwrap();
         assert!(matches!(sync(&fake, &files, &[]), Err(Error::Profiles(_))));

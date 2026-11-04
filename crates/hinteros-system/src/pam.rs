@@ -358,16 +358,15 @@ fn touch_last_used(ctx: &Ctx, user: &str, now: i64) {
     let Some(a) = state.accounts().into_iter().find(|a| a.user == user) else {
         return;
     };
-    let path = ctx.paths.profiles_json();
-    let Ok(mut file) = ProfilesFile::load(&path) else {
-        return;
-    };
-    if let Some(m) = file.profiles.get_mut(&a.id) {
-        m.last_used_at = Some(now);
-        if let Err(e) = file.save(&path) {
-            warn!("profiles.json: {e}");
-        }
-        crate::public::publish(&ctx.paths, &state, &file, now);
+    let touched = ProfilesFile::update(&ctx.paths.profiles_json(), |f| {
+        f.profiles
+            .get_mut(&a.id)
+            .map(|m| m.last_used_at = Some(now))
+    });
+    match touched {
+        Ok(Some((file, ()))) => crate::public::publish(&ctx.paths, &state, &file, now),
+        Ok(None) => {}
+        Err(e) => warn!("profiles.json: {e}"),
     }
 }
 

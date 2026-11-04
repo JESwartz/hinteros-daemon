@@ -76,6 +76,39 @@ pub struct ProfilesFile {
     pub profiles: BTreeMap<String, Meta>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+    /// The file as [`ProfilesFile::load`] read it, so [`ProfilesFile::save`] can tell that
+    /// another process wrote it since.
+    #[serde(skip)]
+    loaded: Loaded,
+}
+
+/// The revision of the bytes a [`ProfilesFile`] was read from (`None`: no file). Not part of
+/// the value: two files with the same contents are equal.
+#[derive(Debug, Clone, Default)]
+struct Loaded(Option<Option<String>>);
+
+impl PartialEq for Loaded {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+/// [`ProfilesFile::save`]: another process (the service, a job, PAM) wrote `profiles.json`
+/// after this copy was read. Read it again and redo the change.
+#[derive(Debug, thiserror::Error)]
+#[error("profiles.json changed since it was read")]
+pub struct Changed;
+
+impl Changed {
+    pub fn is(e: &std::io::Error) -> bool {
+        e.get_ref().is_some_and(|e| e.is::<Changed>())
+    }
+}
+
+/// Hold the lock of the `profiles.json` at `path` (`.profiles.json.lock` next to it).
+fn lock(path: &Path) -> std::io::Result<std::fs::File> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    state::lock(&path.with_file_name(format!(".{name}.lock")))
 }
 
 impl Default for ProfilesFile {
@@ -85,6 +118,7 @@ impl Default for ProfilesFile {
             next: 1,
             profiles: BTreeMap::new(),
             extra: BTreeMap::new(),
+            loaded: Loaded::default(),
         }
     }
 }
@@ -96,14 +130,19 @@ impl ProfilesFile {
         match std::fs::read(path) {
             Ok(bytes) => {
                 check_version(path, &bytes, FILE_VERSION)?;
-                serde_json::from_slice(&bytes).map_err(|e| {
+                let mut file: Self = serde_json::from_slice(&bytes).map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("{}: {e}", path.display()),
                     )
-                })
+                })?;
+                file.loaded = Loaded(Some(Some(state::revision(&bytes))));
+                Ok(file)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self {
+                loaded: Loaded(Some(None)),
+                ..Self::default()
+            }),
             Err(e) => Err(e),
         }
     }
@@ -112,14 +151,48 @@ impl ProfilesFile {
         path.exists()
     }
 
+    /// Write it, under a `flock` that every writer takes. A copy that [`ProfilesFile::load`]
+    /// read is written only if the file is still as it was then (else [`Changed`]), so no
+    /// writer loses another's change.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         check_file_version(path, FILE_VERSION)?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        let _lock = lock(path)?;
+        if let Loaded(Some(was)) = &self.loaded {
+            let now = match std::fs::read(path) {
+                Ok(bytes) => Some(state::revision(&bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            };
+            if &now != was {
+                return Err(std::io::Error::other(Changed));
+            }
+        }
         let mut bytes = serde_json::to_vec_pretty(self)?;
         bytes.push(b'\n');
         fsutil::write_atomic(path, &bytes, 0o600)
+    }
+
+    /// [`ProfilesFile::load`], `change` and [`ProfilesFile::save`], again from a fresh read
+    /// when another writer came in between. `change` returns whether to write.
+    pub fn update<T>(
+        path: &Path,
+        mut change: impl FnMut(&mut Self) -> Option<T>,
+    ) -> std::io::Result<Option<(Self, T)>> {
+        let mut tries = 0;
+        loop {
+            let mut file = Self::load(path)?;
+            let Some(out) = change(&mut file) else {
+                return Ok(None);
+            };
+            match file.save(path) {
+                Err(e) if Changed::is(&e) && tries < 5 => tries += 1,
+                Err(e) => return Err(e),
+                Ok(()) => return Ok(Some((Self::load(path).unwrap_or(file), out))),
+            }
+        }
     }
 
     /// The metadata of the accounts in `state` that are profiles (other ids are kept in the
@@ -380,6 +453,41 @@ mod tests {
         assert_eq!(f.take_id(&state, &Users::default()), "p999");
         assert_eq!(f.take_id(&state, &Users::default()), "p2", "p1 is in use");
         assert_eq!(f.take_id(&state, &users), "p2");
+    }
+
+    /// Two writers (the service and a job): the one that read before the other wrote gets
+    /// `Changed`, not a silent overwrite; `update` reads again and redoes its change.
+    #[test]
+    fn no_lost_updates() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("profiles.json");
+        let state = st(
+            r#"{"schemaVersion":2,"base":"unstable","stateVersion":"26.11","requirements":[],"services":[],
+               "profiles":[{"id":"p1"}]}"#,
+        );
+        let meta = test_file(&state).profiles["p1"].clone();
+        let mut service = ProfilesFile::load(&path).unwrap();
+        let mut job = ProfilesFile::load(&path).unwrap();
+        job.profiles.insert("p2".into(), meta.clone());
+        job.save(&path).unwrap();
+        service.profiles.insert("p1".into(), meta.clone());
+        let e = service.save(&path).unwrap_err();
+        assert!(Changed::is(&e), "{e}");
+        let (file, ()) = ProfilesFile::update(&path, |f| {
+            f.profiles.insert("p1".into(), meta.clone());
+            Some(())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(file.profiles.len(), 2);
+        assert_eq!(ProfilesFile::load(&path).unwrap(), file);
+        assert!(
+            ProfilesFile::update(&path, |_| None::<()>)
+                .unwrap()
+                .is_none()
+        );
+        // A file made from nothing is written as before.
+        ProfilesFile::default().save(&path).unwrap();
     }
 
     #[test]

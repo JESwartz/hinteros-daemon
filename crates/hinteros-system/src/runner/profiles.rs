@@ -25,18 +25,25 @@ impl Runner {
         let paths = self.spec.paths.clone();
         // Metadata and PIN only after the account exists: a failed job leaves neither. The PIN
         // first: a profile without its PIN would let anyone in.
-        let mut file = ProfilesFile::load(&paths.profiles_json())
+        ProfilesFile::load(&paths.profiles_json())
             .map_err(|e| self.fail(format!("profiles.json: {e}")))?;
         let pins = Pins::new(paths.pins_dir());
         if let Err(e) = pins.set_hash(&j.id, &j.pin_hash) {
             pins.remove(&j.id);
             return Err(self.fail(format!("writing the PIN: {e}")));
         }
-        file.profiles.insert(j.id.clone(), j.meta.clone());
-        if let Err(e) = file.save(&paths.profiles_json()) {
-            pins.remove(&j.id);
-            return Err(self.fail(format!("writing profiles.json: {e}")));
-        }
+        let saved = ProfilesFile::update(&paths.profiles_json(), |f| {
+            f.profiles.insert(j.id.clone(), j.meta.clone());
+            Some(())
+        });
+        let file = match saved {
+            Ok(Some((file, ()))) => file,
+            Ok(None) => unreachable!("the change always writes"),
+            Err(e) => {
+                pins.remove(&j.id);
+                return Err(self.fail(format!("writing profiles.json: {e}")));
+            }
+        };
         // Its apps: the starter env (nothing to evaluate).
         let owner = Owner::Profile {
             id: j.id.clone(),
@@ -86,11 +93,10 @@ impl Runner {
             delete_home(home, uid);
         }
         Pins::new(paths.pins_dir()).remove(&j.id);
-        if let Ok(mut file) = ProfilesFile::load(&paths.profiles_json()) {
-            file.profiles.remove(&j.id);
-            if let Err(e) = file.save(&paths.profiles_json()) {
-                warn!("profiles.json: {e}");
-            }
+        if let Err(e) = ProfilesFile::update(&paths.profiles_json(), |f| f.profiles.remove(&j.id)) {
+            warn!("profiles.json: {e}");
+        }
+        if let Ok(file) = ProfilesFile::load(&paths.profiles_json()) {
             public::publish(&paths, &j.state, &file, job::now());
         }
         let link = paths.app_profile(&j.user);

@@ -370,28 +370,49 @@ mod tests {
     async fn cursor_commands_run_one_at_a_time_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("log");
-        let sh = |word: &str, delay: &str| {
-            vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                format!("sleep {delay}; echo {word} >> {}", log.display()),
-            ]
+        let gate = dir.path().join("gate");
+        // The hide logs that it started, then waits for the gate file before it logs again.
+        let hide = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "echo start >> {log}; while [ ! -e {gate} ]; do sleep 0.01; done; echo hide >> {log}",
+                log = log.display(),
+                gate = gate.display()
+            ),
+        ];
+        let show = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("echo show >> {}", log.display()),
+        ];
+        // The log once it has `lines` lines (no fixed sleeps: the build box may be busy).
+        let wait_lines = async |lines: usize| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let text = std::fs::read_to_string(&log).unwrap_or_default();
+                if text.lines().count() >= lines || std::time::Instant::now() > deadline {
+                    return text;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         };
-        // The hide is slow: run at once, it would finish after the show.
-        let mut c = CommandCursor::new(sh("hide", "0.3"), sh("show", "0"), Vec::new());
+        // The hide is slow: run at once, the show would finish before it.
+        let mut c = CommandCursor::new(hide, show, Vec::new());
         c.set_visible(false);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(wait_lines(1).await, "start\n");
         c.set_visible(true);
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        assert_eq!(std::fs::read_to_string(&log).unwrap(), "hide\nshow\n");
+        std::fs::write(&gate, "").unwrap();
+        assert_eq!(wait_lines(3).await, "start\nhide\nshow\n");
         // Requests that come while a command runs: only the latest runs next.
         std::fs::remove_file(&log).unwrap();
+        std::fs::remove_file(&gate).unwrap();
         c.set_visible(false);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(wait_lines(1).await, "start\n");
         c.set_visible(true);
         c.set_visible(false);
-        tokio::time::sleep(Duration::from_millis(1000)).await;
-        assert_eq!(std::fs::read_to_string(&log).unwrap(), "hide\nhide\n");
+        std::fs::write(&gate, "").unwrap();
+        assert_eq!(wait_lines(4).await, "start\nhide\nstart\nhide\n");
     }
 
     #[test]

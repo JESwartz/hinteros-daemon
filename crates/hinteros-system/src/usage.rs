@@ -4,9 +4,10 @@
 //! filesystem. App store paths are shared and not counted here.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::MetadataExt;
+use std::os::fd::OwnedFd;
 use std::path::Path;
 
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, fstat, openat, statat};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -32,35 +33,65 @@ pub fn save(path: &Path, usage: &UsageFile) -> std::io::Result<()> {
     fsutil::write_atomic(path, &bytes, 0o600)
 }
 
-/// Bytes under `dir` (allocated blocks), not following symlinks, on `dev` only.
-pub fn du(dir: &Path, dev: u64) -> u64 {
-    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+const DIR_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// Bytes under the open directory `fd` (allocated blocks), itself included, on `dev` only.
+/// Every entry is looked at relative to its directory's descriptor, so a directory swapped
+/// for a symlink during the walk is not followed.
+fn du(fd: &OwnedFd, dev: u64) -> u64 {
+    let Ok(st) = fstat(fd) else {
         return 0;
     };
-    if meta.dev() != dev {
+    if st.st_dev != dev {
         return 0;
     }
-    let mut total = meta.blocks() * 512;
-    if meta.is_dir()
-        && let Ok(entries) = std::fs::read_dir(dir)
-    {
-        for e in entries.flatten() {
-            total += du(&e.path(), dev);
+    let mut total = st.st_blocks as u64 * 512;
+    let Ok(dup) = rustix::io::dup(fd) else {
+        return total;
+    };
+    let Ok(mut entries) = Dir::new(dup) else {
+        return total;
+    };
+    while let Some(Ok(entry)) = entries.read() {
+        let name = entry.file_name();
+        if name == c"." || name == c".." {
+            continue;
+        }
+        let Ok(st) = statat(fd, name, AtFlags::SYMLINK_NOFOLLOW) else {
+            continue;
+        };
+        if FileType::from_raw_mode(st.st_mode) == FileType::Directory {
+            // Swapped for a symlink since the stat: the open fails and it is not counted.
+            if let Ok(child) = openat(fd, name, DIR_FLAGS, Mode::empty()) {
+                total += du(&child, dev);
+            }
+        } else if st.st_dev == dev {
+            total += st.st_blocks as u64 * 512;
         }
     }
     total
 }
 
+/// Open `rel` under the directory `fd` one component at a time, never following a symlink.
+fn open_beneath(fd: &OwnedFd, rel: &str) -> Option<OwnedFd> {
+    let mut cur = rustix::io::dup(fd).ok()?;
+    for c in rel.split('/') {
+        cur = openat(&cur, c, DIR_FLAGS, Mode::empty()).ok()?;
+    }
+    Some(cur)
+}
+
 /// Measure one home.
 pub fn measure(home: &Path, now: i64) -> Option<Usage> {
-    let meta = std::fs::symlink_metadata(home).ok()?;
-    if !meta.is_dir() {
-        return None;
-    }
-    let dev = meta.dev();
+    let fd = rustix::fs::open(home, DIR_FLAGS, Mode::empty()).ok()?;
+    let dev = fstat(&fd).ok()?.st_dev;
+    let steam = open_beneath(&fd, ".local/share/Steam/steamapps/common");
     Some(Usage {
-        total_bytes: du(home, dev),
-        steam_games_bytes: du(&home.join(".local/share/Steam/steamapps/common"), dev),
+        total_bytes: du(&fd, dev),
+        steam_games_bytes: steam.map_or(0, |s| du(&s, dev)),
         at: now,
     })
 }
@@ -123,5 +154,25 @@ mod tests {
             "{u:?}"
         );
         assert!(measure(&d.path().join("nope"), 5).is_none());
+        assert!(measure(&home.join("link"), 5).is_none());
+    }
+
+    /// A symlink part-way along the Steam path is not followed.
+    #[test]
+    fn steam_path_does_not_follow_a_symlink() {
+        let d = tempfile::tempdir().unwrap();
+        let other = d.path().join("other");
+        std::fs::create_dir_all(other.join(".local/share/Steam/steamapps/common/Game")).unwrap();
+        std::fs::write(
+            other.join(".local/share/Steam/steamapps/common/Game/data"),
+            vec![1u8; 100_000],
+        )
+        .unwrap();
+        let home = d.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(other.join(".local"), home.join(".local")).unwrap();
+        let u = measure(&home, 5).unwrap();
+        assert_eq!(u.steam_games_bytes, 0, "{u:?}");
+        assert!(u.total_bytes < 100_000, "{u:?}");
     }
 }

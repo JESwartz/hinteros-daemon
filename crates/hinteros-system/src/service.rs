@@ -528,6 +528,7 @@ async fn dispatch(
                     &p.profile,
                     &p.current_system,
                     &p.booted_system,
+                    &p.boot_entries,
                     &p.profiles_json(),
                     needed.as_ref(),
                 ),
@@ -1366,6 +1367,7 @@ impl Service {
                     &self.paths.profile,
                     &self.paths.current_system,
                     &self.paths.booted_system,
+                    &self.paths.boot_entries,
                     &self.paths.profiles_json(),
                     None,
                 );
@@ -1384,7 +1386,9 @@ impl Service {
                 if !gens.iter().any(|g| g.generation == target) || Some(target) == current {
                     return Err(ErrorObject::new(
                         ErrorCode::NotFound,
-                        format!("generation {target} is not on disk or is the current one"),
+                        format!(
+                            "generation {target} is not on disk, has no boot entry or is the current one"
+                        ),
                     ));
                 }
                 if let Some(e) = self.job_busy() {

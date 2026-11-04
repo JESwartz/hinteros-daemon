@@ -53,6 +53,32 @@ pub fn links(profile: &Path) -> Vec<Link> {
     out
 }
 
+/// The systems systemd-boot has an entry for: `init=<toplevel>/init` in `<entries>/nixos-*.conf`.
+/// The boot loader writes entries for the newest `configurationLimit` generations only, and the
+/// system repo fails the switch to one without (a rollback past the limit). `None` when there
+/// are no entries or one cannot be read (another boot loader, no ESP): nothing is known.
+pub fn boot_toplevels(entries: &Path) -> Option<BTreeSet<PathBuf>> {
+    let mut found = false;
+    let mut out = BTreeSet::new();
+    for e in std::fs::read_dir(entries).ok()?.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !(name.starts_with("nixos-") && name.ends_with(".conf")) {
+            continue;
+        }
+        found = true;
+        let text = std::fs::read_to_string(e.path()).ok()?;
+        out.extend(
+            text.lines()
+                .filter_map(|l| l.trim_start().strip_prefix("options"))
+                .flat_map(str::split_whitespace)
+                .filter_map(|w| w.strip_prefix("init=")?.strip_suffix("/init"))
+                .map(PathBuf::from),
+        );
+    }
+    found.then_some(out)
+}
+
 /// The generation the profile points at.
 pub fn current_generation(profile: &Path) -> Option<u32> {
     let target = std::fs::read_link(profile).ok()?;
@@ -65,19 +91,26 @@ pub fn current_generation(profile: &Path) -> Option<u32> {
 }
 
 /// `generations.list`. `profiles_json` gives the profiles' current names; `needed`, the box
-/// features the profiles' apps need now, gives `readds_features`.
+/// features the profiles' apps need now, gives `readds_features`. A generation without a boot
+/// entry (`boot_toplevels`) is left out unless it is the current one: a rollback to it fails.
 pub fn list(
     profile: &Path,
     current_system: &Path,
     booted_system: &Path,
+    boot_entries: &Path,
     profiles_json: &Path,
     needed: Option<&BTreeSet<String>>,
 ) -> Vec<Generation> {
     let current = std::fs::canonicalize(current_system).ok();
     let booted = std::fs::canonicalize(booted_system).ok();
+    let bootable = boot_toplevels(boot_entries);
     let names = ProfilesFile::load(profiles_json).unwrap_or_default();
     links(profile)
         .into_iter()
+        .filter(|l| match (&bootable, &l.toplevel) {
+            (Some(b), Some(t)) => b.contains(t) || Some(t) == current.as_ref(),
+            _ => true,
+        })
         .map(|l| {
             let rev = l.toplevel.as_ref().and_then(|t| {
                 flake::read_lock(&t.join("hinteros/flake.lock"))
@@ -164,6 +197,7 @@ mod tests {
             &profile,
             &d.join("current"),
             &d.join("booted"),
+            &d.join("entries"),
             &d.join("profiles.json"),
             None,
         );
@@ -173,6 +207,7 @@ mod tests {
             &profile,
             &d.join("current"),
             &d.join("booted"),
+            &d.join("entries"),
             &d.join("profiles.json"),
             Some(&needed),
         );
@@ -198,5 +233,63 @@ mod tests {
         );
         assert_eq!((p2[1].id.as_str(), p2[1].name.as_deref()), ("p2", None));
         assert_eq!(gens[0].profiles, None);
+    }
+
+    /// Only the newest `configurationLimit` generations have a boot entry; a rollback to an
+    /// older one fails, so the list leaves it out (but never the current one).
+    #[test]
+    fn leaves_out_generations_without_a_boot_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        // Entries name canonical store paths.
+        let d = &std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(d.join("profiles")).unwrap();
+        std::fs::create_dir_all(d.join("entries")).unwrap();
+        for n in [1, 2, 3, 4] {
+            std::fs::create_dir_all(d.join(format!("store/gen{n}"))).unwrap();
+            symlink(
+                d.join(format!("store/gen{n}")),
+                d.join(format!("profiles/system-{n}-link")),
+            )
+            .unwrap();
+        }
+        symlink("system-1-link", d.join("profiles/system")).unwrap();
+        symlink(d.join("store/gen1"), d.join("current")).unwrap();
+        symlink(d.join("store/gen1"), d.join("booted")).unwrap();
+        let list_all = || {
+            list(
+                &d.join("profiles/system"),
+                &d.join("current"),
+                &d.join("booted"),
+                &d.join("entries"),
+                &d.join("profiles.json"),
+                None,
+            )
+            .iter()
+            .map(|g| g.generation)
+            .collect::<Vec<_>>()
+        };
+
+        // No entries (another boot loader): nothing is known, all are listed.
+        assert_eq!(boot_toplevels(&d.join("entries")), None);
+        assert_eq!(boot_toplevels(&d.join("missing")), None);
+        assert_eq!(list_all(), [4, 3, 2, 1]);
+
+        for n in [3, 4] {
+            let toplevel = d.join(format!("store/gen{n}"));
+            std::fs::write(
+                d.join(format!("entries/nixos-generation-{n}+3-0.conf")),
+                format!(
+                    "title HinterOS\nlinux /EFI/nixos/k.efi\noptions init={}/init loglevel=4\n",
+                    toplevel.display()
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(d.join("entries/other.conf"), "options init=/x/init\n").unwrap();
+        let tops = boot_toplevels(&d.join("entries")).unwrap();
+        assert_eq!(tops.len(), 2);
+        assert!(tops.contains(&d.join("store/gen3")));
+        // 2 has no entry; 1 has none either but is the current one.
+        assert_eq!(list_all(), [4, 3, 1]);
     }
 }

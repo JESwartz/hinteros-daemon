@@ -429,6 +429,7 @@ pub fn paths(state_dir: PathBuf, run_dir: PathBuf, config_dir: PathBuf, users: U
         profile: "/nix/var/nix/profiles/system".into(),
         current_system: "/run/current-system".into(),
         booted_system: "/run/booted-system".into(),
+        boot_entries: crate::config::default_boot_entries(),
         apps_profiles: "/nix/var/nix/profiles/hinteros".into(),
         catalog_index: None,
         users,

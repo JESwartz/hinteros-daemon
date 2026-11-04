@@ -1291,9 +1291,11 @@ pub fn session_restart_required(old: Option<&Path>, new: &Path) -> bool {
 pub type CatalogChanges = (Vec<CatalogApp>, Vec<RemovedApp>);
 
 /// Compare the target's `lib.catalogIds` with the running catalog. The target is an object of
-/// id to `{name, status, statusReason?}` (or to just the status string). New: available in the
-/// target and not available now. Removed: installed, and removed from or missing in the
-/// target. `None` if the target is not such an object.
+/// id to `{name, kind?, status, statusReason?}` (or to just the status string); unknown fields
+/// are ignored. New: an app (`kind` absent or `"app"`; a service, or a kind this build does not
+/// know, is never in the Store) available in the target and not available now. Removed:
+/// installed, and removed from or missing in the target. `None` if the target is not such an
+/// object.
 pub fn catalog_changes(
     current: Option<&hinteros_api::catalog::Index>,
     target: &serde_json::Value,
@@ -1311,7 +1313,10 @@ pub fn catalog_changes(
     };
     let mut new = Vec::new();
     for (id, v) in map {
-        if !is_app_id(id) || status(v).as_deref() != Some("available") {
+        if !is_app_id(id)
+            || status(v).as_deref() != Some("available")
+            || v.get("kind").is_some_and(|k| k.as_str() != Some("app"))
+        {
             continue;
         }
         let available_now = current
@@ -1496,6 +1501,7 @@ mod tests {
             profile: d.join("profiles/system"),
             current_system: d.join("current"),
             booted_system: d.join("booted"),
+            boot_entries: d.join("boot/loader/entries"),
             apps_profiles: d.join("nixprofiles"),
             catalog_index: None,
             users: Default::default(),
@@ -1618,7 +1624,10 @@ mod tests {
             "steam": {"name": "Steam", "status": "available"},
             "old": {"name": "Old", "status": "removed", "statusReason": "Discontinued."},
             "later": {"name": "Later", "status": "available"},
-            "moonlight": {"name": "Moonlight", "status": "available"},
+            "moonlight": {"name": "Moonlight", "status": "available", "kind": "app", "later": 1},
+            // Services, and kinds a later catalog adds, are not new apps.
+            "vpn": {"name": "VPN", "status": "available", "kind": "service"},
+            "gadget": {"name": "Gadget", "status": "available", "kind": "widget"},
             "hidden": "retired",
             "BAD": "available"
         });

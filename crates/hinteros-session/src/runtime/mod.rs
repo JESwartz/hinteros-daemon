@@ -84,7 +84,7 @@ struct Lane {
 impl Lane {
     fn take(&self) -> Turn {
         let (done, end) = oneshot::channel();
-        let before = std::mem::replace(&mut *self.last.lock().unwrap(), Some(end));
+        let before = self.last.lock().unwrap().replace(end);
         Turn {
             before,
             _done: done,

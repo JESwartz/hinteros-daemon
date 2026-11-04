@@ -243,6 +243,22 @@ impl Pins {
         out
     }
 
+    /// The backoff of `id` for display (lists, the public view): read under a shared `flock`,
+    /// never creating or writing the file.
+    pub fn peek_backoff(&self, id: &str) -> Backoff {
+        let Ok(mut file) = fs::File::open(self.state_path(id)) else {
+            return Backoff::default();
+        };
+        if flock(&file, FlockOperation::LockShared).is_err() {
+            return Backoff::default();
+        }
+        let mut text = String::new();
+        if file.read_to_string(&mut text).is_err() {
+            return Backoff::default();
+        }
+        fsutil::parse_cache(text.as_bytes()).unwrap_or_default()
+    }
+
     /// Read-modify-write the backoff under an exclusive `flock`.
     fn with_state(&self, id: &str, f: impl FnOnce(Backoff) -> Backoff) -> std::io::Result<()> {
         self.with_json(&self.state_path(id), f)
@@ -474,6 +490,10 @@ mod tests {
         // Another process (a new Pins on the same files) sees the same lock.
         let other = Pins::new(d.path().join("pins"));
         assert_eq!(other.backoff("p1").failures, 4);
+        assert_eq!(other.peek_backoff("p1"), other.backoff("p1"));
+        // Peeking never creates a state file.
+        assert_eq!(other.peek_backoff("p7"), Backoff::default());
+        assert!(!d.path().join("pins/p7.state").exists());
         assert_eq!(other.verify("p1", "2468", 101).unwrap(), Verify::Ok);
         assert_eq!(pins.backoff("p1"), Backoff::default());
         pins.remove("p1");

@@ -31,6 +31,8 @@ use crate::usage;
 
 const PROFILES_ACTION: &str = "org.hinteros.system.profiles";
 const RECOVER_ACTION: &str = "org.hinteros.system.profiles.recover";
+/// How often `profiles.list` may start the usage scan.
+pub(super) const USAGE_SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Which PIN a method checks (`target`, the profile being entered, is checked in PAM).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,7 +462,7 @@ impl Service {
                     admin: m.admin,
                     locked: m.locked,
                     locked_until: (!m.admin)
-                        .then(|| pins.backoff(&a.id).locked_until)
+                        .then(|| pins.peek_backoff(&a.id).locked_until)
                         .filter(|t| *t > now),
                     active: uid.is_some() && uid == active_uid,
                     last_used_at: m.last_used_at,
@@ -486,7 +488,17 @@ impl Service {
         })
     }
 
+    /// Start `hinteros-usage.service`, at most every [`USAGE_SCAN_EVERY`] (a scan that fails or
+    /// finds nothing leaves the data stale; every client's `profiles.list` must not restart it).
     async fn start_usage_scan(&self) {
+        {
+            let mut at = self.usage_scan_at.lock().unwrap();
+            let now = std::time::Instant::now();
+            if at.is_some_and(|t| now.duration_since(t) < USAGE_SCAN_EVERY) {
+                return;
+            }
+            *at = Some(now);
+        }
         if let Ok(conn) = self.bus.get().await {
             let _ = conn
                 .call_method(

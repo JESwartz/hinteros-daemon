@@ -88,6 +88,9 @@ pub struct Service {
     /// while the filter is not on), one change at a time.
     lan_rate: RateLimit,
     lan_apply: tokio::sync::Mutex<()>,
+    /// When `profiles.list` last started the usage scan (at most every
+    /// [`profiles::USAGE_SCAN_EVERY`]).
+    usage_scan_at: Mutex<Option<Instant>>,
 }
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
@@ -124,6 +127,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         // A session start, a restart and a few launches while it is not on fit in the burst.
         lan_rate: RateLimit::new(args.rate_per_minute.max(30), args.rate_burst.max(10)),
         lan_apply: tokio::sync::Mutex::new(()),
+        usage_scan_at: Mutex::new(None),
         paths,
         args,
     });

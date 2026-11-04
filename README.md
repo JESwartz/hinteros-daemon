@@ -1348,7 +1348,8 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   the count; the try that starts the lock is audited (`HINTEROS_PIN_OUTCOME=lockout_started`)), the public view `/run/hinteros/profiles-public.json` (0644) and
   the switch hint with one-time tokens `/run/hinteros/switch.json` (0600) (`public.rs`),
   `runtime.json` → `/run/hinteros/gamescope-modes` and `audio-output`, `usage.json`
-  (`hinteros-system usage`, started over D-Bus when `profiles.list` sees data older than an hour).
+  (`hinteros-system usage`, started over D-Bus when `profiles.list` sees data older than an hour,
+  at most every 10 minutes).
 - `profiles.json` is changed only under an `flock` on `profiles.json.lock`, re-read inside it
   (`ProfilesFile::update`; the service after any PIN check, the profile jobs, the PAM helper's
   `last_used_at`), so no writer loses another's change. **A `profiles.json` that cannot be read**

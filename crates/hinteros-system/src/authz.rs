@@ -202,8 +202,9 @@ pub enum PolkitAnswer {
 /// polkit's `CheckAuthorizationFlags.AllowUserInteraction`.
 const ALLOW_USER_INTERACTION: u32 = 1;
 
-/// Cancels a pending interactive check if the future waiting for it is dropped (the client
-/// went away, or the time ran out), so polkit closes the agent's prompt.
+/// Cancels a pending interactive check if the future waiting for it is dropped, so polkit
+/// closes the agent's prompt ([`check_polkit`] also cancels it when the time runs out or the
+/// client goes away).
 struct CancelOnDrop {
     conn: zbus::Connection,
     id: String,
@@ -294,14 +295,20 @@ pub async fn check_polkit(
                 id: cancellation_id.clone(),
                 armed: true,
             };
-            match tokio::time::timeout(limit, call).await {
+            // Mutating requests run as tasks that outlive their connection: stop waiting when
+            // the client goes away, so nobody can approve an action whose requester is gone.
+            let waited = tokio::select! {
+                r = tokio::time::timeout(limit, call) => r.map_err(|_| "nobody authenticated in time"),
+                () = peer.gone() => Err("the client went away"),
+            };
+            match waited {
                 Ok(reply) => {
                     let mut guard = guard;
                     guard.armed = false;
                     reply?
                 }
-                Err(_) => {
-                    info!(action, "nobody authenticated in time; cancelling the check");
+                Err(why) => {
+                    info!(action, "{why}; cancelling the check");
                     guard.cancel().await;
                     return Ok(PolkitAnswer::Challenge);
                 }

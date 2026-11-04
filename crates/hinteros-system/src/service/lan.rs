@@ -9,6 +9,7 @@
 
 use std::time::{Duration, Instant};
 
+use hinteros_api::server::method_not_found;
 use hinteros_api::system::{LanFilterClear, LanFilterSet};
 use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde_json::{Value, json};
@@ -48,7 +49,9 @@ impl Service {
         };
         let cgroup = match method {
             LanFilterSet::NAME => decode::<LanFilterSet>(params).map(|p| Some(p.cgroup)),
-            _ => decode::<LanFilterClear>(params).map(|_| None),
+            LanFilterClear::NAME => decode::<LanFilterClear>(params).map(|_| None),
+            // Never a clear by default: a name this version does not know changes nothing.
+            _ => Err(method_not_found(method)),
         };
         // The cgroup is checked before the rate limit (a cheap stat), so a bad one is always
         // invalid_params.
@@ -75,7 +78,7 @@ impl Service {
                 Ok(json!({}))
             }
             Err(e) => {
-                audit(Decision::Invalid);
+                audit(Decision::of_error(&e));
                 info!(method, error = %e.message, "request refused");
                 Err(e)
             }

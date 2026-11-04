@@ -1252,6 +1252,57 @@ async fn interactive_authorization() {
         true,
         "nothing changed"
     );
+
+    // The client goes away while the prompt is up: the check is cancelled at once, and a
+    // late answer changes nothing.
+    sys.fakes.lock().unwrap().interactive.insert(
+        ssh.clone(),
+        Interactive {
+            answer: Answer::Yes,
+            dismissed: false,
+            delay: Duration::from_millis(1500),
+        },
+    );
+    let n = sys.fakes.lock().unwrap().polkit_flags.len();
+    let jobs = call(&mut c, "jobs.list", json!({})).await.unwrap()["jobs"].clone();
+    let mut gone = Client::connect(&sys.socket).await.unwrap();
+    gone.hello(system::VERSION, Peer::new("gone", "0"))
+        .await
+        .unwrap();
+    let id = hinteros_api::jsonrpc::Id::Number(1003);
+    gone.send_line(
+        &hinteros_api::jsonrpc::request(&id, "ssh.set", json!({"enabled": false})).to_string(),
+    )
+    .await
+    .unwrap();
+    eventually("the interactive check", || {
+        sys.fakes.lock().unwrap().polkit_flags.len() > n
+    })
+    .await;
+    let gone_id = sys
+        .fakes
+        .lock()
+        .unwrap()
+        .polkit_flags
+        .last()
+        .unwrap()
+        .2
+        .clone();
+    let started = Instant::now();
+    drop(gone);
+    eventually("CancelCheckAuthorization after the client left", || {
+        sys.fakes.lock().unwrap().cancelled.contains(&gone_id)
+    })
+    .await;
+    assert!(started.elapsed() < Duration::from_millis(1500));
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    assert_eq!(
+        sys.root.etc_state()["settings"]["ssh"]["enable"],
+        true,
+        "nothing changed"
+    );
+    let after = call(&mut c, "jobs.list", json!({})).await.unwrap()["jobs"].clone();
+    assert_eq!(after, jobs, "no job started");
 }
 
 const CATALOG: &str = r#"{"indexVersion": 4, "entries": [

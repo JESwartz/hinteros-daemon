@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use hinteros_api::{ErrorCode, ErrorObject};
 use tracing::{info, warn};
 
 /// Decisions recorded in `HINTEROS_DECISION`.
@@ -20,6 +21,16 @@ pub enum Decision {
     AuthRequired,
     Invalid,
     RateLimited,
+    /// Past every check, the handler asked for a PIN (missing or wrong).
+    PinRequired,
+    /// Past every check, another job was running.
+    Busy,
+    /// Past every check, the state changed meanwhile (a stale revision).
+    Conflict,
+    /// Past every check, the handler refused it for another reason.
+    Refused,
+    /// Past every check, the handler failed (an internal error).
+    Failed,
 }
 
 impl Decision {
@@ -32,11 +43,37 @@ impl Decision {
             Self::AuthRequired => "auth_required",
             Self::Invalid => "invalid",
             Self::RateLimited => "rate_limited",
+            Self::PinRequired => "pin_required",
+            Self::Busy => "busy",
+            Self::Conflict => "conflict",
+            Self::Refused => "refused",
+            Self::Failed => "failed",
         }
     }
 
+    /// The decision for a handler's error (the request had passed the gate).
+    pub fn of_error(e: &ErrorObject) -> Self {
+        match e.kind() {
+            Some(ErrorCode::PinRequired) => Self::PinRequired,
+            Some(ErrorCode::JobBusy) => Self::Busy,
+            Some(ErrorCode::StateConflict) => Self::Conflict,
+            Some(ErrorCode::InternalError) => Self::Failed,
+            _ => Self::Refused,
+        }
+    }
+
+    /// What the per-uid cap counts: the gate's refusals, not a handler's answer to a request
+    /// that passed it (rate limited already, and a busy box must not hide real denials).
     fn is_denial(self) -> bool {
-        self != Self::Allowed
+        matches!(
+            self,
+            Self::DeniedSeat
+                | Self::DeniedPolkit
+                | Self::DeniedPeer
+                | Self::AuthRequired
+                | Self::Invalid
+                | Self::RateLimited
+        )
     }
 }
 
@@ -256,19 +293,41 @@ pub fn journal_note(
     }
 }
 
-/// Send without ever blocking the service for long: a full journal queue gets a few short retries,
-/// then the entry is reported as lost (it is still in the service's own log above).
+/// Send without ever blocking the service: a full journal queue gets a few short retries (on the
+/// blocking pool inside a tokio runtime, so the service's one thread does not wait), then the
+/// entry is reported as lost (it is still in the service's own log above). While the queue is
+/// full, a retried entry can thus reach the journal after later ones (the journal stamps it when
+/// it arrives). That is accepted: the service's own log above keeps the request order.
 fn send_datagram(socket: &std::path::Path, datagram: &[u8]) -> std::io::Result<()> {
     let s = UnixDatagram::unbound()?;
     s.set_nonblocking(true)?;
+    match s.send_to(datagram, socket) {
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        r => return r.map(|_| ()),
+    }
+    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+        let (socket, datagram) = (socket.to_owned(), datagram.to_owned());
+        rt.spawn_blocking(move || {
+            if let Err(e) = retry_datagram(&s, &socket, &datagram) {
+                warn!("cannot write to the journal: {e}");
+            }
+        });
+        return Ok(());
+    }
+    retry_datagram(&s, socket, datagram)
+}
+
+fn retry_datagram(
+    s: &UnixDatagram,
+    socket: &std::path::Path,
+    datagram: &[u8],
+) -> std::io::Result<()> {
     let mut tries = 0;
     loop {
+        std::thread::sleep(Duration::from_millis(5));
         match s.send_to(datagram, socket) {
             Ok(_) => return Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && tries < 20 => {
-                tries += 1;
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && tries < 20 => tries += 1,
             Err(e) => return Err(e),
         }
     }
@@ -325,6 +384,40 @@ pub fn parse_datagram(mut data: &[u8]) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full journal queue never makes the service's thread wait: inside a runtime the retries
+    /// run on the blocking pool, and the entry still arrives once there is room.
+    #[test]
+    fn a_full_journal_queue_does_not_block_the_runtime() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("journal");
+        let journal = UnixDatagram::bind(&path).unwrap();
+        let s = UnixDatagram::unbound().unwrap();
+        s.set_nonblocking(true).unwrap();
+        while s.send_to(b"fill", &path).is_ok() {}
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let start = Instant::now();
+            send_datagram(&path, b"last").unwrap();
+            assert!(start.elapsed() < Duration::from_millis(50));
+            journal.set_nonblocking(true).unwrap();
+            let mut buf = [0u8; 16];
+            let mut got = Vec::new();
+            for _ in 0..2000 {
+                match journal.recv(&mut buf) {
+                    Ok(n) => got.push(buf[..n].to_vec()),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+                }
+                if got.last().is_some_and(|m| m == b"last") {
+                    break;
+                }
+            }
+            assert_eq!(got.last().map(Vec::as_slice), Some(&b"last"[..]));
+        });
+    }
 
     #[test]
     fn native_format_round_trips() {
@@ -395,5 +488,37 @@ mod tests {
         }
         assert!(start.elapsed() < Duration::from_secs(10));
         assert_eq!(count, DENIALS_PER_MINUTE);
+    }
+
+    #[test]
+    fn handler_answers_are_named_and_never_use_the_denial_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let sock = UnixDatagram::bind(&path).unwrap();
+        sock.set_nonblocking(true).unwrap();
+        let audit = Audit::new(path);
+        let mut buf = vec![0u8; 65536];
+        let mut decision = |d: Decision| {
+            audit.request(1000, None, "?", "rebuild", None, d, None, "");
+            let n = sock.recv(&mut buf).expect("logged");
+            let m = parse_datagram(&buf[..n]);
+            m["HINTEROS_DECISION"].clone()
+        };
+        // A long job: busy many times; then a real denial is still logged.
+        for _ in 0..DENIALS_PER_MINUTE + 5 {
+            assert_eq!(decision(Decision::Busy), "busy");
+        }
+        assert_eq!(decision(Decision::DeniedPolkit), "denied_polkit");
+        for (e, name) in [
+            (ErrorCode::PinRequired, "pin_required"),
+            (ErrorCode::JobBusy, "busy"),
+            (ErrorCode::StateConflict, "conflict"),
+            (ErrorCode::InternalError, "failed"),
+            (ErrorCode::PermissionDenied, "refused"),
+            (ErrorCode::InvalidParams, "refused"),
+        ] {
+            let d = Decision::of_error(&ErrorObject::new(e, "x"));
+            assert_eq!(decision(d), name);
+        }
     }
 }

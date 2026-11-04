@@ -20,6 +20,7 @@ use hinteros_api::system::{
 use hinteros_api::{ErrorCode, ErrorObject, Method};
 use serde_json::{Value, json};
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use super::{Service, internal, job_ref, state_conflict};
 use crate::config::ServerPaths;
@@ -75,34 +76,39 @@ fn unavailable(service: &str, reason: &str) -> ErrorObject {
 }
 
 impl ServersRequest {
-    pub fn decode(method: &str, params: Option<Value>) -> Option<Result<Self, ErrorObject>> {
+    /// The request of a Server section method (`params` taken), `None` (`params` left) for
+    /// any other method.
+    pub fn decode(method: &str, params: &mut Option<Value>) -> Option<Result<Self, ErrorObject>> {
         use hinteros_api::system as s;
+        let mut params = || params.take();
         let r = match method {
-            s::ServicesEnable::NAME => super::decode::<s::ServicesEnable>(params).map(Self::Enable),
+            s::ServicesEnable::NAME => {
+                super::decode::<s::ServicesEnable>(params()).map(Self::Enable)
+            }
             s::ServicesDisable::NAME => {
-                super::decode::<s::ServicesDisable>(params).map(Self::Disable)
+                super::decode::<s::ServicesDisable>(params()).map(Self::Disable)
             }
             s::JellyfinLibrariesAdd::NAME => {
-                super::decode::<s::JellyfinLibrariesAdd>(params).map(Self::LibraryAdd)
+                super::decode::<s::JellyfinLibrariesAdd>(params()).map(Self::LibraryAdd)
             }
             s::JellyfinLibrariesRemove::NAME => {
-                super::decode::<s::JellyfinLibrariesRemove>(params).map(Self::LibraryRemove)
+                super::decode::<s::JellyfinLibrariesRemove>(params()).map(Self::LibraryRemove)
             }
             s::JellyfinUsersReveal::NAME => {
-                super::decode::<s::JellyfinUsersReveal>(params).map(Self::Reveal)
+                super::decode::<s::JellyfinUsersReveal>(params()).map(Self::Reveal)
             }
-            s::PlexClaim::NAME => super::decode::<s::PlexClaim>(params).map(Self::PlexClaim),
+            s::PlexClaim::NAME => super::decode::<s::PlexClaim>(params()).map(Self::PlexClaim),
             s::TailscaleLogin::NAME => {
-                super::decode::<s::TailscaleLogin>(params).map(Self::TailscaleLogin)
+                super::decode::<s::TailscaleLogin>(params()).map(Self::TailscaleLogin)
             }
             s::TailscaleLogout::NAME => {
-                super::decode::<s::TailscaleLogout>(params).map(Self::TailscaleLogout)
+                super::decode::<s::TailscaleLogout>(params()).map(Self::TailscaleLogout)
             }
             s::CloudflareSetToken::NAME => {
-                super::decode::<s::CloudflareSetToken>(params).map(Self::SetToken)
+                super::decode::<s::CloudflareSetToken>(params()).map(Self::SetToken)
             }
             s::CloudflareClearToken::NAME => {
-                super::decode::<s::CloudflareClearToken>(params).map(Self::ClearToken)
+                super::decode::<s::CloudflareClearToken>(params()).map(Self::ClearToken)
             }
             _ => return None,
         };
@@ -404,7 +410,9 @@ impl Service {
         Ok(ServicesListResult { revision, services })
     }
 
-    pub(super) fn media_folders(
+    /// `media.folders`: the folder scan runs on the blocking pool (a big or slow disk must not
+    /// stall the service's one thread).
+    pub(super) async fn media_folders(
         &self,
         p: MediaFoldersParams,
     ) -> Result<MediaFoldersResult, ErrorObject> {
@@ -417,8 +425,15 @@ impl Service {
                 "not a folder id",
             ));
         }
-        let dir = &self.paths.server.media_dir;
-        let folders = match media::list(dir, p.folder_id.as_deref()) {
+        let dir = self.paths.server.media_dir.clone();
+        let id = p.folder_id.clone();
+        let listed = {
+            let dir = dir.clone();
+            tokio::task::spawn_blocking(move || media::list(&dir, id.as_deref()))
+                .await
+                .map_err(internal)?
+        };
+        let folders = match listed {
             Ok(f) => f,
             // No media folder yet: nothing to pick.
             Err(media::Resolve::Missing) if p.folder_id.is_none() => Vec::new(),
@@ -826,6 +841,9 @@ impl Service {
                     return Err(e);
                 }
                 let dir = self.paths.services_dir().join(servers::CLOUDFLARE);
+                // The job restarts the tunnel on the new token; if it cannot start, the old
+                // token comes back, so a later restart does not pick up one that was refused.
+                let previous = std::fs::read(dir.join("token")).ok().map(Zeroizing::new);
                 write_token(&dir, &p.token)
                     .map_err(|e| internal(format!("writing the tunnel token: {e}")))?;
                 info!(uid, "Cloudflare tunnel token written");
@@ -834,7 +852,13 @@ impl Service {
                     uid,
                     Action::Cloudflare(CloudflareJob { set: true }),
                 );
-                job_ref(Some(self.start(spec).await?))
+                let started = self.start(spec).await;
+                if started.is_err()
+                    && let Err(e) = restore_token(&dir, previous.as_deref().map(Vec::as_slice))
+                {
+                    warn!("cannot put the previous tunnel token back: {e}");
+                }
+                job_ref(Some(started?))
             }
             ServersRequest::ClearToken(_) => {
                 if !on(servers::CLOUDFLARE) {
@@ -941,12 +965,24 @@ fn write_token(dir: &std::path::Path, token: &str) -> std::io::Result<()> {
     crate::fsutil::write_atomic(&dir.join("token"), token.as_bytes(), 0o600)
 }
 
+/// Put the token file back as it was before [`write_token`] (`None`: there was none).
+fn restore_token(dir: &std::path::Path, previous: Option<&[u8]>) -> std::io::Result<()> {
+    let path = dir.join("token");
+    match previous {
+        Some(bytes) => crate::fsutil::write_atomic(&path, bytes, 0o600),
+        None => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn decode(method: &str, params: Value) -> Result<ServersRequest, ErrorObject> {
-        ServersRequest::decode(method, Some(params)).expect("a server method")
+        ServersRequest::decode(method, &mut Some(params)).expect("a server method")
     }
 
     #[test]
@@ -1082,7 +1118,9 @@ mod tests {
                 assert_eq!(d["field"], json!(field), "{m} {p}: {e:?}");
             }
         }
-        assert!(ServersRequest::decode("services.list", None).is_none());
+        let mut params = Some(serde_json::json!({}));
+        assert!(ServersRequest::decode("services.list", &mut params).is_none());
+        assert!(params.is_some(), "left for the caller");
     }
 
     #[test]
@@ -1092,6 +1130,14 @@ mod tests {
         let dir = d.path().join("services/cloudflare-tunnel");
         write_token(&dir, "abc").unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("token")).unwrap(), "abc");
+        // A job that cannot start: the previous token (or none) comes back.
+        write_token(&dir, "new").unwrap();
+        restore_token(&dir, Some(b"abc")).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("token")).unwrap(), "abc");
+        restore_token(&dir, None).unwrap();
+        assert!(!dir.join("token").exists());
+        restore_token(&dir, None).unwrap();
+        write_token(&dir, "abc").unwrap();
         assert_eq!(
             std::fs::metadata(dir.join("token"))
                 .unwrap()

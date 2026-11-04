@@ -856,8 +856,10 @@ trust.
 - **Audit** (`audit.rs`): every mutating request and denial, and every job outcome, goes to the
   journal's native socket with `HINTEROS_AUDIT=1`, `HINTEROS_UID`, `_PID`, `_EXE`, `_METHOD`,
   `_ACTION`, `_DECISION` (`allowed|denied_seat|denied_polkit|denied_peer|auth_required|invalid|
-  rate_limited`), `_JOB_ID`, `_PARAMS` (summary), and for jobs `_OUTCOME`, `_REV_BEFORE/AFTER`,
-  `_GENERATION_BEFORE/AFTER`. Denials are capped at 20 per minute and uid, then summarised.
+  rate_limited`; past the gate, the handler's answer: `pin_required|busy|conflict|refused|failed`),
+  `_JOB_ID`, `_PARAMS` (summary), and for jobs `_OUTCOME`, `_REV_BEFORE/AFTER`,
+  `_GENERATION_BEFORE/AFTER`. Denials (the gate's refusals, not the handler's answers) are capped
+  at 20 per minute and uid, then summarised.
 - **State** (`state.rs`): `state.json` is read into a typed `State` mirroring `state.nix`
   (`schemaVersion`, `base`, `stateVersion`, `settings.{hostname, ssh.enable, admin.user, guest, cleanup}`, `disk.layout`, `apps`,
   `profiles`; anything else refused) and written canonically from it, never from client JSON.
@@ -866,7 +868,14 @@ trust.
 - **Jobs** (`job.rs`, `jobs.rs`, `runner.rs`): one at a time (`job_busy`). The service writes a
   root-only spec to `/run/hinteros/jobs/<id>/spec.json` and starts `hinteros-job@<id>.service`
   (systemd `StartUnit` over D-Bus), which runs `hinteros-system job <id>`; a switch that
-  restarts the service doesn't touch it, and a restarted service re-attaches to it. The job
+  restarts the service doesn't touch it, and a restarted service re-attaches to it. After a
+  rollback an older service reads a later version's job leniently (only id, kind, uid, time and
+  subject of the spec; unknown fields, kinds, stages and results fall back: an unknown kind is
+  `unknown`, an unknown stage is left out of `jobs.list`/`jobs.get` but is `unknown` in
+  `job_progress`, whose `stage` is required) and never overwrites a `status.json` it cannot read;
+  a job whose spec it cannot read at all still keeps the box `job_busy` (without `data.job_id`:
+  `jobs.get` does not know it) while its process holds the lock. The job reads its own spec
+  strictly. The job
   reports through `progress.ndjson` (stages; nix `internal-json` turned into paths, bytes,
   builds, the derivation building and a percent; see "Job progress" below) and `status.json`;
   the service turns them into events (at most 4/s, and a heartbeat at least every 2 s) and
@@ -878,7 +887,11 @@ trust.
   → `nix-env -p <profile> --set` + `switch-to-configuration switch` → replace `/etc/hinteros`
   with the staging copy (`renameat2(RENAME_EXCHANGE)`). A failed switch puts the profile back
   and runs the old system's `switch-to-configuration boot`. `jobs.cancel` works until the job
-  enters `activating` (it then kills the job's process group; the box is unchanged). Jobs hold a
+  enters `activating` (it then kills the job's process group; the box is unchanged), and only for
+  the uid that started the job, root or the admin profile (else `permission_denied {reason:
+  profile}`: another profile or the guest does not undo an update the admin approved). Jobs the
+  service starts itself (the app-env copies of `ensure_envs`) belong to root, so only the admin
+  profile cancels them. Jobs hold a
   logind `shutdown:sleep` inhibitor: `delay`, then `block` while activating.
   `session_restart_required` is set when the new system's `sw/bin/hinteros-session` or
   `hinteros-system` resolves to a different store path.
@@ -1090,7 +1103,8 @@ onto the launcher's `lib/src/system` repository interfaces:
 2. `hinteros-system` checks the action with `CheckAuthorization` **with `AllowUserInteraction`**
    (only the actions in `system::INTERACTIVE_ACTIONS`, today just this one) and a `unix-process`
    subject for its peer, the session daemon. The request waits (at most `--auth-timeout-s`, 300 s;
-   then `CancelCheckAuthorization`), while the connection keeps serving other requests.
+   then `CancelCheckAuthorization`; also at once when the client's connection ends, so nobody
+   approves an action whose requester is gone), while the connection keeps serving other requests.
 3. polkit finds the agent registered for that process: the session daemon (`auth/`) registers one
    at startup with `RegisterAuthenticationAgent`, subject `unix-process` with its own pidfd, pid,
    start time and uid (again whenever polkit restarts). A process-scoped agent works although the
@@ -1257,7 +1271,9 @@ server, `--icon-allow-http`, a hidden test flag).
 - **`lib.catalogIds`** in the system flake: `{ "<id>": { name, status, statusReason } }` (status
   `available|retired|removed`), evaluable without building anything.
 - **`/var/lib/hinteros/terms-accepted.json`**: created by the job in the service's state directory
-  (the job unit has no `StateDirectory` of its own); the installer writes the same format.
+  (the job unit has no `StateDirectory` of its own); the installer writes the same format. Every
+  change to it (the service's `apps.accept_terms`, jobs, the guest wipe) holds an `flock` on
+  `terms-accepted.json.lock`, so no record is lost.
 - **greetd** with `default_session = initial_session` (as `session.nix` has it) and the session
   daemon as the user unit `hinteros-session.service` (found from its cgroup); the daemon needs the
   user's session bus (`DBUS_SESSION_BUS_ADDRESS`, set for user units) for `RestartUnit`.
@@ -1336,7 +1352,8 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
 ### Profiles, PINs, greeter (system service)
 
 - `profiles.json` (`profiles.rs`), PINs (`pins.rs`: argon2id PHC strings in `pins/<id>`, backoff
-  in `pins/<id>.state` under `flock`, 3 free failures then 1 s doubling to 5 min, the lock counted
+  in `pins/<id>.state` under `flock`, 3 free failures then 1 s doubling to 5 min, each try counted
+  under the lock before the hash check (tries at the same time never pass a wait), the wait counted
   from when the hash check ended; **no wait for the admin profile's PIN**, and a stale wait file of
   the admin is ignored and cleared at service start; instead **10 wrong admin-PIN tries a boot**
   (owner): `pins/<id>.tries` = `{boot_id, failures}` (the kernel's
@@ -1347,12 +1364,21 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   the count; the try that starts the lock is audited (`HINTEROS_PIN_OUTCOME=lockout_started`)), the public view `/run/hinteros/profiles-public.json` (0644) and
   the switch hint with one-time tokens `/run/hinteros/switch.json` (0600) (`public.rs`),
   `runtime.json` → `/run/hinteros/gamescope-modes` and `audio-output`, `usage.json`
-  (`hinteros-system usage`, started over D-Bus when `profiles.list` sees data older than an hour).
+  (`hinteros-system usage`, started over D-Bus when `profiles.list` sees data older than an hour,
+  at most every 10 minutes).
+- `profiles.json` is changed only under an `flock` on `profiles.json.lock`, re-read inside it
+  (`ProfilesFile::update`; the service after any PIN check, the profile jobs, the PAM helper's
+  `last_used_at`), so no writer loses another's change. **A `profiles.json` that cannot be read**
+  (damaged, or newer than this binary after a rollback) fails closed: no admin profile, not
+  first-boot mode, no spare (`profiles.list` and the public view list no profiles,
+  `first_boot: false`), so `setup_admin`, every admin-PIN action and every profile login are
+  refused (the guest still plays), and nothing overwrites the file. Recovery is from the console.
 - Methods (`service/profiles.rs`): `profiles.list/create/setup_admin/rename/set_appearance/
   set_pin/set_locked/reset_pin/remove/switch/switch_cancel/unlock`, `guest.set`, `starter_set.get/set`,
   `display.save_mode`, `audio.save_output`; event `profiles_changed`. Which PIN each checks:
   own changes `self`, anything on another profile or the box `admin`; a profile without a PIN yet
-  passes. `pin_required` (3016) names it, with `retry_after_ms` during the lock and
+  passes (the admin PIN only for the admin profile itself: after `reset-pin`, no other profile
+  acts as the admin until it sets a new one). `pin_required` (3016) names it, with `retry_after_ms` during the lock and
   `reboot_required: true` while the admin PIN is refused until a reboot; the audit has
   `HINTEROS_PIN_CHECK`/`_PIN_OUTCOME` and every PIN field is `***` in `HINTEROS_PARAMS`.
   `profiles.create`/`remove`/`guest.set`/`starter_set.set` are jobs (`profiles_create`,
@@ -1364,13 +1390,14 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   and `hardware.redetect` take `admin_pin`; it is checked first (`pin_required
   {pin: admin}` when missing or wrong, or without an admin profile), from every profile, the
   guest included (installing a system update always needs it). Not for root; an
-  admin profile without a PIN yet passes. `update.check` stays open.
+  admin profile without a PIN yet passes only for itself. `update.check` stays open.
 - **End guest session** (`guest.rs`, `runner/profiles.rs`): `guest.end` (the guest only;
   job `guest_end`) checks the account (`hinteros-guest`, `--guest-uid` 20000, the uid maps back to
   the name, home `…/hinteros-guest`), hides the guest from the picker and PAM while it runs, ends
   the guest's processes, then deletes what the uid owns in its home and in `--guest-tmp-dir`s
   (`/tmp`, `/var/tmp`, `/dev/shm`) with `datadel::wipe_owned` (no symlinks, one filesystem, other
-  uids left), resets its app link to the starter env and drops its terms, usage and switch hint.
+  uids left), resets its app link to the starter env and drops its terms, usage, measured home tree
+  (`storage.json`, also at boot) and switch hint.
 - `profiles.switch {id, pin?}`: a locked target (other than the caller's own) needs its PIN (`pin_required
   {pin: target}`, backoff unless it is the admin profile); right, the hint gets a one-time token for
   the target user (60 s, single use in `pin unlocked`), so `greet` enters it with no UI. Without
@@ -1960,7 +1987,8 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
 - **`media.folders {folder_id?}`** (read-only): one level below `/srv/media`. A folder id is the
   path relative to it (no empty, `.`, `..` or hidden part, no control characters), opened part
   by part with `O_NOFOLLOW | O_DIRECTORY` every time it is used (the request, and again in the
-  job): symlinks are neither listed nor entered.
+  job): symlinks are neither listed nor entered. The scan runs off the service's thread and
+  looks at the first 20000 entries of the folder (500 listed) and 2000 of each subfolder.
 - **Jellyfin** (`servers/jellyfin.rs`): HTTP on loopback with `Authorization: MediaBrowser
   Token="<api-key>"` (Jellyfin 10.11+/12 refuse the legacy `X-Emby-Token` unless legacy
   authorization is on; an API key counts as administrator). `jellyfin.libraries.add {pin, name,
@@ -2179,7 +2207,8 @@ Both APIs are 1.0. A client works with a server of the same major and an equal o
 
 The schema documents list exactly what their version sends (`additionalProperties: false`), so
 the conformance tests catch a server that sends what is not documented. An item a later minor
-adds has `since`; an item without it is part of x.0.
+adds has `since`; an item without it is part of x.0. A server does not refuse a method by its
+`since`: the negotiated version is the client's, and a client knows no method newer than it.
 
 ## Persisted JSON files
 
@@ -2188,7 +2217,8 @@ Unknown fields are ignored. A newer file is not understood; what follows depends
 
 | File | Newer file | Unknown fields on a rewrite |
 |---|---|---|
-| `profiles.json`, `services/jellyfin-server/users.json` | load and save are errors; the file stays | kept |
+| `profiles.json` | locked down (below); saving is an error; the file stays | kept |
+| `services/jellyfin-server/users.json` | load and save are errors; the file stays | kept |
 | `terms-accepted.json` | reads as no acceptances; recording is an error; the file stays | kept |
 | `starter.json` | reads as none; saving is an error (the job fails); the file stays | dropped (always written whole) |
 | `channel-tips.json` | reads as empty; saving fails with a warning; the file stays | kept |

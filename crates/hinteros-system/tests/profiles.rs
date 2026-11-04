@@ -662,6 +662,42 @@ async fn first_boot_and_the_greeter_socket() {
     assert_eq!(public(root)["next"]["fast"], true);
 }
 
+/// A `profiles.json` this binary cannot read (damaged, or newer after a rollback) fails closed:
+/// not first-boot mode, no spare, no admin PIN accepted, and the file is never overwritten.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_profiles_file_fails_closed() {
+    let newer = PROFILES.replace(r#""version": 1"#, r#""version": 2"#);
+    for bad in [newer.as_str(), r#"{"version": 1, "next""#] {
+        let Some(sys) = System::start(root_with(Some(bad)), &[]).await else {
+            return;
+        };
+        let root = &sys.root;
+        let mut c = sys.client().await;
+        let l = call(&mut c, "profiles.list", json!({})).await.unwrap();
+        assert_eq!(l["first_boot"], false, "{bad}");
+        assert_eq!(l["profiles"], json!([]));
+        assert_eq!(public(root)["first_boot"], false);
+        assert_eq!(public(root)["spare"], Value::Null);
+        let e = call(
+            &mut c,
+            "profiles.setup_admin",
+            json!({"name": "Kid", "pin": "1111", "locked": false}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code(&e), ErrorCode::PermissionDenied.code(), "{e}");
+        for (method, params) in [
+            ("rollback", json!({"admin_pin": ADMIN_PIN})),
+            ("time_zone.set", json!({"zone": "UTC"})),
+        ] {
+            let e = call(&mut c, method, params).await.unwrap_err();
+            assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{method}: {e}");
+        }
+        assert!(!pam_ok(root, "unlocked", "hinteros-p1"));
+        assert_eq!(root.read("var/lib/hinteros/profiles.json"), bad);
+    }
+}
+
 /// `hinteros-system pin <verb>` as pam_exec runs it: `PAM_USER`, the PIN on stdin, status lines
 /// on stdout.
 #[test]
@@ -982,7 +1018,8 @@ async fn the_admin_pin_locks_until_a_reboot() {
 /// (update.apply) need the admin profile's PIN
 /// Missing or wrong is `pin_required {pin: admin}` before anything else
 /// happens; right, the method goes on as before. Without an admin profile (first-boot mode)
-/// they are refused like every admin action; an admin profile without a PIN yet passes.
+/// they are refused like every admin action; an admin profile without a PIN yet passes for
+/// itself.
 #[tokio::test(flavor = "multi_thread")]
 async fn box_wide_actions_need_the_admin_pin() {
     let Some(sys) = System::start(root_with(Some(PROFILES)), &[]).await else {
@@ -1064,7 +1101,7 @@ async fn box_wide_actions_need_the_admin_pin() {
         );
     }
 
-    // An admin profile without a PIN yet passes without one.
+    // An admin profile without a PIN yet passes without one (the caller is the admin profile).
     std::fs::remove_file(root.p("var/lib/hinteros/pins/p1")).unwrap();
     let r = call(&mut c, "base.set", json!({"base": "unstable"}))
         .await
@@ -1096,6 +1133,70 @@ async fn box_wide_actions_without_an_admin_profile() {
     }
 }
 
+/// While the admin profile has no PIN (after `reset-pin`), only the admin profile itself passes
+/// the admin-PIN checks; another profile gets `pin_required {pin: admin}`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admin_profile_without_a_pin_passes_only_for_itself() {
+    // p2 is the admin profile, without a PIN; the caller is p1, an ordinary profile.
+    let profiles = r#"{"version": 1, "next": 3, "profiles": {
+      "p1": {"name": "Sam", "color": "teal"},
+      "p2": {"name": "James", "color": "blue", "admin": true}}}"#;
+    let Some(sys) = System::start(root_with(Some(profiles)), &[]).await else {
+        return;
+    };
+    settled(&sys).await;
+    let mut c = sys.client().await;
+    for (method, params) in [
+        ("base.set", json!({"base": "unstable"})),
+        ("profiles.rename", json!({"id": "p2", "name": "X"})),
+        (
+            "profiles.reset_pin",
+            json!({"id": "p1", "new_pin": "1111", "admin_pin": "0000"}),
+        ),
+    ] {
+        let e = call(&mut c, method, params).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{method}: {e}");
+        assert_eq!(e["data"], json!({"pin": "admin"}), "{method}");
+    }
+}
+
+/// `jobs.cancel` from a profile that neither started the job nor is the admin profile:
+/// `permission_denied`, and the job runs on.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_starter_or_the_admin_cancels_a_job() {
+    // p2 is the admin profile; the caller is p1. A job someone else started is running.
+    let profiles = r#"{"version": 1, "next": 3, "profiles": {
+      "p1": {"name": "Sam", "color": "teal"},
+      "p2": {"name": "James", "color": "blue", "admin": true}}}"#;
+    let root = root_with(Some(profiles));
+    let id = "0123456789abcdef";
+    let jd = root.p(&format!("run/jobs/{id}"));
+    std::fs::create_dir_all(&jd).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        jd.join("spec.json"),
+        json!({"id": id, "kind": "update_apply", "uid": 4242, "created_at": now}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(jd.join("progress.ndjson"), "").unwrap();
+    let lock = std::fs::File::create(jd.join("lock")).unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    let Some(sys) = System::start(root, &[]).await else {
+        return;
+    };
+    let mut c = sys.client().await;
+    let e = call(&mut c, "jobs.cancel", json!({"job_id": id}))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), ErrorCode::PermissionDenied.code(), "{e}");
+    assert_eq!(e["data"]["reason"], "profile");
+    assert!(!jd.join("cancel").exists());
+    drop(lock);
+}
+
 /// The test's uid as the guest (p1 moves to another uid), with a home under the root.
 fn become_the_guest(root: &Root) -> std::path::PathBuf {
     let home = root.p("guesthomes/hinteros-guest");
@@ -1123,7 +1224,8 @@ fn become_the_guest(root: &Root) -> std::path::PathBuf {
 
 /// End guest session: the guest ends its own session and the job wipes it now:
 /// its home (never following a link out of it), its entries in the shared temp directories,
-/// its app env (back to the starter env), its terms, usage entry and a switch hint into it.
+/// its app env (back to the starter env), its terms, usage entry, storage tree and a switch hint
+/// into it.
 #[tokio::test(flavor = "multi_thread")]
 async fn end_guest_session_wipes_now() {
     let root = root_with(Some(PROFILES));
@@ -1145,6 +1247,15 @@ async fn end_guest_session_wipes_now() {
     std::fs::write(
         root.p("var/lib/hinteros/usage.json"),
         r#"{"version": 1, "data": {"guest": {"total_bytes": 5, "steam_games_bytes": 0, "at": 1}}}"#,
+    )
+    .unwrap();
+    let node = |kind: &str| json!({"kind": kind, "bytes": 5, "children": []});
+    let measurement = json!({"measured_at": 1, "disk": {"total_bytes": 9, "used_bytes": 5, "free_bytes": 4},
+        "root": node("disk"), "garbage_bytes": 0, "estimates": {"system": [], "profiles": []}});
+    std::fs::write(
+        root.p("var/lib/hinteros/storage.json"),
+        json!({"version": 1, "measurement": measurement, "homes": {"guest": node("guest"), "p1": node("profile")}})
+            .to_string(),
     )
     .unwrap();
     // This is a new boot for the service: the boot clean-up must not run before the test.
@@ -1206,6 +1317,9 @@ async fn end_guest_session_wipes_now() {
     assert_eq!(terms["accepted"]["steam"][0]["by"], "hinteros-p1");
     let usage: Value = serde_json::from_str(&root.read("var/lib/hinteros/usage.json")).unwrap();
     assert!(usage["data"].get("guest").is_none());
+    let stored: Value = serde_json::from_str(&root.read("var/lib/hinteros/storage.json")).unwrap();
+    assert!(stored["homes"].get("guest").is_none(), "{stored}");
+    assert!(stored["homes"].get("p1").is_some());
     assert!(!root.p("run/switch.json").exists());
     assert!(!root.p("run/guest-ending").exists());
     assert_eq!(public(root)["guest"]["enabled"], true, "the guest is back");

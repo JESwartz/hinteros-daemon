@@ -88,6 +88,9 @@ pub struct Service {
     /// while the filter is not on), one change at a time.
     lan_rate: RateLimit,
     lan_apply: tokio::sync::Mutex<()>,
+    /// When `profiles.list` last started the usage scan (at most every
+    /// [`profiles::USAGE_SCAN_EVERY`]).
+    usage_scan_at: Mutex<Option<Instant>>,
 }
 
 pub async fn serve(args: ServeArgs) -> Result<()> {
@@ -124,6 +127,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         // A session start, a restart and a few launches while it is not on fit in the burst.
         lan_rate: RateLimit::new(args.rate_per_minute.max(30), args.rate_burst.max(10)),
         lan_apply: tokio::sync::Mutex::new(()),
+        usage_scan_at: Mutex::new(None),
         paths,
         args,
     });
@@ -304,7 +308,9 @@ async fn serve_keyboard(svc: Arc<Service>, listener: tokio::net::UnixListener) {
 }
 
 async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<()> {
-    let peer = Arc::new(Peer::of(&stream)?);
+    // Dropped when this connection ends: an interactive polkit check for it stops then.
+    let (open, closed) = tokio::sync::watch::channel(());
+    let peer = Arc::new(Peer::of(&stream, closed)?);
     info!(
         uid = peer.uid,
         gid = peer.gid,
@@ -374,8 +380,10 @@ async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<
                             write_message(&mut w, &jsonrpc::response(&id, Err(method_not_found(&req.method)))).await?;
                             continue;
                         }
-                        // The session daemon's own `lan_filter.*` wait for a unit too: tasks.
-                        let own = req.method.starts_with("lan_filter.");
+                        // The session daemon's own `lan_filter.set` and `lan_filter.clear` wait for
+                        // a unit too: tasks. Any other name is `method_not_found` (in dispatch).
+                        let own = [system::LanFilterSet::NAME, system::LanFilterClear::NAME]
+                            .contains(&req.method.as_str());
                         if own || system::MUTATING.contains(&req.method.as_str()) {
                             let Ok(permit) = in_flight.clone().try_acquire_owned() else {
                                 let err = authz::rate_limited(Duration::from_secs(1));
@@ -424,6 +432,7 @@ async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<
     // Every `break` above is a deliberate close; make sure the client gets what we sent.
     // The slot is free as soon as we stop serving; draining must not hold it.
     drop(_slot);
+    drop(open);
     close_gracefully(&mut reader, &mut w).await;
     Ok(())
 }
@@ -455,6 +464,7 @@ fn internal(e: impl std::fmt::Display) -> ErrorObject {
     ErrorObject::new(ErrorCode::InternalError, e.to_string())
 }
 
+/// The read-only methods (`handle` runs every mutating one through [`mutating`], in a task).
 async fn dispatch(
     svc: &Arc<Service>,
     peer: &Peer,
@@ -462,9 +472,6 @@ async fn dispatch(
     params: Option<Value>,
     subs: &mut BTreeSet<EventName>,
 ) -> Result<Value, ErrorObject> {
-    if system::MUTATING.contains(&method) {
-        return mutating(svc, peer, method, params, false).await;
-    }
     match method {
         Ping::NAME => server::call::<Ping>(params, server::ping),
         Subscribe::NAME => {
@@ -573,7 +580,7 @@ async fn dispatch(
         }
         system::MediaFolders::NAME => {
             let p = decode::<system::MediaFolders>(params)?;
-            encode::<system::MediaFolders>(svc.media_folders(p)?)
+            encode::<system::MediaFolders>(svc.media_folders(p).await?)
         }
         _ => Err(method_not_found(method)),
     }
@@ -663,7 +670,7 @@ async fn mutating(
             Ok(value)
         }
         Err(e) => {
-            audit(Decision::Invalid, None);
+            audit(Decision::of_error(&e), None);
             info!(method, error = %e.message, "request refused");
             Err(e)
         }
@@ -696,8 +703,8 @@ pub(crate) enum Request {
 }
 
 impl Request {
-    pub(crate) fn decode(method: &str, params: Option<Value>) -> Result<Self, ErrorObject> {
-        if let Some(r) = servers::ServersRequest::decode(method, params.clone()) {
+    pub(crate) fn decode(method: &str, mut params: Option<Value>) -> Result<Self, ErrorObject> {
+        if let Some(r) = servers::ServersRequest::decode(method, &mut params) {
             return r.map(Self::Servers);
         }
         Ok(match method {
@@ -1239,11 +1246,7 @@ impl Service {
             Request::SettingsSet(p) => {
                 let (state, revision) = self.load_state()?;
                 if p.revision != revision {
-                    return Err(ErrorObject::with_data(
-                        ErrorCode::StateConflict,
-                        "state.json changed since settings.get",
-                        json!({ "reason": "revision" }),
-                    ));
+                    return Err(state_conflict());
                 }
                 // No settable fields yet: an empty change set is nothing to do. Each future
                 // field applies to `new` here.
@@ -1589,6 +1592,20 @@ impl Service {
             Request::AppsAcceptTerms(p) => self.apps_accept_terms(peer, p),
             Request::AppsClearData(p) => self.apps_clear_data(peer, p).await,
             Request::JobsCancel(p) => {
+                // Only who started the job, root or the admin profile cancels it: an update the
+                // admin approved with the PIN is not undone from another profile or the guest.
+                let started_by = self.jobs.lock().unwrap().get(&p.job_id).map(|j| j.uid);
+                if let Some(owner) = started_by
+                    && uid != 0
+                    && uid != owner
+                    && !self.caller_is_admin_profile(uid)
+                {
+                    return Err(ErrorObject::with_data(
+                        ErrorCode::PermissionDenied,
+                        "only who started the job, or the admin profile, can cancel it",
+                        json!({ "action": system::polkit_action(system::JobsCancel::NAME), "reason": "profile" }),
+                    ));
+                }
                 self.jobs.lock().unwrap().cancel(&p.job_id)?;
                 info!(job = %p.job_id, uid, "cancel requested");
                 job_ref(Some(p.job_id))

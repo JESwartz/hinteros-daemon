@@ -61,6 +61,28 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
+/// An exclusive `flock` on `<path>.lock` (0600, next to `path`) until the file is dropped: the
+/// processes that read-modify-write one file (the service, jobs, the PAM helper) take turns.
+pub fn lock_beside(path: &Path) -> io::Result<fs::File> {
+    let name = format!(
+        "{}.lock",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    let lock = path.with_file_name(name);
+    if let Some(dir) = lock.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let f = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock)?;
+    rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)?;
+    Ok(f)
+}
+
 /// Replace directory `target` with a copy of `source`: copy next to `target` (same filesystem),
 /// fsync, exchange the two in one rename, then delete the old contents.
 pub fn replace_dir(source: &Path, target: &Path, tag: &str) -> io::Result<()> {

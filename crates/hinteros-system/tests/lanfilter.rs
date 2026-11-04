@@ -131,6 +131,13 @@ async fn set_checks_the_cgroup_and_loads_the_table() {
     assert_eq!(code(&e), -32603, "{e}");
     std::fs::remove_file(sys.root.p("nft.fail")).unwrap();
 
+    // Another `lan_filter.` name is not a clear: method_not_found, the filter stays.
+    let e = call(&mut c, "lan_filter.status", json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), -32601, "{e}");
+    assert_eq!(state(&sys)["cgroups"].as_object().unwrap().len(), 1);
+
     // Cleared: the table goes; clearing again changes nothing.
     call(&mut c, "lan_filter.clear", json!({})).await.unwrap();
     assert_eq!(state(&sys), json!({"version": 1, "cgroups": {}}));

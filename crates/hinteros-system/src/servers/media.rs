@@ -18,6 +18,8 @@ use rustix::io::Errno;
 pub const MAX_ID_BYTES: usize = 1024;
 /// Most folders one answer lists.
 pub const MAX_LISTED: usize = 500;
+/// Entries looked at in the folder being listed (a huge flat folder stops here).
+const LIST_SCAN: usize = 20_000;
 /// Entries looked at to tell whether a folder has folders of its own.
 const CHILD_SCAN: usize = 2000;
 
@@ -93,10 +95,13 @@ pub fn id_of(media_dir: &Path, path: &str) -> Option<String> {
     is_folder_id(rel).then(|| rel.to_owned())
 }
 
-/// The folder names in an open directory (UTF-8, not hidden, real folders, not symlinks).
-fn subfolders(fd: &OwnedFd, limit: usize) -> Result<Vec<String>, Resolve> {
+/// The folder names in an open directory (UTF-8, not hidden, real folders, not symlinks): at
+/// most `want`, from the first `limit` entries.
+fn subfolders(fd: &OwnedFd, limit: usize, want: usize) -> Result<Vec<String>, Resolve> {
     let dup = rustix::io::dup(fd).map_err(Resolve::Io)?;
     let mut dir = Dir::new(dup).map_err(Resolve::Io)?;
+    // The dup shares the read position with `fd`: start at the first entry every time.
+    dir.rewind();
     let mut out = Vec::new();
     let mut seen = 0;
     while let Some(entry) = dir.read() {
@@ -119,6 +124,9 @@ fn subfolders(fd: &OwnedFd, limit: usize) -> Result<Vec<String>, Resolve> {
         };
         if is_dir {
             out.push(name.to_owned());
+            if out.len() >= want {
+                break;
+            }
         }
     }
     Ok(out)
@@ -128,7 +136,7 @@ fn subfolders(fd: &OwnedFd, limit: usize) -> Result<Vec<String>, Resolve> {
 /// [`MAX_LISTED`].
 pub fn list(media_dir: &Path, id: Option<&str>) -> Result<Vec<MediaFolder>, Resolve> {
     let fd = open(media_dir, id)?;
-    let mut names = subfolders(&fd, usize::MAX)?;
+    let mut names = subfolders(&fd, LIST_SCAN, usize::MAX)?;
     names.sort_by_key(|n| (n.to_lowercase(), n.clone()));
     names.truncate(MAX_LISTED);
     Ok(names
@@ -139,7 +147,7 @@ pub fn list(media_dir: &Path, id: Option<&str>) -> Result<Vec<MediaFolder>, Reso
                 None => name.clone(),
             };
             let has_children = open_dir(&fd, &name)
-                .and_then(|c| subfolders(&c, CHILD_SCAN))
+                .and_then(|c| subfolders(&c, CHILD_SCAN, 1))
                 .is_ok_and(|s| !s.is_empty());
             MediaFolder {
                 id: child,
@@ -218,6 +226,19 @@ mod tests {
         );
         assert_eq!(id_of(&media, "/elsewhere/Movies"), None);
         assert_eq!(id_of(&media, media.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn subfolders_stops_at_the_scan_limit_and_the_count_wanted() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..6 {
+            fs::create_dir(d.path().join(format!("f{i}"))).unwrap();
+        }
+        let fd = open(d.path(), None).unwrap();
+        assert_eq!(subfolders(&fd, usize::MAX, usize::MAX).unwrap().len(), 6);
+        assert_eq!(subfolders(&fd, usize::MAX, 1).unwrap().len(), 1);
+        // `.` and `..` count as entries looked at.
+        assert!(subfolders(&fd, 4, usize::MAX).unwrap().len() <= 4);
     }
 
     proptest! {

@@ -425,13 +425,21 @@ pub struct ProgressLine {
     pub stage: Stage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub detail: Option<ProgressDetail>,
     /// The last time the job's process produced output (Unix seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_at: Option<i64>,
     /// The job's subject, when the job learnt more about it (replaces the spec's).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub subject: Option<JobSubject>,
 }
 
@@ -442,21 +450,30 @@ pub struct Snapshot {
     pub rev: Option<String>,
 }
 
-/// `status.json`.
+/// `status.json`. Read leniently (unknown fields ignored, a part this binary cannot read is
+/// `None`): after a rollback an older service reads the status of a job a later one started.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Status {
     pub state: JobState,
+    #[serde(default, deserialize_with = "lenient")]
     pub stage: Option<Stage>,
+    #[serde(default, deserialize_with = "lenient")]
     pub error: Option<ErrorObject>,
+    #[serde(default, deserialize_with = "lenient")]
     pub result: Option<JobResult>,
+    #[serde(default)]
     pub session_restart_required: bool,
     pub finished_at: i64,
     #[serde(default)]
     pub before: Snapshot,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub after: Option<Snapshot>,
     /// The subject as the job last knew it (`None`: the spec's).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub subject: Option<JobSubject>,
 }
 
@@ -504,6 +521,18 @@ pub fn job_failed(stage: Stage, hint: &str) -> ErrorObject {
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+/// Serde: a field this binary cannot read is `None` (a later version wrote it; the job unit runs
+/// on through a rollback to an older service). For what the service reads back of a job, never
+/// for the spec the job runs.
+pub fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 impl JobSpec {

@@ -74,7 +74,11 @@ pub struct Backoff {
 impl Backoff {
     /// After one more failure at `now`.
     pub fn fail(self, now: i64) -> Self {
-        let failures = self.failures.saturating_add(1);
+        Self::after(self.failures.saturating_add(1), now)
+    }
+
+    /// After `failures` failures, the last at `now`.
+    pub fn after(failures: u32, now: i64) -> Self {
         let locked_until = if failures > FREE_FAILURES {
             let n = failures - FREE_FAILURES - 1;
             now + (1i64 << n.min(16)).min(MAX_LOCK_S)
@@ -239,6 +243,22 @@ impl Pins {
         out
     }
 
+    /// The backoff of `id` for display (lists, the public view): read under a shared `flock`,
+    /// never creating or writing the file.
+    pub fn peek_backoff(&self, id: &str) -> Backoff {
+        let Ok(mut file) = fs::File::open(self.state_path(id)) else {
+            return Backoff::default();
+        };
+        if flock(&file, FlockOperation::LockShared).is_err() {
+            return Backoff::default();
+        }
+        let mut text = String::new();
+        if file.read_to_string(&mut text).is_err() {
+            return Backoff::default();
+        }
+        fsutil::parse_cache(text.as_bytes()).unwrap_or_default()
+    }
+
     /// Read-modify-write the backoff under an exclusive `flock`.
     fn with_state(&self, id: &str, f: impl FnOnce(Backoff) -> Backoff) -> std::io::Result<()> {
         self.with_json(&self.state_path(id), f)
@@ -282,7 +302,8 @@ impl Pins {
     }
 
     /// Check `pin` for profile `id` at `now`, applying the backoff: a lock refuses at once; the
-    /// outcome is recorded under the lock, counted from when the (slow) hash check ended.
+    /// try is counted under the lock before the (slow) hash check, so tries at the same time never
+    /// pass a wait; the wait counts from when the check ended, and a right PIN resets it.
     pub fn verify(&self, id: &str, pin: &str, now: i64) -> std::io::Result<Verify> {
         self.verify_with(id, pin, now, true)
     }
@@ -337,7 +358,14 @@ impl Pins {
                 Verify::Wrong { locked_for: 0 }
             });
         }
-        let left = self.backoff(id).remaining(now);
+        // The lock is checked and the try counted as a failure in one step under the lock,
+        // before the (slow) hash check: tries that run at the same time (the API and PAM) see
+        // each other's, so none gets past a wait.
+        let mut left = 0;
+        self.with_state(id, |b| {
+            left = b.remaining(now);
+            if left > 0 { b } else { b.fail(now) }
+        })?;
         if left > 0 {
             return Ok(Verify::Locked { seconds: left });
         }
@@ -349,7 +377,13 @@ impl Pins {
             if ok {
                 Backoff::default()
             } else {
-                let after = b.fail(now);
+                // Counted already (at least this try, if a right PIN reset it meanwhile); the
+                // wait starts when the check ended.
+                let after = Backoff::after(b.failures.max(1), now);
+                let after = Backoff {
+                    locked_until: after.locked_until.max(b.locked_until),
+                    ..after
+                };
                 outcome = Verify::Wrong {
                     locked_for: after.remaining(now),
                 };
@@ -456,6 +490,10 @@ mod tests {
         // Another process (a new Pins on the same files) sees the same lock.
         let other = Pins::new(d.path().join("pins"));
         assert_eq!(other.backoff("p1").failures, 4);
+        assert_eq!(other.peek_backoff("p1"), other.backoff("p1"));
+        // Peeking never creates a state file.
+        assert_eq!(other.peek_backoff("p7"), Backoff::default());
+        assert!(!d.path().join("pins/p7.state").exists());
         assert_eq!(other.verify("p1", "2468", 101).unwrap(), Verify::Ok);
         assert_eq!(pins.backoff("p1"), Backoff::default());
         pins.remove("p1");
@@ -618,12 +656,16 @@ mod tests {
                 std::thread::spawn(move || Pins::new(dir).verify("p2", "0000", 50).unwrap())
             })
             .collect();
-        for t in threads {
-            t.join().unwrap();
-        }
-        // Every failure counted once, whatever the interleaving (some saw the lock).
+        let outcomes: Vec<Verify> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        // Each try is counted before its hash check: the free ones and the one that starts the
+        // wait are checked, every other try at the same time sees the wait.
+        let checked = outcomes
+            .iter()
+            .filter(|o| matches!(o, Verify::Wrong { .. }))
+            .count();
+        assert_eq!(checked, FREE_FAILURES as usize + 1, "{outcomes:?}");
         let b = Pins::new(&dir).backoff("p2");
-        assert!((4..=8).contains(&b.failures), "{b:?}");
+        assert_eq!(b.failures, FREE_FAILURES + 1, "{b:?}");
         assert!(b.remaining(50) >= 1);
     }
 

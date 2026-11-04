@@ -135,7 +135,7 @@ pub fn view(paths: &Paths, state: &State, file: &ProfilesFile, now: i64) -> Publ
             admin: m.admin,
             // The admin profile's PIN has no backoff (a stale file is ignored).
             locked_until: (!m.admin)
-                .then(|| pins.backoff(&a.id).locked_until)
+                .then(|| pins.peek_backoff(&a.id).locked_until)
                 .filter(|t| *t > now),
         })
         .collect();

@@ -1263,8 +1263,10 @@ pub fn write_terms(path: &Path, doc: &serde_json::Map<String, Value>) -> std::io
 
 /// Add accepted terms to `terms-accepted.json`: `{"version": 1, "accepted": {"<id>":
 /// [{"version", "accepted_at" (RFC 3339 UTC), "by"}]}}`, a list per id so that accepting a new
-/// version keeps the history.
+/// version keeps the history. Under an `flock` on `terms-accepted.json.lock`: the service
+/// (`apps.accept_terms`) and jobs both record, and no record may be lost.
 pub fn record_terms(path: &Path, records: &[job::TermsRecord]) -> std::io::Result<()> {
+    let _lock = fsutil::lock_beside(path)?;
     let mut doc = read_terms(path)?.unwrap_or_else(|| {
         let mut doc = serde_json::Map::new();
         doc.insert("version".into(), json!(TERMS_VERSION));
@@ -1547,5 +1549,30 @@ mod tests {
         let e = record_terms(&path, &[rec("x")]).unwrap_err();
         assert!(e.to_string().contains("has version 2"), "{e}");
         assert_eq!(fs::read_to_string(&path).unwrap(), newer);
+    }
+
+    #[test]
+    fn terms_recorded_at_the_same_time_are_all_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("terms-accepted.json");
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let rec = job::TermsRecord {
+                        id: format!("app{i}"),
+                        version: "1".into(),
+                        accepted_at: 0,
+                        by: "hinteros-p1".into(),
+                        profile: None,
+                    };
+                    record_terms(&path, &[rec]).unwrap();
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(accepted_terms(&path).len(), 8);
     }
 }

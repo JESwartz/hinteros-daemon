@@ -1,5 +1,6 @@
 //! Profile jobs (profiles.md "Creating a profile", "Removing a profile").
 
+use std::convert::Infallible;
 use std::fs;
 use std::path::Path;
 
@@ -12,6 +13,7 @@ use crate::job::{self, Apply, GuestEndJob, ProfileCreateJob, ProfileRemoveJob};
 use crate::pins::Pins;
 use crate::profiles::ProfilesFile;
 use crate::state::{GUEST_USER, State};
+use crate::storage::Stored;
 use crate::{datadel, guest, pam, public, usage};
 
 impl Runner {
@@ -24,11 +26,11 @@ impl Runner {
         self.set_stage(Stage::Finishing);
         let paths = self.spec.paths.clone();
         // Metadata and PIN only after the account exists: a failed job leaves neither.
-        let mut file = ProfilesFile::load(&paths.profiles_json())
-            .map_err(|e| self.fail(format!("profiles.json: {e}")))?;
-        file.profiles.insert(j.id.clone(), j.meta.clone());
-        file.save(&paths.profiles_json())
-            .map_err(|e| self.fail(format!("writing profiles.json: {e}")))?;
+        let Ok(file) = ProfilesFile::update(&paths.profiles_json(), |file| {
+            file.profiles.insert(j.id.clone(), j.meta.clone());
+            Ok::<_, Infallible>(file.clone())
+        })
+        .map_err(|e| self.fail(format!("profiles.json: {e}")))?;
         Pins::new(paths.pins_dir())
             .set_hash(&j.id, &j.pin_hash)
             .map_err(|e| self.fail(format!("writing the PIN: {e}")))?;
@@ -81,12 +83,12 @@ impl Runner {
             delete_home(home, uid);
         }
         Pins::new(paths.pins_dir()).remove(&j.id);
-        if let Ok(mut file) = ProfilesFile::load(&paths.profiles_json()) {
+        match ProfilesFile::update(&paths.profiles_json(), |file| {
             file.profiles.remove(&j.id);
-            if let Err(e) = file.save(&paths.profiles_json()) {
-                warn!("profiles.json: {e}");
-            }
-            public::publish(&paths, &j.state, &file, job::now());
+            Ok::<_, Infallible>(file.clone())
+        }) {
+            Ok(Ok(file)) => public::publish(&paths, &j.state, &file, job::now()),
+            Err(e) => warn!("profiles.json: {e}"),
         }
         let link = paths.app_profile(&j.user);
         if let Some(dir) = link.parent()
@@ -205,11 +207,15 @@ impl Runner {
         {
             warn!("the guest did not get the starter env again: {}", e.message);
         }
-        // Per-guest state: terms it accepted, its usage entry, a switch hint into it.
+        // Per-guest state: terms it accepted, its usage entry, its measured home tree, a switch
+        // hint into it.
         match guest::drop_terms(&paths.terms_accepted()) {
             Ok(n) if n > 0 => info!(dropped = n, "the guest's terms acceptances removed"),
             Ok(_) => {}
             Err(e) => problems.push(format!("terms: {e}")),
+        }
+        if let Err(e) = Stored::drop_home(&paths.storage_json(), "guest") {
+            problems.push(format!("storage: {e}"));
         }
         let mut u = usage::load(&paths.usage_json());
         if u.remove("guest").is_some() {

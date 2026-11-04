@@ -52,7 +52,7 @@ impl Ctx {
     }
 
     fn file(&self) -> ProfilesFile {
-        ProfilesFile::load(&self.paths.profiles_json()).unwrap_or_default()
+        ProfilesFile::load_or_locked(&self.paths.profiles_json())
     }
 }
 
@@ -358,16 +358,15 @@ fn touch_last_used(ctx: &Ctx, user: &str, now: i64) {
     let Some(a) = state.accounts().into_iter().find(|a| a.user == user) else {
         return;
     };
-    let path = ctx.paths.profiles_json();
-    let Ok(mut file) = ProfilesFile::load(&path) else {
-        return;
-    };
-    if let Some(m) = file.profiles.get_mut(&a.id) {
+    let touched = ProfilesFile::update(&ctx.paths.profiles_json(), |file| {
+        let m = file.profiles.get_mut(&a.id).ok_or(())?;
         m.last_used_at = Some(now);
-        if let Err(e) = file.save(&path) {
-            warn!("profiles.json: {e}");
-        }
-        crate::public::publish(&ctx.paths, &state, &file, now);
+        Ok(file.clone())
+    });
+    match touched {
+        Ok(Ok(file)) => crate::public::publish(&ctx.paths, &state, &file, now),
+        Ok(Err(())) => {}
+        Err(e) => warn!("profiles.json: {e}"),
     }
 }
 
@@ -586,6 +585,29 @@ mod tests {
             .map(|(n, _)| n)
             .collect();
         assert_eq!(o, ["hinteros-guest", "hinteros-p1", "hinteros-p3"]);
+    }
+
+    #[test]
+    fn an_unreadable_profiles_file_lets_no_profile_in() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ctx(d.path());
+        std::fs::write(d.path().join("etc/state.json"), STATE).unwrap();
+        std::fs::create_dir_all(c.paths.profiles_json().parent().unwrap()).unwrap();
+        // Damaged, or newer than this binary (a rollback): never first-boot mode.
+        for bad in ["{garbage", r#"{"version":2,"next":4,"profiles":{}}"#] {
+            std::fs::write(c.paths.profiles_json(), bad).unwrap();
+            for u in ["hinteros-p1", "hinteros-p2", "hinteros-p3", "admin"] {
+                assert!(!unlocked(&c, u, 0), "{bad}: {u}");
+            }
+            assert_eq!(verify(&c, "hinteros-p1", "2468", 0), (false, None));
+            // The guest still plays.
+            assert!(unlocked(&c, "hinteros-guest", 0));
+            touch_last_used(&c, "hinteros-p1", 5);
+            assert_eq!(
+                std::fs::read_to_string(c.paths.profiles_json()).unwrap(),
+                bad
+            );
+        }
     }
 
     #[test]

@@ -86,6 +86,8 @@ pub fn unmark(paths: &Paths) {
 /// Remove the terms acceptances the guest made (`by: hinteros-guest`, no profile), so the next
 /// guest is asked again. Returns how many went. The audit journal keeps the history.
 pub fn drop_terms(path: &Path) -> std::io::Result<usize> {
+    // The same lock as [`crate::runner::record_terms`].
+    let _lock = crate::fsutil::lock_beside(path)?;
     let Some(mut doc) = read_terms(path)? else {
         return Ok(0);
     };

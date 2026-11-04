@@ -1255,7 +1255,9 @@ server, `--icon-allow-http`, a hidden test flag).
 - **`lib.catalogIds`** in the system flake: `{ "<id>": { name, status, statusReason } }` (status
   `available|retired|removed`), evaluable without building anything.
 - **`/var/lib/hinteros/terms-accepted.json`**: created by the job (the job unit already has
-  `StateDirectory=hinteros`); the installer writes the same format.
+  `StateDirectory=hinteros`); the installer writes the same format. Every change to it (the
+  service's `apps.accept_terms`, jobs, the guest wipe) holds an `flock` on
+  `terms-accepted.json.lock`, so no record is lost.
 - **greetd** with `default_session = initial_session` (as `session.nix` has it) and the session
   daemon as the user unit `hinteros-session.service` (found from its cgroup); the daemon needs the
   user's session bus (`DBUS_SESSION_BUS_ADDRESS`, set for user units) for `RestartUnit`.

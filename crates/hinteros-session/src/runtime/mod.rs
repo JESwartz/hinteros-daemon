@@ -102,6 +102,8 @@ fn service_of(method: &str) -> Service {
 }
 
 /// How long a method may take before it fails: a service that hangs must not hang the launcher.
+/// The launcher's `DaemonClient.timeoutFor` (lib/src/api/client.dart) waits 5 s more than each
+/// limit: change both together.
 fn time_limit(method: &str) -> Duration {
     Duration::from_secs(match method {
         "wifi.connect" => 60,

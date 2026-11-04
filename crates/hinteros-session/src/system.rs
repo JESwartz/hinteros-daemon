@@ -33,7 +33,8 @@ const BACKOFF_MAX: Duration = Duration::from_secs(10);
 /// report through events).
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// A call whose action is checked interactively waits for the user to type the admin password
-/// (the system service gives up after 300 s).
+/// (the system service gives up after 300 s). The launcher's `DaemonClient.timeoutFor`
+/// (lib/src/api/client.dart) waits longer than these two limits: change both together.
 const INTERACTIVE_CALL_TIMEOUT: Duration = Duration::from_secs(330);
 
 type Reply = oneshot::Sender<Result<Value, ErrorObject>>;

@@ -898,7 +898,8 @@ fn system_rust_params_are_closed() {
             "{m} has no polkit action"
         );
     }
-    // The session relay waits longer for these (the admin password).
+    // The session relay waits longer for these (the admin password). The launcher's
+    // `DaemonClient._interactive` (lib/src/api/client.dart) lists the same methods: change both.
     let waits: Vec<&str> = system::API
         .methods
         .iter()

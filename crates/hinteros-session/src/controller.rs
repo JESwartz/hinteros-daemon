@@ -406,8 +406,9 @@ pub struct ControllerStore {
     file: Option<PathBuf>,
     saved: ControllerSettings,
     current: Controller,
-    /// The file as loaded, for the fields this version does not know (a later one wrote them):
-    /// they are written back on a save.
+    /// The file as first loaded, for the fields this version does not know (a later one wrote
+    /// them): they are written back on every save. It is kept for the life of the store and is
+    /// not updated on a save, as the known fields always come from the new settings.
     loaded: serde_json::Value,
 }
 

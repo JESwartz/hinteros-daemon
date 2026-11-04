@@ -374,8 +374,10 @@ async fn handle(svc: Arc<Service>, stream: UnixStream, greeter: bool) -> Result<
                             write_message(&mut w, &jsonrpc::response(&id, Err(method_not_found(&req.method)))).await?;
                             continue;
                         }
-                        // The session daemon's own `lan_filter.*` wait for a unit too: tasks.
-                        let own = req.method.starts_with("lan_filter.");
+                        // The session daemon's own `lan_filter.set` and `lan_filter.clear` wait for
+                        // a unit too: tasks. Any other name is `method_not_found` (in dispatch).
+                        let own = [system::LanFilterSet::NAME, system::LanFilterClear::NAME]
+                            .contains(&req.method.as_str());
                         if own || system::MUTATING.contains(&req.method.as_str()) {
                             let Ok(permit) = in_flight.clone().try_acquire_owned() else {
                                 let err = authz::rate_limited(Duration::from_secs(1));

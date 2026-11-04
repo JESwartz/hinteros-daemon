@@ -1165,8 +1165,10 @@ delete_data}` (polkit `org.hinteros.system.apps`, seat check, rate limit, audit)
   (a broken generation), but not with `delete_data`.
 - The job writes `state.json`'s `apps` from the typed state and runs the apply flow (job kinds
   `apps_install`, `apps_remove`). With `delete_data`, after a successful switch it deletes the
-  removed apps' `dataPaths` (from the index, checked again: relative, no `.`/`..`, no wildcards)
-  in every profile home: the caller's home plus the homes of `state.json`'s profile users (M7),
+  removed apps' `dataPaths` (from the index, checked again: relative, no `.`/`..`, no wildcards;
+  never a shared directory such as `.config` or `.local/share`, nor a path equal to or above a
+  `dataPaths` entry of an app that stays installed; `apps.clear_data` likewise) in every profile
+  home: the caller's home plus the homes of `state.json`'s profile users (M7),
   from the user database, never root's. `datadel.rs` opens the home with `O_NOFOLLOW` (it must be a
   directory owned by the profile's uid), every component with `openat(O_NOFOLLOW|O_DIRECTORY)`,
   removes trees with `unlinkat` relative to directory descriptors, unlinks symlinks without

@@ -192,14 +192,45 @@ pub fn plan_remove(
     Ok(ids)
 }
 
-/// The data paths of the apps being removed (from the running generation's catalog, checked
-/// again here: relative, no `..`, no wildcards).
-pub fn data_paths(index: &Index, ids: &[String]) -> Vec<String> {
+/// Directories that hold the data of many programs: never an app's own data path.
+const SHARED_DIRS: &[&str] = &[
+    ".cache",
+    ".config",
+    ".local",
+    ".local/share",
+    ".local/state",
+    ".var",
+    ".var/app",
+];
+
+/// Whether `dir` is `path` or one of its ancestors (by component).
+fn covers(dir: &str, path: &str) -> bool {
+    path == dir
+        || path
+            .strip_prefix(dir)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The data paths of the apps `ids` (from the running generation's catalog, checked again
+/// here: relative, no `..`, no wildcards). A path is left out when it is a shared directory,
+/// or when it is equal to, or an ancestor of, a data path of an app in `keep` (the apps that
+/// stay installed): deleting it would delete that app's data too.
+pub fn data_paths(index: &Index, ids: &[String], keep: &[String]) -> Vec<String> {
+    let kept: Vec<&String> = keep
+        .iter()
+        .filter(|k| !ids.contains(k))
+        .filter_map(|k| index.get(k))
+        .flat_map(|e| &e.data_paths)
+        .collect();
     let mut out = Vec::new();
     for id in ids {
         if let Some(e) = index.get(id) {
             for p in &e.data_paths {
-                if catalog::is_data_path(p) && !out.contains(p) {
+                if catalog::is_data_path(p)
+                    && !SHARED_DIRS.contains(&p.as_str())
+                    && !kept.iter().any(|k| covers(p, k))
+                    && !out.contains(p)
+                {
                     out.push(p.clone());
                 }
             }
@@ -339,12 +370,41 @@ mod tests {
         assert!(plan_remove(Some(&i), &installed, &ids(&["firefox", "youtube"])).is_ok());
         assert!(plan_remove(Some(&i), &installed, &ids(&["gone"])).is_ok());
         assert_eq!(
-            data_paths(&i, &ids(&["steam", "youtube", "gone"])),
+            data_paths(&i, &ids(&["steam", "youtube", "gone"]), &[]),
             [
                 ".local/share/Steam",
                 ".steam",
                 ".local/share/hinteros/firefox/youtube"
             ]
+        );
+    }
+
+    /// Deleting an app's data never deletes the data of an app that stays installed, or a
+    /// directory many programs share.
+    #[test]
+    fn data_paths_spare_apps_that_stay() {
+        let i = Index::parse(
+            br#"{"indexVersion":4,"entries":[
+              {"id":"a","name":"A","status":"available","dataPaths":[".config/a",".local/share/x",".local/share",".a"]},
+              {"id":"b","name":"B","status":"available","dataPaths":[".local/share/x"]},
+              {"id":"c","name":"C","status":"available","dataPaths":[".a/c",".config/ab"]}
+            ]}"#,
+            "/idx".into(),
+        )
+        .unwrap();
+        // b keeps `.local/share/x`; c keeps `.a/c` under `.a`; `.config/ab` is not under `.config/a`.
+        assert_eq!(
+            data_paths(&i, &ids(&["a"]), &ids(&["a", "b", "c"])),
+            [".config/a"]
+        );
+        assert_eq!(
+            data_paths(&i, &ids(&["a", "b"]), &ids(&["a", "b"])),
+            [".config/a", ".local/share/x", ".a"]
+        );
+        // A path under a kept app's path is the removed app's own.
+        assert_eq!(
+            data_paths(&i, &ids(&["c"]), &ids(&["a"])),
+            [".a/c", ".config/ab"]
         );
     }
 }

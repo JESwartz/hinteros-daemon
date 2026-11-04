@@ -2000,7 +2000,9 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
 - **`plex.claim {pin, code}`** (job): `claim-` and 20 of `[A-Za-z0-9_-]` (what plex.tv/claim gives;
   Plex documents no exact format, so a change shows as `invalid_params`). The job posts it to
   Plex's own `POST /myplex/claim?token=` on 127.0.0.1:32400 with `X-Plex-Client-Identifier` (the
-  server's `ProcessedMachineIdentifier`) and succeeds once `PlexOnlineToken` is set (30 s).
+  server's `ProcessedMachineIdentifier`) and succeeds once `PlexOnlineToken` is set (30 s). The
+  probe and the code go only to a server owned by the `plex` account (32400 is not a privileged
+  port; the same check as Jellyfin's).
 - **`tailscale.login {pin}`** (job): `tailscale up --reset --json --timeout=600s` (defaults: no
   exit node, routes or Tailscale SSH; `--force-reauth` for an expired key); its pretty-printed
   JSON objects are decoded as a stream; each new `AuthURL` (https, printable ASCII, ≤ 512) is

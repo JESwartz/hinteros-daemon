@@ -213,8 +213,12 @@ impl Runner {
     pub(super) fn plex_job(&mut self, j: &PlexJob) -> Outcome {
         self.set_stage(Stage::Preparing);
         let server = self.spec.paths.server.clone();
+        // Only a server run by the plex account gets the code (32400 is not a privileged port).
+        let Some(owner) = self.spec.paths.users.by_name(plex::USER).map(|u| u.uid) else {
+            return Err(self.failed("Plex does not answer", "unreachable"));
+        };
         let up = self.wait_for(SERVICE_WAIT, || {
-            plex::reachable(server.plex, Duration::from_secs(2))
+            plex::reachable(server.plex, owner, Duration::from_secs(2))
         })?;
         if !up {
             return Err(self.failed("Plex does not answer", "unreachable"));
@@ -226,7 +230,7 @@ impl Runner {
         }
         self.set_stage(Stage::Configuring);
         let client_id = prefs.machine_id.unwrap_or_else(|| "hinteros".into());
-        plex::claim(server.plex, &j.code, &client_id, HTTP_TIMEOUT)
+        plex::claim(server.plex, owner, &j.code, &client_id, HTTP_TIMEOUT)
             .map_err(|e| self.failed(e, "refused"))?;
         let linked = self.wait_for(CLAIM_WAIT, || {
             plex::read(&server.plex_preferences).is_some_and(|p| p.claimed)

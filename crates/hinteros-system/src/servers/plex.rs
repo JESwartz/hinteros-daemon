@@ -4,7 +4,9 @@
 //! `PlexOnlineToken` non-empty means the server is claimed; the token itself never leaves this
 //! module (it is a Plex account credential). The claim posts the code from plex.tv/claim to the
 //! server's own `POST /myplex/claim?token=<code>` on loopback (what Plex Web does on an
-//! unclaimed server); the server exchanges it with plex.tv and writes the token.
+//! unclaimed server); the server exchanges it with plex.tv and writes the token. Port 32400 is not
+//! privileged, so the code goes only to a server running as [`USER`] (any local process could
+//! listen there while Plex is down, take the code and link its own server to the account).
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -12,6 +14,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::http::{self, Target};
+
+/// The system account Plex runs as (NixOS `services.plex.user`).
+pub const USER: &str = "plex";
 
 /// What `services.list` and the claim need from `Preferences.xml`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -145,14 +150,23 @@ pub fn read(path: &Path) -> Option<Prefs> {
     })
 }
 
-/// Whether the server answers (`GET /identity`, open without a token).
-pub fn reachable(addr: SocketAddr, timeout: Duration) -> bool {
-    http::request(Target::Tcp(addr), "GET", "/identity", &[], None, timeout).is_ok_and(|r| r.ok())
+/// Whether the server run by uid `owner` answers (`GET /identity`, open without a token).
+pub fn reachable(addr: SocketAddr, owner: u32, timeout: Duration) -> bool {
+    http::request(
+        Target::TcpOwnedBy(addr, owner),
+        "GET",
+        "/identity",
+        &[],
+        None,
+        timeout,
+    )
+    .is_ok_and(|r| r.ok())
 }
 
-/// Post the claim code. `Err`: what went wrong, without the code.
+/// Post the claim code to the server run by uid `owner`. `Err`: what went wrong, without the code.
 pub fn claim(
     addr: SocketAddr,
+    owner: u32,
     code: &str,
     client_id: &str,
     timeout: Duration,
@@ -166,7 +180,14 @@ pub fn claim(
         ("X-Plex-Product", "HinterOS"),
         ("Accept", "application/json"),
     ];
-    match http::request(Target::Tcp(addr), "POST", &path, &headers, None, timeout) {
+    match http::request(
+        Target::TcpOwnedBy(addr, owner),
+        "POST",
+        &path,
+        &headers,
+        None,
+        timeout,
+    ) {
         Ok(r) if r.ok() => Ok(()),
         Ok(r) => Err(format!("Plex refused the code (HTTP {})", r.status)),
         Err(e) => Err(format!("Plex does not answer: {e}")),
@@ -260,5 +281,27 @@ mod tests {
         ] {
             assert!(!is_claim_code(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_code_goes_only_to_plex() {
+        use std::io::Read;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let other = rustix::process::getuid().as_raw().wrapping_add(1);
+        let t = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut got = Vec::new();
+            s.read_to_end(&mut got).unwrap();
+            got
+        });
+        let code = "claim-abcdefghij0123456789";
+        let e = claim(addr, other, code, "x", Duration::from_secs(2)).unwrap_err();
+        assert!(
+            e.starts_with("Plex does not answer") && !e.contains(code),
+            "{e}"
+        );
+        assert!(t.join().unwrap().is_empty());
+        assert!(!reachable(addr, other, Duration::from_secs(2)));
     }
 }

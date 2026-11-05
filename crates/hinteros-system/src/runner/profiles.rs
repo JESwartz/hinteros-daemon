@@ -24,7 +24,7 @@ impl Runner {
             ..Default::default()
         })?;
         self.set_stage(Stage::Finishing);
-        let paths = self.spec.paths.clone();
+        let paths = self.paths.clone();
         // Metadata and PIN only after the account exists: a failed job leaves neither. The PIN
         // first: a profile without its PIN would let anyone in.
         ProfilesFile::load(&paths.profiles_json())
@@ -71,13 +71,13 @@ impl Runner {
 
     pub(super) fn profile_remove(&mut self, j: &ProfileRemoveJob) -> Outcome {
         self.set_stage(Stage::Preparing);
-        let paths = self.spec.paths.clone();
+        let paths = self.paths.clone();
         // Every process of the account goes first (spike 7: NixOS leaves them running).
         if let Some(uid) = j.uid {
             let ctx = pam::Ctx {
                 paths: paths.clone(),
                 users: paths.users.clone(),
-                bus: self.spec.bus.clone(),
+                bus: self.bus.clone(),
                 journal_socket: pam::JOURNAL_SOCKET.into(),
             };
             pam::end_uid(&ctx, &j.user, uid, &paths.proc_dir);
@@ -135,7 +135,7 @@ impl Runner {
     /// unless the account is still exactly the guest and none of its processes are left.
     pub(super) fn guest_end(&mut self, j: &GuestEndJob) -> Outcome {
         self.set_stage(Stage::Preparing);
-        let paths = self.spec.paths.clone();
+        let paths = self.paths.clone();
         if let Err(e) = guest::mark(&paths, &self.spec.id) {
             warn!("cannot mark the guest as ending: {e}");
         }
@@ -153,17 +153,19 @@ impl Runner {
     }
 
     fn guest_wipe(&mut self, j: &GuestEndJob, state: Option<&State>) -> Outcome {
-        let paths = self.spec.paths.clone();
-        // The account again (the service checked it when the request came in).
-        let account = guest::account(&paths.users, j.uid).map_err(|why| self.fail(&why))?;
-        if account.home != j.home {
-            return Err(self.fail("the guest's home changed since the request"));
+        let paths = self.paths.clone();
+        // The account again (the service checked it when the request came in), with the
+        // job's own guest uid: the spec's must be the same.
+        if j.uid != self.own.guest_uid {
+            return Err(self.fail(format!("uid {} is not the guest's", j.uid)));
         }
+        let account = guest::account(&paths.users, j.uid).map_err(|why| self.fail(&why))?;
+        let home = account.home;
         // Its session and every process of the uid go first.
         let ctx = pam::Ctx {
             paths: paths.clone(),
             users: paths.users.clone(),
-            bus: self.spec.bus.clone(),
+            bus: self.bus.clone(),
             journal_socket: pam::JOURNAL_SOCKET.into(),
         };
         for attempt in 0..3 {
@@ -186,17 +188,17 @@ impl Runner {
         // The home's contents (the directory stays: tmpfiles made it, 0700 for the guest).
         let mut removed = 0;
         let mut problems: Vec<String> = Vec::new();
-        match datadel::wipe_owned(&j.home, j.uid, true) {
+        match datadel::wipe_owned(&home, j.uid, true) {
             Ok(w) => {
                 removed += w.removed;
                 problems.extend(w.failed);
             }
-            Err(datadel::Refused::BadHome(_, why)) if !j.home.exists() => {
+            Err(datadel::Refused::BadHome(_, why)) if !home.exists() => {
                 info!("the guest has no home yet: {why}");
             }
             Err(e) => problems.push(e.to_string()),
         }
-        for dir in &j.tmp_dirs {
+        for dir in &self.own.guest_tmp_dirs.clone() {
             match datadel::wipe_owned(dir, j.uid, false) {
                 Ok(w) => {
                     removed += w.removed;

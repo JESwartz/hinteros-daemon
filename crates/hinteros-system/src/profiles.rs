@@ -161,7 +161,7 @@ impl ProfilesFile {
         }
         check_file_version(path, FILE_VERSION)?;
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            fsutil::create_dir_all(dir, 0o777)?;
         }
         let mut bytes = serde_json::to_vec_pretty(self)?;
         bytes.push(b'\n');

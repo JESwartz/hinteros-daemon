@@ -16,8 +16,12 @@ pub struct Peer {
     pub pid: Option<u32>,
     /// `None` on kernels without `SO_PEERPIDFD` (< 6.5): mutating methods are refused.
     pub pidfd: Option<OwnedFd>,
-    /// `/proc/<pid>/exe` at accept time (audit only).
+    /// `/proc/<pid>/exe` at accept time (audit only). The service is not root and has no
+    /// `CAP_SYS_PTRACE`, so this is known only for a peer of its own uid.
     pub exe: Option<PathBuf>,
+    /// `/proc/<pid>/comm` at accept time (audit only; anyone may read it, and the process names
+    /// itself): what the audit shows when `exe` is not known.
+    pub comm: Option<String>,
     /// Its sender is dropped when the connection ends ([`Peer::gone`]).
     closed: watch::Receiver<()>,
 }
@@ -29,12 +33,14 @@ impl Peer {
         let pidfd = getsockopt(&stream.as_fd(), sockopt::PeerPidfd).ok();
         let pid = cred.pid().and_then(|p| u32::try_from(p).ok());
         let exe = pid.and_then(|p| std::fs::read_link(format!("/proc/{p}/exe")).ok());
+        let comm = pid.and_then(|p| std::fs::read_to_string(format!("/proc/{p}/comm")).ok());
         Ok(Self {
             uid: cred.uid(),
             gid: cred.gid(),
             pid,
             pidfd,
             exe,
+            comm: comm.map(|c| c.trim_end().chars().filter(|c| !c.is_control()).collect()),
             closed,
         })
     }
@@ -69,11 +75,14 @@ impl Peer {
         self.alive().then_some(t)
     }
 
+    /// The executable for the audit: the path when known, else the process's own name in
+    /// brackets (`[steam]`; it chose it), else `?`.
     pub fn exe_display(&self) -> String {
-        self.exe
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "?".into())
+        match (&self.exe, &self.comm) {
+            (Some(p), _) => p.display().to_string(),
+            (None, Some(c)) if !c.is_empty() => format!("[{c}]"),
+            _ => "?".into(),
+        }
     }
 }
 
@@ -92,6 +101,18 @@ mod tests {
         assert!(p.alive());
         assert!(p.start_time().is_some());
         assert!(p.exe.is_some());
+        assert!(p.comm.as_deref().is_some_and(|c| !c.is_empty()));
+        // Not root: another uid's exe cannot be read, and the audit shows its name.
+        let named = Peer {
+            uid: 1001,
+            gid: 1001,
+            pid: None,
+            pidfd: None,
+            exe: None,
+            comm: Some("steam".into()),
+            closed: watch::channel(()).1,
+        };
+        assert_eq!(named.exe_display(), "[steam]");
         // Gone once the connection ends.
         let gone = p.gone();
         tokio::pin!(gone);

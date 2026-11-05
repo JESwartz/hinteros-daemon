@@ -236,6 +236,7 @@ fn check_service_ids(ids: &[String]) -> Result<(), ErrorObject> {
 struct DetailCtx {
     server: ServerPaths,
     services_dir: std::path::PathBuf,
+    jellyfin: jellyfin::Files,
     users: crate::users::Users,
     local_ip: Option<Ipv4Addr>,
     port: Option<u16>,
@@ -249,13 +250,13 @@ impl DetailCtx {
 }
 
 fn jellyfin_detail(c: &DetailCtx) -> JellyfinDetail {
-    let files = jellyfin::Files::new(&c.services_dir);
-    let live = jellyfin::Client::new(&files, c.server.jellyfin, &c.users, READ_TIMEOUT)
+    let files = &c.jellyfin;
+    let live = jellyfin::Client::new(files, c.server.jellyfin, &c.users, READ_TIMEOUT)
         .and_then(|cl| cl.virtual_folders());
     // Live, else what the last job or read saw (Jellyfin restarting, an update).
     let folders = match live {
         Ok(f) => {
-            jellyfin::write_cache(&files, &f);
+            jellyfin::write_cache(files, &f);
             f
         }
         Err(_) => crate::fsutil::read_cache(&files.libraries_cache()).unwrap_or_default(),
@@ -365,6 +366,7 @@ impl Service {
                 let ctx = DetailCtx {
                     server: self.server_paths(),
                     services_dir: self.paths.services_dir(),
+                    jellyfin: jellyfin::Files::new(&self.paths),
                     users: self.paths.users.clone(),
                     local_ip,
                     port: entry.and_then(|e| e.tcp_port()),
@@ -475,7 +477,7 @@ impl Service {
         let paths = self.paths.clone();
         let profile = id.clone();
         let made = tokio::task::spawn_blocking(move || {
-            let files = jellyfin::Files::new(&paths.services_dir());
+            let files = jellyfin::Files::new(&paths);
             let c = jellyfin::Client::new(
                 &files,
                 paths.server.jellyfin,
@@ -898,7 +900,7 @@ impl Service {
         if !on {
             return Err(unavailable("jellyfin", "off"));
         }
-        if !jellyfin::Files::new(&self.paths.services_dir()).setup_done() {
+        if !jellyfin::Files::new(&self.paths).setup_done() {
             return Err(unavailable("jellyfin", "not_ready"));
         }
         Ok(())
@@ -906,7 +908,7 @@ impl Service {
 
     /// Jellyfin's libraries now (`None`: it does not answer in time; the job checks again).
     async fn jellyfin_folders(&self) -> Option<Vec<jellyfin::VirtualFolder>> {
-        let files = jellyfin::Files::new(&self.paths.services_dir());
+        let files = jellyfin::Files::new(&self.paths);
         let addr = self.paths.server.jellyfin;
         let users = self.paths.users.clone();
         tokio::task::spawn_blocking(move || {
@@ -936,7 +938,7 @@ impl Service {
 /// `jellyfin.users.reveal`: users made first (best effort), then the admin's and each
 /// profile's password. Profiles that cannot be read: the admin only, and no sync.
 fn reveal(paths: &crate::config::Paths) -> JellyfinUsersRevealResult {
-    let files = jellyfin::Files::new(&paths.services_dir());
+    let files = jellyfin::Files::new(paths);
     let profiles = match jellyfin::profiles(paths) {
         Ok(p) => {
             if let Ok(c) = jellyfin::Client::new(

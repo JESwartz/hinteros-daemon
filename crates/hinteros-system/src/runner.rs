@@ -10,7 +10,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -23,7 +23,7 @@ use hinteros_api::system::{
     Stage, UpdateCheckResult, is_job_id,
 };
 use hinteros_api::{ErrorCode, ErrorObject};
-use rustix::fs::{FlockOperation, flock};
+use rustix::fs::{FlockOperation, OFlags, flock};
 use rustix::process::{Pid, Signal, kill_process_group};
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
@@ -36,6 +36,7 @@ use crate::nixlog;
 use crate::update::{Git, GitError, SeenTips};
 
 mod apps;
+mod check;
 mod profiles;
 mod servers;
 mod storage;
@@ -53,13 +54,45 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 /// them) before the rest of its process group is killed.
 const PIPE_GRACE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 5 });
 
-pub fn main(run_dir: &Path, id: &str) -> ExitCode {
+/// What a job takes from its own command line (the job unit's), never from the spec: the
+/// service that writes the spec is not root (README, "Privileges").
+#[derive(Debug, Clone)]
+pub struct Own {
+    pub paths: crate::config::Paths,
+    pub tools: crate::config::Tools,
+    pub bus: Option<String>,
+    pub policy_dir: PathBuf,
+    pub guest_uid: u32,
+    pub guest_tmp_dirs: Vec<PathBuf>,
+    pub test_profile_home: Option<PathBuf>,
+    pub store_dir: PathBuf,
+    pub srv_dir: PathBuf,
+}
+
+impl Own {
+    pub fn new(args: &crate::config::ServeArgs) -> Self {
+        Self {
+            paths: args.paths(),
+            tools: args.tools(),
+            bus: args.bus.clone(),
+            policy_dir: args.policy_dir(),
+            guest_uid: args.guest_uid,
+            guest_tmp_dirs: args.guest_tmp_dirs(),
+            test_profile_home: args.test_profile_home.clone(),
+            store_dir: args.store_dir.clone(),
+            srv_dir: args.srv_dir.clone(),
+        }
+    }
+}
+
+pub fn main(args: &crate::config::ServeArgs, id: &str) -> ExitCode {
     if !is_job_id(id) {
         error!("bad job id {id:?}");
         return ExitCode::FAILURE;
     }
-    let dir = run_dir.join("jobs").join(id);
-    match run(&dir) {
+    let own = Own::new(args);
+    let dir = own.paths.jobs_dir().join(id);
+    match run(&dir, own) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             error!("job {id}: {e:#}");
@@ -68,14 +101,8 @@ pub fn main(run_dir: &Path, id: &str) -> ExitCode {
     }
 }
 
-fn run(dir: &Path) -> anyhow::Result<()> {
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(dir.join(job::LOCK))?;
+fn run(dir: &Path, own: Own) -> anyhow::Result<()> {
+    let lock = fsutil::open(&dir.join(job::LOCK), OFlags::RDWR | OFlags::CREATE, 0o600)?;
     flock(&lock, FlockOperation::NonBlockingLockExclusive)
         .map_err(|e| anyhow::anyhow!("job is already running ({e})"))?;
     if dir.join(job::STATUS).exists() {
@@ -83,50 +110,28 @@ fn run(dir: &Path) -> anyhow::Result<()> {
     }
     let spec: JobSpec = job::read_json(&dir.join(job::SPEC))
         .ok_or_else(|| anyhow::anyhow!("cannot read {}", dir.join(job::SPEC).display()))?;
-    fs::write(dir.join(job::PID), std::process::id().to_string())?;
+    if spec.id != dir.file_name().unwrap_or_default().to_string_lossy() {
+        anyhow::bail!("the spec is for job {:?}", spec.id);
+    }
+    fsutil::write_atomic(
+        &dir.join(job::PID),
+        std::process::id().to_string().as_bytes(),
+        0o644,
+    )?;
     info!(id = %spec.id, kind = ?spec.kind, uid = spec.uid, "job started");
 
-    let mut r = Runner::new(spec, dir.to_owned());
+    let mut r = Runner::new(spec, dir.to_owned(), own);
     let before = r.snapshot();
-    let outcome = match r.spec.action.clone() {
-        Action::Apply(a) => r.apply(&a).and_then(|o| {
-            if a.rebuild_apps {
-                r.with_apps_stage(o)
-            } else {
-                Ok(o)
-            }
-        }),
-        Action::Rollback {
-            generation,
-            rebuild_apps,
-        } => r.rollback(generation).and_then(|o| {
-            if rebuild_apps {
-                r.with_apps_stage(o).and_then(|o| r.readd_features(o))
-            } else {
-                Ok(o)
-            }
-        }),
-        Action::UpdateCheck(_) => r.update_check(),
-        Action::ChannelCheck(_) => r.channel_check(),
-        Action::Apps(j) => r.apps_job(&j),
-        Action::ProfileCreate(j) => r.profile_create(&j),
-        Action::ProfileRemove(j) => r.profile_remove(&j),
-        Action::GuestEnd(j) => r.guest_end(&j),
-        Action::StorageMeasure(j) => r.storage_measure(&j),
-        Action::Cleanup(j) => r.cleanup(&j),
-        Action::Services(j) => r.services_job(&j),
-        Action::Jellyfin(j) => r.jellyfin_job(&j),
-        Action::Plex(j) => r.plex_job(&j),
-        Action::Tailscale(j) => r.tailscale_job(&j),
-        Action::Cloudflare(j) => r.cloudflare_job(&j),
-        Action::ClearData(d) => {
-            r.set_stage(Stage::Finishing);
-            delete_data(&d);
-            Ok((None, false))
+    let own = r.own.clone();
+    let outcome = match check::check(&mut r.spec, &own) {
+        Err(e) => {
+            warn!("refusing the spec: {e:#}");
+            Err(r.fail(format!("the spec does not match the box: {e:#}")))
         }
+        Ok(()) => r.dispatch(),
     };
     let subject = (r.subject != r.spec.subject).then(|| r.subject.clone());
-    let staging = r.spec.paths.staging();
+    let staging = r.paths.staging();
     let status = match outcome {
         Ok((result, restart)) => Status {
             state: JobState::Succeeded,
@@ -197,6 +202,11 @@ type Outcome = Result<(Option<JobResult>, bool), Failure>;
 struct Runner {
     spec: JobSpec,
     dir: PathBuf,
+    /// The job's own paths, programs and bus (see [`Own`]).
+    paths: crate::config::Paths,
+    tools: crate::config::Tools,
+    bus: Option<String>,
+    own: Own,
     stage: Option<Stage>,
     progress: Option<fs::File>,
     /// The last line written and when.
@@ -214,17 +224,21 @@ struct Runner {
 }
 
 impl Runner {
-    fn new(spec: JobSpec, dir: PathBuf) -> Self {
-        let progress = fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(dir.join(job::PROGRESS))
-            .ok();
+    fn new(spec: JobSpec, dir: PathBuf, own: Own) -> Self {
+        let progress = fsutil::open(
+            &dir.join(job::PROGRESS),
+            OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE,
+            0o600,
+        )
+        .ok();
         Self {
             subject: spec.subject.clone(),
             spec,
             dir,
+            paths: own.paths.clone(),
+            tools: own.tools.clone(),
+            bus: own.bus.clone(),
+            own,
             stage: None,
             progress,
             last_progress: None,
@@ -235,10 +249,51 @@ impl Runner {
         }
     }
 
+    /// Run the action of the (checked) spec.
+    fn dispatch(&mut self) -> Outcome {
+        match self.spec.action.clone() {
+            Action::Apply(a) => self.apply(&a).and_then(|o| {
+                if a.rebuild_apps {
+                    self.with_apps_stage(o)
+                } else {
+                    Ok(o)
+                }
+            }),
+            Action::Rollback {
+                generation,
+                rebuild_apps,
+            } => self.rollback(generation).and_then(|o| {
+                if rebuild_apps {
+                    self.with_apps_stage(o).and_then(|o| self.readd_features(o))
+                } else {
+                    Ok(o)
+                }
+            }),
+            Action::UpdateCheck(_) => self.update_check(),
+            Action::ChannelCheck(_) => self.channel_check(),
+            Action::Apps(j) => self.apps_job(&j),
+            Action::ProfileCreate(j) => self.profile_create(&j),
+            Action::ProfileRemove(j) => self.profile_remove(&j),
+            Action::GuestEnd(j) => self.guest_end(&j),
+            Action::StorageMeasure(j) => self.storage_measure(&j),
+            Action::Cleanup(j) => self.cleanup(&j),
+            Action::Services(j) => self.services_job(&j),
+            Action::Jellyfin(j) => self.jellyfin_job(&j),
+            Action::Plex(j) => self.plex_job(&j),
+            Action::Tailscale(j) => self.tailscale_job(&j),
+            Action::Cloudflare(j) => self.cloudflare_job(&j),
+            Action::ClearData(d) => {
+                self.set_stage(Stage::Finishing);
+                delete_data(&d);
+                Ok((None, false))
+            }
+        }
+    }
+
     fn snapshot(&self) -> Snapshot {
         Snapshot {
-            generation: generations::current_generation(&self.spec.paths.profile),
-            rev: flake::read_lock(&self.spec.paths.config_dir.join("flake.lock"))
+            generation: generations::current_generation(&self.paths.profile),
+            rev: flake::read_lock(&self.paths.config_dir.join("flake.lock"))
                 .ok()
                 .and_then(|l| l.rev),
         }
@@ -387,11 +442,11 @@ impl Runner {
     /// Past this point the job cannot be cancelled: create the marker, then look for a cancel
     /// request that came first.
     fn enter_activation(&mut self) -> Result<(), Failure> {
-        let created = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(self.dir.join(job::ACTIVATING));
+        let created = fsutil::open(
+            &self.dir.join(job::ACTIVATING),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL,
+            0o600,
+        );
         // A second activation in the same job (a rollback's `box` stage): already past the
         // point of no cancelling.
         let created = match created {
@@ -414,7 +469,7 @@ impl Runner {
     /// protection against a reboot mid-switch).
     fn inhibit(&mut self, mode: &str) {
         self.inhibitor = None;
-        let bus = self.spec.bus.clone();
+        let bus = self.bus.clone();
         let mode = mode.to_owned();
         let taken = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -631,9 +686,9 @@ impl Runner {
 
     fn git(&self, source: &job::UpdateSource) -> Git {
         Git {
-            git: self.spec.tools.git.clone(),
-            ssh_keygen: self.spec.tools.ssh_keygen.clone(),
-            git_dir: self.spec.paths.git_dir(),
+            git: self.tools.git.clone(),
+            ssh_keygen: self.tools.ssh_keygen.clone(),
+            git_dir: self.paths.git_dir(),
             scheme: if source.scheme == "file" {
                 "file"
             } else {
@@ -665,16 +720,17 @@ impl Runner {
         };
         self.set_stage(Stage::Preparing);
         let git = self.git(&source);
-        let tips_path = self.spec.paths.channel_tips();
+        let tips_path = self.paths.channel_tips();
         let mut tips = SeenTips::load(&tips_path);
         let mut stages = Vec::new();
+        let signers = check::allowed_signers(&self.own);
         let checked = git.check(
             &source.repo,
             &source.branch,
             source.current_rev.as_deref(),
             true,
             tips.get(&source.branch),
-            &source.allowed_signers,
+            &signers,
             &mut |s| stages.push(s),
         );
         for s in stages {
@@ -688,7 +744,7 @@ impl Runner {
         }
         if !matches!(checked, Err(GitError::Unreachable(_))) {
             for branch in &source.others {
-                changed |= record_other(&git, &source, &mut tips, branch);
+                changed |= record_other(&git, &source, &signers, &mut tips, branch);
             }
         }
         if changed && let Err(e) = tips.save(&tips_path) {
@@ -709,8 +765,8 @@ impl Runner {
             checked_at: job::now(),
         };
         if let Ok(bytes) = fsutil::cache_bytes(&result) {
-            let _ = fs::create_dir_all(&self.spec.paths.state_dir);
-            if let Err(e) = fsutil::write_atomic(&self.spec.paths.last_check(), &bytes, 0o600) {
+            let _ = fsutil::create_dir_all(&self.paths.state_dir, 0o777);
+            if let Err(e) = fsutil::write_atomic(&self.paths.last_check(), &bytes, 0o600) {
                 warn!("cannot store the check result: {e}");
             }
         }
@@ -725,7 +781,7 @@ impl Runner {
         };
         self.set_stage(Stage::Preparing);
         let git = self.git(&source);
-        let tips_path = self.spec.paths.channel_tips();
+        let tips_path = self.paths.channel_tips();
         let mut tips = SeenTips::load(&tips_path);
         self.set_stage(Stage::Fetching);
         let tip = git
@@ -752,7 +808,7 @@ impl Runner {
                 current,
                 false,
                 tips.get(&source.branch),
-                &source.allowed_signers,
+                &check::allowed_signers(&self.own),
             )
             .map_err(|e| self.git_error(&source, e))?;
         // Not known when the locked revision is still not local.
@@ -780,9 +836,9 @@ impl Runner {
         };
         let bytes = fsutil::cache_bytes(&result)
             .map_err(|e| self.fail(format!("encoding the check result: {e}")))?;
-        let _ = fs::create_dir_all(&self.spec.paths.state_dir);
+        let _ = fsutil::create_dir_all(&self.paths.state_dir, 0o777);
         // channel.set accepts only this revision: without the file the switch cannot go on.
-        fsutil::write_atomic(&self.spec.paths.channel_check(), &bytes, 0o600)
+        fsutil::write_atomic(&self.paths.channel_check(), &bytes, 0o600)
             .map_err(|e| self.fail(format!("storing the check result: {e}")))?;
         Ok((Some(JobResult::ChannelCheck(result)), false))
     }
@@ -819,7 +875,7 @@ impl Runner {
                 return Ok(None);
             }
         };
-        let current = hinteros_api::catalog::Index::load(&cat.index)
+        let current = hinteros_api::catalog::Index::load(&self.paths.catalog_index())
             .map_err(|e| warn!("no current catalog: {e}"))
             .ok();
         Ok(catalog_changes(current.as_ref(), &target, &cat.installed))
@@ -828,8 +884,8 @@ impl Runner {
     fn apply(&mut self, a: &Apply) -> Outcome {
         self.set_stage(Stage::Preparing);
         self.inhibit("delay");
-        let paths = self.spec.paths.clone();
-        let tools = self.spec.tools.clone();
+        let paths = self.paths.clone();
+        let tools = self.tools.clone();
         if !paths.config_dir.join("flake.nix").is_file() {
             return Err(self.fail(format!("{} has no flake.nix", paths.config_dir.display())));
         }
@@ -868,7 +924,7 @@ impl Runner {
                     u.source.current_rev.as_deref(),
                     require_ff,
                     tips.get(&u.source.branch),
-                    &u.source.allowed_signers,
+                    &check::allowed_signers(&self.own),
                 )
                 .map_err(|e| self.git_error(&u.source, e))?;
             if record_tip(&git, &mut tips, &u.source.branch, &rev)
@@ -1036,15 +1092,15 @@ impl Runner {
     }
 
     fn nix_command(&self) -> Command {
-        let mut cmd = Command::new(&self.spec.tools.nix);
+        let mut cmd = Command::new(&self.tools.nix);
         cmd.args(["--extra-experimental-features", "nix-command flakes"]);
         cmd
     }
 
     fn activate(&mut self, toplevel: &Path) -> Result<(), Failure> {
-        let mut cmd = Command::new(&self.spec.tools.nix_env);
+        let mut cmd = Command::new(&self.tools.nix_env);
         cmd.arg("-p")
-            .arg(&self.spec.paths.profile)
+            .arg(&self.paths.profile)
             .arg("--set")
             .arg(toplevel);
         self.exec(cmd, false, &mut |_, _| {})?;
@@ -1066,10 +1122,10 @@ impl Runner {
             "activation failed; restoring the profile to {}",
             old.display()
         );
-        let profile = self.spec.paths.profile.clone();
+        let profile = self.paths.profile.clone();
         let failed = generations::current_generation(&profile)
             .filter(|g| old_generation != Some(*g) && !before.contains(g));
-        let mut cmd = Command::new(&self.spec.tools.nix_env);
+        let mut cmd = Command::new(&self.tools.nix_env);
         cmd.arg("-p").arg(&profile);
         match old_generation {
             Some(g) => cmd.arg("--switch-generation").arg(g.to_string()),
@@ -1081,7 +1137,7 @@ impl Runner {
         if old_generation.is_some()
             && let Some(f) = failed
         {
-            let mut cmd = Command::new(&self.spec.tools.nix_env);
+            let mut cmd = Command::new(&self.tools.nix_env);
             cmd.arg("-p")
                 .arg(&profile)
                 .arg("--delete-generations")
@@ -1105,8 +1161,8 @@ impl Runner {
         old_toplevel: Option<&Path>,
         target: &Path,
     ) -> Result<(), Failure> {
-        let profile = self.spec.paths.profile.clone();
-        let mut cmd = Command::new(&self.spec.tools.nix_env);
+        let profile = self.paths.profile.clone();
+        let mut cmd = Command::new(&self.tools.nix_env);
         cmd.arg("-p")
             .arg(&profile)
             .arg("--switch-generation")
@@ -1116,7 +1172,7 @@ impl Runner {
         cmd.arg("switch");
         if let Err(e) = self.exec(cmd, false, &mut |_, _| {}) {
             if let Some(old) = old_generation {
-                let mut cmd = Command::new(&self.spec.tools.nix_env);
+                let mut cmd = Command::new(&self.tools.nix_env);
                 cmd.arg("-p")
                     .arg(&profile)
                     .arg("--switch-generation")
@@ -1137,7 +1193,7 @@ impl Runner {
     fn rollback(&mut self, generation: u32) -> Outcome {
         self.set_stage(Stage::Preparing);
         self.inhibit("delay");
-        let paths = self.spec.paths.clone();
+        let paths = self.paths.clone();
         let old_generation = generations::current_generation(&paths.profile);
         let old_toplevel = fs::canonicalize(&paths.profile).ok();
         let target = generations::links(&paths.profile)
@@ -1200,10 +1256,16 @@ fn record_tip(git: &Git, tips: &mut SeenTips, branch: &str, rev: &str) -> bool {
 
 /// `update.check`: fetch and verify another channel's tip and record it. Failures are logged
 /// only (the check is about the followed channel). Returns whether the record changed.
-fn record_other(git: &Git, source: &job::UpdateSource, tips: &mut SeenTips, branch: &str) -> bool {
+fn record_other(
+    git: &Git,
+    source: &job::UpdateSource,
+    allowed_signers: &Path,
+    tips: &mut SeenTips,
+    branch: &str,
+) -> bool {
     let tip = match git
         .fetch_tip(&source.repo, branch)
-        .and_then(|tip| git.verify(&tip, &source.allowed_signers).map(|_| tip))
+        .and_then(|tip| git.verify(&tip, allowed_signers).map(|_| tip))
     {
         Ok(tip) => tip,
         Err(e) => {
@@ -1395,13 +1457,10 @@ pub fn read_terms(path: &Path) -> std::io::Result<Option<serde_json::Map<String,
     Ok(Some(doc))
 }
 
-/// Write `terms-accepted.json` (root-only, atomically); the installer writes the same format.
+/// Write `terms-accepted.json` (0600, atomically); the installer writes the same format.
 pub fn write_terms(path: &Path, doc: &serde_json::Map<String, Value>) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)?;
+        fsutil::create_dir_all(parent, 0o700)?;
     }
     let mut bytes = serde_json::to_vec_pretty(doc)?;
     bytes.push(b'\n');
@@ -1497,6 +1556,7 @@ mod tests {
         let paths = crate::config::Paths {
             config_dir: d.join("etc"),
             state_dir: d.join("var"),
+            root_state_dir: d.join("root"),
             run_dir: d.join("run"),
             profile: d.join("profiles/system"),
             current_system: d.join("current"),
@@ -1523,13 +1583,21 @@ mod tests {
             kind: hinteros_api::system::JobKind::Rebuild,
             uid: 1000,
             created_at: 0,
-            paths,
-            tools,
-            bus: None,
             action: Action::Apply(Apply::default()),
             subject: JobSubject::default(),
         };
-        Runner::new(spec, d.to_owned())
+        let own = Own {
+            paths,
+            tools,
+            bus: None,
+            policy_dir: d.join("policy"),
+            guest_uid: crate::state::GUEST_UID,
+            guest_tmp_dirs: Vec::new(),
+            test_profile_home: None,
+            store_dir: d.join("store"),
+            srv_dir: d.join("srv"),
+        };
+        Runner::new(spec, d.to_owned(), own)
     }
 
     fn written(d: &Path) -> Vec<ProgressLine> {

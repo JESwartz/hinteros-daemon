@@ -55,11 +55,11 @@ pub fn delete_targets(
     out
 }
 
-/// `/var/lib` directories that hold the box's own state (`state.json`, `profiles.json`, the
+/// `/var/lib` directories that hold the box's own state (`profiles.json`, root's staging, the
 /// services' secrets, ...): no delete target may name them, or a folder above them. HinterOS's
 /// own directory only as `hinteros/services/<entry>` or below. The catalog's validator refuses
 /// the same `stateDirs`.
-const SYSTEM_STATE: &[&str] = &["hinteros", "nixos", "systemd", "private"];
+const SYSTEM_STATE: &[&str] = &["hinteros", "hinteros-root", "nixos", "systemd", "private"];
 
 /// `rel` (below `/var/lib`) leaves the box's own state alone; with `entry`, only that entry's
 /// `hinteros/services/<entry>` is allowed.

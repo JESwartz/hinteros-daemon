@@ -415,7 +415,7 @@ async fn settings_ssh_rebuild_rollback() {
             .contains(&format!("{} switch", root.p("store/gen2").display()))
     );
     assert!(
-        !root.p("var/lib/hinteros/staging").exists(),
+        !root.p("var/lib/hinteros-root/staging").exists(),
         "staging cleaned up"
     );
     let nix_log = root.read("nix.log");
@@ -541,7 +541,7 @@ async fn settings_ssh_rebuild_rollback() {
     assert_eq!(job["job"]["state"], "cancelled");
     assert_eq!(root.read("etc/hinteros/state.json"), before);
     assert_eq!(root.current(), root.p("store/gen3"));
-    assert!(!root.p("var/lib/hinteros/staging").exists());
+    assert!(!root.p("var/lib/hinteros-root/staging").exists());
     assert!(job_dir.join("status.json").exists());
     root.rm("build-hold");
     let e = call(&mut c, "jobs.cancel", json!({"job_id": id}))
@@ -1155,7 +1155,8 @@ async fn updates_are_verified() {
 
 /// The newest verified tips the box recorded (`channel-tips.json`).
 fn tips(root: &Root) -> Value {
-    let v: Value = serde_json::from_str(&root.read("var/lib/hinteros/channel-tips.json")).unwrap();
+    let v: Value =
+        serde_json::from_str(&root.read("var/lib/hinteros-root/channel-tips.json")).unwrap();
     v["tips"].clone()
 }
 

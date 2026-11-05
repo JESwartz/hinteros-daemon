@@ -395,8 +395,9 @@ fn root() -> Root {
     }
     std::fs::write(root.p("media/notes.txt"), "x").unwrap();
     std::os::unix::fs::symlink(root.p("outside"), root.p("media/Escape")).unwrap();
-    // What the system repo's Jellyfin setup unit leaves.
-    let jf = root.p("var/lib/hinteros/services/jellyfin-server");
+    // What the system repo's Jellyfin setup unit leaves (in root's directory, readable by the
+    // service).
+    let jf = root.p("var/lib/hinteros-root/jellyfin-server");
     std::fs::create_dir_all(&jf).unwrap();
     std::fs::write(jf.join("setup-done"), "").unwrap();
     std::fs::write(jf.join("api-key"), API_KEY).unwrap();
@@ -800,6 +801,7 @@ async fn services_jellyfin_and_delete_data() {
     assert!(!root.p("var/lib/jellyfin").exists());
     assert!(!root.p("var/cache/jellyfin").exists());
     assert!(!root.p("var/lib/hinteros/services/jellyfin-server").exists());
+    assert!(!root.p("var/lib/hinteros-root/jellyfin-server").exists());
     assert!(root.p("var/lib/plex").is_dir() && root.p("outside/secret").is_dir());
     assert!(root.p("media/Movies/Kids").is_dir());
     let rev = revision(&mut c).await;

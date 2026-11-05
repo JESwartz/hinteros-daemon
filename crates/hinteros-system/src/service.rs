@@ -34,7 +34,7 @@ use tracing::{debug, info, warn};
 
 use crate::audit::{Audit, Decision};
 use crate::authz::{self, Bus, RateLimit};
-use crate::config::{Paths, ServeArgs, Tools};
+use crate::config::{Paths, ServeArgs};
 use crate::flake::{self, ChannelTable, Release};
 use crate::generations;
 use crate::job::{self, Action, Apply, ApplyUpdate, JobSpec, NotFastForward, UpdateSource};
@@ -63,7 +63,6 @@ type Broadcast = (EventName, Value);
 pub struct Service {
     args: ServeArgs,
     paths: Paths,
-    tools: Tools,
     bus: Bus,
     audit: Audit,
     rate: RateLimit,
@@ -111,7 +110,6 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
         .ok()
         .map(|(s, _)| crate::timezone::effective(&paths.zoneinfo_dir, &s, job::now()).zone);
     let svc = Arc::new(Service {
-        tools: args.tools(),
         bus: Bus::new(args.bus.clone()),
         audit: Audit::new(args.journal_socket.clone()),
         rate: RateLimit::new(args.rate_per_minute, args.rate_burst),
@@ -529,6 +527,7 @@ async fn dispatch(
                     &p.current_system,
                     &p.booted_system,
                     &p.boot_entries,
+                    &p.boot_index(),
                     &p.profiles_json(),
                     needed.as_ref(),
                 ),
@@ -1170,9 +1169,6 @@ impl Service {
             kind,
             uid,
             created_at: job::now(),
-            paths: self.paths.clone(),
-            tools: self.tools.clone(),
-            bus: self.args.bus.clone(),
             action,
             subject: system::JobSubject::default(),
         }
@@ -1222,7 +1218,6 @@ impl Service {
             branch: branch.to_owned(),
             channel,
             current_rev,
-            allowed_signers: flake::allowed_signers(&self.policy_dir()),
             catalog: None,
             others: Vec::new(),
         })
@@ -1368,6 +1363,7 @@ impl Service {
                     &self.paths.current_system,
                     &self.paths.booted_system,
                     &self.paths.boot_entries,
+                    &self.paths.boot_index(),
                     &self.paths.profiles_json(),
                     None,
                 );
@@ -1436,9 +1432,7 @@ impl Service {
                     .filter(|b| **b != source.branch)
                     .cloned()
                     .collect();
-                let index = self.args.catalog_index();
                 source.catalog = Some(job::CatalogCheck {
-                    index: std::fs::canonicalize(&index).unwrap_or(index),
                     installed: State::load(&self.paths.state_json())
                         .map(|(s, _)| self.installed_anywhere(&s))
                         .unwrap_or_default(),

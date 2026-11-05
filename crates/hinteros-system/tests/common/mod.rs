@@ -143,7 +143,7 @@ pub struct FakeState {
     /// Started units.
     pub units: Vec<String>,
     pub children: Vec<Child>,
-    /// How to run a job: (binary, run dir, extra env).
+    /// How to run a job: (binary, run dir, extra env, the service's flags).
     pub job_cmd: Option<JobCmd>,
     /// How `hinteros-time-zone-apply.service` runs: the binary and its arguments.
     pub tz_cmd: Option<(PathBuf, Vec<String>)>,
@@ -164,7 +164,7 @@ pub struct FakeState {
 }
 
 /// How the fake systemd runs a job: binary, run dir, extra environment.
-pub type JobCmd = (PathBuf, PathBuf, Vec<(String, String)>);
+pub type JobCmd = (PathBuf, PathBuf, Vec<(String, String)>, Vec<String>);
 
 /// The outcome of a fake agent conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,12 +380,11 @@ impl Systemd {
             .and_then(|n| n.strip_suffix(".service"))
             .ok_or_else(|| zbus::fdo::Error::Failed(format!("unexpected unit {name}")))?
             .to_owned();
-        let (bin, run_dir, env) = s.job_cmd.clone().expect("job command configured");
+        let (bin, run_dir, env, args) = s.job_cmd.clone().expect("job command configured");
         let log = std::fs::File::create(run_dir.join(format!("job-{id}.log"))).unwrap();
         let child = Command::new(bin)
             .arg("job")
-            .arg("--run-dir")
-            .arg(&run_dir)
+            .args(&args)
             .arg(&id)
             .envs(env)
             .env("RUST_LOG", "debug")
@@ -941,6 +940,7 @@ impl System {
                 ("PATH".into(), path.clone()),
                 ("FAKE_ROOT".into(), root.path().display().to_string()),
             ],
+            Vec::new(),
         ));
         {
             let r = |p: &str| root.p(p).display().to_string();
@@ -988,6 +988,8 @@ impl System {
             r("etc/hinteros"),
             "--state-dir".into(),
             r("var/lib/hinteros"),
+            "--root-state-dir".into(),
+            r("var/lib/hinteros-root"),
             "--run-dir".into(),
             r("run"),
             "--profile".into(),
@@ -1075,6 +1077,11 @@ impl System {
             }
         }
         args.extend(extra.iter().map(|s| s.to_string()));
+        // A job takes paths and programs from its own command line (the service's flags), never
+        // from the spec.
+        if let Some(cmd) = fakes.lock().unwrap().job_cmd.as_mut() {
+            cmd.3.clone_from(&args);
+        }
         let child = Command::new(env!("CARGO_BIN_EXE_hinteros-system"))
             .args(&args)
             .env("PATH", path)

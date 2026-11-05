@@ -77,7 +77,7 @@ fn main() -> ExitCode {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
     match cli.command {
-        Some(Command::Job { run_dir, id }) => runner::main(&run_dir, &id),
+        Some(Command::Job { serve, id }) => runner::main(&serve, &id),
         Some(Command::Pin {
             verb,
             dirs,
@@ -107,6 +107,13 @@ fn main() -> ExitCode {
             journal_socket,
         }) => hinteros_system::resetpin::main(&dirs.paths(), profile.as_deref(), &journal_socket),
         Some(Command::Usage { dirs }) => hinteros_system::usage::main(&dirs.paths()),
+        Some(Command::BootEntries {
+            boot_entries,
+            run_dir,
+        }) => hinteros_system::generations::index_main(
+            &boot_entries,
+            &run_dir.join(hinteros_system::generations::BOOT_INDEX),
+        ),
         Some(Command::TimeZoneApply {
             dirs,
             zoneinfo_dir,

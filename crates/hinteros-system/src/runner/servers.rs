@@ -60,7 +60,7 @@ impl Runner {
 
     /// A systemd manager call on `unit` (`RestartUnit`, `StopUnit`), mode `replace`.
     fn unit_call(&self, method: &str, unit: &str) -> Result<(), String> {
-        let bus = self.spec.bus.clone();
+        let bus = self.bus.clone();
         let (method, unit) = (method.to_owned(), unit.to_owned());
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -96,7 +96,7 @@ impl Runner {
     /// users.
     pub(super) fn services_job(&mut self, j: &ServicesJob) -> Outcome {
         let outcome = self.apply(&j.apply)?;
-        let paths = self.spec.paths.clone();
+        let paths = self.paths.clone();
         for t in &j.delete {
             if !servers::delete_allowed(&t.base, &t.rel, &paths.server) {
                 warn!(base = %t.base.display(), path = %t.rel, "not deleting: outside /var/lib and /var/cache");
@@ -113,12 +113,19 @@ impl Runner {
                     warn!(base = %t.base.display(), path = %t.rel, "not deleting service data: {e}")
                 }
             }
+            // Jellyfin's HinterOS files: the setup unit's (root's) go with the service's.
+            if t.base == paths.state_dir && t.rel == format!("services/{}", jellyfin::ID) {
+                match crate::datadel::delete_under(&paths.root_state_dir, jellyfin::ID) {
+                    Ok(_) => info!("deleted the Jellyfin setup's files"),
+                    Err(e) => warn!("not deleting the Jellyfin setup's files: {e}"),
+                }
+            }
         }
         if j.enabled.iter().any(|i| i == jellyfin::ID) {
             // Its users once the setup unit is done (best effort: reveal and every Jellyfin job
             // sync again).
             self.set_stage(Stage::Configuring);
-            let files = jellyfin::Files::new(&paths.services_dir());
+            let files = jellyfin::Files::new(&paths);
             let addr = paths.server.jellyfin;
             let ready = self.wait_for(JELLYFIN_SETUP_WAIT, || {
                 files.setup_done() && jellyfin::Client::ping(addr, Duration::from_secs(2))
@@ -134,8 +141,8 @@ impl Runner {
 
     /// Jellyfin, set up and answering (waits up to [`SERVICE_WAIT`]).
     fn jellyfin_client(&mut self) -> Result<jellyfin::Client, Failure> {
-        let paths = self.spec.paths.clone();
-        let files = jellyfin::Files::new(&paths.services_dir());
+        let paths = self.paths.clone();
+        let files = jellyfin::Files::new(&paths);
         let addr = paths.server.jellyfin;
         let up = self.wait_for(SERVICE_WAIT, || {
             files.setup_done() && jellyfin::Client::ping(addr, Duration::from_secs(2))
@@ -154,8 +161,8 @@ impl Runner {
         self.set_stage(Stage::Preparing);
         let client = self.jellyfin_client()?;
         self.set_stage(Stage::Configuring);
-        let paths = self.spec.paths.clone();
-        let files = jellyfin::Files::new(&paths.services_dir());
+        let paths = self.paths.clone();
+        let files = jellyfin::Files::new(&paths);
         if let Err(e) = jellyfin::profiles(&paths).and_then(|p| jellyfin::sync(&client, &files, &p))
         {
             warn!("Jellyfin users not synced: {e}");
@@ -212,9 +219,9 @@ impl Runner {
 
     pub(super) fn plex_job(&mut self, j: &PlexJob) -> Outcome {
         self.set_stage(Stage::Preparing);
-        let server = self.spec.paths.server.clone();
+        let server = self.paths.server.clone();
         // Only a server run by the plex account gets the code (32400 is not a privileged port).
-        let Some(owner) = self.spec.paths.users.by_name(plex::USER).map(|u| u.uid) else {
+        let Some(owner) = self.paths.users.by_name(plex::USER).map(|u| u.uid) else {
             return Err(self.failed("Plex does not answer", "unreachable"));
         };
         let up = self.wait_for(SERVICE_WAIT, || {
@@ -245,7 +252,7 @@ impl Runner {
 
     pub(super) fn tailscale_job(&mut self, j: &TailscaleJob) -> Outcome {
         self.set_stage(Stage::Preparing);
-        let server = self.spec.paths.server.clone();
+        let server = self.paths.server.clone();
         let status = tailscale::status(&server.tailscale_socket, Duration::from_secs(5)).ok();
         if !j.login {
             self.set_stage(Stage::Configuring);
@@ -286,7 +293,7 @@ impl Runner {
         status: Option<&Value>,
         timeout: Duration,
     ) -> Result<(), Failure> {
-        let server = self.spec.paths.server.clone();
+        let server = self.paths.server.clone();
         let mut cmd = Command::new(&server.tailscale);
         cmd.args(tailscale::login_args(status, timeout))
             .stdin(Stdio::null())
@@ -405,7 +412,7 @@ impl Runner {
 
     pub(super) fn cloudflare_job(&mut self, j: &CloudflareJob) -> Outcome {
         self.set_stage(Stage::Configuring);
-        let paths = self.spec.paths.clone();
+        let paths = self.paths.clone();
         let token = paths.services_dir().join(servers::CLOUDFLARE).join("token");
         if j.set {
             if !token.is_file() {
@@ -484,7 +491,7 @@ impl Runner {
         let Some((from, to)) = backup::changes(old, new) else {
             return Ok(false);
         };
-        let paths = self.spec.paths.clone();
+        let paths = self.paths.clone();
         let data = paths.server.var_lib.join(backup::DATA);
         if !data.is_dir() {
             return Ok(false);
@@ -492,7 +499,7 @@ impl Runner {
         info!(from, to, "Jellyfin changes version: backing up its data");
         self.unit_call("StopUnit", backup::UNIT)
             .map_err(|e| self.failed(format!("stopping Jellyfin: {e}"), "refused"))?;
-        let bus = self.spec.bus.clone();
+        let bus = self.bus.clone();
         let stopped = self.wait_for(JELLYFIN_STOP_WAIT, || {
             !matches!(
                 Self::unit_state(bus.clone(), backup::UNIT).as_deref(),
@@ -504,12 +511,16 @@ impl Runner {
             stopped?;
             return Err(self.failed("Jellyfin did not stop", "timeout"));
         }
-        let dir = paths.services_dir().join(jellyfin::ID);
-        let made = std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&dir)
-            .and_then(|()| backup::replace(&data, &dir.join(backup::BACKUP)));
+        let backup = paths.jellyfin_backup();
+        let made = backup
+            .parent()
+            .map_or(Ok(()), |dir| {
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(dir)
+            })
+            .and_then(|()| backup::replace(&data, &backup));
         match made {
             Ok(n) => {
                 info!(entries = n, "Jellyfin data backed up");
@@ -536,8 +547,8 @@ impl Runner {
     /// switch may have restarted it, e.g. for a new version; up to [`SERVICE_WAIT`]). Best
     /// effort: `jellyfin.users.reveal` and every Jellyfin job sync again.
     pub(super) fn jellyfin_sync_users(&mut self) {
-        let paths = self.spec.paths.clone();
-        let files = jellyfin::Files::new(&paths.services_dir());
+        let paths = self.paths.clone();
+        let files = jellyfin::Files::new(&paths);
         if !jellyfin::enabled(&paths) || !files.setup_done() {
             return;
         }

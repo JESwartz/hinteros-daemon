@@ -20,11 +20,12 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Run one job (what `hinteros-job@<id>.service` executes): reads
-    /// `<run-dir>/jobs/<id>/spec.json`, written by the service.
+    /// `<run-dir>/jobs/<id>/spec.json`, written by the service. Paths, programs and the bus
+    /// are the job's own (these flags, as the service's), never the spec's: the service is not
+    /// root
     Job {
-        /// Runtime directory holding `jobs/`
-        #[arg(long, env = "HINTEROS_RUN_DIR", default_value = "/run/hinteros")]
-        run_dir: PathBuf,
+        #[command(flatten)]
+        serve: Box<ServeArgs>,
         /// Job id (16 hex digits)
         id: String,
     },
@@ -90,6 +91,16 @@ pub enum Command {
         /// Where the evdev devices are
         #[arg(long, default_value = "/dev/input")]
         input_dir: PathBuf,
+    },
+    /// Write the toplevels systemd-boot has an entry for to `<run-dir>/boot-entries.json`
+    /// (`hinteros-boot-entries.service`): the ESP is root's, and the service that lists the
+    /// generations is not
+    BootEntries {
+        /// systemd-boot's entries (`nixos-*.conf`)
+        #[arg(long, default_value = "/boot/loader/entries")]
+        boot_entries: PathBuf,
+        #[arg(long, default_value = "/run/hinteros")]
+        run_dir: PathBuf,
     },
     /// Apply the time zone `time_zone.set` asked for (`hinteros-time-zone-apply.service`):
     /// the zone in `<run-dir>/time-zone.request` into `<config-dir>/state.json` and the
@@ -165,9 +176,14 @@ pub struct ServeArgs {
     #[arg(long, default_value = "/etc/hinteros")]
     pub config_dir: PathBuf,
 
-    /// State dir (staging/, git/, the last update check)
+    /// State dir (profiles, PINs, the app registry, the last update check; the service's own)
     #[arg(long, default_value = "/var/lib/hinteros")]
     pub state_dir: PathBuf,
+
+    /// Root's own state, out of the service's reach (staging/, git/, the channel tips, the
+    /// Jellyfin backup): only jobs use it
+    #[arg(long, default_value = "/var/lib/hinteros-root")]
+    pub root_state_dir: PathBuf,
 
     /// Runtime dir (jobs/)
     #[arg(long, env = "HINTEROS_RUN_DIR", default_value = "/run/hinteros")]
@@ -366,6 +382,7 @@ impl ServeArgs {
         Paths {
             config_dir: self.config_dir.clone(),
             state_dir: self.state_dir.clone(),
+            root_state_dir: self.root_state_dir.clone(),
             run_dir: self.run_dir.clone(),
             profile: self.profile.clone(),
             current_system: self.current_system.clone(),
@@ -410,6 +427,19 @@ impl ServeArgs {
         }
     }
 
+    /// The shared directories `guest.end` clears (`--guest-tmp-dir`, else `/tmp`, `/var/tmp`,
+    /// `/dev/shm`).
+    pub fn guest_tmp_dirs(&self) -> Vec<PathBuf> {
+        if self.guest_tmp_dirs.is_empty() {
+            ["/tmp", "/var/tmp", "/dev/shm"]
+                .iter()
+                .map(PathBuf::from)
+                .collect()
+        } else {
+            self.guest_tmp_dirs.clone()
+        }
+    }
+
     pub fn update_check_cache(&self) -> Duration {
         Duration::from_secs(self.update_check_cache_s)
     }
@@ -429,6 +459,9 @@ impl ServeArgs {
 pub struct Paths {
     pub config_dir: PathBuf,
     pub state_dir: PathBuf,
+    /// Root's own state (jobs only; see `--root-state-dir`).
+    #[serde(default = "default_root_state")]
+    pub root_state_dir: PathBuf,
     pub run_dir: PathBuf,
     pub profile: PathBuf,
     pub current_system: PathBuf,
@@ -495,6 +528,10 @@ impl Default for ServerPaths {
 
 fn default_proc() -> PathBuf {
     "/proc".into()
+}
+
+pub fn default_root_state() -> PathBuf {
+    "/var/lib/hinteros-root".into()
 }
 
 pub fn default_boot_entries() -> PathBuf {
@@ -572,26 +609,38 @@ impl Paths {
     pub fn switch_json(&self) -> PathBuf {
         self.run_dir.join("switch.json")
     }
+    /// The toplevels systemd-boot has an entry for, as `hinteros-system boot-entries` (the
+    /// `hinteros-boot-entries` unit) last found them: the ESP is root's, the service is not.
+    pub fn boot_index(&self) -> PathBuf {
+        self.run_dir.join(crate::generations::BOOT_INDEX)
+    }
     pub fn jobs_dir(&self) -> PathBuf {
         self.run_dir.join("jobs")
     }
+    /// The edited copy of the config dir a job builds (root's: the service never sees it).
     pub fn staging(&self) -> PathBuf {
-        self.state_dir.join("staging")
+        self.root_state_dir.join("staging")
     }
+    /// The channel repository's mirror (root's: git runs in it as root).
     pub fn git_dir(&self) -> PathBuf {
-        self.state_dir.join("git")
+        self.root_state_dir.join("git")
     }
     pub fn last_check(&self) -> PathBuf {
         self.state_dir.join("update-check.json")
     }
-    /// The last `channel.check` result (root only), which `channel.set` must match.
+    /// The last `channel.check` result, which `channel.set` must match (the job verifies the
+    /// revision again).
     pub fn channel_check(&self) -> PathBuf {
         self.state_dir.join("channel-check.json")
     }
-    /// The newest verified tip seen on each channel branch (root only). Only update jobs write
+    /// The newest verified tip seen on each channel branch (root's). Only update jobs write
     /// it, and only forward: rollbacks and channel switches never lower it.
     pub fn channel_tips(&self) -> PathBuf {
-        self.state_dir.join("channel-tips.json")
+        self.root_state_dir.join("channel-tips.json")
+    }
+    /// The Jellyfin data copied before a version change (root's: owners and modes kept).
+    pub fn jellyfin_backup(&self) -> PathBuf {
+        self.root_state_dir.join("jellyfin-backup")
     }
     /// Which vendor terms were accepted, when and by whom (written by apps.install jobs).
     pub fn terms_accepted(&self) -> PathBuf {

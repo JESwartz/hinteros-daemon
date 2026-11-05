@@ -360,20 +360,11 @@ impl State {
     }
 }
 
-/// Hold the `state.json` lock (blocking): the service holds it while it reads, changes and
-/// writes `state.json` in place, a job while it carries the live time zone into its staged
+/// Hold the `state.json` lock (blocking): the time zone helper holds it while it reads, changes
+/// and writes `state.json` in place, a job while it carries the live time zone into its staged
 /// config and replaces `/etc/hinteros` with it (or restores a snapshot). Released on drop.
 pub fn lock(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(path)?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
-    Ok(file)
+    crate::fsutil::lock_file(path)
 }
 
 /// `[a-z0-9][a-z0-9-]{0,31}` (catalog.md).

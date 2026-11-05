@@ -998,8 +998,9 @@ What the service does, and how without root:
 polkit (system repo, `40-hinteros-system.rules`, before every other rules file): for the
 `hinteros-system` account, `org.freedesktop.systemd1.manage-units` only with verb `start` and
 unit `hinteros-job@<16 hex>.service`, `hinteros-usage.service` or
-`hinteros-time-zone-apply.service`; `restart` and `hinteros-lan-filter.service`; `freeze` or
-`thaw` and `user-<uid>.slice` (uid ≥ 1000). Every other action of the account is no.
+`hinteros-time-zone-apply.service`; `restart` and `hinteros-lan-filter.service`; `stop` or `start`
+(the verbs systemd asks with for `FreezeUnit` and `ThawUnit`) and `user-<uid>.slice` of a profile
+or the guest (uid ≥ 20000). Every other action of the account is no.
 `StartTransientUnit` has no unit name, so it is refused.
 
 Root's side:
@@ -1033,6 +1034,11 @@ What is left, and why:
   profiles, settings. It skips its own PIN, polkit and rate checks. It gets no root: a job runs
   no program and writes no path the spec names, and `state.json` is typed (`State`) and
   checked again by the system repo.
+- systemd asks polkit about `FreezeUnit` and `ThawUnit` with the verbs `stop` and `start`, so
+  the account may also stop or start a profile's slice (end its session). Accounts below uid
+  20000 (a test box's session user) are never frozen.
+- Its D-Bus calls to systemd now go through polkit: while polkitd restarts they fail (the local
+  network filter tries once more).
 - `HINTEROS_EXE` of another user's process is its own name, not its path. Reading the path
   needs `CAP_SYS_PTRACE` (any root process could then be traced); the uid, pid and pidfd stay
   exact.

@@ -4512,7 +4512,7 @@
     },
     "store.list": {
       "summary": "The App Store: the running generation's catalog, merged with what is installed.",
-      "description": "From the catalog index of the running generation (/run/current-system/sw/share/hinteros/catalog.json) and system.settings.get's installed apps. Lists available apps and installed ones whatever their catalog status (retired: still works, can be removed; removed: the next update takes it away), sorted by name; apps being installed or removed through this daemon have state installing/removing. Terms carry the full text's path on this box, so the launcher can show it offline before system.apps.install. more_after_update: the last update check found apps that the next update makes installable. unavailable {service: catalog}: no index, or an index version this daemon does not read.",
+      "description": "From the catalog index of the running generation (/run/current-system/sw/share/hinteros/catalog.json) and system.settings.get's installed apps. Lists available apps and installed ones whatever their catalog status (retired: still works, can be removed; removed: the next update takes it away), and removed apps that are not installed but whose data (dataPaths) is still in this profile's home (state leftover: only Clear data, system.apps.clear_data, is offered), sorted by name; apps being installed or removed through this daemon have state installing/removing. Terms carry the full text's path on this box, so the launcher can show it offline before system.apps.install. more_after_update: the last update check found apps that the next update makes installable. unavailable {service: catalog}: no index, or an index version this daemon does not read.",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": {
         "type": "object",
@@ -6018,7 +6018,7 @@
     },
     "AuthCookie": { "description": "polkit's cookie for one authentication request.", "type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$" },
     "AuthOutcome": { "enum": ["authorized", "failed", "cancelled"] },
-    "StoreState": { "enum": ["available", "installed", "installing", "removing", "retired", "unavailable"] },
+    "StoreState": { "description": "leftover: not installed and removed from the catalog, its data still in this profile's home; only Clear data is offered.", "enum": ["available", "installed", "installing", "removing", "retired", "unavailable", "leftover"] },
     "CatalogStatus": { "enum": ["available", "retired", "removed"] },
     "Delivery": {
       "description": "How an app reaches the box. download: from the binary cache. build: fetched from the vendor and prepared on this box during install (a few minutes, needs internet).",
@@ -6026,7 +6026,7 @@
     },
 
     "StoreApp": {
-      "description": "A catalog entry (hinteros-catalog index version 4, fields in snake_case) with its state on this box. Removed entries (tombstones) only have id, name and status_reason; the other fields are empty.",
+      "description": "A catalog entry (hinteros-catalog index version 4, fields in snake_case) with its state on this box. Removed entries (tombstones) only have id, name, status_reason and data_paths; the other fields are empty.",
       "type": "object",
       "required": [
         "id", "name", "summary", "description", "category", "homepage", "size_mib", "icon", "box_features", "depends",

@@ -1905,6 +1905,9 @@ pub enum StoreState {
     Retired,
     /// Installed, and removed from the catalog: the next update takes it away.
     Unavailable,
+    /// Not installed and removed from the catalog, with its data still in this profile's home:
+    /// only Clear data (`system.apps.clear_data`) is offered.
+    Leftover,
     /// A value of a later minor (`#[serde(other)]`). This build never sends it.
     #[serde(other)]
     Unknown,
@@ -1918,6 +1921,7 @@ impl StoreState {
         StoreState::Removing,
         StoreState::Retired,
         StoreState::Unavailable,
+        StoreState::Leftover,
     ];
 }
 

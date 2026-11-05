@@ -1233,8 +1233,10 @@ delete_data}` (polkit `org.hinteros.system.apps`, seat check, rate limit, audit)
   running index (null when that fails; the update is still offered).
 
 `store.list` merges the index (`[store] index`) with `system.settings.get`'s apps:
-available apps plus installed ones whatever their status, by name, with `state`
-(`available|installed|installing|removing|retired|unavailable`; installing/removing from apps jobs
+available apps, installed ones whatever their status, and removed apps that are not installed but
+left data in the home (`dataPaths`; none without a home), by name, with `state`
+(`available|installed|installing|removing|retired|unavailable|leftover`; leftover: only Clear
+data is offered; installing/removing from apps jobs
 relayed through this daemon), all catalog fields in snake_case, terms with the absolute path of the
 text so the launcher shows it offline, and `more_after_update` from the last update check's
 `new_apps`. `store_changed` after an apps job starts or finishes, any other switching job finishes,

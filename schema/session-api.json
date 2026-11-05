@@ -3434,8 +3434,8 @@
       "errors": ["unavailable", "not_authorized", "device_failed"],
       "examples": [
         { "name": "two networks", "params": {}, "result": { "networks": [
-          { "ssid": "Home", "signal": 72, "security": "wpa", "known": true, "connected": true },
-          { "ssid": "Neighbour", "signal": 31, "security": "wpa3", "known": false, "connected": false }
+          { "id": "486f6d65-wpa", "ssid": "Home", "signal": 72, "security": "wpa", "known": true, "connected": true },
+          { "id": "4e65696768626f7572-wpa3", "ssid": "Neighbour", "signal": 31, "security": "wpa3", "known": false, "connected": false }
         ] } },
         { "name": "Wi-Fi off", "params": {}, "error": { "code": 4002, "message": "Wi-Fi is turned off", "data": { "reason": "wifi_disabled" } } }
       ]
@@ -3451,23 +3451,23 @@
     },
     "wifi.connect": {
       "summary": "Join a network, creating a system-wide connection for it.",
-      "description": "The password is needed unless the network is open or already known; it is stored in NetworkManager's system connection (readable by the session user, as accepted in the threat model) and is never logged by the daemon. Returns when the connection is up (or has failed, at most about 45 s). A failed new connection is removed again. 802.1X (enterprise) networks are refused with invalid_params.",
+      "description": "id: the network's id from wifi.list or wifi.scan (not_found when no access point with that SSID and security is in range; invalid_params {field: id, reason: bad_format} when it is not an id). The password is needed unless the network is open or already known; it is stored in NetworkManager's system connection (readable by the session user, as accepted in the threat model) and is never logged by the daemon. Returns when the connection is up (or has failed, at most about 45 s). A failed new connection is removed again. 802.1X (enterprise) and WEP networks are refused with invalid_params {field: id, reason: unsupported_security}.",
       "params": {
         "type": "object",
-        "required": ["ssid"],
+        "required": ["id"],
         "additionalProperties": false,
         "properties": {
-          "ssid": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "id": { "$ref": "#/$defs/WifiNetworkId" },
           "password": { "description": "8 to 63 characters (WPA), or 64 hex digits (the raw key).", "type": "string", "minLength": 1, "maxLength": 128 }
         }
       },
       "result": { "type": "object", "$ref": "#/$defs/NetworkStatus" },
       "errors": ["unavailable", "not_authorized", "not_found", "wrong_password", "device_failed"],
       "examples": [
-        { "name": "new network", "params": { "ssid": "Home", "password": "correct horse" }, "result": { "wifi_available": true, "wifi_enabled": true, "ethernet": false, "wifi_ssid": "Home", "wifi_signal": 72, "address": "192.168.1.20", "connectivity": "full" } },
-        { "name": "wrong password", "params": { "ssid": "Home", "password": "nope nope" }, "error": { "code": 4003, "message": "the password for Home was not accepted" } },
-        { "name": "out of range", "params": { "ssid": "Gone" }, "error": { "code": 3010, "message": "no network named Gone in range" } },
-        { "name": "password missing", "params": { "ssid": "Home" }, "error": { "code": -32602, "message": "Home needs a password", "data": { "field": "password", "reason": "required" } } }
+        { "name": "new network", "params": { "id": "486f6d65-wpa", "password": "correct horse" }, "result": { "wifi_available": true, "wifi_enabled": true, "ethernet": false, "wifi_ssid": "Home", "wifi_signal": 72, "address": "192.168.1.20", "connectivity": "full" } },
+        { "name": "wrong password", "params": { "id": "486f6d65-wpa", "password": "nope nope" }, "error": { "code": 4003, "message": "the password for Home was not accepted" } },
+        { "name": "out of range", "params": { "id": "476f6e65-wpa" }, "error": { "code": 3010, "message": "no network named Gone in range" } },
+        { "name": "password missing", "params": { "id": "486f6d65-wpa" }, "error": { "code": -32602, "message": "Home needs a password", "data": { "field": "password", "reason": "required" } } }
       ]
     },
     "wifi.disconnect": {
@@ -3481,12 +3481,12 @@
     },
     "wifi.forget": {
       "summary": "Delete the stored connections of a network.",
-      "description": "Disconnects if it is the network in use. Forgetting a network that is not stored is not an error.",
-      "params": { "type": "object", "required": ["ssid"], "additionalProperties": false, "properties": { "ssid": { "type": "string", "minLength": 1, "maxLength": 32 } } },
+      "description": "id: the network's id from wifi.list (invalid_params {field: id, reason: bad_format} when it is not an id). Deletes every stored connection with that SSID. Disconnects if it is the network in use. Forgetting a network that is not stored is not an error.",
+      "params": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "$ref": "#/$defs/WifiNetworkId" } } },
       "result": { "type": "object", "additionalProperties": false, "properties": {} },
       "errors": ["unavailable", "not_authorized"],
       "examples": [
-        { "name": "forgotten", "params": { "ssid": "Home" }, "result": {} }
+        { "name": "forgotten", "params": { "id": "486f6d65-wpa" }, "result": {} }
       ]
     },
     "wifi.enable": {
@@ -4962,7 +4962,7 @@
       "description": "Params are what wifi.list returns. Signal changes below 5 points do not count; debounced.",
       "params": { "type": "object", "$ref": "#/$defs/WifiList" },
       "examples": [
-        { "name": "one network", "params": { "networks": [ { "ssid": "Home", "signal": 72, "security": "wpa", "known": true, "connected": true } ] } }
+        { "name": "one network", "params": { "networks": [ { "id": "486f6d65-wpa", "ssid": "Home", "signal": 72, "security": "wpa", "known": true, "connected": true } ] } }
       ]
     },
     "bluetooth_changed": {
@@ -6816,12 +6816,14 @@
       }
     },
     "WifiSecurity": { "description": "wpa is WPA or WPA2 with a passphrase, wpa3 is SAE only, enterprise (802.1X) cannot be joined with a password alone.", "type": "string", "enum": ["open", "wep", "wpa", "wpa3", "enterprise"] },
+    "WifiNetworkId": { "description": "Opaque: a network in wifi.list, for wifi.connect and wifi.forget (one id per raw SSID and security; stable while they stay the same). Clients must not build or parse it.", "type": "string", "pattern": "^([0-9a-f]{2}){1,32}-[a-z0-9_]{1,16}$" },
     "WifiNetwork": {
       "type": "object",
-      "required": ["ssid", "signal", "security", "known", "connected"],
+      "required": ["id", "ssid", "signal", "security", "known", "connected"],
       "additionalProperties": false,
       "properties": {
-        "ssid": { "type": "string", "minLength": 1 },
+        "id": { "$ref": "#/$defs/WifiNetworkId" },
+        "ssid": { "description": "The name to show: an SSID that is not UTF-8 has U+FFFD in place of its bad bytes, so two networks can show the same name (their ids differ).", "type": "string", "minLength": 1 },
         "signal": { "type": "integer", "minimum": 0, "maximum": 100 },
         "security": { "$ref": "#/$defs/WifiSecurity" },
         "known": { "description": "A connection for it is stored (no password needed).", "type": "boolean" },

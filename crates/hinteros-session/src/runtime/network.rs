@@ -12,7 +12,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use hinteros_api::session::{
     Connectivity, Empty, EventName, NetworkStatus, Service, WifiConnectParams, WifiEnableParams,
-    WifiForgetParams, WifiList, WifiNetwork, WifiSecurity,
+    WifiForgetParams, WifiList, WifiNetwork, WifiSecurity, parse_wifi_network_id, wifi_network_id,
 };
 use hinteros_api::{ErrorCode, ErrorObject};
 use tokio::time::{Instant, sleep, timeout};
@@ -282,19 +282,21 @@ async fn list_from(conn: &Connection, devices: &[Device]) -> Result<WifiList, Er
     } else {
         None
     };
-    // One entry per SSID: the strongest access point.
-    let mut best: HashMap<Vec<u8>, &Ap> = HashMap::new();
+    // One entry per network (raw SSID and security, its id): the strongest access point.
+    let mut best: HashMap<(Vec<u8>, WifiSecurity), &Ap> = HashMap::new();
     for ap in &aps {
-        match best.get(&ap.ssid) {
+        let key = (ap.ssid.clone(), ap.security);
+        match best.get(&key) {
             Some(b) if b.strength >= ap.strength => {}
             _ => {
-                best.insert(ap.ssid.clone(), ap);
+                best.insert(key, ap);
             }
         }
     }
     let mut networks: Vec<WifiNetwork> = best
         .into_values()
         .map(|ap| WifiNetwork {
+            id: wifi_network_id(&ap.ssid, ap.security),
             ssid: display_ssid(&ap.ssid),
             signal: ap.strength,
             security: ap.security,
@@ -302,7 +304,12 @@ async fn list_from(conn: &Connection, devices: &[Device]) -> Result<WifiList, Er
             connected: active_ssid.as_deref() == Some(ap.ssid.as_slice()),
         })
         .collect();
-    networks.sort_by(|a, b| b.signal.cmp(&a.signal).then_with(|| a.ssid.cmp(&b.ssid)));
+    networks.sort_by(|a, b| {
+        b.signal
+            .cmp(&a.signal)
+            .then_with(|| a.ssid.cmp(&b.ssid))
+            .then_with(|| a.id.cmp(&b.id))
+    });
     Ok(WifiList { networks })
 }
 
@@ -428,36 +435,21 @@ fn display_ssid(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
 }
 
-/// Whether the raw SSID `raw` is the network the API calls `name`. `exact`: another SSID has
-/// exactly these bytes, so only that one is.
-fn named(name: &str, raw: &[u8], exact: bool) -> bool {
-    raw == name.as_bytes() || (!exact && display_ssid(raw) == name)
-}
-
-/// Whether one of `raws` is exactly `name` (see [`named`]).
-fn has_exact<'a>(name: &str, mut raws: impl Iterator<Item = &'a [u8]>) -> bool {
-    raws.any(|r| r == name.as_bytes())
-}
-
-/// The one raw SSID of `raws` that the API calls `name` (see [`named`]). When two SSIDs that
-/// are not UTF-8 show the same name, the first: forgetting both would be worse.
-fn one_named<'a>(name: &str, raws: impl Iterator<Item = &'a [u8]> + Clone) -> Option<&'a [u8]> {
-    let exact = has_exact(name, raws.clone());
-    raws.into_iter().find(|r| named(name, r, exact))
+/// The raw SSID and security of a `wifi.list` id; `invalid_params {field: id, reason:
+/// bad_format}` when it is not one.
+fn network_of(id: &str) -> Result<(Vec<u8>, WifiSecurity), ErrorObject> {
+    parse_wifi_network_id(id).ok_or_else(|| invalid("id", "bad_format", "not a Wi-Fi network id"))
 }
 
 pub async fn forget(ctx: &Ctx, p: WifiForgetParams) -> Result<Empty, ErrorObject> {
+    let (raw, _) = network_of(&p.id)?;
     let conn = ctx.conn(SVC).await?;
     let saved = saved(&conn).await?;
-    let Some(raw) = one_named(&p.ssid, saved.iter().map(|s| s.ssid.as_slice())).map(<[u8]>::to_vec)
-    else {
-        return Ok(Empty {});
-    };
-    // Every connection stored for that one network.
+    // Every connection stored for that SSID (whatever security it was stored with).
     for s in saved.into_iter().filter(|s| s.ssid == raw) {
         let c = proxy(&conn, NM, &s.path, I_CONNECTION).await.map_err(map)?;
         c.call::<_, _, ()>("Delete", &()).await.map_err(map)?;
-        info!(ssid = %p.ssid, "forgot a Wi-Fi connection");
+        info!(ssid = %display_ssid(&raw), "forgot a Wi-Fi connection");
     }
     Ok(Empty {})
 }
@@ -696,21 +688,20 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
     if !get(&nm, "WirelessEnabled").unwrap_or(false) {
         return Err(wifi_off());
     }
+    let (raw, security) = network_of(&p.id)?;
+    // The name to show and log.
+    let name = display_ssid(&raw);
     let aps = access_points(&conn, device).await?;
-    let exact = has_exact(&p.ssid, aps.iter().map(|a| a.ssid.as_slice()));
     let ap = aps
         .into_iter()
-        .filter(|a| named(&p.ssid, &a.ssid, exact))
+        .filter(|a| a.ssid == raw && a.security == security)
         .max_by_key(|a| a.strength)
-        .ok_or_else(|| not_found(format!("no network named {} in range", p.ssid)))?;
+        .ok_or_else(|| not_found(format!("no network named {name} in range")))?;
     if matches!(ap.security, WifiSecurity::Enterprise | WifiSecurity::Wep) {
         return Err(invalid(
-            "ssid",
+            "id",
             "unsupported_security",
-            format!(
-                "{} uses a security type that cannot be joined with a password",
-                p.ssid
-            ),
+            format!("{name} uses a security type that cannot be joined with a password"),
         ));
     }
     let password = p
@@ -754,7 +745,7 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
                 )
                 .await;
             if let Err(e) = &secrets {
-                warn!(ssid = %p.ssid, "cannot read the stored Wi-Fi secrets: {e}");
+                warn!(ssid = %name, "cannot read the stored Wi-Fi secrets: {e}");
             }
             c.call::<_, _, ()>("Update", &(update,))
                 .await
@@ -768,11 +759,11 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
                 return Err(invalid(
                     "password",
                     "required",
-                    format!("{} needs a password", p.ssid),
+                    format!("{name} needs a password"),
                 ));
             }
             let id = uuid();
-            let s = new_settings(&ap.ssid, &p.ssid, ap.security, pw, &id);
+            let s = new_settings(&ap.ssid, &name, ap.security, pw, &id);
             let path: OwnedObjectPath = settings.call("AddConnection", &(s,)).await.map_err(map)?;
             (path.to_string(), true)
         }
@@ -810,7 +801,7 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
     .await;
     guard.armed = false;
     if let Err(e) = &result {
-        warn!(ssid = %p.ssid, code = e.code, "Wi-Fi connect failed: {}", e.message);
+        warn!(ssid = %name, code = e.code, "Wi-Fi connect failed: {}", e.message);
         if created && let Ok(c) = proxy(&conn, NM, &target, I_CONNECTION).await {
             // Do not leave a connection with a wrong password behind.
             let _ = c.call::<_, _, ()>("Delete", &()).await;
@@ -827,12 +818,12 @@ pub async fn connect(ctx: &Ctx, p: WifiConnectParams) -> Result<NetworkStatus, E
                 .call::<_, _, ()>("Update", &(as_settings(prev, None),))
                 .await
             {
-                warn!(ssid = %p.ssid, "cannot restore the stored Wi-Fi password: {e}");
+                warn!(ssid = %name, "cannot restore the stored Wi-Fi password: {e}");
             }
         }
     }
     result?;
-    info!(ssid = %p.ssid, "joined a Wi-Fi network");
+    info!(ssid = %name, "joined a Wi-Fi network");
     let devices = self::devices(&conn).await?;
     status_from(&conn, &devices).await
 }
@@ -929,24 +920,42 @@ mod tests {
     }
 
     #[test]
-    fn ssids_that_are_not_utf8_match_as_shown() {
+    fn ssids_that_are_not_utf8_keep_their_own_ids() {
         let latin1 = b"Caf\xe9";
         let shown = display_ssid(latin1);
         assert_eq!(shown, "Caf\u{fffd}");
-        assert!(named(&shown, latin1, false));
-        assert!(named("Home", b"Home", true));
-        assert!(!named("Home", b"Home2", false));
-        // A network really named "Caf\u{fffd}" is the one meant by that name.
-        let raws: [&[u8]; 2] = [latin1, shown.as_bytes()];
-        let exact = has_exact(&shown, raws.into_iter());
-        assert!(exact);
-        assert!(!named(&shown, latin1, exact));
-        assert!(named(&shown, shown.as_bytes(), exact));
-        // Two SSIDs that show the same name: only one is forgotten.
-        let both: [&[u8]; 3] = [b"Home", latin1, b"Caf\xe8"];
-        assert_eq!(one_named(&shown, both.into_iter()), Some(&latin1[..]));
-        assert_eq!(one_named(&shown, raws.into_iter()), Some(shown.as_bytes()));
-        assert_eq!(one_named("Work", both.into_iter()), None);
+        // Two SSIDs that show the same name, and one really named so: three ids.
+        let ids: Vec<String> = [&latin1[..], b"Caf\xe8", shown.as_bytes()]
+            .iter()
+            .map(|r| wifi_network_id(r, WifiSecurity::Wpa))
+            .collect();
+        assert_eq!(ids[0], "436166e9-wpa");
+        assert!(ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2]);
+        assert_eq!(
+            network_of(&ids[1]).unwrap(),
+            (b"Caf\xe8".to_vec(), WifiSecurity::Wpa)
+        );
+        // The same SSID with another security is another network.
+        assert_ne!(
+            wifi_network_id(b"Home", WifiSecurity::Open),
+            wifi_network_id(b"Home", WifiSecurity::Wpa)
+        );
+        for bad in [
+            "Home",
+            "486f6d65",
+            "486f6d6-wpa",
+            "486F6D65-wpa",
+            "-wpa",
+            "486f6d65-x",
+            "",
+        ] {
+            let e = network_of(bad).unwrap_err();
+            assert_eq!(e.data.unwrap()["field"], "id", "{bad}");
+        }
+        assert!(
+            network_of(&format!("{}-open", "61".repeat(33))).is_err(),
+            "longer than 32 bytes"
+        );
     }
 
     #[test]

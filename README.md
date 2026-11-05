@@ -577,7 +577,7 @@ every method and event is in `schema/session-api.json` with examples.
 
 | Area | Methods | Events | Through |
 |---|---|---|---|
-| Wi-Fi | `network.status`, `wifi.scan`, `wifi.list`, `wifi.connect {ssid, password?}`, `wifi.disconnect`, `wifi.forget {ssid}`, `wifi.enable {enabled}` | `network_changed`, `wifi_list_changed` | NetworkManager (D-Bus) |
+| Wi-Fi | `network.status`, `wifi.scan`, `wifi.list`, `wifi.connect {id, password?}`, `wifi.disconnect`, `wifi.forget {id}`, `wifi.enable {enabled}` | `network_changed`, `wifi_list_changed` | NetworkManager (D-Bus) |
 | Bluetooth | `bluetooth.status`, `.scan {enabled, timeout_s?}`, `.devices`, `.pair {address}`, `.confirm {address, accept}`, `.connect`, `.disconnect`, `.forget` | `bluetooth_changed`, `bluetooth_confirm` | BlueZ (D-Bus) |
 | Audio | `audio.outputs`, `.set_output {id}`, `.volume {percent?}`, `.mute {muted}` (all return the same state). The outputs are the sinks and the outputs of each ALSA card's other available profiles (id: the sink name it will have, `alsa_output.<card>.<mapping>`; no surround variants); `set_output` on one of those switches the card's profile first (`set-card-profile`, keeping the input), as does the box-wide output at session start | `audio_changed` | `pactl` (PipeWire's pulse server) |
 | Display | `display.modes`, `.set_mode {width, height, refresh}`, `.keep`, `.revert` | | gamescope (Wayland output, Xwayland, mode save file) |
@@ -597,7 +597,11 @@ that feature answers `unavailable`; the rest of the API is unaffected, which is 
 preview or CI sees. Every call has a time limit (30 s; `wifi.connect` 60 s, `bluetooth.pair`
 90 s), so a hung service cannot hang the launcher.
 
-**Wi-Fi.** `wifi.connect` creates a *system* connection (`AddConnection`, then
+**Wi-Fi.** Each `wifi.list` entry has an opaque `id` (the raw SSID in hex, `-`, the security),
+one per raw SSID and security, and `ssid`, the name to show (U+FFFD for bytes that are not UTF-8):
+`wifi.connect` and `wifi.forget` take the `id`, so two networks whose names show the same are
+still told apart (`invalid_params {field: id, reason: bad_format}` for anything else; `wifi.forget`
+deletes every stored connection with that SSID). `wifi.connect` creates a *system* connection (`AddConnection`, then
 `ActivateConnection`), so it exists before login and for every profile; a stored network needs no
 password, a new password replaces the stored one. WPA/WPA2 (`wpa-psk`) and WPA3 (`sae`) and open
 networks work; WEP and 802.1X are refused (`invalid_params {reason: unsupported_security}`). The

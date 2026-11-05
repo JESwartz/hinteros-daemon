@@ -1108,10 +1108,13 @@ fn runtime_schema_rejects_what_it_should() {
     let schema = ApiSchema::session();
     let bad = [
         ("/methods/wifi.connect/params", r#"{}"#),
-        ("/methods/wifi.connect/params", r#"{"ssid":""}"#),
+        ("/methods/wifi.connect/params", r#"{"ssid":"Home"}"#),
+        ("/methods/wifi.connect/params", r#"{"id":"Home"}"#),
+        ("/methods/wifi.connect/params", r#"{"id":"486F6D65-wpa"}"#),
+        ("/methods/wifi.forget/params", r#"{"id":"-wpa"}"#),
         (
             "/methods/wifi.connect/params",
-            r#"{"ssid":"a","password":"x","hidden":true}"#,
+            r#"{"id":"61-wpa","password":"x","hidden":true}"#,
         ),
         ("/methods/wifi.enable/params", r#"{"enabled":"on"}"#),
         (
@@ -1174,12 +1177,12 @@ fn runtime_schema_rejects_what_it_should() {
 fn wifi_password_is_not_in_debug_output() {
     use hinteros_api::session::WifiConnectParams;
     let p = WifiConnectParams {
-        ssid: "Home".into(),
+        id: "486f6d65-wpa".into(),
         password: Some("hunter2hunter2".into()),
     };
     let shown = format!("{p:?}");
     assert!(
-        shown.contains("Home") && !shown.contains("hunter2"),
+        shown.contains("486f6d65-wpa") && !shown.contains("hunter2"),
         "{shown}"
     );
 }

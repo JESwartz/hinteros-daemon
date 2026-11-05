@@ -3,8 +3,9 @@
 //!
 //! The service has no write access to `/etc`: `time_zone.set` leaves the zone in
 //! `<run-dir>/time-zone.request`, starts `hinteros-time-zone-apply.service` (a oneshot running
-//! `hinteros-system time-zone-apply`, see [`crate::timezone::apply_main`]) and waits for its
-//! systemd job to end.
+//! `hinteros-system time-zone-apply`, see [`crate::timezone::apply_main`]: it writes
+//! `state.json` and asks systemd-timedated for `/etc/localtime`) and waits for its systemd job
+//! to end.
 //!
 //! The admin PIN guards `time_zone.set` like every box-wide setting, except in first-boot mode
 //! (no admin profile yet, the rule of `profiles.setup_admin`): the first-boot wizard sets the
@@ -111,9 +112,18 @@ impl Service {
             // One request at a time.
             let _one = self.tz_apply.lock().await;
             timezone::write_request(&self.paths, &p.zone).map_err(not_applied)?;
-            self.run_oneshot(APPLY_UNIT, "StartUnit", APPLY_TIMEOUT)
+            // The unit binds /etc/hinteros when it starts: a job that swaps that directory
+            // before the helper takes the state.json lock makes the helper fail (it changes
+            // nothing). Once more, then it is a failure.
+            if let Err(e) = self
+                .run_oneshot(APPLY_UNIT, "StartUnit", APPLY_TIMEOUT)
                 .await
-                .map_err(not_applied)?;
+            {
+                info!("time zone: {e}; once more");
+                self.run_oneshot(APPLY_UNIT, "StartUnit", APPLY_TIMEOUT)
+                    .await
+                    .map_err(not_applied)?;
+            }
         }
         let new = self.time_zone_get()?;
         if new.zone != p.zone {

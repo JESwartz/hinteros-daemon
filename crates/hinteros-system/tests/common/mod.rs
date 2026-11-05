@@ -4,7 +4,8 @@
 //!   polkit
 //!   (`CheckAuthorization` answers per action, records subjects) and systemd (`StartUnit`
 //!   of `hinteros-job@<id>.service` runs `hinteros-system job <id>` as a child of the test;
-//!   the profiles' slices with their `FreezerState`, `FreezeUnit` and `ThawUnit`).
+//!   the profiles' slices with their `FreezerState`, `FreezeUnit` and `ThawUnit`), and
+//!   systemd-timedated (`SetTimezone` replaces the fake root's `etc/localtime`).
 //! - A fake root: `/etc/hinteros`, `/var/lib/hinteros`, `/run/hinteros`, a system profile with
 //!   generations, `/run/current-system`, the update policy, and fake `nix`, `nix-env`,
 //!   `nixos-facter` and `switch-to-configuration` scripts that log what they were asked to do.
@@ -149,6 +150,10 @@ pub struct FakeState {
     pub tz_cmd: Option<(PathBuf, Vec<String>)>,
     /// The time zone unit's job result instead of running it (e.g. "failed").
     pub tz_result: Option<String>,
+    /// How many of the next runs of the time zone unit fail (before it runs).
+    pub tz_fail_next: u32,
+    /// The fake systemd-timedated.
+    pub timedated: Timedated,
     /// How `hinteros-lan-filter.service` runs (`RestartUnit`): the binary and its arguments.
     pub lan_cmd: Option<(PathBuf, Vec<String>)>,
     /// Jobs started so far (their ids).
@@ -322,6 +327,52 @@ impl Authority {
     }
 }
 
+/// The fake systemd-timedated: like the real one, it reads the link only when it starts
+/// (`zone`: what it thinks is set; `None` until then, and again after `StopUnit`) and does
+/// nothing for that zone.
+#[derive(Default)]
+pub struct Timedated {
+    /// The link it replaces and the tzdata it points into.
+    pub link: PathBuf,
+    pub zoneinfo: PathBuf,
+    pub zone: Option<String>,
+    /// Refuse every call (an error reply).
+    pub refuse: bool,
+    /// The zones asked for.
+    pub calls: Vec<String>,
+}
+
+struct TimedatedIface(Shared);
+
+#[zbus::interface(name = "org.freedesktop.timedate1")]
+impl TimedatedIface {
+    fn set_timezone(&self, zone: String, interactive: bool) -> zbus::fdo::Result<()> {
+        assert!(!interactive);
+        let mut s = self.0.lock().unwrap();
+        let t = &mut s.timedated;
+        t.calls.push(zone.clone());
+        let file = t.zoneinfo.join(&zone);
+        if t.refuse || !file.is_file() {
+            return Err(zbus::fdo::Error::InvalidArgs(format!("no zone {zone}")));
+        }
+        let current = t.zone.get_or_insert_with(|| {
+            std::fs::read_link(&t.link)
+                .ok()
+                .and_then(|l| Some(l.strip_prefix(&t.zoneinfo).ok()?.display().to_string()))
+                .unwrap_or_default()
+        });
+        if *current == zone {
+            return Ok(());
+        }
+        let tmp = t.link.with_extension("timedated-tmp");
+        let _ = std::fs::remove_file(&tmp);
+        symlink(&file, &tmp).unwrap();
+        std::fs::rename(&tmp, &t.link).unwrap();
+        t.zone = Some(zone);
+        Ok(())
+    }
+}
+
 struct Systemd(Shared);
 
 #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
@@ -361,7 +412,11 @@ impl Systemd {
     }
 
     fn stop_unit(&self, name: String, _mode: String) -> zbus::fdo::Result<OwnedObjectPath> {
-        self.0.lock().unwrap().units.push(format!("stop {name}"));
+        let mut s = self.0.lock().unwrap();
+        if name == "systemd-timedated.service" {
+            s.timedated.zone = None;
+        }
+        s.units.push(format!("stop {name}"));
         Ok(OwnedObjectPath::try_from("/org/freedesktop/systemd1/job/8").unwrap())
     }
 
@@ -419,8 +474,15 @@ impl Systemd {
     /// (after the reply, as systemd does).
     fn start_time_zone_unit(&self, name: String, conn: zbus::Connection) -> OwnedObjectPath {
         let (cmd, result) = {
-            let s = self.0.lock().unwrap();
-            (s.tz_cmd.clone(), s.tz_result.clone())
+            let mut s = self.0.lock().unwrap();
+            let fail = s.tz_fail_next > 0;
+            s.tz_fail_next = s.tz_fail_next.saturating_sub(1);
+            let result = if fail {
+                Some("failed".into())
+            } else {
+                s.tz_result.clone()
+            };
+            (s.tz_cmd.clone(), result)
         };
         self.run_helper(name, cmd, result, conn)
     }
@@ -531,6 +593,10 @@ pub async fn serve_fakes(address: &str, state: Shared) -> zbus::Connection {
         .await
         .unwrap();
     server
+        .at("/org/freedesktop/timedate1", TimedatedIface(state.clone()))
+        .await
+        .unwrap();
+    server
         .at("/org/freedesktop/systemd1", Systemd(state))
         .await
         .unwrap();
@@ -538,6 +604,7 @@ pub async fn serve_fakes(address: &str, state: Shared) -> zbus::Connection {
         "org.freedesktop.login1",
         "org.freedesktop.PolicyKit1",
         "org.freedesktop.systemd1",
+        "org.freedesktop.timedate1",
     ] {
         conn.request_name(name).await.unwrap();
     }
@@ -958,8 +1025,15 @@ impl System {
                     zoneinfo_fixtures().display().to_string(),
                     "--localtime".into(),
                     r("etc/localtime"),
+                    "--bus".into(),
+                    bus.address.clone(),
                 ],
             ));
+            fakes.lock().unwrap().timedated = Timedated {
+                link: root.p("etc/localtime"),
+                zoneinfo: zoneinfo_fixtures(),
+                ..Default::default()
+            };
         }
         let conn = serve_fakes(&bus.address, fakes.clone()).await;
         let sock = UnixDatagram::bind(root.p("journal.sock")).unwrap();

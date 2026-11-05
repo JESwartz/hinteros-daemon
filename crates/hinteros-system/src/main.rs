@@ -111,11 +111,12 @@ fn main() -> ExitCode {
             dirs,
             zoneinfo_dir,
             localtime,
+            bus,
         }) => {
             let mut paths = dirs.paths();
             paths.zoneinfo_dir = zoneinfo_dir;
             paths.localtime = localtime;
-            hinteros_system::timezone::apply_main(&paths)
+            hinteros_system::timezone::apply_main(&paths, bus.as_deref())
         }
         Some(Command::KeyboardHome { socket, input_dir }) => {
             hinteros_system::keyboard::main(&input_dir, &socket)

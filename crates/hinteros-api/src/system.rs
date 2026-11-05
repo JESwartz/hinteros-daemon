@@ -2490,6 +2490,7 @@ pub struct JobFinishedParams {
     pub job_id: String,
     pub kind: JobKind,
     pub ok: bool,
+    /// Why it failed. A cancelled job: `job_failed` with `data.reason` `cancelled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorObject>,
     #[serde(

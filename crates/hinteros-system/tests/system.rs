@@ -535,6 +535,7 @@ async fn settings_ssh_rebuild_rollback() {
     assert_eq!(done["ok"], false);
     assert_eq!(done["error"]["code"], ErrorCode::JobFailed.code());
     assert_eq!(done["error"]["message"], "cancelled");
+    assert_eq!(done["error"]["data"]["reason"], "cancelled");
     let job = call(&mut c, "jobs.get", json!({"job_id": id}))
         .await
         .unwrap();

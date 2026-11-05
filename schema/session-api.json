@@ -4940,7 +4940,7 @@
             "job_id": "3f9a0c2b7e4d1a65",
             "kind": "rebuild",
             "ok": false,
-            "error": { "code": 3003, "message": "cancelled", "data": { "stage": "building", "log_hint": "cancelled" } },
+            "error": { "code": 3003, "message": "cancelled", "data": { "stage": "building", "log_hint": "cancelled", "reason": "cancelled" } },
             "session_restart_required": false,
             "subject": {},
             "started_at": 1791300000,
@@ -5358,7 +5358,7 @@
     },
     "job_failed": {
       "code": 3003,
-      "summary": "Only in job_finished.error and jobs.get: the job failed (or was cancelled) at stage; log_hint is the last relevant log line. Reason says why a Server section job failed: unreachable (the service does not answer), not_ready (its setup is not done), refused (the service or tool said no; log_hint says why), timeout (nobody signed in in time), not_connected (the Cloudflare tunnel did not connect).",
+      "summary": "Only in job_finished.error and jobs.get: the job failed (or was cancelled) at stage; log_hint is the last relevant log line. Reason cancelled: the job was cancelled (jobs.cancel; any kind). Else reason says why a Server section job failed: unreachable (the service does not answer), not_ready (its setup is not done), refused (the service or tool said no; log_hint says why), timeout (nobody signed in in time), not_connected (the Cloudflare tunnel did not connect).",
       "data": {
         "type": "object",
         "required": [
@@ -5374,7 +5374,7 @@
             "type": "string",
             "maxLength": 1000
           },
-          "reason": { "enum": ["unreachable", "not_ready", "refused", "timeout", "not_connected"] }
+          "reason": { "enum": ["cancelled", "unreachable", "not_ready", "refused", "timeout", "not_connected"] }
         }
       }
     },

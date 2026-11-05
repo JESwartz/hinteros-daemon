@@ -763,6 +763,9 @@ fn server_section() {
         schema
             .check_error(&serde_json::json!({"code": 3003, "message": "m", "data": {"stage": "signing_in", "log_hint": "x", "reason": "timeout"}}))
             .unwrap();
+        schema
+            .check_error(&serde_json::json!({"code": 3003, "message": "m", "data": {"stage": "building", "log_hint": "x", "reason": "cancelled"}}))
+            .unwrap();
         assert!(
             schema
                 .check_error(&serde_json::json!({"code": 3003, "message": "m", "data": {"stage": "configuring", "log_hint": "x", "reason": "mood"}}))

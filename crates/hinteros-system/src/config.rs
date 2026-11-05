@@ -92,17 +92,20 @@ pub enum Command {
         input_dir: PathBuf,
     },
     /// Apply the time zone `time_zone.set` asked for (`hinteros-time-zone-apply.service`):
-    /// the zone in `<run-dir>/time-zone.request` into `<config-dir>/state.json` and the
-    /// localtime link
+    /// the zone in `<run-dir>/time-zone.request` into `<config-dir>/state.json`, and
+    /// systemd-timedated points `/etc/localtime` at it
     TimeZoneApply {
         #[command(flatten)]
         dirs: HelperDirs,
         /// The system's tzdata
         #[arg(long, default_value = "/etc/zoneinfo")]
         zoneinfo_dir: PathBuf,
-        /// The link to point at `<zoneinfo-dir>/<zone>`
+        /// The link timedated points at `<zoneinfo-dir>/<zone>` (read back)
         #[arg(long, default_value = "/etc/localtime")]
         localtime: PathBuf,
+        /// D-Bus address for systemd-timedated and systemd [default: the system bus]
+        #[arg(long)]
+        bus: Option<String>,
     },
     /// Load the local network filter (`hinteros-lan-filter.service`): the
     /// nftables table `inet hinteros_lan` for the cgroups in `<run-dir>/lan-filter.json`
@@ -308,7 +311,8 @@ pub struct ServeArgs {
     /// points into it
     #[arg(long, default_value = "/etc/zoneinfo")]
     pub zoneinfo_dir: PathBuf,
-    /// The link `time_zone.set` points at `<zoneinfo-dir>/<zone>`
+    /// The link that names the zone: systemd-timedated points it at `<zoneinfo-dir>/<zone>`
+    /// (`time_zone.set`, rollbacks; read back)
     #[arg(long, default_value = "/etc/localtime")]
     pub localtime: PathBuf,
     /// `lan_filter.*`: the box has the local network filter
@@ -451,7 +455,7 @@ pub struct Paths {
     /// The system's tzdata (TZif files and `zone1970.tab`).
     #[serde(default = "default_zoneinfo")]
     pub zoneinfo_dir: PathBuf,
-    /// The link to the box's time zone file.
+    /// The link to the box's time zone file (systemd-timedated replaces it).
     #[serde(default = "default_localtime")]
     pub localtime: PathBuf,
     /// The Server section's services.

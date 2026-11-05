@@ -2,7 +2,8 @@
 //! and list from tzdata fixtures, `time_zone.set` (state.json, the localtime link, the event),
 //! its errors, the admin PIN and first-boot mode, a job that runs across a change, and a
 //! rollback that keeps the live zone. The helper unit (`hinteros-time-zone-apply.service`) is
-//! the real `time-zone-apply` subcommand, run by the fake systemd.
+//! the real `time-zone-apply` subcommand, run by the fake systemd; it asks the fake
+//! systemd-timedated for the link.
 
 use hinteros_api::ErrorCode;
 use hinteros_api::client::Client;
@@ -341,4 +342,78 @@ async fn an_unknown_zone_in_state_reads_as_utc() {
     let mut c = sys.client().await;
     let r = call(&mut c, "time_zone.get", json!({})).await.unwrap();
     assert_eq!(r["zone"], "UTC");
+}
+
+/// `/etc/localtime` is timedated's to replace: a stale timedated is restarted, a refusal changes
+/// nothing, and a helper run that fails (a job swapped `/etc/hinteros` under it) is tried once
+/// more.
+#[tokio::test(flavor = "multi_thread")]
+async fn timedated_replaces_the_link() {
+    let Some(sys) = System::start(Root::create(), &[]).await else {
+        return;
+    };
+    let root = &sys.root;
+    let mut c = sys.subscriber().await;
+    let set = |zone: &'static str| json!({ "zone": zone });
+    let apply_runs = || {
+        sys.fakes
+            .lock()
+            .unwrap()
+            .units
+            .iter()
+            .filter(|u| *u == "hinteros-time-zone-apply.service")
+            .count()
+    };
+
+    call(&mut c, "time_zone.set", set("Asia/Tokyo"))
+        .await
+        .unwrap();
+    assert_eq!(localtime(root), zoneinfo_fixtures().join("Asia/Tokyo"));
+    assert_eq!(sys.fakes.lock().unwrap().timedated.calls, ["Asia/Tokyo"]);
+
+    // Activation pointed the link elsewhere behind timedated's back: it still thinks Tokyo is
+    // set and does nothing, so the helper stops it and asks again.
+    std::fs::remove_file(root.p("etc/localtime")).unwrap();
+    std::os::unix::fs::symlink(zoneinfo_fixtures().join("UTC"), root.p("etc/localtime")).unwrap();
+    call(&mut c, "time_zone.set", set("Asia/Tokyo"))
+        .await
+        .unwrap();
+    assert_eq!(localtime(root), zoneinfo_fixtures().join("Asia/Tokyo"));
+    {
+        let f = sys.fakes.lock().unwrap();
+        assert_eq!(f.timedated.calls, ["Asia/Tokyo"; 3]);
+        assert!(
+            f.units
+                .contains(&"stop systemd-timedated.service".to_string()),
+            "{:?}",
+            f.units
+        );
+    }
+
+    // The link is right already: timedated is not asked.
+    call(&mut c, "time_zone.set", set("Asia/Tokyo"))
+        .await
+        .unwrap();
+    assert_eq!(sys.fakes.lock().unwrap().timedated.calls.len(), 3);
+
+    // timedated refuses: an error, and state.json is put back.
+    sys.fakes.lock().unwrap().timedated.refuse = true;
+    let e = call(&mut c, "time_zone.set", set("Europe/London"))
+        .await
+        .unwrap_err();
+    assert_eq!(e["message"], "The time zone did not change.");
+    assert_eq!(root.etc_state()["settings"]["timeZone"], "Asia/Tokyo");
+    assert_eq!(localtime(root), zoneinfo_fixtures().join("Asia/Tokyo"));
+    sys.fakes.lock().unwrap().timedated.refuse = false;
+
+    // One failed run of the unit: once more, and it applies.
+    let runs = apply_runs();
+    sys.fakes.lock().unwrap().tz_fail_next = 1;
+    let r = call(&mut c, "time_zone.set", set("Europe/London"))
+        .await
+        .unwrap();
+    assert_eq!(r["zone"], "Europe/London");
+    assert_eq!(apply_runs(), runs + 2);
+    assert_eq!(root.etc_state()["settings"]["timeZone"], "Europe/London");
+    assert_eq!(localtime(root), zoneinfo_fixtures().join("Europe/London"));
 }

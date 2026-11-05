@@ -3,7 +3,11 @@
 //!
 //! The service never writes `/etc` itself: `time_zone.set` leaves the zone in
 //! `<run-dir>/time-zone.request` and starts `hinteros-time-zone-apply.service`, which runs
-//! `hinteros-system time-zone-apply` ([`apply_main`]).
+//! `hinteros-system time-zone-apply` ([`apply_main`]). The helper writes `state.json` and
+//! asks systemd-timedated to replace `/etc/localtime` ([`timedated_set`]): only timedated
+//! writes `/etc` itself, so the helper unit needs `/etc/hinteros` writable, not all of `/etc`.
+//! `/etc/localtime` stays one link straight at `/etc/zoneinfo/<zone>`, which readers that read
+//! the zone name from the link expect (OpenJDK, timedated, .NET).
 //!
 //! Offsets come from the TZif files of the zoneinfo directory (`/etc/zoneinfo`, the same files
 //! `/etc/localtime` points into), never from a database built into the daemon, so the daemon
@@ -12,8 +16,10 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read};
+#[cfg(test)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use hinteros_api::system::{DEFAULT_TIME_ZONE, TimeZoneEntry, TimeZoneInfo, is_zone_name};
 use tracing::{debug, warn};
@@ -252,7 +258,9 @@ pub fn list(dir: &Path, now: i64) -> Vec<TimeZoneEntry> {
 }
 
 /// Point the `localtime` link at `<zoneinfo>/<zone>`: a new link next to it, renamed over the
-/// old one, so readers see the old zone or the new one, never none.
+/// old one, so readers see the old zone or the new one, never none. (The box asks timedated,
+/// [`timedated_set`]; tests use this.)
+#[cfg(test)]
 pub fn set_localtime(localtime: &Path, zoneinfo: &Path, zone: &str) -> io::Result<()> {
     let target = zone_file(zoneinfo, zone).map_err(io::Error::other)?;
     let dir = localtime.parent().unwrap_or(Path::new("/"));
@@ -268,6 +276,119 @@ pub fn set_localtime(localtime: &Path, zoneinfo: &Path, zone: &str) -> io::Resul
         return Err(e);
     }
     fs::File::open(dir).and_then(|d| d.sync_all())
+}
+
+/// systemd-timedated's bus name; its `SetTimezone` replaces `/etc/localtime`.
+const TIMEDATED: &str = "org.freedesktop.timedate1";
+
+/// timedated's unit: stopped when it answers from a stale zone (see [`timedated_set`]).
+const TIMEDATED_UNIT: &str = "systemd-timedated.service";
+
+/// How long one timedated or systemd call may take.
+const BUS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Point `/etc/localtime` (`localtime`) at `<zoneinfo>/<zone>` through systemd-timedated's
+/// `SetTimezone` (`bus`: `None` is the system bus; a root caller needs no polkit). timedated
+/// writes the one link atomically (NixOS's timedated: an absolute link into `/etc/zoneinfo`).
+/// It reads `/etc/localtime` only when it starts and does nothing for the zone it thinks is
+/// set, so a link changed behind its back (activation) can make the call a no-op: the link is
+/// read back, and when it is wrong, timedated is stopped (the next call starts it again) and
+/// asked once more. Nothing to do when the link is right already.
+pub fn timedated_set(
+    bus: Option<&str>,
+    localtime: &Path,
+    zoneinfo: &Path,
+    zone: &str,
+) -> io::Result<()> {
+    let want = zone_file(zoneinfo, zone).map_err(io::Error::other)?;
+    let right = || fs::read_link(localtime).is_ok_and(|t| t == want);
+    if right() {
+        return Ok(());
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let conn = match bus {
+                Some(a) => zbus::connection::Builder::address(a)?.build().await?,
+                None => zbus::Connection::system().await?,
+            };
+            set_timezone(&conn, zone).await?;
+            if right() {
+                return Ok(());
+            }
+            warn!(
+                zone,
+                "timedated left /etc/localtime as it was; restarting it"
+            );
+            stop_timedated(&conn).await?;
+            set_timezone(&conn, zone).await?;
+            if right() {
+                return Ok(());
+            }
+            Err(zbus::Error::Failure(format!(
+                "timedated did not point {} at {}",
+                localtime.display(),
+                want.display()
+            )))
+        })
+        .map_err(io::Error::other)
+}
+
+async fn bus_call<B>(
+    conn: &zbus::Connection,
+    dest: &str,
+    path: &str,
+    iface: &str,
+    method: &str,
+    body: &B,
+) -> zbus::Result<()>
+where
+    B: serde::Serialize + zbus::zvariant::DynamicType,
+{
+    tokio::time::timeout(
+        BUS_TIMEOUT,
+        conn.call_method(Some(dest), path, Some(iface), method, body),
+    )
+    .await
+    .map_err(|_| zbus::Error::Failure(format!("{method} timed out")))?
+    .map(drop)
+}
+
+async fn set_timezone(conn: &zbus::Connection, zone: &str) -> zbus::Result<()> {
+    bus_call(
+        conn,
+        TIMEDATED,
+        "/org/freedesktop/timedate1",
+        "org.freedesktop.timedate1",
+        "SetTimezone",
+        &(zone, false),
+    )
+    .await
+}
+
+/// Stop timedated and wait until it is gone (a call before that would reach the old process).
+async fn stop_timedated(conn: &zbus::Connection) -> zbus::Result<()> {
+    bus_call(
+        conn,
+        "org.freedesktop.systemd1",
+        "/org/freedesktop/systemd1",
+        "org.freedesktop.systemd1.Manager",
+        "StopUnit",
+        &(TIMEDATED_UNIT, "replace"),
+    )
+    .await?;
+    for _ in 0..100 {
+        match crate::freeze::unit_property(conn, TIMEDATED_UNIT, "ActiveState").await? {
+            Some(s) if s != "inactive" && s != "failed" => {
+                tokio::time::sleep(Duration::from_millis(100)).await
+            }
+            _ => return Ok(()),
+        }
+    }
+    Err(zbus::Error::Failure(format!(
+        "{TIMEDATED_UNIT} did not stop"
+    )))
 }
 
 /// The request `time_zone.set` leaves for the helper: one line, the zone name.
@@ -303,10 +424,14 @@ fn read_request(paths: &Paths) -> anyhow::Result<String> {
     Ok(zone.to_owned())
 }
 
-/// Under the `state.json` lock: write `settings.timeZone` (when it changes) and point the
-/// localtime link at `zone` (a TZif file of the zoneinfo dir, checked again here). On a failure
-/// `state.json` is left (or put back) as it was. Returns the zone that applied before.
-pub fn apply_zone(paths: &Paths, zone: &str) -> anyhow::Result<String> {
+/// What points `/etc/localtime` at a zone: [`timedated_set`] on the box (see [`apply_main`]),
+/// a plain link in unit tests.
+pub type SetZone<'a> = &'a dyn Fn(&str) -> io::Result<()>;
+
+/// Under the `state.json` lock: write `settings.timeZone` (when it changes) and point
+/// `/etc/localtime` at `zone` (`set`; a TZif file of the zoneinfo dir, checked again here). On
+/// a failure `state.json` is left (or put back) as it was. Returns the zone that applied before.
+pub fn apply_zone(paths: &Paths, zone: &str, set: SetZone) -> anyhow::Result<String> {
     load(&paths.zoneinfo_dir, zone)?;
     let _lock = crate::state::lock(&paths.state_lock())?;
     let path = paths.state_json();
@@ -318,7 +443,7 @@ pub fn apply_zone(paths: &Paths, zone: &str) -> anyhow::Result<String> {
         st.settings.time_zone = Some(zone.to_owned());
         crate::fsutil::write_atomic(&path, &st.to_canonical_json(), 0o644)?;
     }
-    if let Err(e) = set_localtime(&paths.localtime, &paths.zoneinfo_dir, zone) {
+    if let Err(e) = set(zone) {
         if changed && let Err(e2) = crate::fsutil::write_atomic(&path, &old, 0o644) {
             warn!("cannot put state.json back: {e2}");
         }
@@ -331,16 +456,18 @@ pub fn apply_zone(paths: &Paths, zone: &str) -> anyhow::Result<String> {
 }
 
 /// The request applied: zone checked, `state.json`, the link, the request file removed.
-pub fn apply_request(paths: &Paths) -> anyhow::Result<(String, String)> {
+pub fn apply_request(paths: &Paths, set: SetZone) -> anyhow::Result<(String, String)> {
     let zone = read_request(paths)?;
-    let before = apply_zone(paths, &zone)?;
+    let before = apply_zone(paths, &zone, set)?;
     let _ = fs::remove_file(request_path(paths));
     Ok((before, zone))
 }
 
-/// `hinteros-system time-zone-apply` (`hinteros-time-zone-apply.service`).
-pub fn apply_main(paths: &Paths) -> std::process::ExitCode {
-    match apply_request(paths) {
+/// `hinteros-system time-zone-apply` (`hinteros-time-zone-apply.service`); `bus` reaches
+/// timedated (`None`: the system bus).
+pub fn apply_main(paths: &Paths, bus: Option<&str>) -> std::process::ExitCode {
+    let set = |zone: &str| timedated_set(bus, &paths.localtime, &paths.zoneinfo_dir, zone);
+    match apply_request(paths, &set) {
         Ok((before, zone)) => {
             tracing::info!(from = %before, to = %zone, "time zone applied");
             std::process::ExitCode::SUCCESS
@@ -352,13 +479,13 @@ pub fn apply_main(paths: &Paths) -> std::process::ExitCode {
     }
 }
 
-/// Point `/etc/localtime` at the zone `state.json` names now (UTC when tzdata lacks it):
-/// after a rollback restored another `state.json` (the switch ran before the restore). Returns
-/// the zone applied.
-pub fn apply_state(paths: &Paths) -> io::Result<String> {
+/// Point `/etc/localtime` at the zone `state.json` names now (UTC when tzdata lacks it), through
+/// timedated: after a rollback restored another `state.json` (the switch ran before the
+/// restore). Returns the zone applied.
+pub fn apply_state(paths: &Paths, bus: Option<&str>) -> io::Result<String> {
     let (state, _) = State::load(&paths.state_json()).map_err(io::Error::other)?;
     let zone = effective(&paths.zoneinfo_dir, &state, crate::job::now()).zone;
-    set_localtime(&paths.localtime, &paths.zoneinfo_dir, &zone)?;
+    timedated_set(bus, &paths.localtime, &paths.zoneinfo_dir, &zone)?;
     Ok(zone)
 }
 
@@ -567,6 +694,27 @@ mod tests {
         assert!(set_localtime(&lt, &fixtures(), "../x").is_err());
     }
 
+    #[test]
+    fn the_box_link_is_etc_localtime() {
+        // timedated replaces /etc/localtime only: the link the daemon checks must be that one.
+        use clap::Parser;
+        let link = Path::new("/etc/localtime");
+        let cli =
+            crate::config::Cli::try_parse_from(["hinteros-system", "time-zone-apply"]).unwrap();
+        let Some(crate::config::Command::TimeZoneApply { localtime, bus, .. }) = cli.command else {
+            panic!("not time-zone-apply");
+        };
+        assert_eq!((localtime.as_path(), bus), (link, None));
+        let cli = crate::config::Cli::try_parse_from(["hinteros-system"]).unwrap();
+        assert_eq!(cli.serve.localtime, link);
+        assert_eq!(crate::config::default_localtime(), link);
+    }
+
+    /// The link itself, in place of timedated.
+    fn link(p: &Paths) -> impl Fn(&str) -> io::Result<()> + '_ {
+        |zone| set_localtime(&p.localtime, &p.zoneinfo_dir, zone)
+    }
+
     fn helper_paths(d: &Path) -> Paths {
         let mut p = crate::pam::paths(
             d.join("var"),
@@ -595,7 +743,7 @@ mod tests {
             fs::metadata(request_path(&p)).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        let (before, zone) = apply_request(&p).unwrap();
+        let (before, zone) = apply_request(&p, &link(&p)).unwrap();
         assert_eq!((before.as_str(), zone.as_str()), ("UTC", "Europe/London"));
         let (s, _) = State::load(&p.state_json()).unwrap();
         assert_eq!(s.time_zone(), "Europe/London");
@@ -611,7 +759,7 @@ mod tests {
         let ino = fs::metadata(p.state_json()).unwrap().ino();
         fs::remove_file(&p.localtime).unwrap();
         write_request(&p, "Europe/London").unwrap();
-        assert_eq!(apply_request(&p).unwrap().0, "Europe/London");
+        assert_eq!(apply_request(&p, &link(&p)).unwrap().0, "Europe/London");
         assert_eq!(fs::read(p.state_json()).unwrap(), bytes);
         assert_eq!(
             fs::metadata(p.state_json()).unwrap().ino(),
@@ -630,7 +778,7 @@ mod tests {
         let mut p = helper_paths(d.path());
         let bytes = fs::read(p.state_json()).unwrap();
         // No request.
-        assert!(apply_request(&p).is_err());
+        assert!(apply_request(&p, &link(&p)).is_err());
         // Bad names, unknown zones, two lines.
         for bad in [
             "../../etc/shadow",
@@ -642,14 +790,14 @@ mod tests {
             "",
         ] {
             fs::write(request_path(&p), format!("{bad}\n")).unwrap();
-            assert!(apply_request(&p).is_err(), "{bad:?}");
+            assert!(apply_request(&p, &link(&p)).is_err(), "{bad:?}");
             assert_eq!(fs::read(p.state_json()).unwrap(), bytes, "{bad:?}");
             assert!(!p.localtime.exists(), "{bad:?}");
         }
         // The link cannot be made (its directory is missing): state.json is put back.
         p.localtime = d.path().join("missing/localtime");
         write_request(&p, "Asia/Tokyo").unwrap();
-        assert!(apply_request(&p).is_err());
+        assert!(apply_request(&p, &link(&p)).is_err());
         assert_eq!(fs::read(p.state_json()).unwrap(), bytes);
         assert!(request_path(&p).exists(), "kept for a look");
     }

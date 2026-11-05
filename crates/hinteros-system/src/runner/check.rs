@@ -1,8 +1,9 @@
 //! What a job checks of its spec before it runs (README, "Privileges"): the service that wrote
 //! it is not root, so a spec says what to do, never where or with which program. Paths,
 //! programs and the bus are the job's own ([`super::Own`]); what a spec still names (the
-//! channel's repository and branches, homes, data to delete) must be what the job's own
-//! configuration and the user database say, or the job does not run.
+//! channel's repository and branches, homes, data to delete, what only the installer writes in
+//! `state.json`) must be what the job's own configuration and the user database say, or the job
+//! does not run.
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +26,9 @@ pub fn check(spec: &mut JobSpec, own: &Own) -> anyhow::Result<()> {
         Action::UpdateCheck(s) | Action::ChannelCheck(s) => source(s, own),
         Action::Apps(j) => {
             owner(&j.owner)?;
+            if let Some(s) = &j.box_state {
+                installer_fields(s, own)?;
+            }
             match &j.op {
                 AppsOp::CopyFrom { from } => owner(from)?,
                 AppsOp::Set { ids } => {
@@ -40,8 +44,12 @@ pub fn check(spec: &mut JobSpec, own: &Own) -> anyhow::Result<()> {
             Ok(())
         }
         Action::ClearData(d) => delete_homes(d, uid, own),
-        Action::ProfileCreate(j) => profile_account(&j.id, &j.user),
+        Action::ProfileCreate(j) => {
+            installer_fields(&j.state, own)?;
+            profile_account(&j.id, &j.user)
+        }
         Action::ProfileRemove(j) => {
+            installer_fields(&j.state, own)?;
             profile_account(&j.id, &j.user)?;
             let user = own.paths.users.by_name(&j.user);
             j.uid = user.as_ref().map(|u| u.uid);
@@ -79,7 +87,33 @@ fn home_of(uid: u32, home: PathBuf) -> Option<PathBuf> {
     (uid >= 1000 && home.is_absolute() && home != Path::new("/")).then_some(home)
 }
 
+/// What only the installer writes in `state.json` (`stateVersion`, `disk`, `settings.hostname`,
+/// `settings.admin`) and the fields this daemon does not know: the service never changes them,
+/// so a spec's state must have them as the running config dir's `state.json` does. Else a
+/// compromised service could make an admin account (wheel) of its own. A config dir without a
+/// readable `state.json`: no state-carrying job runs.
+fn installer_fields(s: &State, own: &Own) -> anyhow::Result<()> {
+    let (live, _) = State::load(&own.paths.state_json()).context("the running state.json")?;
+    let fields = |s: &State| {
+        (
+            s.state_version.clone(),
+            s.disk.clone(),
+            s.settings.hostname.clone(),
+            s.settings.admin.clone(),
+            s.extra.clone(),
+            s.settings.extra.clone(),
+        )
+    };
+    if fields(s) != fields(&live) {
+        bail!("the state changes what only the installer sets");
+    }
+    Ok(())
+}
+
 fn apply(a: &mut Apply, uid: u32, own: &Own) -> anyhow::Result<()> {
+    if let Some(s) = &a.state {
+        installer_fields(s, own)?;
+    }
     if let Some(d) = &mut a.delete_data {
         delete_homes(d, uid, own)?;
     }
@@ -416,6 +450,74 @@ mod tests {
                 None
             ]
         );
+    }
+
+    /// A spec's state keeps what only the installer writes as the running `state.json` has it:
+    /// no admin account, host name, disk or unknown field of the service's own.
+    #[test]
+    fn installer_fields_are_the_running_states() {
+        use crate::state::AdminState;
+        let d = tempfile::tempdir().unwrap();
+        let own = own(d.path());
+        let live = State::parse(&std::fs::read(d.path().join("etc/state.json")).unwrap()).unwrap();
+        let apply = |s: State| {
+            spec(
+                20001,
+                Action::Apply(Apply {
+                    state: Some(s),
+                    ..Default::default()
+                }),
+            )
+        };
+        let mut ok = live.clone();
+        ok.settings.ssh.enable = true;
+        ok.services.push("jellyfin".into());
+        assert!(check(&mut apply(ok), &own).is_ok());
+
+        let mut admin = live.clone();
+        admin.settings.admin = Some(AdminState {
+            user: "evil".into(),
+            extra: Default::default(),
+        });
+        assert!(check(&mut apply(admin.clone()), &own).is_err());
+        let mut host = live.clone();
+        host.settings.hostname = Some("other".into());
+        assert!(check(&mut apply(host), &own).is_err());
+        let mut later = live.clone();
+        later.extra.insert("later".into(), serde_json::json!(true));
+        assert!(check(&mut apply(later), &own).is_err());
+        let mut version = live.clone();
+        version.state_version = "24.05".into();
+        assert!(check(&mut apply(version), &own).is_err());
+
+        // The other jobs that carry a state.
+        let mut s = spec(
+            0,
+            Action::ProfileRemove(ProfileRemoveJob {
+                state: admin.clone(),
+                id: "p1".into(),
+                user: "hinteros-p1".into(),
+                uid: None,
+                home: None,
+            }),
+        );
+        assert!(check(&mut s, &own).is_err());
+        let mut s = spec(
+            20001,
+            Action::Apps(crate::job::AppsJob {
+                owner: Owner::Guest,
+                op: AppsOp::Set { ids: Vec::new() },
+                box_state: Some(admin),
+                terms: Vec::new(),
+                delete_data: None,
+                starter: None,
+            }),
+        );
+        assert!(check(&mut s, &own).is_err());
+
+        // No running state.json: refused.
+        std::fs::remove_file(d.path().join("etc/state.json")).unwrap();
+        assert!(check(&mut apply(live), &own).is_err());
     }
 
     /// Profile ids and account names go into root's paths (`apps/<user>`, `pins/<id>`): only

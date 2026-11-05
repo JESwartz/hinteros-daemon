@@ -1226,7 +1226,7 @@ impl Runner {
             .map_err(|e| self.fail(format!("restoring the config snapshot: {e}")))?;
             // The switch set /etc/localtime from the state.json before the restore: follow the
             // restored one (the live time zone if one was set, else the snapshot's, or UTC).
-            match crate::timezone::apply_state(&paths, self.spec.bus.as_deref()) {
+            match crate::timezone::apply_state(&paths, self.bus.as_deref()) {
                 Ok(zone) => info!(zone, "time zone of the restored state applied"),
                 Err(e) => warn!("cannot apply the restored time zone: {e}"),
             }

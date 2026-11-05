@@ -712,7 +712,7 @@ pub(crate) enum Request {
     TimeZoneSet(system::TimeZoneSetParams),
     /// The Server section.
     Servers(servers::ServersRequest),
-    JobsCancel(JobIdParams),
+    JobsCancel(system::JobsCancelParams),
 }
 
 impl Request {
@@ -840,8 +840,9 @@ impl Request {
                 Self::AppsClearData(p)
             }
             JobsCancel::NAME => {
-                let p: JobIdParams = decode::<JobsCancel>(params)?;
+                let p: system::JobsCancelParams = decode::<JobsCancel>(params)?;
                 check_job_id(&p.job_id)?;
+                check_admin_pin(p.admin_pin.as_deref())?;
                 Self::JobsCancel(p)
             }
             system::TimeZoneSet::NAME => {
@@ -1616,17 +1617,22 @@ impl Service {
             Request::JobsCancel(p) => {
                 // Only who started the job, root or the admin profile cancels it: an update the
                 // admin approved with the PIN is not undone from another profile or the guest.
+                // Anyone else needs the admin PIN (a wrong one counts toward its tries).
                 let started_by = self.jobs.lock().unwrap().get(&p.job_id).map(|j| j.uid);
                 if let Some(owner) = started_by
                     && uid != 0
                     && uid != owner
                     && !self.caller_is_admin_profile(uid)
                 {
-                    return Err(ErrorObject::with_data(
-                        ErrorCode::PermissionDenied,
-                        "only who started the job, or the admin profile, can cancel it",
-                        json!({ "action": system::polkit_action(system::JobsCancel::NAME), "reason": "profile" }),
-                    ));
+                    if p.admin_pin.is_none() {
+                        return Err(ErrorObject::with_data(
+                            ErrorCode::PermissionDenied,
+                            "only who started the job, or the admin profile, can cancel it",
+                            json!({ "action": system::polkit_action(system::JobsCancel::NAME), "reason": "starter" }),
+                        ));
+                    }
+                    self.check_box_admin(uid, JobsCancel::NAME, p.admin_pin.as_deref())
+                        .await?;
                 }
                 self.jobs.lock().unwrap().cancel(&p.job_id)?;
                 info!(job = %p.job_id, uid, "cancel requested");

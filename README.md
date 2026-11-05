@@ -850,7 +850,7 @@ trust.
   `jobs.list`; mutating `settings.set {revision, changes}` (closed, typed `changes`; empty), `ssh.set {enabled}`, `rebuild`, `hardware.redetect`, `rollback {generation?}`,
   `update.check`, `update.apply {rev}`, `channel.check {channel}`, `channel.set {channel, rev?}`,
   `base.set {base, acknowledge_downgrade?}`, `apps.install {ids, revision, accepted_terms?}`,
-  `apps.remove {ids, revision, delete_data}` (see "Store backend" below), `jobs.cancel {job_id}`. Events `job_started`,
+  `apps.remove {ids, revision, delete_data}` (see "Store backend" below), `jobs.cancel {job_id, admin_pin?}`. Events `job_started`,
   `job_progress`, `job_finished {…, session_restart_required}` after `subscribe`.
 - **Authorization** (`peer.rs`, `authz.rs`): uid/gid/pid from `SO_PEERCRED` and a pidfd from
   `SO_PEERPIDFD` at accept. Mutating methods need: the pidfd (and the process alive), the caller
@@ -903,9 +903,11 @@ trust.
   and runs the old system's `switch-to-configuration boot`. `jobs.cancel` works until the job
   enters `activating` (it then kills the job's process group; the box is unchanged), and only for
   the uid that started the job, root or the admin profile (else `permission_denied {reason:
-  profile}`: another profile or the guest does not undo an update the admin approved). Jobs the
-  service starts itself (the app-env copies of `ensure_envs`) belong to root, so only the admin
-  profile cancels them. Jobs hold a
+  starter}`: another profile or the guest does not undo an update the admin approved), or for
+  any profile with the right `admin_pin` (a wrong one is `pin_required {pin: admin}` and counts
+  toward the admin PIN's tries). Jobs the service starts itself (the app-env copies of
+  `ensure_envs`) belong to root, so only the admin profile (or the admin PIN) cancels them. A
+  cancelled job ends with `job_failed` whose `data.reason` is `cancelled`. Jobs hold a
   logind `shutdown:sleep` inhibitor: `delay`, then `block` while activating.
   `session_restart_required` is set when the new system's `sw/bin/hinteros-session` or
   `hinteros-system` resolves to a different store path.
@@ -1425,6 +1427,12 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   {pin: admin}` when missing or wrong, or without an admin profile), from every profile, the
   guest included (installing a system update always needs it). Not for root; an
   admin profile without a PIN yet passes only for itself. `update.check` stays open.
+  The admin profile's PIN is always the optional `admin_pin` (its own params type,
+  `AdminPinParams`, where it is the only field); `pin` is always the caller's own or the target
+  profile's. So `profiles.rename {id, name, admin_pin?}`, `profiles.remove {id, confirm_id,
+  pin?, admin_pin?, revision}` (`pin` to remove your own profile, `admin_pin` for another),
+  `guest.set {enabled, admin_pin?}`, `starter_set.set {ids, admin_pin?}` and every Server
+  section method.
 - **End guest session** (`guest.rs`, `runner/profiles.rs`): `guest.end` (the guest only;
   job `guest_end`) checks the account (`hinteros-guest`, `--guest-uid` 20000, the uid maps back to
   the name, home `…/hinteros-guest`), hides the guest from the picker and PAM while it runs, ends
@@ -2020,7 +2028,7 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   asked once with a 1 s timeout on the blocking pool (the service's runtime is single-threaded);
   when the service has no loopback socket (the system repo allows `AF_INET` only while Jellyfin,
   Plex or Cloudflare is on) the fields fall back to false/null/cache.
-- **`services.enable {ids, pin, revision, accepted_terms?}` / `services.disable {ids, pin,
+- **`services.enable {ids, admin_pin?, revision, accepted_terms?}` / `services.disable {ids, admin_pin?,
   revision, delete_data}`** (jobs `services_enable`, `services_disable`): admin PIN,
   `state.json` `services` through the apply flow. Plex's terms as for apps (recorded by the
   caller's user with the admin profile's id). `delete_data`, after the switch: each `stateDirs`
@@ -2036,11 +2044,11 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   looks at the first 20000 entries of the folder (500 listed) and 2000 of each subfolder.
 - **Jellyfin** (`servers/jellyfin.rs`): HTTP on loopback with `Authorization: MediaBrowser
   Token="<api-key>"` (Jellyfin 10.11+/12 refuse the legacy `X-Emby-Token` unless legacy
-  authorization is on; an API key counts as administrator). `jellyfin.libraries.add {pin, name,
+  authorization is on; an API key counts as administrator). `jellyfin.libraries.add {admin_pin?, name,
   kind, folder}` (job: `POST /Library/VirtualFolders` with the path in
   `LibraryOptions.PathInfos`, since one `paths=` value is split at commas; `collectionType`
   movies/tvshows/music, none for mixed; a duplicate name is refused first, as Jellyfin would
-  rename it `Name2`), `jellyfin.libraries.remove {pin, library_id}` (job: by the library's name;
+  rename it `Name2`), `jellyfin.libraries.remove {admin_pin?, library_id}` (job: by the library's name;
   the media stay). Profile users: `users.json` (0600, under `users.lock`) maps a profile id to
   `{jellyfin_user_id, name, password, access_token?}`; `sync` makes one user per profile (not the
   guest), named after the profile (letters, digits, space, `_-'.@+`; unique in any case with
@@ -2050,7 +2058,7 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   alone. A new user is recorded first, with an empty `jellyfin_user_id` (pending): if Jellyfin
   makes it but the answer is lost, the next sync takes over the user of that name, but only if it
   signs in with the recorded password (else it is not ours: the profile gets " 2"). It runs after
-  profile create/remove jobs, after a rename (in the background), at the end of `services_enable`, in every Jellyfin job and in `jellyfin.users.reveal {pin}` (no job; the
+  profile create/remove jobs, after a rename (in the background), at the end of `services_enable`, in every Jellyfin job and in `jellyfin.users.reveal {admin_pin?}` (no job; the
   admin's and each profile's password; never logged). `jellyfin.client_token` (no PIN, read-only
   for the caller): the caller's own profile only (from its uid; guest and spare accounts get
   `permission_denied {reason: profile}`): `{server_id, user_id, device_id: "hinteros-<id>",
@@ -2079,25 +2087,25 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   links to `/var/lib/hinteros/services/jellyfin-server/backup` (through `backup.new`: one copy,
   replaced each time) and starts Jellyfin again after the switch (also when the switch failed). A
   failed stop or copy fails the job before the switch. Restoring is by hand.
-- **`plex.claim {pin, code}`** (job): `claim-` and 20 of `[A-Za-z0-9_-]` (what plex.tv/claim gives;
+- **`plex.claim {admin_pin?, code}`** (job): `claim-` and 20 of `[A-Za-z0-9_-]` (what plex.tv/claim gives;
   Plex documents no exact format, so a change shows as `invalid_params`). The job posts it to
   Plex's own `POST /myplex/claim?token=` on 127.0.0.1:32400 with `X-Plex-Client-Identifier` (the
   server's `ProcessedMachineIdentifier`) and succeeds once `PlexOnlineToken` is set (30 s). The
   probe and the code go only to a server owned by the `plex` account (32400 is not a privileged
   port; the same check as Jellyfin's).
-- **`tailscale.login {pin}`** (job): `tailscale up --reset --json --timeout=600s` (defaults: no
+- **`tailscale.login {admin_pin?}`** (job): `tailscale up --reset --json --timeout=600s` (defaults: no
   exit node, routes or Tailscale SSH; `--force-reauth` for an expired key); its pretty-printed
   JSON objects are decoded as a stream; each new `AuthURL` (https, printable ASCII, ≤ 512) is
   `job_progress {stage: signing_in, detail: {auth_url}}`, sent (and shown by `jobs.get` and
   `jobs.list`) only to connections of the uid that started the job and of root: whoever opens
   the URL first adds the box to their tailnet; done at `{"BackendState":"Running"}`
-  and exit 0. `jobs.cancel` kills the CLI. `tailscale.logout {pin}` (job) runs `tailscale
+  and exit 0. `jobs.cancel` kills the CLI. `tailscale.logout {admin_pin?}` (job) runs `tailscale
   logout`. Both answer `job_id: null` when the state is already the asked one.
-- **`cloudflare.set_token {pin, token}`**: checked strictly (cloudflared's `ParseToken`: padded
+- **`cloudflare.set_token {admin_pin?, token}`**: checked strictly (cloudflared's `ParseToken`: padded
   standard base64 of `{"a": 32 hex, "t": UUID, "s": base64 of 32..256 bytes, "e"?: endpoint}`,
   no repeated key; other keys are ignored, as cloudflared ignores them; ≤ 512); the service writes it 0600 atomically (the directory 0700) so
   it is never in a job spec; the job restarts `hinteros-cloudflared.service` (D-Bus) and waits 30 s
-  for `/ready`. `cloudflare.clear_token {pin}` (job) stops the unit and deletes the file.
+  for `/ready`. `cloudflare.clear_token {admin_pin?}` (job) stops the unit and deletes the file.
 - polkit action `org.hinteros.system.services` for every write (the admin PIN is the service's
   check); `services.list`, `media.folders`, `jellyfin.client_token` are reads. PINs, claim codes
   and tokens are `***` in `HINTEROS_PARAMS`. Job failures carry `job_failed.data.reason`

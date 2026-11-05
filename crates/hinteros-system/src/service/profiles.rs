@@ -137,9 +137,9 @@ impl ProfilesRequest {
             R::Rename(p) => {
                 check_id(&p.id, "id")?;
                 profiles::check_name(&p.name)?;
-                p.pin
+                p.admin_pin
                     .as_deref()
-                    .map_or(Ok(()), |x| check_pin_field(x, "pin"))
+                    .map_or(Ok(()), |x| check_pin_field(x, "admin_pin"))
             }
             R::SetAppearance(p) => {
                 if let Some(c) = &p.color {
@@ -179,7 +179,10 @@ impl ProfilesRequest {
                         "confirm_id must equal id",
                     ));
                 }
-                check_pin_field(&p.pin, "pin")?;
+                if let Some(x) = &p.pin {
+                    check_pin_field(x, "pin")?;
+                }
+                super::check_admin_pin(p.admin_pin.as_deref())?;
                 super::check_revision(&p.revision)
             }
             R::Switch(p) => {
@@ -192,7 +195,7 @@ impl ProfilesRequest {
             }
             R::SwitchCancel => Ok(()),
             R::Unlock(p) => check_pin_field(&p.pin, "pin"),
-            R::GuestSet(p) => check_pin_field(&p.admin_pin, "admin_pin"),
+            R::GuestSet(p) => super::check_admin_pin(p.admin_pin.as_deref()),
             R::GuestEnd => Ok(()),
             R::SaveMode(p) => {
                 if p.display.is_empty()
@@ -240,7 +243,7 @@ impl ProfilesRequest {
                         "0 to 16 catalog ids",
                     ));
                 }
-                check_pin_field(&p.pin, "pin")
+                super::check_admin_pin(p.admin_pin.as_deref())
             }
         }
     }
@@ -686,7 +689,7 @@ impl Service {
                 let name = profiles::check_name(&p.name)?;
                 if caller.id.as_deref() != Some(&p.id) || caller.role != Role::Profile {
                     let admin = self.admin_for_pin(&state, &file)?;
-                    self.check_pin(uid, method, &admin, p.pin.as_deref(), Which::Admin)
+                    self.check_pin(uid, method, &admin, p.admin_pin.as_deref(), Which::Admin)
                         .await?;
                 }
                 // Only the name changes, in the file as it is after the PIN check.
@@ -811,11 +814,11 @@ impl Service {
                 }
                 let caller = self.caller(uid, &state);
                 if caller.id.as_deref() == Some(&p.id) {
-                    self.check_pin(uid, method, &p.id, Some(&p.pin), Which::Own)
+                    self.check_pin(uid, method, &p.id, p.pin.as_deref(), Which::Own)
                         .await?;
                 } else {
                     let admin = self.admin_for_pin(&state, &file)?;
-                    self.check_pin(uid, method, &admin, Some(&p.pin), Which::Admin)
+                    self.check_pin(uid, method, &admin, p.admin_pin.as_deref(), Which::Admin)
                         .await?;
                 }
                 self.preflight()?;
@@ -948,7 +951,7 @@ impl Service {
                 let (state, _) = self.load_state()?;
                 let file = self.profiles_file();
                 let admin = self.admin_for_pin(&state, &file)?;
-                self.check_pin(uid, method, &admin, Some(&p.admin_pin), Which::Admin)
+                self.check_pin(uid, method, &admin, p.admin_pin.as_deref(), Which::Admin)
                     .await?;
                 if state.guest_enabled() == p.enabled {
                     return job_ref(None);
@@ -1026,7 +1029,7 @@ impl Service {
                 let (admin, _) = file
                     .admin(&state)
                     .ok_or_else(|| pin_required(Which::Admin, None, "there is no admin profile"))?;
-                self.check_pin(uid, method, &admin.id, Some(&p.pin), Which::Admin)
+                self.check_pin(uid, method, &admin.id, p.admin_pin.as_deref(), Which::Admin)
                     .await?;
                 let admin_ids = appreg::current(
                     &Owner::Profile {

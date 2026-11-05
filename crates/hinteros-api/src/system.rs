@@ -505,9 +505,10 @@ impl Method for Rebuild {
     type Result = JobRef;
 }
 
-/// The admin profile's PIN guards the box-wide actions (`hardware.redetect`, `rollback`,
-/// `update.apply`, `channel.set`, `base.set`): `pin_required {pin: admin}` without it or when it is wrong, on a
-/// caller that is not root.
+/// The admin profile's PIN guards the box-wide actions. It is always `admin_pin` and always
+/// optional: `pin_required {pin: admin}` when the admin profile has a PIN and it is missing or
+/// wrong (and for any other profile while the admin profile has none). `pin` is always the
+/// caller's own PIN or the target profile's.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HardwareRedetectParams {
@@ -972,7 +973,7 @@ pub struct ProfilesRenameParams {
     pub name: String,
     /// The admin PIN, for another profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pin: Option<String>,
+    pub admin_pin: Option<String>,
 }
 
 pub struct ProfilesRename;
@@ -1054,7 +1055,12 @@ impl Method for ProfilesResetPin {
 pub struct ProfilesRemoveParams {
     pub id: String,
     pub confirm_id: String,
-    pub pin: String,
+    /// The caller's own PIN, to remove the caller's own profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
+    /// The admin PIN, to remove another profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
     pub revision: String,
 }
 
@@ -1097,6 +1103,15 @@ pub struct PinParams {
     pub pin: String,
 }
 
+/// Only the admin profile's PIN. Optional like every `admin_pin`: `pin_required {pin: admin}`
+/// when the admin profile has a PIN and it is missing or wrong.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminPinParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
+}
+
 pub struct ProfilesUnlock;
 impl Method for ProfilesUnlock {
     const NAME: &'static str = "profiles.unlock";
@@ -1108,7 +1123,8 @@ impl Method for ProfilesUnlock {
 #[serde(deny_unknown_fields)]
 pub struct GuestSetParams {
     pub enabled: bool,
-    pub admin_pin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
 }
 
 pub struct GuestSet;
@@ -1178,7 +1194,8 @@ impl Method for StarterSetGet {
 pub struct StarterSetSetParams {
     pub ids: Vec<String>,
     /// The admin PIN.
-    pub pin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
 }
 
 pub struct StarterSetSet;
@@ -1901,7 +1918,8 @@ impl Method for ServicesList {
 pub struct ServicesEnableParams {
     pub ids: Vec<String>,
     /// The admin PIN.
-    pub pin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
     /// `services.list`'s revision.
     pub revision: String,
     /// The terms version accepted, per service id with vendor terms.
@@ -1921,7 +1939,9 @@ impl Method for ServicesEnable {
 #[serde(deny_unknown_fields)]
 pub struct ServicesDisableParams {
     pub ids: Vec<String>,
-    pub pin: String,
+    /// The admin PIN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
     pub revision: String,
     /// After the switch, also delete each service's data (`stateDirs`).
     pub delete_data: bool,
@@ -1970,7 +1990,9 @@ impl Method for MediaFolders {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JellyfinLibrariesAddParams {
-    pub pin: String,
+    /// The admin PIN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
     pub name: String,
     pub kind: LibraryKind,
     /// A `media.folders` id.
@@ -1988,7 +2010,9 @@ impl Method for JellyfinLibrariesAdd {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JellyfinLibrariesRemoveParams {
-    pub pin: String,
+    /// The admin PIN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
     pub library_id: String,
 }
 
@@ -2038,14 +2062,16 @@ impl std::fmt::Debug for JellyfinUsersRevealResult {
 pub struct JellyfinUsersReveal;
 impl Method for JellyfinUsersReveal {
     const NAME: &'static str = "jellyfin.users.reveal";
-    type Params = PinParams;
+    type Params = AdminPinParams;
     type Result = JellyfinUsersRevealResult;
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlexClaimParams {
-    pub pin: String,
+    /// The admin PIN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
     /// From plex.tv/claim: `claim-` and 20 letters, digits, `_` or `-`.
     pub code: String,
 }
@@ -2068,7 +2094,7 @@ impl Method for PlexClaim {
 pub struct TailscaleLogin;
 impl Method for TailscaleLogin {
     const NAME: &'static str = "tailscale.login";
-    type Params = PinParams;
+    type Params = AdminPinParams;
     type Result = JobRef;
 }
 
@@ -2076,7 +2102,7 @@ impl Method for TailscaleLogin {
 pub struct TailscaleLogout;
 impl Method for TailscaleLogout {
     const NAME: &'static str = "tailscale.logout";
-    type Params = PinParams;
+    type Params = AdminPinParams;
     type Result = JobRef;
 }
 
@@ -2117,7 +2143,9 @@ pub const MAX_TUNNEL_TOKEN_BYTES: usize = 512;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CloudflareSetTokenParams {
-    pub pin: String,
+    /// The admin PIN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
     /// The tunnel token from the Zero Trust dashboard.
     pub token: String,
 }
@@ -2140,7 +2168,7 @@ impl Method for CloudflareSetToken {
 pub struct CloudflareClearToken;
 impl Method for CloudflareClearToken {
     const NAME: &'static str = "cloudflare.clear_token";
-    type Params = PinParams;
+    type Params = AdminPinParams;
     type Result = JobRef;
 }
 
@@ -2347,10 +2375,20 @@ impl Method for JobsList {
     type Result = JobsListResult;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobsCancelParams {
+    pub job_id: String,
+    /// The admin PIN: lets any profile cancel the job (without it, only the job's starter,
+    /// root and the admin profile may).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_pin: Option<String>,
+}
+
 pub struct JobsCancel;
 impl Method for JobsCancel {
     const NAME: &'static str = "jobs.cancel";
-    type Params = JobIdParams;
+    type Params = JobsCancelParams;
     type Result = JobRef;
 }
 

@@ -209,7 +209,7 @@ async fn profiles_lifecycle_and_pins() {
     let e = call(
         &mut c,
         "profiles.rename",
-        json!({"id": "p3", "name": "Sammy", "pin": "1357"}),
+        json!({"id": "p3", "name": "Sammy", "admin_pin": "1357"}),
     )
     .await
     .unwrap_err();
@@ -220,7 +220,7 @@ async fn profiles_lifecycle_and_pins() {
     call(
         &mut c,
         "profiles.rename",
-        json!({"id": "p3", "name": "Sammy", "pin": ADMIN_PIN}),
+        json!({"id": "p3", "name": "Sammy", "admin_pin": ADMIN_PIN}),
     )
     .await
     .unwrap();
@@ -404,7 +404,7 @@ async fn profiles_lifecycle_and_pins() {
     let e = call(
         &mut c,
         "profiles.remove",
-        json!({"id": "p1", "confirm_id": "p1", "pin": ADMIN_PIN, "revision": rev}),
+        json!({"id": "p1", "confirm_id": "p1", "admin_pin": ADMIN_PIN, "revision": rev}),
     )
     .await
     .unwrap_err();
@@ -412,7 +412,7 @@ async fn profiles_lifecycle_and_pins() {
     let e = call(
         &mut c,
         "profiles.remove",
-        json!({"id": "p3", "confirm_id": "p1", "pin": ADMIN_PIN, "revision": rev}),
+        json!({"id": "p3", "confirm_id": "p1", "admin_pin": ADMIN_PIN, "revision": rev}),
     )
     .await
     .unwrap_err();
@@ -435,7 +435,7 @@ async fn profiles_lifecycle_and_pins() {
         &sys,
         &mut c,
         "profiles.remove",
-        json!({"id": "p3", "confirm_id": "p3", "pin": ADMIN_PIN, "revision": rev}),
+        json!({"id": "p3", "confirm_id": "p3", "admin_pin": ADMIN_PIN, "revision": rev}),
     )
     .await;
     assert!(!home.exists(), "the home is gone");
@@ -503,7 +503,7 @@ async fn profiles_lifecycle_and_pins() {
     let e = call(
         &mut c,
         "starter_set.set",
-        json!({"ids": ["moonlight", "steam"], "pin": ADMIN_PIN}),
+        json!({"ids": ["moonlight", "steam"], "admin_pin": ADMIN_PIN}),
     )
     .await
     .unwrap_err();
@@ -511,7 +511,7 @@ async fn profiles_lifecycle_and_pins() {
     let e = call(
         &mut c,
         "starter_set.set",
-        json!({"ids": ["moonlight"], "pin": "1111"}),
+        json!({"ids": ["moonlight"], "admin_pin": "1111"}),
     )
     .await
     .unwrap_err();
@@ -521,7 +521,7 @@ async fn profiles_lifecycle_and_pins() {
         &sys,
         &mut c,
         "starter_set.set",
-        json!({"ids": ["moonlight", "youtube"], "pin": ADMIN_PIN}),
+        json!({"ids": ["moonlight", "youtube"], "admin_pin": ADMIN_PIN}),
     )
     .await;
     let s = call(&mut c, "starter_set.get", json!({})).await.unwrap();
@@ -1192,9 +1192,59 @@ async fn only_the_starter_or_the_admin_cancels_a_job() {
         .await
         .unwrap_err();
     assert_eq!(code(&e), ErrorCode::PermissionDenied.code(), "{e}");
-    assert_eq!(e["data"]["reason"], "profile");
+    assert_eq!(e["data"]["reason"], "starter");
     assert!(!jd.join("cancel").exists());
+    // With the admin PIN any profile cancels it; a wrong one is refused like every admin PIN.
+    hinteros_system::pins::Pins::new(sys.root.p("var/lib/hinteros/pins"))
+        .set("p2", "1357")
+        .unwrap();
+    let e = call(
+        &mut c,
+        "jobs.cancel",
+        json!({"job_id": id, "admin_pin": ADMIN_PIN}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["data"], json!({"pin": "admin"}), "{e}");
+    assert!(!jd.join("cancel").exists());
+    call(
+        &mut c,
+        "jobs.cancel",
+        json!({"job_id": id, "admin_pin": "1357"}),
+    )
+    .await
+    .unwrap();
+    assert!(jd.join("cancel").exists());
     drop(lock);
+}
+
+/// An admin profile without a PIN acts without `admin_pin` (it is optional everywhere).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admin_profile_without_a_pin_needs_no_admin_pin() {
+    // p1, the caller, is the admin profile, without a PIN.
+    let profiles = r#"{"version": 1, "next": 3, "profiles": {
+      "p1": {"name": "James", "color": "blue", "admin": true},
+      "p2": {"name": "Sam", "color": "teal"}}}"#;
+    let root = root_with(Some(profiles));
+    hinteros_system::pins::Pins::new(root.p("var/lib/hinteros/pins"))
+        .clear("p1")
+        .unwrap();
+    let Some(sys) = System::start(root, &[]).await else {
+        return;
+    };
+    settled(&sys).await;
+    let mut c = sys.client().await;
+    call(
+        &mut c,
+        "profiles.rename",
+        json!({"id": "p2", "name": "Kim"}),
+    )
+    .await
+    .unwrap();
+    let r = call(&mut c, "starter_set.set", json!({"ids": []}))
+        .await
+        .unwrap();
+    assert!(r.get("job_id").is_some(), "{r}");
 }
 
 /// The test's uid as the guest (p1 moves to another uid), with a home under the root.

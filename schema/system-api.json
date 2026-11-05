@@ -2,7 +2,7 @@
   "$schema": "./api-doc.schema.json",
   "api": "system",
   "version": "1.0",
-  "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. The lan_filter methods are the session daemon's own (not relayed): they only restrict the caller's processes, so they need no seat or polkit check, but are rate limited and audited. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md. Compatibility: a client works with a server of the same major and an equal or higher minor. Clients ignore fields, enum values and events they do not know; the document lists exactly what this version sends. Enums that a client also sends are closed: a new value there is a new major.",
+  "description": "Internal API of the privileged HinterOS system service (hinteros-system, root). Any process of a 'hinteros' user can connect; the session daemon is an ordinary client that relays these methods to the launcher. Read-only methods need no further checks. Mutating methods need a pidfd for the peer (SO_PEERPIDFD), the caller owning seat0's active session (or root), a polkit YES for the method's action (with user interaction only for org.hinteros.system.ssh, whose default is auth_admin: polkit then asks the calling process's authentication agent for the admin password while the call waits), and are rate limited and audited in the system journal. Every params object is closed: unknown fields are invalid_params. admin_pin is always the admin profile's PIN and always optional: pin_required {pin: admin} when the admin profile has a PIN and admin_pin is missing or wrong (and for any other profile while the admin profile has no PIN). pin is the caller's own PIN or the target profile's. The lan_filter methods are the session daemon's own (not relayed): they only restrict the caller's processes, so they need no seat or polkit check, but are rate limited and audited. Long work runs as a job in its own systemd unit and reports through job_* events. See hinteros-docs/design/system-api.md. Compatibility: a client works with a server of the same major and an equal or higher minor. Clients ignore fields, enum values and events they do not know; the document lists exactly what this version sends. Enums that a client also sends are closed: a new value there is a new major.",
   "transport": {
     "protocol": "jsonrpc-2.0",
     "framing": "ndjson",
@@ -968,7 +968,7 @@
     },
     "profiles.rename": {
       "summary": "Rename a profile. Own: no PIN; another: the admin PIN.",
-      "description": "pin_required {pin: admin} (with retry_after_ms during the backoff lock) when renaming another profile without the right admin PIN.",
+      "description": "pin_required {pin: admin} (with retry_after_ms during the backoff lock) when renaming another profile without the right admin_pin.",
       "params": {
         "type": "object",
         "required": [
@@ -983,7 +983,7 @@
           "name": {
             "$ref": "#/$defs/ProfileName"
           },
-          "pin": {
+          "admin_pin": {
             "$ref": "#/$defs/Pin"
           }
         }
@@ -1229,13 +1229,12 @@
     },
     "profiles.remove": {
       "summary": "Remove a profile, its home and its apps (job, a rebuild). Own PIN for yourself, the admin PIN for others; never the admin profile.",
-      "description": "confirm_id must equal id. The job kills every process of the account, rebuilds without it, then deletes the home (no symlink is followed, one filesystem), the PIN, the metadata, the app profile links and the registry entry. A failed or cancelled job deletes nothing. Removing your own profile: end the session first (the launcher switches to the picker). invalid_params {field: id, reason: admin} for the admin profile. Job kind profiles_remove.",
+      "description": "confirm_id must equal id. The job kills every process of the account, rebuilds without it, then deletes the home (no symlink is followed, one filesystem), the PIN, the metadata, the app profile links and the registry entry. A failed or cancelled job deletes nothing. Removing your own profile: end the session first (the launcher switches to the picker). invalid_params {field: id, reason: admin} for the admin profile. pin: the caller's own PIN, to remove the caller's own profile (pin_required {pin: self}). admin_pin: the admin PIN, to remove another profile (pin_required {pin: admin}). Job kind profiles_remove.",
       "params": {
         "type": "object",
         "required": [
           "id",
           "confirm_id",
-          "pin",
           "revision"
         ],
         "additionalProperties": false,
@@ -1247,6 +1246,9 @@
             "$ref": "#/$defs/ProfileId"
           },
           "pin": {
+            "$ref": "#/$defs/Pin"
+          },
+          "admin_pin": {
             "$ref": "#/$defs/Pin"
           },
           "revision": {
@@ -1274,7 +1276,7 @@
           "params": {
             "id": "p3",
             "confirm_id": "p3",
-            "pin": "2468",
+            "admin_pin": "2468",
             "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d"
           },
           "result": {
@@ -1286,7 +1288,7 @@
           "params": {
             "id": "p1",
             "confirm_id": "p1",
-            "pin": "2468",
+            "admin_pin": "2468",
             "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d"
           },
           "error": {
@@ -1462,8 +1464,7 @@
       "params": {
         "type": "object",
         "required": [
-          "enabled",
-          "admin_pin"
+          "enabled"
         ],
         "additionalProperties": false,
         "properties": {
@@ -1662,8 +1663,7 @@
       "params": {
         "type": "object",
         "required": [
-          "ids",
-          "pin"
+          "ids"
         ],
         "additionalProperties": false,
         "properties": {
@@ -1674,7 +1674,7 @@
               "$ref": "#/$defs/CatalogId"
             }
           },
-          "pin": {
+          "admin_pin": {
             "$ref": "#/$defs/Pin"
           }
         }
@@ -1700,7 +1700,7 @@
               "steam",
               "youtube"
             ],
-            "pin": "2468"
+            "admin_pin": "2468"
           },
           "result": {
             "job_id": "3f9a0c2b7e4d1a65"
@@ -2088,11 +2088,11 @@
       "description": "ids: 1 to 8 different catalog ids, each kind service with status available in the running generation's catalog (not_found: not in the catalog; invalid_params {field: ids, reason: not_a_service | not_available}). Ids already on are skipped; job_id null when nothing is left. revision: services.list's (state_conflict otherwise). A service with vendor terms (Plex) needs accepted_terms[id] equal to the catalog's terms.version (terms_required {id, version}; terms for ids not being turned on: invalid_params {field: accepted_terms, reason: not_requested}); the acceptance is audited and recorded in /var/lib/hinteros/terms-accepted.json by the caller's user, with the admin profile's id. The job writes state.json's services and runs the apply flow (stages preparing, evaluating, downloading, building, activating, finishing); for jellyfin-server it then waits up to 3 minutes for HinterOS's first-run setup (stage configuring) and makes each profile's Jellyfin user (best effort: jellyfin.users.reveal and every Jellyfin job make missing users too). Result: the applied generation.",
       "params": {
         "type": "object",
-        "required": ["ids", "pin", "revision"],
+        "required": ["ids", "revision"],
         "additionalProperties": false,
         "properties": {
           "ids": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "$ref": "#/$defs/CatalogId" } },
-          "pin": { "$ref": "#/$defs/Pin" },
+          "admin_pin": { "$ref": "#/$defs/Pin" },
           "revision": { "$ref": "#/$defs/Revision" },
           "accepted_terms": {
             "description": "Service id to the terms version accepted (after reading the full text).",
@@ -2106,16 +2106,16 @@
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "state_conflict", "not_found", "terms_required", "pin_required", "unavailable"],
       "examples": [
-        { "name": "Jellyfin", "params": { "ids": ["jellyfin-server"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
-        { "name": "Plex, terms accepted", "params": { "ids": ["plex-media-server"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "accepted_terms": { "plex-media-server": "2025-10-30" } }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
-        { "name": "already on", "params": { "ids": ["tailscale"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "result": { "job_id": null } },
+        { "name": "Jellyfin", "params": { "ids": ["jellyfin-server"], "admin_pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "Plex, terms accepted", "params": { "ids": ["plex-media-server"], "admin_pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "accepted_terms": { "plex-media-server": "2025-10-30" } }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "already on", "params": { "ids": ["tailscale"], "admin_pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "result": { "job_id": null } },
         {
           "name": "Plex terms not accepted",
-          "params": { "ids": ["plex-media-server"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" },
+          "params": { "ids": ["plex-media-server"], "admin_pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" },
           "error": { "code": 3014, "message": "plex-media-server needs its terms accepted (version 2025-10-30)", "data": { "id": "plex-media-server", "version": "2025-10-30" } }
         },
-        { "name": "wrong PIN", "params": { "ids": ["tailscale"], "pin": "1111", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "error": { "code": 3016, "message": "that PIN didn't match", "data": { "pin": "admin" } } },
-        { "name": "an app", "params": { "ids": ["steam"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "error": { "code": -32602, "message": "steam is not a service", "data": { "field": "ids", "reason": "not_a_service" } } }
+        { "name": "wrong PIN", "params": { "ids": ["tailscale"], "admin_pin": "1111", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "error": { "code": 3016, "message": "that PIN didn't match", "data": { "pin": "admin" } } },
+        { "name": "an app", "params": { "ids": ["steam"], "admin_pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d" }, "error": { "code": -32602, "message": "steam is not a service", "data": { "field": "ids", "reason": "not_a_service" } } }
       ]
     },
     "services.disable": {
@@ -2123,11 +2123,11 @@
       "description": "ids: 1 to 8 different ids, each on (not_found otherwise). revision: services.list's. The job writes state.json without them and runs the apply flow. With delete_data (the launcher confirms twice), after a successful switch it deletes each service's catalog stateDirs below /var/lib, and for jellyfin-server also /var/cache/jellyfin and /var/lib/hinteros/services/jellyfin-server (admin password, API key, profile users), as root without following a symlink anywhere and without entering another filesystem; anything outside /var/lib and /var/cache is refused. Media files in /srv/media are never deleted. Without delete_data the data stays and turning the service on again finds it.",
       "params": {
         "type": "object",
-        "required": ["ids", "pin", "revision", "delete_data"],
+        "required": ["ids", "revision", "delete_data"],
         "additionalProperties": false,
         "properties": {
           "ids": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "$ref": "#/$defs/CatalogId" } },
-          "pin": { "$ref": "#/$defs/Pin" },
+          "admin_pin": { "$ref": "#/$defs/Pin" },
           "revision": { "$ref": "#/$defs/Revision" },
           "delete_data": { "type": "boolean" }
         }
@@ -2135,9 +2135,9 @@
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "insufficient_resources", "state_conflict", "not_found", "pin_required", "unavailable"],
       "examples": [
-        { "name": "keep data", "params": { "ids": ["plex-media-server"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": false }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
-        { "name": "delete server data", "params": { "ids": ["jellyfin-server"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": true }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
-        { "name": "not on", "params": { "ids": ["tailscale"], "pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": false }, "error": { "code": 3010, "message": "tailscale is not on" } }
+        { "name": "keep data", "params": { "ids": ["plex-media-server"], "admin_pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": false }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "delete server data", "params": { "ids": ["jellyfin-server"], "admin_pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": true }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "not on", "params": { "ids": ["tailscale"], "admin_pin": "2468", "revision": "6b2c1e0b9f4a7d3c5e8f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c0d", "delete_data": false }, "error": { "code": 3010, "message": "tailscale is not on" } }
       ]
     },
     "media.folders": {
@@ -2169,10 +2169,10 @@
       "description": "name: 1 to 64 characters after trimming, no control or format characters, none of /\\:*?\"<>| (invalid_params {field: name, reason: bad_length | bad_name}); a library with the same name (any case) is invalid_params {field: name, reason: exists} when Jellyfin answers in time, else the job fails. kind: movies, shows, music or mixed (Jellyfin's collection types movies, tvshows, music, and none for mixed). folder: a media.folders id, resolved again (no symlink followed) when the request comes and again in the job (not_found: no such folder). Jellyfin off: unavailable {service: jellyfin, reason: off}; its first-run setup not done: unavailable {service: jellyfin, reason: not_ready}. The job (stages preparing, configuring, finishing) waits up to 90 s for Jellyfin, makes missing profile users, adds the library and starts its scan; job_progress's subject then gains library.id. Failures: job_failed with reason unreachable, not_ready or refused.",
       "params": {
         "type": "object",
-        "required": ["pin", "name", "kind", "folder"],
+        "required": ["name", "kind", "folder"],
         "additionalProperties": false,
         "properties": {
-          "pin": { "$ref": "#/$defs/Pin" },
+          "admin_pin": { "$ref": "#/$defs/Pin" },
           "name": { "$ref": "#/$defs/LibraryName" },
           "kind": { "$ref": "#/$defs/LibraryKind" },
           "folder": { "$ref": "#/$defs/FolderId" }
@@ -2181,9 +2181,9 @@
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "not_found", "pin_required", "unavailable"],
       "examples": [
-        { "name": "movies", "params": { "pin": "2468", "name": "Movies", "kind": "movies", "folder": "Movies" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
-        { "name": "name taken", "params": { "pin": "2468", "name": "movies", "kind": "movies", "folder": "Films" }, "error": { "code": -32602, "message": "a library has this name", "data": { "field": "name", "reason": "exists" } } },
-        { "name": "setup not done", "params": { "pin": "2468", "name": "Shows", "kind": "shows", "folder": "TV" }, "error": { "code": 4001, "message": "the service is not ready", "data": { "service": "jellyfin", "reason": "not_ready" } } }
+        { "name": "movies", "params": { "admin_pin": "2468", "name": "Movies", "kind": "movies", "folder": "Movies" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "name taken", "params": { "admin_pin": "2468", "name": "movies", "kind": "movies", "folder": "Films" }, "error": { "code": -32602, "message": "a library has this name", "data": { "field": "name", "reason": "exists" } } },
+        { "name": "setup not done", "params": { "admin_pin": "2468", "name": "Shows", "kind": "shows", "folder": "TV" }, "error": { "code": 4001, "message": "the service is not ready", "data": { "service": "jellyfin", "reason": "not_ready" } } }
       ]
     },
     "jellyfin.libraries.remove": {
@@ -2191,15 +2191,15 @@
       "description": "library_id: a library id from services.list (not_found when Jellyfin answers in time and has no such library; else the job fails with reason refused). Jellyfin removes its own folder for the library (links, options), never the media. unavailable as for jellyfin.libraries.add.",
       "params": {
         "type": "object",
-        "required": ["pin", "library_id"],
+        "required": ["library_id"],
         "additionalProperties": false,
-        "properties": { "pin": { "$ref": "#/$defs/Pin" }, "library_id": { "$ref": "#/$defs/JellyfinId" } }
+        "properties": { "admin_pin": { "$ref": "#/$defs/Pin" }, "library_id": { "$ref": "#/$defs/JellyfinId" } }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "not_found", "pin_required", "unavailable"],
       "examples": [
-        { "name": "remove", "params": { "pin": "2468", "library_id": "f137a2dd21bbc1b99aa5c0f6bf02a805" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
-        { "name": "unknown", "params": { "pin": "2468", "library_id": "00000000000000000000000000000000" }, "error": { "code": 3010, "message": "no such library" } }
+        { "name": "remove", "params": { "admin_pin": "2468", "library_id": "f137a2dd21bbc1b99aa5c0f6bf02a805" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "unknown", "params": { "admin_pin": "2468", "library_id": "00000000000000000000000000000000" }, "error": { "code": 3010, "message": "no such library" } }
       ]
     },
     "jellyfin.users.reveal": {
@@ -2207,9 +2207,8 @@
       "description": "Makes missing profile users first (one Jellyfin user per profile, not the guest; named after the profile: letters, digits, space and _-'.@+ kept, unique in any case with a number added; not an administrator, no media deletion; random 16-character password), when Jellyfin answers within 3 s. admin: null until HinterOS's first-run setup wrote it. users: every profile that has a user, with the profile's name now. The answer is never logged; the audit records only that it was asked. Jellyfin off: unavailable {service: jellyfin, reason: off}.",
       "params": {
         "type": "object",
-        "required": ["pin"],
         "additionalProperties": false,
-        "properties": { "pin": { "$ref": "#/$defs/Pin" } }
+        "properties": { "admin_pin": { "$ref": "#/$defs/Pin" } }
       },
       "result": {
         "type": "object",
@@ -2224,7 +2223,7 @@
       "examples": [
         {
           "name": "passwords",
-          "params": { "pin": "2468" },
+          "params": { "admin_pin": "2468" },
           "result": {
             "admin": { "name": "admin", "password": "k3v9q2m7x4p8w6t5" },
             "users": [
@@ -2233,7 +2232,7 @@
             ]
           }
         },
-        { "name": "off", "params": { "pin": "2468" }, "error": { "code": 4001, "message": "the service is off", "data": { "service": "jellyfin", "reason": "off" } } }
+        { "name": "off", "params": { "admin_pin": "2468" }, "error": { "code": 4001, "message": "the service is off", "data": { "service": "jellyfin", "reason": "off" } } }
       ]
     },
     "jellyfin.client_token": {
@@ -2263,16 +2262,16 @@
       "description": "code: claim- and 20 letters, digits, _ or - (what plex.tv/claim gives; valid about 4 minutes; never logged). Plex off: unavailable {service: plex, reason: off}; already linked: job_id null. The job (stages preparing, configuring, finishing) waits up to 90 s for Plex on 127.0.0.1:32400, posts the code to Plex's own /myplex/claim (Plex exchanges it with plex.tv), and succeeds once Preferences.xml has the account token (at most 30 s). Failures: job_failed with reason unreachable (Plex does not answer) or refused (Plex refused the code, e.g. it expired). Plex libraries are added in Plex's own app afterwards.",
       "params": {
         "type": "object",
-        "required": ["pin", "code"],
+        "required": ["code"],
         "additionalProperties": false,
-        "properties": { "pin": { "$ref": "#/$defs/Pin" }, "code": { "$ref": "#/$defs/PlexClaimCode" } }
+        "properties": { "admin_pin": { "$ref": "#/$defs/Pin" }, "code": { "$ref": "#/$defs/PlexClaimCode" } }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required", "unavailable"],
       "examples": [
-        { "name": "claim", "params": { "pin": "2468", "code": "claim-AbCdEfGhIjKlMnOpQrSt" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
-        { "name": "linked already", "params": { "pin": "2468", "code": "claim-AbCdEfGhIjKlMnOpQrSt" }, "result": { "job_id": null } },
-        { "name": "bad code", "params": { "pin": "2468", "code": "claim-12345678901234567890" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }
+        { "name": "claim", "params": { "admin_pin": "2468", "code": "claim-AbCdEfGhIjKlMnOpQrSt" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "linked already", "params": { "admin_pin": "2468", "code": "claim-AbCdEfGhIjKlMnOpQrSt" }, "result": { "job_id": null } },
+        { "name": "bad code", "params": { "admin_pin": "2468", "code": "claim-12345678901234567890" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }
       ]
     },
     "tailscale.login": {
@@ -2280,15 +2279,14 @@
       "description": "Tailscale off: unavailable {service: tailscale, reason: off}; signed in already (Running): job_id null. The job runs tailscale up --reset --json --timeout=600s (the defaults: no exit node, no subnet routes, no Tailscale SSH; --force-reauth when an expired key needs a new sign-in). When Tailscale has the sign-in URL, job_progress has stage signing_in and detail.auth_url (https, at most 512 printable ASCII characters; the launcher shows it as a QR code; jobs.get's detail has it too); a newer URL comes in a new job_progress. The job succeeds when tailscaled is Running (the person signed in, and the tailnet approved the device if it must). jobs.cancel stops the wait. Failures: job_failed with reason timeout (nobody signed in within 10 minutes), refused (the CLI failed; log_hint says why) or unreachable (no tailscale CLI).",
       "params": {
         "type": "object",
-        "required": ["pin"],
         "additionalProperties": false,
-        "properties": { "pin": { "$ref": "#/$defs/Pin" } }
+        "properties": { "admin_pin": { "$ref": "#/$defs/Pin" } }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required", "unavailable"],
       "examples": [
-        { "name": "sign in", "params": { "pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
-        { "name": "signed in already", "params": { "pin": "2468" }, "result": { "job_id": null } }
+        { "name": "sign in", "params": { "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "signed in already", "params": { "admin_pin": "2468" }, "result": { "job_id": null } }
       ]
     },
     "tailscale.logout": {
@@ -2296,28 +2294,27 @@
       "description": "Tailscale off: unavailable {service: tailscale, reason: off}; signed out already (NeedsLogin): job_id null. Stages preparing, configuring, finishing.",
       "params": {
         "type": "object",
-        "required": ["pin"],
         "additionalProperties": false,
-        "properties": { "pin": { "$ref": "#/$defs/Pin" } }
+        "properties": { "admin_pin": { "$ref": "#/$defs/Pin" } }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required", "unavailable"],
-      "examples": [{ "name": "sign out", "params": { "pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
+      "examples": [{ "name": "sign out", "params": { "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
     },
     "cloudflare.set_token": {
       "summary": "Set the Cloudflare tunnel token and (re)start the tunnel (job cloudflare_set_token). Admin PIN. Action org.hinteros.system.services.",
       "description": "token: the token of a remotely managed tunnel from the Zero Trust dashboard, checked strictly: at most 512 characters, standard padded base64 of a JSON object with exactly a (account tag, 32 hex digits), t (tunnel id, a UUID), s (secret: base64 of 32 to 256 bytes) and optionally e (endpoint, lower-case letters), each once; else invalid_params {field: token, reason: bad_length | not_base64 | not_a_token | bad_account | bad_tunnel_id | bad_secret | bad_endpoint}. Never logged. Cloudflare off: unavailable {service: cloudflare, reason: off}. The service writes it to /var/lib/hinteros/services/cloudflare-tunnel/token (0600 root, atomically); the job restarts hinteros-cloudflared.service and waits up to 30 s for a connection (stages configuring, finishing). Failures: job_failed with reason not_connected (the token is kept: check it, or clear it) or unreachable (systemd refused the restart).",
       "params": {
         "type": "object",
-        "required": ["pin", "token"],
+        "required": ["token"],
         "additionalProperties": false,
-        "properties": { "pin": { "$ref": "#/$defs/Pin" }, "token": { "$ref": "#/$defs/TunnelToken" } }
+        "properties": { "admin_pin": { "$ref": "#/$defs/Pin" }, "token": { "$ref": "#/$defs/TunnelToken" } }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required", "unavailable"],
       "examples": [
-        { "name": "set", "params": { "pin": "2468", "token": "eyJhIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJ0IjoiNmYxYzhhMmUtM2I0ZC00ZTVmLThhOWItMGMxZDJlM2Y0YTViIiwicyI6IkJ3Y0hCd2NIQndjSEJ3Y0hCd2NIQndjSEJ3Y0hCd2NIQndjSEJ3Y0hCd2M9In0=" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
-        { "name": "not a token", "params": { "pin": "2468", "token": "eyJhIjoiYiJ9" }, "error": { "code": -32602, "message": "not a tunnel token", "data": { "field": "token", "reason": "not_a_token" } } }
+        { "name": "set", "params": { "admin_pin": "2468", "token": "eyJhIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJ0IjoiNmYxYzhhMmUtM2I0ZC00ZTVmLThhOWItMGMxZDJlM2Y0YTViIiwicyI6IkJ3Y0hCd2NIQndjSEJ3Y0hCd2NIQndjSEJ3Y0hCd2NIQndjSEJ3Y0hCd2M9In0=" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "not a token", "params": { "admin_pin": "2468", "token": "eyJhIjoiYiJ9" }, "error": { "code": -32602, "message": "not a tunnel token", "data": { "field": "token", "reason": "not_a_token" } } }
       ]
     },
     "cloudflare.clear_token": {
@@ -2325,13 +2322,12 @@
       "description": "No token: job_id null. Cloudflare off: unavailable {service: cloudflare, reason: off}. Stages configuring, finishing.",
       "params": {
         "type": "object",
-        "required": ["pin"],
         "additionalProperties": false,
-        "properties": { "pin": { "$ref": "#/$defs/Pin" } }
+        "properties": { "admin_pin": { "$ref": "#/$defs/Pin" } }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
       "errors": ["permission_denied", "authentication_required", "rate_limited", "job_busy", "pin_required", "unavailable"],
-      "examples": [{ "name": "clear", "params": { "pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
+      "examples": [{ "name": "clear", "params": { "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } }]
     },
 
     "jobs.get": {
@@ -2445,16 +2441,23 @@
     },
     "jobs.cancel": {
       "summary": "Cancel a running job before its activation stage; the box stays unchanged. Action org.hinteros.system.jobs.cancel.",
+      "description": "Without admin_pin only the job's starter, root and the admin profile may cancel it; anyone else gets permission_denied {reason: starter}. With admin_pin (the admin profile's PIN) any profile may: pin_required {pin: admin} when it is wrong (it counts toward the admin PIN's tries). The cancelled job ends with job_finished, ok false, error job_failed with data.reason cancelled.",
       "params": {
         "type": "object",
         "required": ["job_id"],
         "additionalProperties": false,
-        "properties": { "job_id": { "$ref": "#/$defs/JobId" } }
+        "properties": { "job_id": { "$ref": "#/$defs/JobId" }, "admin_pin": { "$ref": "#/$defs/Pin" } }
       },
       "result": { "$ref": "#/$defs/JobRef", "type": "object" },
-      "errors": ["permission_denied", "authentication_required", "rate_limited", "not_found", "job_busy"],
+      "errors": ["permission_denied", "authentication_required", "rate_limited", "not_found", "job_busy", "pin_required"],
       "examples": [
         { "name": "cancelling", "params": { "job_id": "3f9a0c2b7e4d1a65" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        { "name": "with the admin PIN", "params": { "job_id": "3f9a0c2b7e4d1a65", "admin_pin": "2468" }, "result": { "job_id": "3f9a0c2b7e4d1a65" } },
+        {
+          "name": "started by another profile",
+          "params": { "job_id": "3f9a0c2b7e4d1a65" },
+          "error": { "code": 3002, "message": "only who started the job, or the admin profile, can cancel it", "data": { "action": "org.hinteros.system.jobs.cancel", "reason": "starter" } }
+        },
         { "name": "already activating", "params": { "job_id": "3f9a0c2b7e4d1a65" }, "error": { "code": 3005, "message": "the job is activating and can no longer be cancelled", "data": { "job_id": "3f9a0c2b7e4d1a65" } } }
       ]
     }
@@ -2685,14 +2688,14 @@
     "already_handshaken": { "code": 1003, "summary": "'hello' was called twice on one connection." },
     "permission_denied": {
       "code": 3002,
-      "summary": "Not allowed: the caller does not own seat0's active session (seat), polkit said no (polkit), or the peer cannot be identified safely (peer: no SO_PEERPIDFD, or the process is gone).",
+      "summary": "Not allowed: the caller does not own seat0's active session (seat), polkit said no (polkit), the peer cannot be identified safely (peer: no SO_PEERPIDFD, or the process is gone), the caller's profile may not do it (profile), or jobs.cancel of a job another profile started without admin_pin (starter).",
       "data": {
         "type": "object",
         "required": ["action", "reason"],
         "additionalProperties": false,
         "properties": {
           "action": { "$ref": "#/$defs/PolkitAction" },
-          "reason": { "enum": ["seat", "polkit", "peer", "profile"] }
+          "reason": { "enum": ["seat", "polkit", "peer", "profile", "starter"] }
         }
       }
     },

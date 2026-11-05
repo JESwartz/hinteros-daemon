@@ -9,11 +9,11 @@ use std::time::Duration;
 
 use hinteros_api::catalog::{EntryKind, Index, Status};
 use hinteros_api::system::{
-    CatalogApp, CloudflareDetail, CloudflareSetTokenParams, JellyfinAccount,
+    AdminPinParams, CatalogApp, CloudflareDetail, CloudflareSetTokenParams, JellyfinAccount,
     JellyfinClientTokenResult, JellyfinDetail, JellyfinLibrariesAddParams,
     JellyfinLibrariesRemoveParams, JellyfinProfileAccount, JellyfinUserRef,
     JellyfinUsersRevealResult, JobKind, JobSubject, MediaFoldersParams, MediaFoldersResult,
-    PinParams, PlexClaimParams, PlexDetail, ServiceDetail, ServiceIcon, ServiceInfo, ServiceTerms,
+    PlexClaimParams, PlexDetail, ServiceDetail, ServiceIcon, ServiceInfo, ServiceTerms,
     ServicesDisableParams, ServicesEnableParams, ServicesListResult, Setup, SubjectLibrary,
     UnitState,
 };
@@ -42,24 +42,12 @@ pub enum ServersRequest {
     Disable(ServicesDisableParams),
     LibraryAdd(JellyfinLibrariesAddParams),
     LibraryRemove(JellyfinLibrariesRemoveParams),
-    Reveal(PinParams),
+    Reveal(AdminPinParams),
     PlexClaim(PlexClaimParams),
-    TailscaleLogin(PinParams),
-    TailscaleLogout(PinParams),
+    TailscaleLogin(AdminPinParams),
+    TailscaleLogout(AdminPinParams),
     SetToken(CloudflareSetTokenParams),
-    ClearToken(PinParams),
-}
-
-fn pin_field(pin: &str) -> Result<(), ErrorObject> {
-    if crate::pins::is_pin(pin) {
-        Ok(())
-    } else {
-        Err(ErrorObject::invalid_field(
-            "pin",
-            "bad_format",
-            "a PIN is 4 to 8 digits",
-        ))
-    }
+    ClearToken(AdminPinParams),
 }
 
 /// `unavailable {service, reason}`: the service is off (`off`) or not set up yet (`not_ready`).
@@ -131,24 +119,24 @@ impl ServersRequest {
         }
     }
 
-    fn pin(&self) -> &str {
+    fn admin_pin(&self) -> Option<&str> {
         match self {
-            Self::Enable(p) => &p.pin,
-            Self::Disable(p) => &p.pin,
-            Self::LibraryAdd(p) => &p.pin,
-            Self::LibraryRemove(p) => &p.pin,
-            Self::PlexClaim(p) => &p.pin,
-            Self::SetToken(p) => &p.pin,
+            Self::Enable(p) => p.admin_pin.as_deref(),
+            Self::Disable(p) => p.admin_pin.as_deref(),
+            Self::LibraryAdd(p) => p.admin_pin.as_deref(),
+            Self::LibraryRemove(p) => p.admin_pin.as_deref(),
+            Self::PlexClaim(p) => p.admin_pin.as_deref(),
+            Self::SetToken(p) => p.admin_pin.as_deref(),
             Self::Reveal(p)
             | Self::TailscaleLogin(p)
             | Self::TailscaleLogout(p)
-            | Self::ClearToken(p) => &p.pin,
+            | Self::ClearToken(p) => p.admin_pin.as_deref(),
         }
     }
 
     /// The formats (before the rate limit and polkit).
     pub fn validate(&self) -> Result<(), ErrorObject> {
-        pin_field(self.pin())?;
+        super::check_admin_pin(self.admin_pin())?;
         match self {
             Self::Enable(p) => {
                 check_service_ids(&p.ids)?;
@@ -513,7 +501,7 @@ impl Service {
         let uid = peer.uid;
         let method = r.method();
         let (state, revision) = self.load_state()?;
-        self.check_box_admin(uid, method, Some(r.pin())).await?;
+        self.check_box_admin(uid, method, r.admin_pin()).await?;
         let on = |id: &str| state.services.iter().any(|i| i == id);
         match r {
             ServersRequest::Enable(p) => {
@@ -1013,36 +1001,36 @@ mod tests {
         let ok = [
             (
                 "services.enable",
-                json!({"ids": ["jellyfin-server"], "pin": "1234", "revision": rev}),
+                json!({"ids": ["jellyfin-server"], "admin_pin": "1234", "revision": rev}),
             ),
             (
                 "services.enable",
-                json!({"ids": ["plex-media-server"], "pin": "1234", "revision": rev, "accepted_terms": {"plex-media-server": "2025-10-30"}}),
+                json!({"ids": ["plex-media-server"], "admin_pin": "1234", "revision": rev, "accepted_terms": {"plex-media-server": "2025-10-30"}}),
             ),
             (
                 "services.disable",
-                json!({"ids": ["tailscale"], "pin": "1234", "revision": rev, "delete_data": true}),
+                json!({"ids": ["tailscale"], "admin_pin": "1234", "revision": rev, "delete_data": true}),
             ),
             (
                 "jellyfin.libraries.add",
-                json!({"pin": "1234", "name": "Movies", "kind": "movies", "folder": "Movies/HD"}),
+                json!({"admin_pin": "1234", "name": "Movies", "kind": "movies", "folder": "Movies/HD"}),
             ),
             (
                 "jellyfin.libraries.remove",
-                json!({"pin": "1234", "library_id": "f137a2dd21bbc1b99aa5c0f6bf02a805"}),
+                json!({"admin_pin": "1234", "library_id": "f137a2dd21bbc1b99aa5c0f6bf02a805"}),
             ),
-            ("jellyfin.users.reveal", json!({"pin": "1234"})),
+            ("jellyfin.users.reveal", json!({"admin_pin": "1234"})),
             (
                 "plex.claim",
-                json!({"pin": "1234", "code": "claim-AbCdEfGhIjKlMnOpQrSt"}),
+                json!({"admin_pin": "1234", "code": "claim-AbCdEfGhIjKlMnOpQrSt"}),
             ),
-            ("tailscale.login", json!({"pin": "1234"})),
-            ("tailscale.logout", json!({"pin": "1234"})),
+            ("tailscale.login", json!({"admin_pin": "1234"})),
+            ("tailscale.logout", json!({"admin_pin": "1234"})),
             (
                 "cloudflare.set_token",
-                json!({"pin": "1234", "token": token}),
+                json!({"admin_pin": "1234", "token": token}),
             ),
-            ("cloudflare.clear_token", json!({"pin": "1234"})),
+            ("cloudflare.clear_token", json!({"admin_pin": "1234"})),
         ];
         for (m, p) in ok {
             assert!(decode(m, p.clone()).is_ok(), "{m} {p}");
@@ -1050,82 +1038,82 @@ mod tests {
         let bad = [
             (
                 "services.enable",
-                json!({"ids": [], "pin": "1234", "revision": rev}),
+                json!({"ids": [], "admin_pin": "1234", "revision": rev}),
                 "ids",
             ),
             (
                 "services.enable",
-                json!({"ids": ["a", "a"], "pin": "1234", "revision": rev}),
+                json!({"ids": ["a", "a"], "admin_pin": "1234", "revision": rev}),
                 "ids",
             ),
             (
                 "services.enable",
-                json!({"ids": ["../x"], "pin": "1234", "revision": rev}),
+                json!({"ids": ["../x"], "admin_pin": "1234", "revision": rev}),
                 "ids",
             ),
             (
                 "services.enable",
-                json!({"ids": ["a"], "pin": "12", "revision": rev}),
-                "pin",
+                json!({"ids": ["a"], "admin_pin": "12", "revision": rev}),
+                "admin_pin",
             ),
             (
                 "services.enable",
-                json!({"ids": ["a"], "pin": "1234", "revision": "x"}),
+                json!({"ids": ["a"], "admin_pin": "1234", "revision": "x"}),
                 "revision",
             ),
             (
                 "services.disable",
-                json!({"ids": ["a"], "pin": "1234", "revision": rev, "delete_data": true, "path": "/"}),
+                json!({"ids": ["a"], "admin_pin": "1234", "revision": rev, "delete_data": true, "path": "/"}),
                 "path",
             ),
             (
                 "jellyfin.libraries.add",
-                json!({"pin": "1234", "name": "M", "kind": "books", "folder": "M"}),
+                json!({"admin_pin": "1234", "name": "M", "kind": "books", "folder": "M"}),
                 "kind",
             ),
             (
                 "jellyfin.libraries.add",
-                json!({"pin": "1234", "name": "M", "kind": "movies", "folder": "../etc"}),
+                json!({"admin_pin": "1234", "name": "M", "kind": "movies", "folder": "../etc"}),
                 "folder",
             ),
             (
                 "jellyfin.libraries.add",
-                json!({"pin": "1234", "name": "M", "kind": "movies", "folder": "/srv/media/M"}),
+                json!({"admin_pin": "1234", "name": "M", "kind": "movies", "folder": "/srv/media/M"}),
                 "folder",
             ),
             (
                 "jellyfin.libraries.add",
-                json!({"pin": "1234", "name": "a/b", "kind": "movies", "folder": "M"}),
+                json!({"admin_pin": "1234", "name": "a/b", "kind": "movies", "folder": "M"}),
                 "name",
             ),
             (
                 "jellyfin.libraries.add",
-                json!({"pin": "1234", "name": "M", "kind": "movies", "path": "/etc"}),
+                json!({"admin_pin": "1234", "name": "M", "kind": "movies", "path": "/etc"}),
                 "path",
             ),
             (
                 "jellyfin.libraries.remove",
-                json!({"pin": "1234", "library_id": "../x"}),
+                json!({"admin_pin": "1234", "library_id": "../x"}),
                 "library_id",
             ),
             (
                 "plex.claim",
-                json!({"pin": "1234", "code": "claim-short"}),
+                json!({"admin_pin": "1234", "code": "claim-short"}),
                 "code",
             ),
             (
                 "plex.claim",
-                json!({"pin": "1234", "code": "claim-AbCdEfGhIjKlMnOpQrSt", "url": "x"}),
+                json!({"admin_pin": "1234", "code": "claim-AbCdEfGhIjKlMnOpQrSt", "url": "x"}),
                 "url",
             ),
             (
                 "cloudflare.set_token",
-                json!({"pin": "1234", "token": "eyJhIjoiYiJ9"}),
+                json!({"admin_pin": "1234", "token": "eyJhIjoiYiJ9"}),
                 "token",
             ),
             (
                 "tailscale.login",
-                json!({"pin": "1234", "exit_node": "x"}),
+                json!({"admin_pin": "1234", "exit_node": "x"}),
                 "exit_node",
             ),
         ];

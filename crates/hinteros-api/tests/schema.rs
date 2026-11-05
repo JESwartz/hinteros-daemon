@@ -684,23 +684,23 @@ fn server_section() {
         let bad = [
             (
                 "services.enable",
-                format!(r#"{{"ids":["a"],"pin":"1234","revision":"{rev}","uid":0}}"#),
+                format!(r#"{{"ids":["a"],"admin_pin":"1234","revision":"{rev}","uid":0}}"#),
             ),
             (
                 "services.enable",
-                format!(r#"{{"ids":["a","a"],"pin":"1234","revision":"{rev}"}}"#),
+                format!(r#"{{"ids":["a","a"],"admin_pin":"1234","revision":"{rev}"}}"#),
             ),
             (
                 "services.enable",
-                format!(r#"{{"ids":["../x"],"pin":"1234","revision":"{rev}"}}"#),
+                format!(r#"{{"ids":["../x"],"admin_pin":"1234","revision":"{rev}"}}"#),
             ),
             (
                 "services.enable",
-                format!(r#"{{"ids":["a"],"revision":"{rev}"}}"#),
+                format!(r#"{{"ids":["a"],"pin":"1234","revision":"{rev}"}}"#),
             ),
             (
                 "services.disable",
-                format!(r#"{{"ids":["a"],"pin":"1234","revision":"{rev}"}}"#),
+                format!(r#"{{"ids":["a"],"admin_pin":"1234","revision":"{rev}"}}"#),
             ),
             ("media.folders", r#"{"folder_id":"../etc"}"#.into()),
             ("media.folders", r#"{"folder_id":"/srv/media"}"#.into()),
@@ -708,45 +708,48 @@ fn server_section() {
             ("media.folders", r#"{"path":"/"}"#.into()),
             (
                 "jellyfin.libraries.add",
-                r#"{"pin":"1234","name":"M","kind":"books","folder":"M"}"#.into(),
+                r#"{"admin_pin":"1234","name":"M","kind":"books","folder":"M"}"#.into(),
             ),
             (
                 "jellyfin.libraries.add",
-                r#"{"pin":"1234","name":"","kind":"movies","folder":"M"}"#.into(),
+                r#"{"admin_pin":"1234","name":"","kind":"movies","folder":"M"}"#.into(),
             ),
             (
                 "jellyfin.libraries.add",
-                r#"{"pin":"1234","name":"M","kind":"movies","folder":"M/../.."}"#.into(),
+                r#"{"admin_pin":"1234","name":"M","kind":"movies","folder":"M/../.."}"#.into(),
             ),
             (
                 "jellyfin.libraries.remove",
-                r#"{"pin":"1234","library_id":"F137A2DD21BBC1B99AA5C0F6BF02A805"}"#.into(),
+                r#"{"admin_pin":"1234","library_id":"F137A2DD21BBC1B99AA5C0F6BF02A805"}"#.into(),
             ),
-            ("jellyfin.users.reveal", r#"{}"#.into()),
-            ("plex.claim", r#"{"pin":"1234","code":"claim-abc"}"#.into()),
+            ("jellyfin.users.reveal", r#"{"pin":"1234"}"#.into()),
             (
                 "plex.claim",
-                r#"{"pin":"1234","code":"AbCdEfGhIjKlMnOpQrStUv"}"#.into(),
+                r#"{"admin_pin":"1234","code":"claim-abc"}"#.into(),
+            ),
+            (
+                "plex.claim",
+                r#"{"admin_pin":"1234","code":"AbCdEfGhIjKlMnOpQrStUv"}"#.into(),
             ),
             (
                 "tailscale.login",
-                r#"{"pin":"1234","exit_node":"x"}"#.into(),
+                r#"{"admin_pin":"1234","exit_node":"x"}"#.into(),
             ),
             (
                 "tailscale.login",
-                r#"{"pin":"1234","authkey":"tskey-x"}"#.into(),
+                r#"{"admin_pin":"1234","authkey":"tskey-x"}"#.into(),
             ),
             (
                 "cloudflare.set_token",
-                r#"{"pin":"1234","token":"not base64!"}"#.into(),
+                r#"{"admin_pin":"1234","token":"not base64!"}"#.into(),
             ),
             (
                 "cloudflare.set_token",
-                format!(r#"{{"pin":"1234","token":"{}"}}"#, "A".repeat(600)),
+                format!(r#"{{"admin_pin":"1234","token":"{}"}}"#, "A".repeat(600)),
             ),
             (
                 "cloudflare.clear_token",
-                r#"{"pin":"1234","token":"x"}"#.into(),
+                r#"{"admin_pin":"1234","token":"x"}"#.into(),
             ),
         ];
         for (m, p) in bad {
@@ -775,10 +778,11 @@ fn server_section() {
         assert!(schema.check_event("job_progress", &bad_url).is_err());
     }
     let p: PlexClaimParams =
-        serde_json::from_str(r#"{"pin":"1234","code":"claim-AbCdEfGhIjKlMnOpQrSt"}"#).unwrap();
+        serde_json::from_str(r#"{"admin_pin":"1234","code":"claim-AbCdEfGhIjKlMnOpQrSt"}"#)
+            .unwrap();
     assert!(!format!("{p:?}").contains("claim-") && !format!("{p:?}").contains("1234"));
     let t: CloudflareSetTokenParams =
-        serde_json::from_str(r#"{"pin":"1234","token":"c2VjcmV0"}"#).unwrap();
+        serde_json::from_str(r#"{"admin_pin":"1234","token":"c2VjcmV0"}"#).unwrap();
     assert!(!format!("{t:?}").contains("c2VjcmV0"));
     let r = JellyfinUsersRevealResult {
         admin: Some(JellyfinAccount {
@@ -885,10 +889,16 @@ fn zone_names() {
 
 #[test]
 fn system_rust_params_are_closed() {
-    use hinteros_api::system::{NoParams, SshSetParams, UpdateApplyParams};
+    use hinteros_api::system::{AdminPinParams, NoParams, SshSetParams, UpdateApplyParams};
     assert!(serde_json::from_str::<NoParams>(r#"{"uid":0}"#).is_err());
     assert!(serde_json::from_str::<SshSetParams>(r#"{"enabled":true,"x":1}"#).is_err());
     assert!(serde_json::from_str::<UpdateApplyParams>(r#"{"rev":"a","path":"/"}"#).is_err());
+    // No alias: the admin PIN is only ever `admin_pin`.
+    assert!(serde_json::from_str::<AdminPinParams>(r#"{"pin":"1234"}"#).is_err());
+    assert_eq!(
+        serde_json::from_str::<AdminPinParams>("{}").unwrap(),
+        AdminPinParams::default()
+    );
     for action in system::POLKIT_ACTIONS {
         assert!(action.starts_with("org.hinteros.system."));
     }

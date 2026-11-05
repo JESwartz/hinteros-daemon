@@ -4806,10 +4806,10 @@
       ]
     },
     "job_progress": {
-      "summary": "Relayed from the system service. A job reached a stage or made progress (at most 4 per second), and at least every 2 s while the job runs (a heartbeat repeats the latest values). percent where meaningful: downloading and building (never goes back within a stage run, below 100 while nix runs), measuring. last_activity_at: the last time the job's process printed anything (nix log lines included). subject only when it changed during the job (it replaces the one from job_started).",
+      "summary": "Relayed from the system service. A job reached a stage or made progress (at most 4 per second), and at least every 2 s while the job runs (a heartbeat repeats the latest values). percent where meaningful: downloading and building (never goes back within a stage run, below 100 while nix runs), measuring. last_activity_at: the last time the job's process printed anything (nix log lines included). subject only when it changed during the job (it replaces the one from job_started). stage is left out when it is unknown (a job a later version started, after a rollback).",
       "params": {
         "type": "object",
-        "required": ["job_id", "kind", "stage", "started_at"],
+        "required": ["job_id", "kind", "started_at"],
         "additionalProperties": false,
         "properties": {
           "job_id": { "$ref": "#/$defs/JobId" },
@@ -5409,7 +5409,8 @@
     },
     "job_busy": {
       "code": 3005,
-      "summary": "Another job runs (only one at a time), or the job is past the point of cancelling.",
+      "summary": "Another job runs (only one at a time), or the job is past the point of cancelling. data.job_id is that job; data can be absent when the running job cannot be read (a job a later version started, after a rollback).",
+      "data_optional": true,
       "data": {
         "type": "object",
         "required": [
@@ -5944,6 +5945,7 @@
       ]
     },
     "JobKind": {
+      "description": "unknown: a kind of a later version (a server sends it after a rollback, for a job a later version started).",
       "enum": [
         "settings",
         "ssh",
@@ -5976,7 +5978,8 @@
         "tailscale_logout",
         "cloudflare_set_token",
         "cloudflare_clear_token",
-        "apps_clear_data"
+        "apps_clear_data",
+        "unknown"
       ]
     },
     "ProfileId": { "description": "A profile id.", "type": "string", "pattern": "^p[1-9][0-9]{0,2}$" },
@@ -6098,14 +6101,17 @@
     },
 
     "JobState": {
+      "description": "unknown: a state of a later version (a server may send it after a rollback, for a job a later version started).",
       "enum": [
         "running",
         "succeeded",
         "failed",
-        "cancelled"
+        "cancelled",
+        "unknown"
       ]
     },
     "Stage": {
+      "description": "unknown: a stage of a later version (a server may send it after a rollback, in job_failed's stage; job_progress and jobs.get leave it out).",
       "enum": [
         "preparing",
         "fetching",
@@ -6121,7 +6127,8 @@
         "apps",
         "configuring",
         "signing_in",
-        "finishing"
+        "finishing",
+        "unknown"
       ]
     },
     "Severity": {

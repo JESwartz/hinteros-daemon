@@ -634,6 +634,18 @@ fn system_schema_rejects_what_it_should() {
             "{pointer} accepted {instance}"
         );
     }
+    // A job of a later version (after a rollback): kind unknown, its stage left out.
+    let later =
+        serde_json::json!({"job_id": "3f9a0c2b7e4d1a65", "kind": "unknown", "started_at": 1});
+    schema.check("/events/job_progress/params", &later).unwrap();
+    let p: system::JobProgressParams = serde_json::from_value(later).unwrap();
+    assert_eq!((p.kind, p.stage), (system::JobKind::Unknown, None));
+    schema
+        .check_error(&serde_json::json!({"code": 3003, "message": "m", "data": {"stage": "unknown", "log_hint": ""}}))
+        .unwrap();
+    schema
+        .check_error(&serde_json::json!({"code": 3005, "message": "m"}))
+        .unwrap();
     // invalid_params may carry {field, reason} or nothing.
     schema
         .check_error(&serde_json::json!({"code": -32602, "message": "m"}))

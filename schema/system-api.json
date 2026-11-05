@@ -2507,10 +2507,10 @@
       ]
     },
     "job_progress": {
-      "summary": "A job reached a stage or made progress (at most 4 per second), and at least every 2 s while the job runs (a heartbeat repeats the latest values). percent where meaningful: downloading and building (never goes back within a stage run, below 100 while nix runs), measuring. last_activity_at: the last time the job's process printed anything (nix log lines included). subject only when it changed during the job (it replaces the one from job_started).",
+      "summary": "A job reached a stage or made progress (at most 4 per second), and at least every 2 s while the job runs (a heartbeat repeats the latest values). percent where meaningful: downloading and building (never goes back within a stage run, below 100 while nix runs), measuring. last_activity_at: the last time the job's process printed anything (nix log lines included). subject only when it changed during the job (it replaces the one from job_started). stage is left out when it is unknown (a job a later version started, after a rollback).",
       "params": {
         "type": "object",
-        "required": ["job_id", "kind", "stage", "started_at"],
+        "required": ["job_id", "kind", "started_at"],
         "additionalProperties": false,
         "properties": {
           "job_id": { "$ref": "#/$defs/JobId" },
@@ -2729,7 +2729,8 @@
     },
     "job_busy": {
       "code": 3005,
-      "summary": "Another job runs (only one at a time), or the job is past the point of cancelling.",
+      "summary": "Another job runs (only one at a time), or the job is past the point of cancelling. data.job_id is that job; data can be absent when the running job cannot be read (a job a later version started, after a rollback).",
+      "data_optional": true,
       "data": {
         "type": "object",
         "required": ["job_id"],
@@ -2873,7 +2874,7 @@
     "PolkitAction": { "type": "string", "pattern": "^org\\.hinteros\\.system\\.[a-z.]+$" },
     "Channel": { "enum": ["stable", "beta"] },
     "Base": { "enum": ["stable", "unstable"] },
-    "JobKind": { "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "profiles_create", "profiles_remove", "guest_set", "guest_end", "storage_measure", "cleanup_system", "cleanup_profiles", "cleanup_set", "channel_check", "services_enable", "services_disable", "jellyfin_library_add", "jellyfin_library_remove", "plex_claim", "tailscale_login", "tailscale_logout", "cloudflare_set_token", "cloudflare_clear_token", "apps_clear_data"] },
+    "JobKind": { "description": "unknown: a kind of a later version (a server sends it after a rollback, for a job a later version started).", "enum": ["settings", "ssh", "rebuild", "hardware_redetect", "update_check", "update_apply", "rollback", "channel", "base", "apps_install", "apps_remove", "apps_rollback", "starter_set", "profiles_create", "profiles_remove", "guest_set", "guest_end", "storage_measure", "cleanup_system", "cleanup_profiles", "cleanup_set", "channel_check", "services_enable", "services_disable", "jellyfin_library_add", "jellyfin_library_remove", "plex_claim", "tailscale_login", "tailscale_logout", "cloudflare_set_token", "cloudflare_clear_token", "apps_clear_data", "unknown"] },
     "ProfileId": { "description": "A profile id.", "type": "string", "pattern": "^p[1-9][0-9]{0,2}$" },
     "ProfileName": { "description": "A display name: 1 to 32 characters, trimmed, no control or format characters.", "type": "string", "minLength": 1, "maxLength": 128 },
     "ProfileColor": { "enum": ["teal", "blue", "purple", "pink", "red", "orange", "yellow", "green"] },
@@ -2903,8 +2904,8 @@
         "reason": { "description": "The catalog's statusReason.", "oneOf": [{ "type": "string", "maxLength": 200 }, { "type": "null" }] }
       }
     },
-    "JobState": { "enum": ["running", "succeeded", "failed", "cancelled"] },
-    "Stage": { "enum": ["preparing", "fetching", "verifying", "box", "measuring", "evaluating", "downloading", "building", "activating", "cleaning", "collecting", "apps", "configuring", "signing_in", "finishing"] },
+    "JobState": { "description": "unknown: a state of a later version (a server may send it after a rollback, for a job a later version started).", "enum": ["running", "succeeded", "failed", "cancelled", "unknown"] },
+    "Stage": { "description": "unknown: a stage of a later version (a server may send it after a rollback, in job_failed's stage; job_progress and jobs.get leave it out).", "enum": ["preparing", "fetching", "verifying", "box", "measuring", "evaluating", "downloading", "building", "activating", "cleaning", "collecting", "apps", "configuring", "signing_in", "finishing", "unknown"] },
     "Severity": { "enum": ["low", "medium", "high", "critical"] },
     "JobRef": {
       "description": "A started job, or null when there was nothing to do.",

@@ -142,7 +142,8 @@ pub enum JobKind {
     CloudflareClearToken,
     /// An app's data deleted in the caller's home (`apps.clear_data`).
     AppsClearData,
-    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    /// A kind of a later version (`#[serde(other)]`). A server sends it for a job it cannot read
+    /// (one a later version started, after a rollback).
     #[serde(other)]
     Unknown,
 }
@@ -181,6 +182,7 @@ impl JobKind {
         JobKind::CloudflareSetToken,
         JobKind::CloudflareClearToken,
         JobKind::AppsClearData,
+        JobKind::Unknown,
     ];
 }
 
@@ -191,7 +193,8 @@ pub enum JobState {
     Succeeded,
     Failed,
     Cancelled,
-    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    /// A state of a later version (`#[serde(other)]`). A server may send it for a job a later
+    /// version started (after a rollback).
     #[serde(other)]
     Unknown,
 }
@@ -202,6 +205,7 @@ impl JobState {
         JobState::Succeeded,
         JobState::Failed,
         JobState::Cancelled,
+        JobState::Unknown,
     ];
 }
 
@@ -232,7 +236,9 @@ pub enum Stage {
     /// Waiting for the person to sign in at `detail.auth_url` (Tailscale).
     SigningIn,
     Finishing,
-    /// A value of a later minor (`#[serde(other)]`). This build never sends it.
+    /// A stage of a later version (`#[serde(other)]`). A server may send it for a job a later
+    /// version started (after a rollback), in `job_failed`'s `stage`; `job_progress` and `jobs.get`
+    /// leave such a stage out.
     #[serde(other)]
     Unknown,
 }
@@ -254,6 +260,7 @@ impl Stage {
         Stage::Configuring,
         Stage::SigningIn,
         Stage::Finishing,
+        Stage::Unknown,
     ];
 }
 
@@ -2465,7 +2472,9 @@ impl ProgressDetail {
 pub struct JobProgressParams {
     pub job_id: String,
     pub kind: JobKind,
-    pub stage: Stage,
+    /// Absent when the stage is unknown (a job of a later version, after a rollback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<Stage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

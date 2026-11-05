@@ -105,9 +105,11 @@ fn enums_a_client_only_reads_take_unknown_values() {
     reads_new_value(BtConfirmMode::Unknown);
     reads_new_value(AudioKind::Unknown);
     reads_new_value(PowerCapability::Unknown);
-    // The catch-all is not part of the API.
-    assert!(!JobKind::ALL.contains(&JobKind::Unknown));
-    assert!(!Stage::ALL.contains(&Stage::Unknown));
+    // The job enums' catch-all is part of the API: a server sends it for a job of a later
+    // version (after a rollback).
+    assert!(JobKind::ALL.contains(&JobKind::Unknown));
+    assert!(Stage::ALL.contains(&Stage::Unknown));
+    assert!(JobState::ALL.contains(&JobState::Unknown));
 }
 
 fn job_from_a_newer_server() -> Value {

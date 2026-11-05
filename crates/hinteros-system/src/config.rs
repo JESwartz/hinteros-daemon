@@ -642,6 +642,11 @@ impl Paths {
     pub fn jellyfin_backup(&self) -> PathBuf {
         self.root_state_dir.join("jellyfin-backup")
     }
+    /// The Cloudflare tunnel token as the last `set_token` job checked it (root's, 0600): what
+    /// `hinteros-cloudflared` loads (system repo), never the service's own file.
+    pub fn cloudflare_token(&self) -> PathBuf {
+        self.root_state_dir.join("cloudflare-tunnel-token")
+    }
     /// Which vendor terms were accepted, when and by whom (written by apps.install jobs).
     pub fn terms_accepted(&self) -> PathBuf {
         self.state_dir.join("terms-accepted.json")

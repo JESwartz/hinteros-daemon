@@ -1019,21 +1019,33 @@ Root's side:
   the user database, app data is deleted only in the asking account's own profile (or guest)
   home, a removed profile's account must be `hinteros-p<N>`, the guest's uid must be the job's
   `--guest-uid`, delete targets stay below `/var/lib` or `/var/cache` and off the box's own state.
-- **Writing into the service's directories** (`fsutil.rs`): as root, no symlink anywhere in a
-  path (each component opened `O_NOFOLLOW`; no `..`), temporary files `O_EXCL | O_NOFOLLOW`, and what root
-  makes there goes to the directory's owner. The app links are made relative to the directory
-  opened once.
+  A state in the spec (apply, services, apps, profile create and remove) must keep what only the
+  installer writes as the running `/etc/hinteros/state.json` has it: `stateVersion`, `disk`,
+  `settings.hostname`, `settings.admin` and the fields this daemon does not know. The service
+  never changes them; without this a compromised service could add an admin account (wheel)
+  of its own.
+- **Reading and writing in the service's directories** (`fsutil.rs`): as root, no symlink
+  anywhere in a path (each component opened `O_NOFOLLOW`; no `..`), only a regular file (opened
+  `O_NONBLOCK`, then checked: a FIFO does not hang the job), temporary files
+  `O_EXCL | O_NOFOLLOW`, and what root makes there goes to the directory's owner. The app links
+  are made relative to the directory opened once. The job spec, `profiles.json`, PINs, the app
+  registry, `terms-accepted.json`, the guest marker, the time zone request and
+  `lan-filter.json` are read this way.
 - **Root's own state** is `/var/lib/hinteros-root` (`--root-state-dir`; root:hinteros-system
   0710, the group may only pass): the jobs' `staging/` and `git/` (git and `nix build` run in
   them as root), `channel-tips.json` (rollback protection), `jellyfin-backup/`, the setup's
-  `jellyfin-server/`, and the admin password hash (system repo).
+  `jellyfin-server/`, `cloudflare-tunnel-token` (the `set_token` job's checked copy of the
+  service's token; `hinteros-cloudflared` loads only that copy), and the admin password hash
+  (system repo).
 
 What is left, and why:
 
 - A compromised service still does what the system API does: any job with a typed state, PINs,
   profiles, settings. It skips its own PIN, polkit and rate checks. It gets no root: a job runs
-  no program and writes no path the spec names, and `state.json` is typed (`State`) and
-  checked again by the system repo.
+  no program and writes no path the spec names, `state.json` is typed (`State`) and checked
+  again by the system repo, and the installer's fields (admin account, host name) stay as they
+  are. It can turn SSH on (`settings.ssh.enable`; the API asks for the admin password, a
+  compromised service does not), but signing in still needs the admin account's password or key.
 - systemd asks polkit about `FreezeUnit` and `ThawUnit` with the verbs `stop` and `start`, so
   the account may also stop or start a profile's slice (end its session). Accounts below uid
   20000 (a test box's session user) are never frozen.
@@ -1043,14 +1055,17 @@ What is left, and why:
   needs `CAP_SYS_PTRACE` (any root process could then be traced); the uid, pid and pidfd stay
   exact.
 - Plex: a `Preferences.xml` that neither Plex's group nor others may read shows as not claimed.
-- The Cloudflare tunnel token is in the service's directory; systemd (`LoadCredential`) reads
-  it as root for `hinteros-cloudflared`. The service could point that path at another file;
-  the tunnel then gets that file as its token (it never comes back to the service).
+  As a member of Plex's group the service can read all of Plex's group-readable files, so
+  also `PlexOnlineToken` (in `Preferences.xml` itself): a compromised service can use the
+  linked Plex account. It gets no root from it.
 - Moving a box (pre-1.0) onto this: the first start as the account gives `/var/lib/hinteros`
   and `/run/hinteros` to it. A job started by the old root service across that switch writes
-  files the new service cannot read: its result is lost. The system repo moves the admin
-  password hash at activation. The old `git/`, `staging/`, `channel-tips.json` and the Jellyfin
-  files in `/var/lib/hinteros` stay unused (delete them by hand).
+  files the new service cannot read: its result is lost. Nothing moves the admin password hash
+  (the account would read a file the service can write): move
+  `/var/lib/hinteros/admin-password-hash` to `/var/lib/hinteros-root/` by hand, as root, before
+  the switch. A tunnel token set before this is not copied: set it again. The old `git/`,
+  `staging/`, `channel-tips.json` and the Jellyfin files in `/var/lib/hinteros` stay unused
+  (delete them by hand).
 
 ### Command line
 

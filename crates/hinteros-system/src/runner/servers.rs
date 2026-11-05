@@ -414,10 +414,21 @@ impl Runner {
         self.set_stage(Stage::Configuring);
         let paths = self.paths.clone();
         let token = paths.services_dir().join(servers::CLOUDFLARE).join("token");
+        let copy = paths.cloudflare_token();
         if j.set {
-            if !token.is_file() {
+            // The service's file, read without following a symlink and checked again, then
+            // copied to root's directory: the unit's `LoadCredential` (root) reads only that copy.
+            let limit = hinteros_api::system::MAX_TUNNEL_TOKEN_BYTES as u64 + 1;
+            let text = crate::fsutil::read_limited(&token, limit)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+                .filter(|t| cloudflare::check_token(t).is_ok());
+            let Some(text) = text else {
                 return Err(self.failed("there is no token", "refused"));
-            }
+            };
+            crate::fsutil::create_dir_all(&paths.root_state_dir, 0o700)
+                .and_then(|()| crate::fsutil::write_atomic(&copy, text.as_bytes(), 0o600))
+                .map_err(|e| self.failed(format!("copying the token: {e}"), "refused"))?;
             self.unit_call("RestartUnit", cloudflare::UNIT)
                 .map_err(|e| {
                     self.failed(
@@ -440,10 +451,14 @@ impl Runner {
             if let Err(e) = self.unit_call("StopUnit", cloudflare::UNIT) {
                 warn!("stopping {}: {e}", cloudflare::UNIT);
             }
-            match std::fs::remove_file(&token) {
-                Ok(()) => info!("Cloudflare tunnel token deleted"),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(self.failed(format!("deleting the token: {e}"), "refused")),
+            for path in [&copy, &token] {
+                match std::fs::remove_file(path) {
+                    Ok(()) => info!(file = %path.display(), "Cloudflare tunnel token deleted"),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(self.failed(format!("deleting the token: {e}"), "refused"));
+                    }
+                }
             }
         }
         self.set_stage(Stage::Finishing);

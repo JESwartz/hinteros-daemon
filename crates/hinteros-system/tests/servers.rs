@@ -955,6 +955,13 @@ esac"#,
         std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
         0o600
     );
+    // The job's checked copy in root's directory: what the unit loads.
+    let copy = root.p("var/lib/hinteros-root/cloudflare-tunnel-token");
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), token);
+    assert_eq!(
+        std::fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     assert!(
         sys.fakes
             .lock()
@@ -975,6 +982,7 @@ esac"#,
     )
     .await;
     assert!(!file.exists());
+    assert!(!copy.exists());
     assert!(
         sys.fakes
             .lock()

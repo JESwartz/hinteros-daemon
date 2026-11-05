@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 
 use super::Own;
+use crate::appreg::Owner;
 use crate::flake::{self, ChannelTable};
-use crate::job::{Action, Apply, DeleteData, Home, JobSpec, MeasureHome, UpdateSource};
+use crate::job::{Action, Apply, AppsOp, DeleteData, Home, JobSpec, MeasureHome, UpdateSource};
 use crate::state::{self, GUEST_USER, State};
 use crate::users::Users;
 
@@ -23,30 +24,53 @@ pub fn check(spec: &mut JobSpec, own: &Own) -> anyhow::Result<()> {
         Action::Services(j) => apply(&mut j.apply, uid, own),
         Action::UpdateCheck(s) | Action::ChannelCheck(s) => source(s, own),
         Action::Apps(j) => {
+            owner(&j.owner)?;
+            match &j.op {
+                AppsOp::CopyFrom { from } => owner(from)?,
+                AppsOp::Set { ids } => {
+                    if let Some(bad) = ids.iter().find(|i| !state::is_app_id(i)) {
+                        bail!("{bad:?} is not an app id");
+                    }
+                }
+                AppsOp::Rollback { .. } => {}
+            }
             if let Some(d) = &mut j.delete_data {
                 delete_homes(d, uid, own)?;
             }
             Ok(())
         }
         Action::ClearData(d) => delete_homes(d, uid, own),
+        Action::ProfileCreate(j) => profile_account(&j.id, &j.user),
         Action::ProfileRemove(j) => {
-            if !state::is_profile_id(&j.id) || j.user != state::user_for(&j.id) {
-                bail!("{} is not the account of profile {}", j.user, j.id);
-            }
+            profile_account(&j.id, &j.user)?;
             let user = own.paths.users.by_name(&j.user);
             j.uid = user.as_ref().map(|u| u.uid);
             j.home = user.and_then(|u| home_of(u.uid, u.home));
             Ok(())
         }
+        Action::StorageMeasure(j) => j.owners.iter().try_for_each(owner),
+        Action::Cleanup(j) => j.owners.iter().try_for_each(owner),
         Action::Rollback { .. }
-        | Action::ProfileCreate(_)
         | Action::GuestEnd(_)
-        | Action::StorageMeasure(_)
-        | Action::Cleanup(_)
         | Action::Jellyfin(_)
         | Action::Plex(_)
         | Action::Tailscale(_)
         | Action::Cloudflare(_) => Ok(()),
+    }
+}
+
+/// Profile `p<N>`'s account is `hinteros-p<N>`: ids and names go into paths (PINs, app envs).
+fn profile_account(id: &str, user: &str) -> anyhow::Result<()> {
+    if !state::is_profile_id(id) || user != state::user_for(id) {
+        bail!("{user} is not the account of profile {id}");
+    }
+    Ok(())
+}
+
+fn owner(o: &Owner) -> anyhow::Result<()> {
+    match o {
+        Owner::Profile { id, user } => profile_account(id, user),
+        Owner::Starter | Owner::Guest => Ok(()),
     }
 }
 
@@ -392,5 +416,44 @@ mod tests {
                 None
             ]
         );
+    }
+
+    /// Profile ids and account names go into root's paths (`apps/<user>`, `pins/<id>`): only
+    /// `p<N>` and `hinteros-p<N>`, and app ids only as the catalog spells them.
+    #[test]
+    fn owners_and_ids_are_checked() {
+        use crate::appreg::Owner;
+        use crate::job::{AppsJob, AppsOp};
+        let d = tempfile::tempdir().unwrap();
+        let own = own(d.path());
+        let apps = |owner: Owner, op: AppsOp| {
+            spec(
+                20001,
+                Action::Apps(AppsJob {
+                    owner,
+                    op,
+                    box_state: None,
+                    terms: Vec::new(),
+                    delete_data: None,
+                    starter: None,
+                }),
+            )
+        };
+        let p = |id: &str, user: &str| Owner::Profile {
+            id: id.into(),
+            user: user.into(),
+        };
+        let set = |ids: &[&str]| AppsOp::Set {
+            ids: ids.iter().map(|i| (*i).to_owned()).collect(),
+        };
+        assert!(check(&mut apps(p("p1", "hinteros-p1"), set(&["kodi"])), &own).is_ok());
+        assert!(check(&mut apps(Owner::Guest, set(&[])), &own).is_ok());
+        assert!(check(&mut apps(p("p1", "../../../etc"), set(&[])), &own).is_err());
+        assert!(check(&mut apps(p("../x", "hinteros-../x"), set(&[])), &own).is_err());
+        assert!(check(&mut apps(Owner::Starter, set(&["a\"b"])), &own).is_err());
+        let copy = AppsOp::CopyFrom {
+            from: p("p2", "root"),
+        };
+        assert!(check(&mut apps(Owner::Guest, copy), &own).is_err());
     }
 }

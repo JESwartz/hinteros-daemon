@@ -1019,7 +1019,7 @@ Root's side:
   home, a removed profile's account must be `hinteros-p<N>`, the guest's uid must be the job's
   `--guest-uid`, delete targets stay below `/var/lib` or `/var/cache` and off the box's own state.
 - **Writing into the service's directories** (`fsutil.rs`): as root, no symlink anywhere in a
-  path (`openat2` `RESOLVE_NO_SYMLINKS`), temporary files `O_EXCL | O_NOFOLLOW`, and what root
+  path (each component opened `O_NOFOLLOW`; no `..`), temporary files `O_EXCL | O_NOFOLLOW`, and what root
   makes there goes to the directory's owner. The app links are made relative to the directory
   opened once.
 - **Root's own state** is `/var/lib/hinteros-root` (`--root-state-dir`; root:hinteros-system

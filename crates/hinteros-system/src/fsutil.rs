@@ -15,8 +15,8 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{
-    AtFlags, CWD, Mode, OFlags, RenameFlags, ResolveFlags, fchown, fstat, mkdirat, openat, openat2,
-    renameat, renameat_with, unlinkat,
+    AtFlags, CWD, Mode, OFlags, RenameFlags, fchown, fstat, mkdirat, openat, renameat,
+    renameat_with, unlinkat,
 };
 use rustix::process::{Gid, Uid, geteuid};
 use serde::de::DeserializeOwned;
@@ -36,17 +36,33 @@ fn open_dir(dir: &Path, guard: bool) -> io::Result<OwnedFd> {
     };
     let flags = OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC;
     let fd = if guard {
-        openat2(
-            CWD,
-            dir,
-            flags,
-            Mode::empty(),
-            ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-        )
+        walk(dir, flags)
     } else {
         openat(CWD, dir, flags, Mode::empty())
     };
     fd.map_err(|e| io::Error::new(io::Error::from(e).kind(), format!("{}: {e}", dir.display())))
+}
+
+/// `dir` opened one component at a time with `O_NOFOLLOW`: a symlink (or `..`) anywhere fails.
+/// Not `openat2(RESOLVE_NO_SYMLINKS)`: the helper units' seccomp filters refuse it.
+fn walk(dir: &Path, flags: OFlags) -> rustix::io::Result<OwnedFd> {
+    use std::path::Component;
+    let mut fd = openat(
+        CWD,
+        if dir.is_absolute() { "/" } else { "." },
+        flags,
+        Mode::empty(),
+    )?;
+    for c in dir.components() {
+        match c {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => {
+                fd = openat(&fd, name, flags | OFlags::NOFOLLOW, Mode::empty())?;
+            }
+            Component::ParentDir | Component::Prefix(_) => return Err(rustix::io::Errno::LOOP),
+        }
+    }
+    Ok(fd)
 }
 
 /// Directory `path` for the `*at` calls (as root: no symlink in the path), so that later calls
@@ -385,6 +401,10 @@ mod tests {
         create_dir_all_with(&real.join("x/y"), 0o700, true).unwrap();
         assert!(real.join("x/y").is_dir());
         assert!(create_dir_all_with(&d.path().join("link/z"), 0o700, true).is_err());
+        assert!(
+            write_atomic_with(&real.join("x/../a"), b"1", 0o600, true).is_err(),
+            "no .."
+        );
         assert!(!real.join("z").exists());
     }
 }

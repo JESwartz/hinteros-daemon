@@ -1330,7 +1330,9 @@ impl StorageNode {
     }
 }
 
-/// The store's filesystem (statvfs), like df.
+/// The store's filesystem (statvfs): `used_bytes` is total minus the available blocks
+/// (`f_bavail`, so blocks reserved for root count as used), and `used_bytes + free_bytes ==
+/// total_bytes`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskUsage {
     pub total_bytes: u64,

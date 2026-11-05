@@ -3168,7 +3168,7 @@
     },
     "system.cloudflare.set_token": {
       "summary": "Relayed to the system service's cloudflare.set_token. set the Cloudflare tunnel token and (re)start the tunnel (job cloudflare_set_token). Admin PIN. Action org.hinteros.system.services.",
-      "description": "token: the token of a remotely managed tunnel from the Zero Trust dashboard, checked strictly: at most 512 characters, standard padded base64 of a JSON object with exactly a (account tag, 32 hex digits), t (tunnel id, a UUID), s (secret: base64 of 32 to 256 bytes) and optionally e (endpoint, lower-case letters), each once; else invalid_params {field: token, reason: bad_length | not_base64 | not_a_token | bad_account | bad_tunnel_id | bad_secret | bad_endpoint}. Never logged. Cloudflare off: unavailable {service: cloudflare, reason: off}. The service writes it to /var/lib/hinteros/services/cloudflare-tunnel/token (0600 root, atomically); the job restarts hinteros-cloudflared.service and waits up to 30 s for a connection (stages configuring, finishing). Failures: job_failed with reason not_connected (the token is kept: check it, or clear it) or unreachable (systemd refused the restart).",
+      "description": "token: the token of a remotely managed tunnel from the Zero Trust dashboard, checked strictly: at most 512 characters, standard padded base64 of a JSON object with a (account tag, 32 hex digits), t (tunnel id, a UUID), s (secret: base64 of 32 to 256 bytes) and optionally e (endpoint, 1 to 16 lower-case letters), each at most once; other keys are ignored (a later cloudflared may add some); else invalid_params {field: token, reason: bad_length | not_base64 | not_a_token | bad_account | bad_tunnel_id | bad_secret | bad_endpoint}. Never logged. Cloudflare off: unavailable {service: cloudflare, reason: off}. The service writes it to /var/lib/hinteros/services/cloudflare-tunnel/token (0600 root, atomically); the job restarts hinteros-cloudflared.service and waits up to 30 s for a connection (stages configuring, finishing). Failures: job_failed with reason not_connected (the token is kept: check it, or clear it) or unreachable (systemd refused the restart).",
       "params": {
         "type": "object",
         "required": ["token"],
@@ -6469,7 +6469,7 @@
       }
     },
     "DiskUsage": {
-      "description": "The Nix store's filesystem, like df: used = total minus free blocks, free = available blocks.",
+      "description": "The Nix store's filesystem: used = total minus available blocks (f_bavail), free = available blocks, so used + free = total. Blocks reserved for root count as used.",
       "type": "object",
       "required": ["total_bytes", "used_bytes", "free_bytes"],
       "additionalProperties": false,

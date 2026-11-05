@@ -1367,7 +1367,10 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   <drv>^out … --keep-going`) and set with `nix-env -p <profile> --set` (skipped when it is
   already the current env). Its manifest `share/hinteros/apps.json` (`hinteros_api::manifest`)
   is the truth; `/var/lib/hinteros/apps/registry.json` caches owners' ids and box features and is
-  rewritten from the manifests at start.
+  rewritten from the manifests at start. A newer system can leave a manifest behind (a boot-menu
+  rollback keeps the envs): a later version is read as far as this one knows it and an unknown
+  box feature is dropped (both logged); only a broken manifest (shape, older version, bad id or
+  Steam path) is refused.
 - **Methods**: `apps.list` (`{revision, generation, ids, needs_terms, box}`), `apps.generations`,
   `apps.install`/`apps.remove` on the caller's own profile (the profile's `revision` from
   `apps.list`; `delete_data` only in the caller's home), `apps.rollback {generation}`,

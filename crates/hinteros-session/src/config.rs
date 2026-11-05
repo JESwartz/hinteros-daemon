@@ -1269,7 +1269,12 @@ impl Config {
         // No Steam unless the manifest has it; autostart only with it.
         self.steam.path = PathBuf::new();
         let manifest = match hinteros_api::manifest::Manifest::load(profile) {
-            Ok(m) => m,
+            Ok(m) => {
+                for w in &m.warnings {
+                    tracing::warn!("app env: {w}");
+                }
+                m
+            }
             Err(hinteros_api::manifest::ManifestError::Missing(p)) => {
                 tracing::debug!(manifest = %p.display(), "no app env yet");
                 self.steam.autostart = false;

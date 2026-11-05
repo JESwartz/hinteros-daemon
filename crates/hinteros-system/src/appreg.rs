@@ -96,12 +96,27 @@ pub struct Current {
     pub manifest: Manifest,
 }
 
+/// Log what a manifest's parse read past or dropped, once per env (`current` runs every second
+/// for the starter env).
+fn warn_once(owner: &Owner, env: &Path, warnings: &[String]) {
+    static WARNED: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+    if warnings.is_empty() || !WARNED.lock().unwrap().insert(env.to_owned()) {
+        return;
+    }
+    for w in warnings {
+        warn!(owner = %owner.key(), env = %env.display(), "app env: {w}");
+    }
+}
+
 /// The owner's current env, if it has one with a readable manifest.
 pub fn current(owner: &Owner, paths: &Paths) -> Option<Current> {
     let link = owner.link(paths);
     let env = std::fs::canonicalize(&link).ok()?;
     let manifest = match Manifest::load(&env) {
-        Ok(m) => m,
+        Ok(m) => {
+            warn_once(owner, &env, &m.warnings);
+            m
+        }
         Err(e) => {
             warn!(owner = %owner.key(), "unreadable app env: {e}");
             return None;

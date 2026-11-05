@@ -1,7 +1,8 @@
 //! Jellyfin's data before a version change (server.md, "Jellyfin"): a new Jellyfin migrates its
 //! database on the first start and an older one cannot read it after that, so before an update
 //! or rollback switches to a system with another Jellyfin version, the job stops Jellyfin and
-//! copies `/var/lib/jellyfin/data` to `/var/lib/hinteros/services/jellyfin-server/backup`. One
+//! copies `/var/lib/jellyfin/data` to `/var/lib/hinteros-root/jellyfin-backup` (root's, out of the
+//! unprivileged service's reach: the copy keeps owners and modes). One
 //! copy, replaced each time, no history. Restoring it is a manual step (stop Jellyfin, copy it
 //! back with its owner kept).
 
@@ -12,8 +13,6 @@ use std::path::{Path, PathBuf};
 
 /// Jellyfin's data directory below `/var/lib`.
 pub const DATA: &str = "jellyfin/data";
-/// The backup's name in the service's HinterOS directory.
-pub const BACKUP: &str = "backup";
 /// The unit to stop for the copy.
 pub const UNIT: &str = "jellyfin.service";
 

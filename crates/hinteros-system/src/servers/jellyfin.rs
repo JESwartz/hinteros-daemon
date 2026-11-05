@@ -2,7 +2,7 @@
 //! one Jellyfin user per HinterOS profile.
 //!
 //! The setup unit (`hinteros-jellyfin-setup.service`) writes, in
-//! `/var/lib/hinteros/services/jellyfin-server/` (0700 root): `setup-done` (the first-run wizard is
+//! `/var/lib/hinteros-root/jellyfin-server/` (root:hinteros-system, 0750; files 0640): `setup-done` (the first-run wizard is
 //! done), `admin-password` (user `admin`) and `api-key`. API keys count as administrator in
 //! Jellyfin and are sent as `Authorization: MediaBrowser Token="<key>"` (Jellyfin 10.11+ refuses
 //! the legacy `X-Emby-Token`). JSON is PascalCase; ids are 32 lowercase hex digits. The key,
@@ -39,20 +39,26 @@ pub const USER: &str = "jellyfin";
 /// Longest library name.
 pub const MAX_LIBRARY_NAME: usize = 64;
 
-/// The files of `/var/lib/hinteros/services/jellyfin-server`.
+/// Jellyfin's HinterOS files: the service's own in `/var/lib/hinteros/services/jellyfin-server`
+/// (users, the libraries cache), and what the root setup unit writes in
+/// `/var/lib/hinteros-root/jellyfin-server` (`setup-done`, `admin-password`, `api-key`; root's,
+/// readable by the service's group: the service is not root and must not be able to replace
+/// what root writes).
 #[derive(Debug, Clone)]
 pub struct Files {
     pub dir: PathBuf,
+    pub secrets: PathBuf,
 }
 
 impl Files {
-    pub fn new(services_dir: &Path) -> Self {
+    pub fn new(paths: &crate::config::Paths) -> Self {
         Self {
-            dir: services_dir.join(ID),
+            dir: paths.services_dir().join(ID),
+            secrets: paths.root_state_dir.join(ID),
         }
     }
     pub fn setup_done(&self) -> bool {
-        self.dir.join("setup-done").exists()
+        self.secrets.join("setup-done").exists()
     }
     pub fn users_json(&self) -> PathBuf {
         self.dir.join("users.json")
@@ -60,11 +66,16 @@ impl Files {
     fn lock_path(&self) -> PathBuf {
         self.dir.join("users.lock")
     }
+    /// The users lock (the directory made first: the service's own, 0700).
+    fn lock(&self) -> std::io::Result<std::fs::File> {
+        crate::fsutil::create_dir_all(&self.dir, 0o700)?;
+        crate::state::lock(&self.lock_path())
+    }
     pub fn libraries_cache(&self) -> PathBuf {
         self.dir.join("libraries.json")
     }
     fn secret(&self, name: &str) -> Option<String> {
-        let text = std::fs::read_to_string(self.dir.join(name)).ok()?;
+        let text = std::fs::read_to_string(self.secrets.join(name)).ok()?;
         let t = text.trim();
         (!t.is_empty() && t.len() <= 256 && t.bytes().all(|b| b.is_ascii_graphic()))
             .then(|| t.to_owned())
@@ -445,7 +456,7 @@ impl UsersFile {
     /// Read it (missing: empty). A newer file is an error, and `save` leaves it alone: the
     /// passwords in it are not to be had again.
     pub fn load(path: &Path) -> io::Result<Self> {
-        match std::fs::read(path) {
+        match crate::fsutil::read(path) {
             Ok(b) => {
                 check_version(path, &b, USERS_VERSION)?;
                 serde_json::from_slice(&b)
@@ -703,7 +714,8 @@ pub struct Synced {
 /// must not leave the later profiles without users); Jellyfin not answering does. The first
 /// failure is returned (the next sync tries again).
 pub fn sync(api: &dyn Api, files: &Files, profiles: &[Profile]) -> Result<Synced, Error> {
-    let lock = crate::state::lock(&files.lock_path())
+    let lock = files
+        .lock()
         .map_err(|e| Error::Refused(format!("locking users.json: {e}")))?;
     let path = files.users_json();
     let mut stored =
@@ -943,7 +955,8 @@ pub fn client_token(
     let device = device_id(id);
     let mut recovered = false;
     loop {
-        let lock = crate::state::lock(&files.lock_path())
+        let lock = files
+            .lock()
             .map_err(|e| Error::Refused(format!("locking users.json: {e}")))?;
         let mut stored =
             UsersFile::load(&path).map_err(|e| Error::Refused(format!("users.json: {e}")))?;
@@ -973,7 +986,8 @@ pub fn client_token(
                     recovered = true;
                     warn!(profile = %id, "Jellyfin sign-in refused; repairing the user");
                     sync(c, files, profiles)?;
-                    let _lock = crate::state::lock(&files.lock_path())
+                    let _lock = files
+                        .lock()
                         .map_err(|e| Error::Refused(format!("locking users.json: {e}")))?;
                     let stored = UsersFile::load(&path)
                         .map_err(|e| Error::Refused(format!("users.json: {e}")))?;
@@ -1034,7 +1048,7 @@ pub fn sync_if_ready(paths: &crate::config::Paths, server: &crate::config::Serve
     if !enabled(paths) {
         return;
     }
-    let files = Files::new(&paths.services_dir());
+    let files = Files::new(paths);
     match Client::new(
         &files,
         server.jellyfin,
@@ -1394,6 +1408,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let files = Files {
             dir: d.path().to_owned(),
+            secrets: d.path().to_owned(),
         };
         let fake = Fake {
             users: RefCell::new(vec![u(&hex(1), "admin")]),
@@ -1464,6 +1479,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let files = Files {
             dir: d.path().to_owned(),
+            secrets: d.path().to_owned(),
         };
         let slow = Fake {
             users: RefCell::new(vec![u(&hex(1), "admin")]),
@@ -1522,6 +1538,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let files = Files {
             dir: d.path().to_owned(),
+            secrets: d.path().to_owned(),
         };
         let mut stored = UsersFile::default();
         stored.users.insert("p2".into(), rec("", "Bob"));
@@ -1581,6 +1598,7 @@ mod tests {
         let paths = crate::config::Paths {
             config_dir: d.path().join("etc"),
             state_dir: d.path().join("var"),
+            root_state_dir: d.path().join("root"),
             run_dir: d.path().join("run"),
             profile: d.path().join("profiles/system"),
             current_system: d.path().join("current"),
@@ -1624,6 +1642,7 @@ mod tests {
         // An empty list with users recorded: refused, nothing deleted.
         let files = Files {
             dir: d.path().join("jf"),
+            secrets: d.path().join("jf"),
         };
         std::fs::create_dir_all(&files.dir).unwrap();
         let fake = Fake {

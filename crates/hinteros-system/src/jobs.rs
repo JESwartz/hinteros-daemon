@@ -593,7 +593,6 @@ pub async fn start_unit(conn: &zbus::Connection, id: &str) -> zbus::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Tools;
     use crate::job::{Action, Apply};
 
     /// The Tailscale sign-in URL goes only to the uid that started the sign-in (and root).
@@ -613,6 +612,7 @@ mod tests {
         Paths {
             config_dir: d.join("etc"),
             state_dir: d.join("var"),
+            root_state_dir: d.join("root"),
             run_dir: d.join("run"),
             profile: d.join("profiles/system"),
             current_system: d.join("current"),
@@ -628,22 +628,12 @@ mod tests {
         }
     }
 
-    fn spec(d: &Path, id: &str) -> JobSpec {
+    fn spec(id: &str) -> JobSpec {
         JobSpec {
             id: id.into(),
             kind: JobKind::Rebuild,
             uid: 1000,
             created_at: job::now(),
-            paths: paths(d),
-            tools: Tools {
-                nix: "nix".into(),
-                nix_env: "nix-env".into(),
-                git: "git".into(),
-                ssh_keygen: "ssh-keygen".into(),
-                nixos_facter: "nixos-facter".into(),
-                nix_store: "nix-store".into(),
-            },
-            bus: None,
             action: Action::Apply(Apply::default()),
             subject: Default::default(),
         }
@@ -654,10 +644,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut jobs = Jobs::load(paths(d.path()));
         assert!(jobs.busy().is_none());
-        let s = spec(d.path(), "0123456789abcdef");
+        let s = spec("0123456789abcdef");
         jobs.create(&s).unwrap();
         assert_eq!(jobs.busy(), Some("0123456789abcdef"));
-        assert!(jobs.create(&spec(d.path(), "1123456789abcdef")).is_err());
+        assert!(jobs.create(&spec("1123456789abcdef")).is_err());
         assert_eq!(jobs.busy_error().unwrap().kind(), Some(ErrorCode::JobBusy));
         let jd = d.path().join("run/jobs/0123456789abcdef");
 
@@ -716,7 +706,7 @@ mod tests {
     fn heartbeat_and_latest_progress() {
         let d = tempfile::tempdir().unwrap();
         let mut jobs = Jobs::load(paths(d.path()));
-        let mut s = spec(d.path(), "0123456789abcdef");
+        let mut s = spec("0123456789abcdef");
         s.subject.enabled = Some(true);
         jobs.create(&s).unwrap();
         let jd = d.path().join("run/jobs/0123456789abcdef");
@@ -827,9 +817,9 @@ mod tests {
             fs::write(jd.join(job::PID), "1").unwrap();
             (jd, lock)
         };
-        // A known kind, but fields this binary does not know (a later Paths, a new action).
-        let mut s = serde_json::to_value(spec(d.path(), "0123456789abcdef")).unwrap();
-        s["paths"]["later"] = json!("/x");
+        // A known kind, but fields this binary does not know (a later field, a new action).
+        let mut s = serde_json::to_value(spec("0123456789abcdef")).unwrap();
+        s["later"] = json!("/x");
         s["action"] = json!({"type": "later_action"});
         s["subject"]["later"] = json!(1);
         let (jd, lock) = write_job("0123456789abcdef", s);
@@ -853,7 +843,7 @@ mod tests {
         assert_eq!(on_disk, status);
 
         // A kind this binary does not know: followed as `unknown`.
-        let mut s = serde_json::to_value(spec(d.path(), "1123456789abcdef")).unwrap();
+        let mut s = serde_json::to_value(spec("1123456789abcdef")).unwrap();
         s["kind"] = json!("later_kind");
         let (jd, lock) = write_job("1123456789abcdef", s);
         let mut jobs = Jobs::load(paths(d.path()));
@@ -883,7 +873,7 @@ mod tests {
         fs::write(jd.join(job::SPEC), "{\"id\":").unwrap();
         let mut jobs = Jobs::load(paths(d.path()));
         assert_eq!(jobs.busy(), Some("2123456789abcdef"));
-        assert!(jobs.create(&spec(d.path(), "3123456789abcdef")).is_err());
+        assert!(jobs.create(&spec("3123456789abcdef")).is_err());
         assert!(jobs.get("2123456789abcdef").is_none());
         // `job_busy` without a `job_id` that `jobs.get` would not know.
         let e = jobs.busy_error().unwrap();
@@ -902,7 +892,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(jobs.busy().is_none());
-        jobs.create(&spec(d.path(), "3123456789abcdef")).unwrap();
+        jobs.create(&spec("3123456789abcdef")).unwrap();
     }
 
     #[test]
@@ -911,7 +901,7 @@ mod tests {
         let mut jobs = Jobs::load(paths(d.path()));
         for i in 0..12u8 {
             let id = format!("{i:016x}");
-            jobs.create(&spec(d.path(), &id)).unwrap();
+            jobs.create(&spec(&id)).unwrap();
             let jd = d.path().join("run/jobs").join(&id);
             let status = Status::lost(None, "x");
             fs::write(jd.join(job::STATUS), serde_json::to_vec(&status).unwrap()).unwrap();

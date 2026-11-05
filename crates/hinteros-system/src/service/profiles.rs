@@ -998,22 +998,10 @@ impl Service {
                 if account.uid != uid {
                     return Err(internal("the caller is not the guest account's uid"));
                 }
-                let tmp_dirs = if self.args.guest_tmp_dirs.is_empty() {
-                    ["/tmp", "/var/tmp", "/dev/shm"]
-                        .iter()
-                        .map(std::path::PathBuf::from)
-                        .collect()
-                } else {
-                    self.args.guest_tmp_dirs.clone()
-                };
                 let spec = self.spec(
                     JobKind::GuestEnd,
                     uid,
-                    Action::GuestEnd(job::GuestEndJob {
-                        uid: account.uid,
-                        home: account.home,
-                        tmp_dirs,
-                    }),
+                    Action::GuestEnd(job::GuestEndJob { uid: account.uid }),
                 );
                 let spec = spec.about(JobSubject {
                     owner: Some(Owner::Guest.key()),

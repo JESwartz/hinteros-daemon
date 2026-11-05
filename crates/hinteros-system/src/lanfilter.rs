@@ -118,8 +118,9 @@ pub struct Filters {
 impl Filters {
     /// Missing: none.
     pub fn load(path: &Path) -> io::Result<Self> {
-        let text = match read_limited(path) {
-            Ok(t) => t,
+        // The service's run dir: as root, no symlink and a regular file only (fsutil).
+        let text = match crate::fsutil::read_limited(path, MAX_READ_BYTES) {
+            Ok(t) => String::from_utf8(t).map_err(io::Error::other)?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e),
         };

@@ -1,0 +1,561 @@
+//! What a job checks of its spec before it runs (README, "Privileges"): the service that wrote
+//! it is not root, so a spec says what to do, never where or with which program. Paths,
+//! programs and the bus are the job's own ([`super::Own`]); what a spec still names (the
+//! channel's repository and branches, homes, data to delete, what only the installer writes in
+//! `state.json`) must be what the job's own configuration and the user database say, or the job
+//! does not run.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, bail};
+
+use super::Own;
+use crate::appreg::Owner;
+use crate::flake::{self, ChannelTable};
+use crate::job::{Action, Apply, AppsOp, DeleteData, Home, JobSpec, MeasureHome, UpdateSource};
+use crate::state::{self, GUEST_USER, State};
+use crate::users::Users;
+
+/// Check `spec` against the job's own configuration; what can be had again from it (the
+/// channel's repository and URLs) is replaced, anything else that does not match fails the job.
+pub fn check(spec: &mut JobSpec, own: &Own) -> anyhow::Result<()> {
+    let uid = spec.uid;
+    match &mut spec.action {
+        Action::Apply(a) => apply(a, uid, own),
+        Action::Services(j) => apply(&mut j.apply, uid, own),
+        Action::UpdateCheck(s) | Action::ChannelCheck(s) => source(s, own),
+        Action::Apps(j) => {
+            owner(&j.owner)?;
+            if let Some(s) = &j.box_state {
+                installer_fields(s, own)?;
+            }
+            match &j.op {
+                AppsOp::CopyFrom { from } => owner(from)?,
+                AppsOp::Set { ids } => {
+                    if let Some(bad) = ids.iter().find(|i| !state::is_app_id(i)) {
+                        bail!("{bad:?} is not an app id");
+                    }
+                }
+                AppsOp::Rollback { .. } => {}
+            }
+            if let Some(d) = &mut j.delete_data {
+                delete_homes(d, uid, own)?;
+            }
+            Ok(())
+        }
+        Action::ClearData(d) => delete_homes(d, uid, own),
+        Action::ProfileCreate(j) => {
+            installer_fields(&j.state, own)?;
+            profile_account(&j.id, &j.user)
+        }
+        Action::ProfileRemove(j) => {
+            installer_fields(&j.state, own)?;
+            profile_account(&j.id, &j.user)?;
+            let user = own.paths.users.by_name(&j.user);
+            j.uid = user.as_ref().map(|u| u.uid);
+            j.home = user.and_then(|u| home_of(u.uid, u.home));
+            Ok(())
+        }
+        Action::StorageMeasure(j) => j.owners.iter().try_for_each(owner),
+        Action::Cleanup(j) => j.owners.iter().try_for_each(owner),
+        Action::Rollback { .. }
+        | Action::GuestEnd(_)
+        | Action::Jellyfin(_)
+        | Action::Plex(_)
+        | Action::Tailscale(_)
+        | Action::Cloudflare(_) => Ok(()),
+    }
+}
+
+/// Profile `p<N>`'s account is `hinteros-p<N>`: ids and names go into paths (PINs, app envs).
+fn profile_account(id: &str, user: &str) -> anyhow::Result<()> {
+    if !state::is_profile_id(id) || user != state::user_for(id) {
+        bail!("{user} is not the account of profile {id}");
+    }
+    Ok(())
+}
+
+fn owner(o: &Owner) -> anyhow::Result<()> {
+    match o {
+        Owner::Profile { id, user } => profile_account(id, user),
+        Owner::Starter | Owner::Guest => Ok(()),
+    }
+}
+
+/// A home root may work in: a regular account's, absolute, not `/`.
+fn home_of(uid: u32, home: PathBuf) -> Option<PathBuf> {
+    (uid >= 1000 && home.is_absolute() && home != Path::new("/")).then_some(home)
+}
+
+/// What only the installer writes in `state.json` (`stateVersion`, `disk`, `settings.hostname`,
+/// `settings.admin`) and the fields this daemon does not know: the service never changes them,
+/// so a spec's state must have them as the running config dir's `state.json` does. Else a
+/// compromised service could make an admin account (wheel) of its own. A config dir without a
+/// readable `state.json`: no state-carrying job runs.
+fn installer_fields(s: &State, own: &Own) -> anyhow::Result<()> {
+    let (live, _) = State::load(&own.paths.state_json()).context("the running state.json")?;
+    let fields = |s: &State| {
+        (
+            s.state_version.clone(),
+            s.disk.clone(),
+            s.settings.hostname.clone(),
+            s.settings.admin.clone(),
+            s.extra.clone(),
+            s.settings.extra.clone(),
+        )
+    };
+    if fields(s) != fields(&live) {
+        bail!("the state changes what only the installer sets");
+    }
+    Ok(())
+}
+
+fn apply(a: &mut Apply, uid: u32, own: &Own) -> anyhow::Result<()> {
+    if let Some(s) = &a.state {
+        installer_fields(s, own)?;
+    }
+    if let Some(d) = &mut a.delete_data {
+        delete_homes(d, uid, own)?;
+    }
+    let Some(u) = &mut a.update else {
+        return Ok(());
+    };
+    source(&mut u.source, own)?;
+    let table = ChannelTable::load(&own.policy_dir).context("the channel table")?;
+    u.input_url = table.input_url(&u.source.branch, None);
+    if let Some(from) = &u.retarget_from
+        && !table
+            .branches
+            .values()
+            .any(|b| table.input_url(b, None) == *from)
+    {
+        bail!("{from} is not the input URL of a channel");
+    }
+    Ok(())
+}
+
+/// The repository and branches from the running generation's channel table, never the spec's.
+fn source(s: &mut UpdateSource, own: &Own) -> anyhow::Result<()> {
+    let table = ChannelTable::load(&own.policy_dir).context("the channel table")?;
+    let branch = table
+        .branch(s.channel)
+        .with_context(|| format!("the channel table has no {}", s.channel.name()))?;
+    if s.branch != branch {
+        bail!("{} is not the branch of {}", s.branch, s.channel.name());
+    }
+    s.repo = table.repo.clone();
+    s.scheme = table.scheme().unwrap_or("https").to_owned();
+    s.host = table.host();
+    s.others.retain(|b| table.channel_of(b).is_some());
+    if let Some(c) = &mut s.catalog {
+        c.input_url = table.input_url(branch, None);
+    }
+    Ok(())
+}
+
+/// The running generation's update policy files (`allowed_signers`), the job's own.
+pub fn allowed_signers(own: &Own) -> PathBuf {
+    flake::allowed_signers(&own.policy_dir)
+}
+
+/// App data is deleted only in the home of the account that asked (`uid`), a profile's or the
+/// guest's, as the user database has it.
+fn delete_homes(d: &mut DeleteData, uid: u32, own: &Own) -> anyhow::Result<()> {
+    if let Some(dir) = &own.test_profile_home {
+        d.homes = vec![Home {
+            user: "test".into(),
+            uid,
+            dir: dir.clone(),
+        }];
+        return Ok(());
+    }
+    let accounts: Vec<String> = State::load(&own.paths.state_json())
+        .map(|(s, _)| s.accounts().into_iter().map(|a| a.user).collect())
+        .unwrap_or_default();
+    for h in &d.homes {
+        let known = own
+            .paths
+            .users
+            .by_name(&h.user)
+            .and_then(|u| Some((u.uid, home_of(u.uid, u.home)?)));
+        let ok = h.uid == uid
+            && (h.user == GUEST_USER || accounts.contains(&h.user))
+            && known == Some((h.uid, h.dir.clone()));
+        if !ok {
+            bail!(
+                "{} ({}) is not the home of the profile that asked",
+                h.dir.display(),
+                h.user
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The homes to measure, from the user database (the spec names the profiles, not where their
+/// homes are).
+pub fn measure_homes(homes: &[MeasureHome], users: &Users) -> Vec<MeasureHome> {
+    homes
+        .iter()
+        .map(|h| {
+            let user = if h.id == "guest" {
+                Some(GUEST_USER.to_owned())
+            } else {
+                state::is_profile_id(&h.id).then(|| state::user_for(&h.id))
+            };
+            MeasureHome {
+                id: h.id.clone(),
+                home: user
+                    .and_then(|n| users.by_name(&n))
+                    .and_then(|u| home_of(u.uid, u.home)),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use hinteros_api::system::{Channel, JobKind};
+
+    use super::*;
+    use crate::job::{ApplyUpdate, NotFastForward, ProfileRemoveJob};
+
+    /// A job's own configuration in `d`: the channel table, a user database with a profile, the
+    /// guest, root and a stranger, and a state with profile p1.
+    fn own(d: &Path) -> Own {
+        std::fs::create_dir_all(d.join("policy/update")).unwrap();
+        std::fs::write(
+            d.join("policy/update/channels.json"),
+            r#"{"repo": "https://git.hinteros.org/hinteros.git",
+                "branches": {"stable": "stable", "beta": "beta"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("passwd"),
+            "root:x:0:0::/root:/bin/sh\n\
+             hinteros-p1:x:20001:20001::/home/p1:/bin/sh\n\
+             hinteros-guest:x:20000:20000::/home/guest:/bin/sh\n\
+             stranger:x:1001:100::/home/stranger:/bin/sh\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(d.join("etc")).unwrap();
+        std::fs::write(
+            d.join("etc/state.json"),
+            r#"{"schemaVersion": 2, "base": "unstable", "stateVersion": "25.11",
+                "profiles": [{"id": "p1"}], "requirements": [], "services": []}"#,
+        )
+        .unwrap();
+        let args = crate::config::Cli::parse_from([
+            "hinteros-system",
+            "--config-dir",
+            &d.join("etc").display().to_string(),
+            "--policy-dir",
+            &d.join("policy").display().to_string(),
+            "--passwd-file",
+            &d.join("passwd").display().to_string(),
+        ]);
+        Own::new(&args.serve)
+    }
+
+    fn spec(uid: u32, action: Action) -> JobSpec {
+        JobSpec {
+            id: "0123456789abcdef".into(),
+            kind: JobKind::Rebuild,
+            uid,
+            created_at: 0,
+            action,
+            subject: Default::default(),
+        }
+    }
+
+    fn source(repo: &str, branch: &str) -> UpdateSource {
+        UpdateSource {
+            repo: repo.into(),
+            scheme: "file".into(),
+            host: "evil".into(),
+            branch: branch.into(),
+            channel: Channel::Stable,
+            current_rev: None,
+            catalog: None,
+            others: vec!["beta".into(), "elsewhere".into()],
+        }
+    }
+
+    #[test]
+    fn the_repository_and_urls_are_the_jobs_own() {
+        let d = tempfile::tempdir().unwrap();
+        let own = own(d.path());
+        let mut s = spec(
+            20001,
+            Action::UpdateCheck(source("file:///tmp/evil", "stable")),
+        );
+        check(&mut s, &own).unwrap();
+        let Action::UpdateCheck(got) = &s.action else {
+            unreachable!()
+        };
+        assert_eq!(got.repo, "https://git.hinteros.org/hinteros.git");
+        assert_eq!(
+            (got.scheme.as_str(), got.host.as_str()),
+            ("https", "git.hinteros.org")
+        );
+        assert_eq!(got.others, ["beta"]);
+        assert_eq!(
+            allowed_signers(&own),
+            d.path().join("policy/update/allowed_signers")
+        );
+
+        // A branch that is not the channel's: refused.
+        let mut s = spec(20001, Action::ChannelCheck(source("x", "main")));
+        assert!(check(&mut s, &own).is_err());
+
+        // An update locks the channel's URL, whatever the spec says; a retarget only from a
+        // channel's URL.
+        let update = |from: Option<&str>| {
+            spec(
+                20001,
+                Action::Apply(Apply {
+                    update: Some(ApplyUpdate {
+                        source: source("x", "stable"),
+                        rev: None,
+                        not_fast_forward: NotFastForward::Reject,
+                        input_url: "git+https://evil.example/x?ref=stable".into(),
+                        retarget_from: from.map(str::to_owned),
+                    }),
+                    ..Default::default()
+                }),
+            )
+        };
+        let mut s = update(Some("git+https://git.hinteros.org/hinteros.git?ref=beta"));
+        check(&mut s, &own).unwrap();
+        let Action::Apply(Apply {
+            update: Some(u), ..
+        }) = &s.action
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            u.input_url,
+            "git+https://git.hinteros.org/hinteros.git?ref=stable"
+        );
+        assert!(
+            check(
+                &mut update(Some("git+https://evil.example/x?ref=beta")),
+                &own
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn data_is_deleted_only_in_the_callers_profile_home() {
+        let d = tempfile::tempdir().unwrap();
+        let own = own(d.path());
+        let data = |user: &str, uid: u32, dir: &str| {
+            Action::ClearData(DeleteData {
+                homes: vec![Home {
+                    user: user.into(),
+                    uid,
+                    dir: dir.into(),
+                }],
+                paths: vec![".local/share/x".into()],
+            })
+        };
+        assert!(
+            check(
+                &mut spec(20001, data("hinteros-p1", 20001, "/home/p1")),
+                &own
+            )
+            .is_ok()
+        );
+        assert!(
+            check(
+                &mut spec(20000, data(GUEST_USER, 20000, "/home/guest")),
+                &own
+            )
+            .is_ok()
+        );
+        // Another profile's home, a home that is not the account's, an account that is not a
+        // profile, root.
+        assert!(
+            check(
+                &mut spec(20000, data("hinteros-p1", 20001, "/home/p1")),
+                &own
+            )
+            .is_err()
+        );
+        assert!(check(&mut spec(20001, data("hinteros-p1", 20001, "/etc")), &own).is_err());
+        assert!(
+            check(
+                &mut spec(1001, data("stranger", 1001, "/home/stranger")),
+                &own
+            )
+            .is_err()
+        );
+        assert!(check(&mut spec(0, data("root", 0, "/root")), &own).is_err());
+    }
+
+    #[test]
+    fn homes_come_from_the_user_database() {
+        let d = tempfile::tempdir().unwrap();
+        let own = own(d.path());
+        let mut s = spec(
+            0,
+            Action::ProfileRemove(ProfileRemoveJob {
+                state: State::parse(&std::fs::read(d.path().join("etc/state.json")).unwrap())
+                    .unwrap(),
+                id: "p1".into(),
+                user: "hinteros-p1".into(),
+                uid: Some(0),
+                home: Some("/".into()),
+            }),
+        );
+        check(&mut s, &own).unwrap();
+        let Action::ProfileRemove(j) = &s.action else {
+            unreachable!()
+        };
+        assert_eq!(
+            (j.uid, j.home.as_deref()),
+            (Some(20001), Some(Path::new("/home/p1")))
+        );
+        let Action::ProfileRemove(j) = &mut s.action else {
+            unreachable!()
+        };
+        j.user = "stranger".into();
+        assert!(check(&mut s, &own).is_err());
+
+        let homes = measure_homes(
+            &[
+                MeasureHome {
+                    id: "p1".into(),
+                    home: Some("/etc".into()),
+                },
+                MeasureHome {
+                    id: "guest".into(),
+                    home: None,
+                },
+                MeasureHome {
+                    id: "p9".into(),
+                    home: Some("/root".into()),
+                },
+            ],
+            &own.paths.users,
+        );
+        let got: Vec<_> = homes.iter().map(|h| h.home.as_deref()).collect();
+        assert_eq!(
+            got,
+            [
+                Some(Path::new("/home/p1")),
+                Some(Path::new("/home/guest")),
+                None
+            ]
+        );
+    }
+
+    /// A spec's state keeps what only the installer writes as the running `state.json` has it:
+    /// no admin account, host name, disk or unknown field of the service's own.
+    #[test]
+    fn installer_fields_are_the_running_states() {
+        use crate::state::AdminState;
+        let d = tempfile::tempdir().unwrap();
+        let own = own(d.path());
+        let live = State::parse(&std::fs::read(d.path().join("etc/state.json")).unwrap()).unwrap();
+        let apply = |s: State| {
+            spec(
+                20001,
+                Action::Apply(Apply {
+                    state: Some(s),
+                    ..Default::default()
+                }),
+            )
+        };
+        let mut ok = live.clone();
+        ok.settings.ssh.enable = true;
+        ok.services.push("jellyfin".into());
+        assert!(check(&mut apply(ok), &own).is_ok());
+
+        let mut admin = live.clone();
+        admin.settings.admin = Some(AdminState {
+            user: "evil".into(),
+            extra: Default::default(),
+        });
+        assert!(check(&mut apply(admin.clone()), &own).is_err());
+        let mut host = live.clone();
+        host.settings.hostname = Some("other".into());
+        assert!(check(&mut apply(host), &own).is_err());
+        let mut later = live.clone();
+        later.extra.insert("later".into(), serde_json::json!(true));
+        assert!(check(&mut apply(later), &own).is_err());
+        let mut version = live.clone();
+        version.state_version = "24.05".into();
+        assert!(check(&mut apply(version), &own).is_err());
+
+        // The other jobs that carry a state.
+        let mut s = spec(
+            0,
+            Action::ProfileRemove(ProfileRemoveJob {
+                state: admin.clone(),
+                id: "p1".into(),
+                user: "hinteros-p1".into(),
+                uid: None,
+                home: None,
+            }),
+        );
+        assert!(check(&mut s, &own).is_err());
+        let mut s = spec(
+            20001,
+            Action::Apps(crate::job::AppsJob {
+                owner: Owner::Guest,
+                op: AppsOp::Set { ids: Vec::new() },
+                box_state: Some(admin),
+                terms: Vec::new(),
+                delete_data: None,
+                starter: None,
+            }),
+        );
+        assert!(check(&mut s, &own).is_err());
+
+        // No running state.json: refused.
+        std::fs::remove_file(d.path().join("etc/state.json")).unwrap();
+        assert!(check(&mut apply(live), &own).is_err());
+    }
+
+    /// Profile ids and account names go into root's paths (`apps/<user>`, `pins/<id>`): only
+    /// `p<N>` and `hinteros-p<N>`, and app ids only as the catalog spells them.
+    #[test]
+    fn owners_and_ids_are_checked() {
+        use crate::appreg::Owner;
+        use crate::job::{AppsJob, AppsOp};
+        let d = tempfile::tempdir().unwrap();
+        let own = own(d.path());
+        let apps = |owner: Owner, op: AppsOp| {
+            spec(
+                20001,
+                Action::Apps(AppsJob {
+                    owner,
+                    op,
+                    box_state: None,
+                    terms: Vec::new(),
+                    delete_data: None,
+                    starter: None,
+                }),
+            )
+        };
+        let p = |id: &str, user: &str| Owner::Profile {
+            id: id.into(),
+            user: user.into(),
+        };
+        let set = |ids: &[&str]| AppsOp::Set {
+            ids: ids.iter().map(|i| (*i).to_owned()).collect(),
+        };
+        assert!(check(&mut apps(p("p1", "hinteros-p1"), set(&["kodi"])), &own).is_ok());
+        assert!(check(&mut apps(Owner::Guest, set(&[])), &own).is_ok());
+        assert!(check(&mut apps(p("p1", "../../../etc"), set(&[])), &own).is_err());
+        assert!(check(&mut apps(p("../x", "hinteros-../x"), set(&[])), &own).is_err());
+        assert!(check(&mut apps(Owner::Starter, set(&["a\"b"])), &own).is_err());
+        let copy = AppsOp::CopyFrom {
+            from: p("p2", "root"),
+        };
+        assert!(check(&mut apps(Owner::Guest, copy), &own).is_err());
+    }
+}

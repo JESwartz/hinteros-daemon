@@ -8,8 +8,8 @@ binaries:
   on-screen keyboard. Also the
   runtime settings (Wi-Fi, Bluetooth, audio, display mode, sleep/restart/shutdown) through
   the system's own services. Serves the launcher on `$XDG_RUNTIME_DIR/hinteros/session.sock`.
-- **`hinteros-system`** (root, small, narrow API): settings in `state.json`, SSH on/off,
-  rebuilds, verified updates, channel and base switches, rollback. Listens on
+- **`hinteros-system`** (its own system account, not root; narrow API): settings in `state.json`, SSH on/off,
+  rebuilds, verified updates, channel and base switches, rollback (in root job units). Listens on
   `/run/hinteros/system.sock`; the session daemon relays it to the launcher as `system.*`.
   Authorizes every mutating request on its own (pidfd, seat0 owner, polkit) and audits it.
 
@@ -845,7 +845,8 @@ input method on hardware.
 
 ## System service
 
-`hinteros-system` (`crates/hinteros-system/src/`) runs as root and serves system API 1.0
+`hinteros-system` (`crates/hinteros-system/src/`) runs as its own system account, not root (see
+"Privileges"), and serves system API 1.0
 (`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
 `hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
 trust.
@@ -872,7 +873,8 @@ trust.
   the admin password. `hello`'s params are closed like every other method's (both daemons). Limits: 8
   connections per uid, 5 s to `hello`, 64 KiB per message.
 - **Audit** (`audit.rs`): every mutating request and denial, and every job outcome, goes to the
-  journal's native socket with `HINTEROS_AUDIT=1`, `HINTEROS_UID`, `_PID`, `_EXE`, `_METHOD`,
+  journal's native socket with `HINTEROS_AUDIT=1`, `HINTEROS_UID`, `_PID`, `_EXE` (the path for
+  its own uid, else the process's name in brackets: see "Privileges"), `_METHOD`,
   `_ACTION`, `_DECISION` (`allowed|denied_seat|denied_polkit|denied_peer|auth_required|invalid|
   rate_limited`; past the gate, the handler's answer: `pin_required|busy|conflict|refused|failed`),
   `_JOB_ID`, `_PARAMS` (summary), and for jobs `_OUTCOME`, `_REV_BEFORE/AFTER`,
@@ -884,7 +886,8 @@ trust.
   `revision` is the SHA-256 of the file. `apps` (M8) and `profiles` (M7) round-trip untouched,
   ready for `apps.install/remove` and `profiles.*` to edit the same struct.
 - **Jobs** (`job.rs`, `jobs.rs`, `runner.rs`): one at a time (`job_busy`). The service writes a
-  root-only spec to `/run/hinteros/jobs/<id>/spec.json` and starts `hinteros-job@<id>.service`
+  spec (0600, its own; what to do, never where: see "Privileges") to
+  `/run/hinteros/jobs/<id>/spec.json` and starts `hinteros-job@<id>.service`
   (systemd `StartUnit` over D-Bus), which runs `hinteros-system job <id>`; a switch that
   restarts the service doesn't touch it, and a restarted service re-attaches to it. After a
   rollback an older service reads a later version's job leniently (only id, kind, uid, time and
@@ -900,7 +903,7 @@ trust.
   keeps the last 10 finished jobs. A request that a running job would refuse first takes in a
   result the job has just written, so a job that has ended is never `job_busy`. Apply flow:
   memory (2 GiB) and disk (4 GiB on the store's filesystem) preflight → copy `/etc/hinteros`
-  to `/var/lib/hinteros/staging` → edit (state, flake input, lock,
+  to `/var/lib/hinteros-root/staging` → edit (state, flake input, lock,
   facter) → `nix build …#nixosConfigurations.hinteros.config.system.build.toplevel`
   → `nix-env -p <profile> --set` + `switch-to-configuration switch` → replace `/etc/hinteros`
   with the staging copy (`renameat2(RENAME_EXCHANGE)`). A failed switch puts the profile back
@@ -918,7 +921,7 @@ trust.
 - **Updates** (`update.rs`, `flake.rs`): the channel is the `ref` of the locked `hinteros`
   input (`/etc/hinteros/flake.lock`); the repo URL and branches come only from the running
   generation's `channels.json`. `update.check` runs `git ls-remote`, fetches the branch into
-  `/var/lib/hinteros/git`, verifies the tip with `git verify-commit` (SSH signatures,
+  `/var/lib/hinteros-root/git`, verifies the tip with `git verify-commit` (SSH signatures,
   `gpg.ssh.allowedSignersFile` = the running generation's `allowed_signers`, i.e.
   `ssh-keygen -Y verify`), requires it to descend from the locked revision, and reports the
   highest `Security: low|medium|high|critical` trailer among the new commits (unknown values
@@ -974,6 +977,105 @@ trust.
   frozen. A frozen profile's sleep inhibitor (`delay`) holds a suspend from a text console up to
   logind's `InhibitDelayMaxSec`.
 
+### Privileges
+
+Every process of a `hinteros` user (games included) can reach `system.sock`, so a bug in the
+request path must not be root. The service runs as the system account `hinteros-system` (not
+`DynamicUser`: it keeps `/var/lib/hinteros`), group `hinteros`, with no capabilities. It may
+start only its own units over D-Bus. Everything that needs root runs in a narrow root unit that
+takes its request from the service and checks it again.
+
+What the service does, and how without root:
+
+| What | How |
+|---|---|
+| Its socket, profiles, PINs, app registry, runtime settings, checks, job specs | Its own `/var/lib/hinteros` and `/run/hinteros` (`StateDirectory`, `RuntimeDirectory`: systemd gives them to the account, once with everything in them) |
+| polkit `CheckAuthorization` for a caller's process | It owns each `org.hinteros.system.*` action (`org.freedesktop.policykit.owner`): polkit lets only root or an action's owner ask about another user's process |
+| logind (seat0, sessions, users), systemd unit states, `Subscribe` | Unprivileged reads |
+| Rebuilds, updates, apps, profiles, guest, storage, servers | `StartUnit hinteros-job@<id>.service`: the job runs as root (below) |
+| Disk use, time zone, local network filter | `StartUnit hinteros-usage` / `hinteros-time-zone-apply`, `RestartUnit hinteros-lan-filter` |
+| Inactive profiles frozen | `FreezeUnit` / `ThawUnit` of `user-<uid>.slice` |
+| `generations.list` (systemd-boot's entries; the ESP is root's) | `hinteros-boot-entries` (the service's account with `CAP_DAC_READ_SEARCH`, at start and when the entries change) writes `<run-dir>/boot-entries.json` |
+| The audit's `HINTEROS_EXE` (was `CAP_SYS_PTRACE`) | `/proc/<pid>/exe` only for its own uid; else `/proc/<pid>/comm` in brackets (`[steam]`; the process names itself), else `?` |
+| Plex's status (`Preferences.xml`) | Read as a member of Plex's group |
+| Jellyfin's API key and admin password | The root setup unit writes them in `/var/lib/hinteros-root/jellyfin-server` (root:hinteros-system 0750, files 0640) |
+| Server status over loopback HTTP | `IPAddressAllow=localhost` (system repo) |
+
+polkit (system repo, `40-hinteros-system.rules`, before every other rules file): for the
+`hinteros-system` account, `org.freedesktop.systemd1.manage-units` only for `StartUnit` of
+`hinteros-job@<16 hex>.service`, `hinteros-usage.service` or `hinteros-time-zone-apply.service`;
+`RestartUnit` of `hinteros-lan-filter.service`; `FreezeUnit` and `ThawUnit` of `user-<uid>.slice`
+of a profile or the guest (uid ≥ 20000). Every other action of the account is no.
+The verb systemd passes does not tell the method (`StartUnit` and `StartTransientUnit` both ask
+with `start`, `FreezeUnit` and `StopUnit` with `stop`), so the rule also checks the
+`polkit.message` detail, which does. Without that, polkit said yes to `StartTransientUnit` of an
+allowed name: for the services only systemd's "has a fragment file" check refused it, and a
+transient `user-<uid>.slice` (no fragment) could have pulled in a transient root service. A
+systemd that words its messages otherwise is refused (fails closed; `system-escalation` VM test).
+
+Root's side:
+
+- **Units**: `hinteros-job@` (root), `hinteros-time-zone-apply` (root; `CAP_DAC_OVERRIDE`,
+  `CAP_CHOWN` for the request and the lock in `/run/hinteros`), `hinteros-lan-filter` (root;
+  `CAP_NET_ADMIN`, `CAP_DAC_READ_SEARCH` for `lan-filter.json`), the PAM helper (`pam_exec`)
+  and `reset-pin` (root, by hand). `hinteros-usage` and `hinteros-boot-entries` run as the
+  service's account with `CAP_DAC_READ_SEARCH` only.
+- **A job believes no path from its spec** (`job.rs`, `runner/check.rs`). Paths, programs, the
+  bus and the update policy come from its own command line (`hinteros-system job [flags] <id>`;
+  the unit uses the defaults, the box's): the spec has no paths or tools. What the spec still
+  names is checked: the repository, scheme, host and input URLs come from the running
+  generation's `channels.json` (the branch must be the channel's; a retarget only from a
+  channel's URL), the allowed signers and the catalog index are the job's own, homes come from
+  the user database, app data is deleted only in the asking account's own profile (or guest)
+  home, a removed profile's account must be `hinteros-p<N>`, the guest's uid must be the job's
+  `--guest-uid`, delete targets stay below `/var/lib` or `/var/cache` and off the box's own state.
+  A state in the spec (apply, services, apps, profile create and remove) must keep what only the
+  installer writes as the running `/etc/hinteros/state.json` has it: `stateVersion`, `disk`,
+  `settings.hostname`, `settings.admin` and the fields this daemon does not know. The service
+  never changes them; without this a compromised service could add an admin account (wheel)
+  of its own.
+- **Reading and writing in the service's directories** (`fsutil.rs`): as root, no symlink
+  anywhere in a path (each component opened `O_NOFOLLOW`; no `..`), only a regular file (opened
+  `O_NONBLOCK`, then checked: a FIFO does not hang the job), temporary files
+  `O_EXCL | O_NOFOLLOW`, and what root makes there goes to the directory's owner. The app links
+  are made relative to the directory opened once. The job spec, `profiles.json`, PINs, the app
+  registry, `terms-accepted.json`, the guest marker, the time zone request and
+  `lan-filter.json` are read this way.
+- **Root's own state** is `/var/lib/hinteros-root` (`--root-state-dir`; root:hinteros-system
+  0710, the group may only pass): the jobs' `staging/` and `git/` (git and `nix build` run in
+  them as root), `channel-tips.json` (rollback protection), `jellyfin-backup/`, the setup's
+  `jellyfin-server/`, `cloudflare-tunnel-token` (the `set_token` job's checked copy of the
+  service's token; `hinteros-cloudflared` loads only that copy), and the admin password hash
+  (system repo).
+
+What is left, and why:
+
+- A compromised service still does what the system API does: any job with a typed state, PINs,
+  profiles, settings. It skips its own PIN, polkit and rate checks. It gets no root: a job runs
+  no program and writes no path the spec names, `state.json` is typed (`State`) and checked
+  again by the system repo, and the installer's fields (admin account, host name) stay as they
+  are. It can turn SSH on (`settings.ssh.enable`; the API asks for the admin password, a
+  compromised service does not), but signing in still needs the admin account's password or key.
+- The account may freeze any profile's slice (the profile's apps stop until thawed). Accounts
+  below uid 20000 (a test box's session user) are never frozen.
+- Its D-Bus calls to systemd now go through polkit: while polkitd restarts they fail (the local
+  network filter tries once more).
+- `HINTEROS_EXE` of another user's process is its own name, not its path. Reading the path
+  needs `CAP_SYS_PTRACE` (any root process could then be traced); the uid, pid and pidfd stay
+  exact.
+- Plex: a `Preferences.xml` that neither Plex's group nor others may read shows as not claimed.
+  As a member of Plex's group the service can read all of Plex's group-readable files, so
+  also `PlexOnlineToken` (in `Preferences.xml` itself): a compromised service can use the
+  linked Plex account. It gets no root from it.
+- Moving a box (pre-1.0) onto this: the first start as the account gives `/var/lib/hinteros`
+  and `/run/hinteros` to it. A job started by the old root service across that switch writes
+  files the new service cannot read: its result is lost. Nothing moves the admin password hash
+  (the account would read a file the service can write): move
+  `/var/lib/hinteros/admin-password-hash` to `/var/lib/hinteros-root/` by hand, as root, before
+  the switch. A tunnel token set before this is not copied: set it again. The old `git/`,
+  `staging/`, `channel-tips.json` and the Jellyfin files in `/var/lib/hinteros` stay unused
+  (delete them by hand).
+
 ### Command line
 
 All paths default to the box's; tests point them at a temporary root.
@@ -982,7 +1084,8 @@ All paths default to the box's; tests point them at a temporary root.
 |---|---|
 | `--socket` (`HINTEROS_SYSTEM_SOCKET`) | `/run/hinteros/system.sock` |
 | `--config-dir` | `/etc/hinteros` |
-| `--state-dir` | `/var/lib/hinteros` (`staging/`, `git/`, `update-check.json`, `channel-check.json`, `channel-tips.json`) |
+| `--state-dir` | `/var/lib/hinteros` (the service's: `profiles.json`, `pins/`, `apps/`, `update-check.json`, `channel-check.json`, ...) |
+| `--root-state-dir` | `/var/lib/hinteros-root` (root's, jobs only: `staging/`, `git/`, `channel-tips.json`, `jellyfin-backup/`; the Jellyfin setup's `jellyfin-server/`) |
 | `--run-dir` (`HINTEROS_RUN_DIR`) | `/run/hinteros` (`jobs/`) |
 | `--profile` | `/nix/var/nix/profiles/system` |
 | `--current-system`, `--booted-system` | `/run/current-system`, `/run/booted-system` |
@@ -1001,7 +1104,12 @@ All paths default to the box's; tests point them at a temporary root.
 | `--lan-filter` (`HINTEROS_LAN_FILTER`) | off (the system repo sets it with `lan`): `lan_filter.*` work; without it they fail |
 | `--cgroup-root` | `/sys/fs/cgroup` (where `lan_filter.set` checks the caller's cgroup) |
 
-`hinteros-system job [--run-dir DIR] <id>` runs one job (the job unit's `ExecStart`).
+`hinteros-system job [FLAGS] <id>` runs one job (the job unit's `ExecStart`), with the same flags
+as the service: its paths, programs and bus are its own, never the spec's (see "Privileges").
+
+`hinteros-system boot-entries [--boot-entries DIR] [--run-dir DIR]` writes the toplevels
+systemd-boot has an entry for to `<run-dir>/boot-entries.json` (the `hinteros-boot-entries` unit),
+which `generations.list` reads where the entries cannot be read (the service is not root).
 
 `hinteros-system keyboard-home [--socket PATH] [--input-dir DIR]` reads the keyboards for
 Ctrl + Super + D (see "Keyboard Home"; the `hinteros-keyboard` unit's `ExecStart`).
@@ -1025,8 +1133,10 @@ whole index unusable, so the system repo runs it on the index it ships.
 For `daemon.nix` (and the VM tests) in the system repo:
 
 - **Group** `hinteros`, with the session user (later: every profile user) in it.
-- **`hinteros-system.service`**: `ExecStart=hinteros-system`, `User=root`, `Group=hinteros`,
-  `RuntimeDirectory=hinteros` with `RuntimeDirectoryMode=0755` and
+- **Account** `hinteros-system` (system user, group `hinteros-system`; see "Privileges").
+- **`hinteros-system.service`**: `ExecStart=hinteros-system`, `User=hinteros-system`,
+  `Group=hinteros`, `SupplementaryGroups=hinteros-system` (plus the greeter's and keyboard's
+  socket groups), `RuntimeDirectory=hinteros` with `RuntimeDirectoryMode=0755` and
   **`RuntimeDirectoryPreserve=yes`** (the job directories in `/run/hinteros/jobs` must survive a
   restart of the service during a switch), `UMask=0077` or `0007`. It reads `/etc/hinteros`,
   `/proc`, the profile links and `/run/current-system`; writes `/run/hinteros` and its state in
@@ -1034,18 +1144,27 @@ For `daemon.nix` (and the VM tests) in the system repo:
   `ReadWritePaths=/run/hinteros /var/lib/hinteros`,
   `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`,
   `RestrictAddressFamilies=AF_UNIX` (D-Bus, journal), `SystemCallFilter=@system-service`,
-  `MemoryDenyWriteExecute=yes`, `CapabilityBoundingSet=CAP_SYS_PTRACE` (only so `HINTEROS_EXE`
-  can read `/proc/<pid>/exe` of another user's process; with an empty set the field is `?`).
+  `MemoryDenyWriteExecute=yes`, `CapabilityBoundingSet=` and `AmbientCapabilities=` (none).
   `PATH`/`path` is irrelevant to it. `restartIfChanged` may stay on.
+- **polkit rules for the account** (`40-hinteros-system.rules`, before every other rules file):
+  `manage-units` only as listed in "Privileges", every other action no.
+- **`/var/lib/hinteros-root`** (tmpfiles, root:hinteros-system 0710): root's own state (see
+  "Privileges").
+- **`hinteros-usage.service`** and **`hinteros-boot-entries.service`** (oneshot,
+  `ExecStart=hinteros-system usage` / `boot-entries`): `User=hinteros-system`,
+  `CapabilityBoundingSet` and `AmbientCapabilities` `CAP_DAC_READ_SEARCH`. The boot entries' unit is
+  wanted by the service and started again by a path unit on `/boot/loader/entries`.
 - **`hinteros-job@.service`** (template, root, network allowed, no `ProtectSystem`: it switches
-  the system): `ExecStart=hinteros-system job %i`, `Type=exec`, `Nice=10`,
+  the system): `ExecStart=hinteros-system job %i` (the defaults are the box's paths and
+  programs; a test that changes the service's flags changes the job's the same way),
+  `Type=exec`, `Nice=10`,
   `IOSchedulingClass=idle`, `KillMode=control-group`, `path` with `nix`, `git`, `openssh`
   (`ssh-keygen`), `nixos-facter`, `coreutils`, `SSL_CERT_FILE` for git over https, and
   **`restartIfChanged = false; stopIfChanged = false`** (`X-RestartIfChanged=false`) so the
   switch it performs never restarts the running instance. **No `StateDirectory`**: the job uses
-  the service's `/var/lib/hinteros`. With its own, systemd chowns the whole tree at every job
-  start, and the job fails (ENOENT) when the service replaces a file during that walk (an update
-  check during a switch).
+  the service's `/var/lib/hinteros` and its own `/var/lib/hinteros-root`. With its own, systemd
+  chowns the whole tree at every job start, and the job fails (ENOENT) when the service replaces
+  a file during that walk (an update check during a switch).
 - **Keyboards**: no profile account may read a keyboard (no uaccess rule for keyboards, no
   group `input`). `hinteros-keyboard.service`: `ExecStart=hinteros-system keyboard-home`,
   `DynamicUser`, `SupplementaryGroups=input hinteros-keyboard`, `DeviceAllow=char-input r`,
@@ -1056,7 +1175,9 @@ For `daemon.nix` (and the VM tests) in the system repo:
   `org.hinteros.system.{settings,rebuild,update.check,update.apply,rollback,channel,jobs.cancel,apps,profiles,profiles.create,starter,services}`
   (defaults `no/no/no`), and `org.hinteros.system.ssh` and `org.hinteros.system.profiles.recover`
   (`system::INTERACTIVE_ACTIONS`; defaults `auth_admin` for any/inactive/active: the admin
-  password). The rules file grants the first group to `hinteros` members and must **not** return
+  password). Each action is annotated `org.freedesktop.policykit.owner` =
+  `unix-user:hinteros-system` (the service asks about its callers' processes). The rules file
+  grants the first group to `hinteros` members and must **not** return
   YES for the two `auth_admin` actions (`profiles.recover` resets the admin profile's PIN):
   ```js
   polkit.addRule(function (action, subject) {
@@ -1082,7 +1203,7 @@ For `daemon.nix` (and the VM tests) in the system repo:
   `sw/bin/hinteros-system` exist for `session_restart_required`).
 - **Paths:** `/etc/hinteros` (root, 0755) with `flake.nix` from the template, whose input line
   is exactly `inputs.hinteros.url = "git+<repo>?ref=<branch>";` with `<repo>` as in
-  `channels.json`; `/var/lib/hinteros` (root, 0700); the config snapshot at `$out/hinteros/`
+  `channels.json`; `/var/lib/hinteros` (the service's, 0700); the config snapshot at `$out/hinteros/`
   (`device-config.nix`, as today).
 - **sshd** for `ssh.set`: `state.nix` maps `settings.ssh.enable`; login is the admin account
   with its password (the service doesn't touch sshd settings).
@@ -1365,9 +1486,9 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   `…/starter`, the guest's a single link `/run/hinteros/apps/hinteros-guest` (an indirect GC root
   via `nix-store --add-root --indirect --realise`). The service publishes
   `/run/hinteros/apps/<user>` → the profile's Nix profile at start and after every job.
-  `/run/hinteros/apps` is 0750 root:hinteros, not the 0755 of the M7 design (D4): every
+  `/run/hinteros/apps` is 0750 hinteros-system:hinteros, not the 0755 of the M7 design (D4): every
   session account is in `hinteros`, and other users cannot list who has which apps. Whoever
-  publishes (a job runs as root:root)
+  publishes (a job runs as root:root, relative to the directory opened once: see "Privileges")
   sets that mode and the group of `/run/hinteros` (the service's runtime directory). An env
   is built by `config.hinteros.appEnv.build ids` of `/etc/hinteros` (`nix eval --impure --json
   --expr` over a list of id lists, all of a job's envs in one evaluation, then `nix build
@@ -1773,12 +1894,13 @@ link), `service/timezone.rs` (the methods).
   The sync must not undo that at the next boot: compare `state.json` without `settings.timeZone`
   and keep the live zone when it restores, after a rollback too (as the daemon's own rollback
   does).
-- `hinteros-time-zone-apply.service`: oneshot, root, `ExecStart=hinteros-system
+- `hinteros-time-zone-apply.service`: oneshot, root (`CapabilityBoundingSet=CAP_DAC_OVERRIDE
+  CAP_CHOWN`: the request and the lock are in the service's `/run/hinteros`), `ExecStart=hinteros-system
   time-zone-apply`, `ProtectSystem=strict`, `ReadWritePaths=/etc/hinteros /run/hinteros` (not
-  `/etc`: timedated writes `/etc/localtime`), no network, the system bus reachable
-  (`AF_UNIX`). The service only needs `/run/hinteros` writable (no `/etc`) and may start this
-  unit (it is root; systemd's manager API). No new polkit action. systemd-timedated as NixOS
-  ships it (bus-activated).
+  `/etc`: timedated writes `/etc/localtime`), no network, the system bus reachable (`AF_UNIX`).
+  The service only needs `/run/hinteros` writable (no `/etc`) and may start this unit (it is
+  not root: the account's polkit rule allows `start` of this unit). No new HinterOS polkit
+  action. systemd-timedated as NixOS ships it (bus-activated).
 
 ### What the launcher must do
 
@@ -1823,7 +1945,7 @@ Code: `update.rs` (`SeenTips`, `Rejection::OlderThanSeen`), `runner.rs` (`update
 `channel.set` never locks whatever signed commit the target branch points at: a server that
 serves an old release with a known hole on that branch must not get it installed.
 
-- **Newest verified tips** (`/var/lib/hinteros/channel-tips.json`, root only, `{"version": 1, "tips": {"<branch>":
+- **Newest verified tips** (`/var/lib/hinteros-root/channel-tips.json`, root only, `{"version": 1, "tips": {"<branch>":
   "<rev>"}}`): every job that verifies a channel tip records it there, but only forward (a
   revision that descends from the recorded one). `update.check` also fetches and verifies the
   other branches of the channel table (one extra `git fetch` each; failures are only logged), so
@@ -2115,7 +2237,7 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   rollback that switches between two systems that both run Jellyfin, in different versions
   (`jellyfin-<version>` in their `etc/systemd/system/jellyfin.service`), first stops
   `jellyfin.service` (D-Bus, waits 90 s), copies `/var/lib/jellyfin/data` with modes, owners and
-  links to `/var/lib/hinteros/services/jellyfin-server/backup` (through `backup.new`: one copy,
+  links to `/var/lib/hinteros-root/jellyfin-backup` (root's; through `jellyfin-backup.new`: one copy,
   replaced each time) and starts Jellyfin again after the switch (also when the switch failed). A
   failed stop or copy fails the job before the switch. Restoring is by hand.
 - **`plex.claim {admin_pin?, code}`** (job): `claim-` and 20 of `[A-Za-z0-9_-]` (what plex.tv/claim gives;
@@ -2153,8 +2275,10 @@ must be loopback (the HTTP client refuses anything else).
 
 ### What the system repo must provide
 
-As agreed (system repo `m10-server`): `/var/lib/hinteros/services/<id>/` while a service is on;
-Jellyfin's `setup-done`, `admin-password`, `api-key` (no trailing newline needed: they are
+As agreed (system repo `m10-server`): `/var/lib/hinteros/services/<id>/` while a service is on
+(0700, the service's account: it is not root);
+Jellyfin's `setup-done`, `admin-password`, `api-key` in `/var/lib/hinteros-root/jellyfin-server/`
+(root's, readable by group `hinteros-system`; no trailing newline needed: they are
 trimmed); Plex on 127.0.0.1:32400 and its `Preferences.xml`; `hinteros-cloudflared.service`
 reading `/var/lib/hinteros/services/cloudflare-tunnel/token` with metrics on 127.0.0.1:20241;
 `tailscale` on the `PATH` of `hinteros-job@` and the socket `/run/tailscale/tailscaled.sock`;
@@ -2162,7 +2286,8 @@ reading `/var/lib/hinteros/services/cloudflare-tunnel/token` with metrics on 127
 Cloudflare is on. Also: the polkit action `org.hinteros.system.services` in the policy file
 (granted to `hinteros` by the existing rule); `hinteros-system` (not only the job unit) must
 reach `/run/tailscale/tailscaled.sock` (`services.list`, `tailscale.*`'s pre-check: `AF_UNIX`,
-read access) and read `/var/lib/plex/Plex Media Server/Preferences.xml` and `/proc/net/route`,
+read access) and read `/var/lib/plex/Plex Media Server/Preferences.xml` (as a member of Plex's
+group) and `/proc/net/route`,
 `/proc/net/fib_trie`; `hinteros-job@` needs `systemd` D-Bus `RestartUnit`/`StopUnit` on
 `hinteros-cloudflared.service` (root: allowed), loopback to Jellyfin/Plex/cloudflared, and
 writes under `/var/lib`, `/var/cache` (delete_data). For the Jellyfin app: Jellyfin serves

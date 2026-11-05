@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -14,7 +13,7 @@ use hinteros_api::system::{
 };
 use tracing::{info, warn};
 
-use super::{Failure, Outcome, ProgressLine, Runner};
+use super::{Failure, Outcome, ProgressLine, Runner, check};
 use crate::appreg::Owner;
 use crate::generations;
 use crate::job::{self, CleanupJob, CleanupTarget, MeasureJob};
@@ -47,7 +46,7 @@ type Gens = Vec<(GenFacts, Option<PathBuf>)>;
 
 impl Runner {
     fn nix_store(&self) -> Command {
-        Command::new(&self.spec.tools.nix_store)
+        Command::new(&self.tools.nix_store)
     }
 
     fn store_facts(&mut self) -> Result<StoreFacts, Failure> {
@@ -89,7 +88,7 @@ impl Runner {
 
     /// System generations as facts (closures filled in later).
     fn system_gens(&self) -> Gens {
-        let paths = &self.spec.paths;
+        let paths = &self.paths;
         let current = fs::canonicalize(&paths.current_system).ok();
         let booted = fs::canonicalize(&paths.booted_system).ok();
         let profile_gen = generations::current_generation(&paths.profile);
@@ -111,7 +110,7 @@ impl Runner {
 
     /// An owner's app generations as facts (the guest: its single link).
     fn owner_gens(&self, owner: &Owner) -> Gens {
-        let link = owner.link(&self.spec.paths);
+        let link = owner.link(&self.paths);
         if !owner.has_generations() {
             return fs::canonicalize(&link)
                 .ok()
@@ -137,10 +136,10 @@ impl Runner {
 
     pub(super) fn storage_measure(&mut self, j: &MeasureJob) -> Outcome {
         self.set_stage(Stage::Preparing);
-        let paths = self.spec.paths.clone();
-        let disk = storage::disk_usage(&j.store_dir)
+        let paths = self.paths.clone();
+        let disk = storage::disk_usage(&self.own.store_dir)
             .ok_or_else(|| self.fail("cannot read the store's filesystem"))?;
-        let store_fs = storage::filesystem_of(&j.store_dir);
+        let store_fs = storage::filesystem_of(&self.own.store_dir);
         let on_store_fs =
             |dir: &Path| store_fs.is_some() && storage::filesystem_of(dir) == store_fs;
         let mut system = self.system_gens();
@@ -188,7 +187,7 @@ impl Runner {
         let cancel = move || cancel_file.exists();
         let mut homes: Vec<(StorageNode, bool)> = Vec::new();
         let mut ids: Vec<String> = Vec::new();
-        for h in &j.homes {
+        for h in &check::measure_homes(&j.homes, &paths.users) {
             self.check_cancel()?;
             let kind = if h.id == "guest" {
                 NodeKind::Guest
@@ -218,8 +217,8 @@ impl Runner {
             done += 1;
             self.measuring(done, total);
         }
-        let media = storage::measure_media(&j.srv_dir, Limits::default(), &cancel)
-            .map(|m| (m, on_store_fs(&j.srv_dir)));
+        let media = storage::measure_media(&self.own.srv_dir, Limits::default(), &cancel)
+            .map(|m| (m, on_store_fs(&self.own.srv_dir)));
         self.check_cancel()?;
         info!(
             bytes = media.as_ref().map(|(m, _)| m.bytes),
@@ -263,12 +262,11 @@ impl Runner {
 
     /// Past this point a job cannot be cancelled (no stage change, unlike activation).
     fn point_of_no_return(&mut self) -> Result<(), Failure> {
-        let created = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(self.dir.join(job::ACTIVATING));
+        let created = crate::fsutil::open(
+            &self.dir.join(job::ACTIVATING),
+            rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE,
+            0o600,
+        );
         if let Err(e) = created {
             return Err(self.fail(format!("cannot mark the job: {e}")));
         }
@@ -282,8 +280,8 @@ impl Runner {
     pub(super) fn cleanup(&mut self, j: &CleanupJob) -> Outcome {
         self.set_stage(Stage::Preparing);
         self.inhibit("delay");
-        let paths = self.spec.paths.clone();
-        let free_before = storage::disk_usage(&j.store_dir).map(|d| d.free_bytes);
+        let paths = self.paths.clone();
+        let free_before = storage::disk_usage(&self.own.store_dir).map(|d| d.free_bytes);
         // What goes: per Nix profile, the generation numbers.
         let plan: Vec<(PathBuf, Vec<u32>)> = match j.target {
             CleanupTarget::System => {
@@ -311,7 +309,7 @@ impl Runner {
             if numbers.is_empty() {
                 continue;
             }
-            let mut cmd = Command::new(&self.spec.tools.nix_env);
+            let mut cmd = Command::new(&self.tools.nix_env);
             cmd.arg("-p").arg(profile).arg("--delete-generations");
             cmd.args(numbers.iter().map(u32::to_string));
             self.exec(cmd, false, &mut |_, _| {})?;
@@ -334,8 +332,8 @@ impl Runner {
         cmd.arg("--gc");
         self.exec(cmd, false, &mut |_, _| {})?;
         self.set_stage(Stage::Finishing);
-        storage::sync_filesystem(&j.store_dir);
-        let free_after = storage::disk_usage(&j.store_dir).map(|d| d.free_bytes);
+        storage::sync_filesystem(&self.own.store_dir);
+        let free_after = storage::disk_usage(&self.own.store_dir).map(|d| d.free_bytes);
         let freed = match (free_before, free_after) {
             (Some(b), Some(a)) => a.saturating_sub(b),
             _ => 0,

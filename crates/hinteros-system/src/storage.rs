@@ -47,7 +47,7 @@ impl Stored {
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            fsutil::create_dir_all(parent, 0o777)?;
         }
         let bytes = serde_json::to_vec(self).map_err(std::io::Error::other)?;
         fsutil::write_atomic(path, &bytes, 0o600)

@@ -79,6 +79,43 @@ pub fn boot_toplevels(entries: &Path) -> Option<BTreeSet<PathBuf>> {
     found.then_some(out)
 }
 
+/// The index's name in the run dir.
+pub const BOOT_INDEX: &str = "boot-entries.json";
+
+/// [`boot_toplevels`], or where the entries cannot be read (the ESP is root's only, and the
+/// service is not root) what `hinteros-system boot-entries` last wrote to `index`. Neither:
+/// `None` (nothing known).
+pub fn bootable(entries: &Path, index: &Path) -> Option<BTreeSet<PathBuf>> {
+    match std::fs::read_dir(entries) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            crate::fsutil::read_cache::<Option<BTreeSet<PathBuf>>>(index).flatten()
+        }
+        _ => boot_toplevels(entries),
+    }
+}
+
+/// `hinteros-system boot-entries` (the `hinteros-boot-entries` unit, run when the entries
+/// change): write [`boot_toplevels`] to `index` for the service.
+pub fn index_main(entries: &Path, index: &Path) -> std::process::ExitCode {
+    let found = boot_toplevels(entries);
+    let written = crate::fsutil::cache_bytes(&found)
+        .map_err(std::io::Error::other)
+        .and_then(|b| crate::fsutil::write_atomic(index, &b, 0o644));
+    match written {
+        Ok(()) => {
+            tracing::info!(
+                entries = found.as_ref().map(BTreeSet::len),
+                "boot entries indexed"
+            );
+            std::process::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            tracing::error!("cannot write {}: {e}", index.display());
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 /// The generation the profile points at.
 pub fn current_generation(profile: &Path) -> Option<u32> {
     let target = std::fs::read_link(profile).ok()?;
@@ -98,12 +135,13 @@ pub fn list(
     current_system: &Path,
     booted_system: &Path,
     boot_entries: &Path,
+    boot_index: &Path,
     profiles_json: &Path,
     needed: Option<&BTreeSet<String>>,
 ) -> Vec<Generation> {
     let current = std::fs::canonicalize(current_system).ok();
     let booted = std::fs::canonicalize(booted_system).ok();
-    let bootable = boot_toplevels(boot_entries);
+    let bootable = bootable(boot_entries, boot_index);
     let names = ProfilesFile::load(profiles_json).unwrap_or_default();
     links(profile)
         .into_iter()
@@ -198,6 +236,7 @@ mod tests {
             &d.join("current"),
             &d.join("booted"),
             &d.join("entries"),
+            &d.join("boot-entries.json"),
             &d.join("profiles.json"),
             None,
         );
@@ -208,6 +247,7 @@ mod tests {
             &d.join("current"),
             &d.join("booted"),
             &d.join("entries"),
+            &d.join("boot-entries.json"),
             &d.join("profiles.json"),
             Some(&needed),
         );
@@ -261,6 +301,7 @@ mod tests {
                 &d.join("current"),
                 &d.join("booted"),
                 &d.join("entries"),
+                &d.join("boot-entries.json"),
                 &d.join("profiles.json"),
                 None,
             )
@@ -291,5 +332,20 @@ mod tests {
         assert!(tops.contains(&d.join("store/gen3")));
         // 2 has no entry; 1 has none either but is the current one.
         assert_eq!(list_all(), [4, 3, 1]);
+
+        // The service is not root and cannot read the ESP: it uses the index the helper wrote.
+        assert_eq!(
+            index_main(&d.join("entries"), &d.join("boot-entries.json")),
+            std::process::ExitCode::SUCCESS
+        );
+        if !rustix::process::geteuid().is_root() {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |m| std::fs::Permissions::from_mode(m);
+            std::fs::set_permissions(d.join("entries"), mode(0o000)).unwrap();
+            assert_eq!(list_all(), [4, 3, 1]);
+            std::fs::remove_file(d.join("boot-entries.json")).unwrap();
+            assert_eq!(list_all(), [4, 3, 2, 1], "no index: nothing is known");
+            std::fs::set_permissions(d.join("entries"), mode(0o755)).unwrap();
+        }
     }
 }

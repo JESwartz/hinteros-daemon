@@ -413,10 +413,9 @@ pub fn write_request(paths: &Paths, zone: &str) -> io::Result<()> {
 /// Read the request: one line, a zone name of the right shape.
 fn read_request(paths: &Paths) -> anyhow::Result<String> {
     let path = request_path(paths);
-    let mut text = String::new();
-    fs::File::open(&path)
-        .and_then(|f| f.take(MAX_REQUEST_BYTES).read_to_string(&mut text))
+    let bytes = crate::fsutil::read_limited(&path, MAX_REQUEST_BYTES)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+    let text = String::from_utf8_lossy(&bytes);
     let zone = text.strip_suffix('\n').unwrap_or(&text);
     if !is_zone_name(zone) {
         anyhow::bail!("{} does not hold a time zone name", path.display());

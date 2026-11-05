@@ -168,6 +168,7 @@ mod tests {
         Paths {
             config_dir: root.join("etc"),
             state_dir: root.join("var"),
+            root_state_dir: root.join("root"),
             run_dir: root.join("run"),
             profile: root.join("profiles/system"),
             current_system: root.join("current"),

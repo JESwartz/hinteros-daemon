@@ -182,7 +182,6 @@ impl Service {
                     Action::Cleanup(CleanupJob {
                         target: CleanupTarget::System,
                         keep: p.keep,
-                        store_dir: self.args.store_dir.clone(),
                         owners: Vec::new(),
                     }),
                 );
@@ -204,7 +203,6 @@ impl Service {
                     Action::Cleanup(CleanupJob {
                         target: CleanupTarget::Profiles,
                         keep: p.keep,
-                        store_dir: self.args.store_dir.clone(),
                         owners: appreg::owners(&state)
                             .into_iter()
                             .filter(appreg::Owner::has_generations)
@@ -282,9 +280,7 @@ impl Service {
             });
         }
         MeasureJob {
-            store_dir: self.args.store_dir.clone(),
             homes,
-            srv_dir: self.args.srv_dir.clone(),
             owners: appreg::owners(state),
         }
     }

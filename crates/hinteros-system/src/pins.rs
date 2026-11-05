@@ -13,7 +13,6 @@
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -167,10 +166,7 @@ impl Pins {
     }
 
     fn ensure_dir(&self) -> std::io::Result<()> {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.dir)
+        fsutil::create_dir_all(&self.dir, 0o700)
     }
 
     pub fn is_set(&self, id: &str) -> bool {
@@ -253,7 +249,7 @@ impl Pins {
     /// The backoff of `id` for display (lists, the public view): read under a shared `flock`,
     /// never creating or writing the file.
     pub fn peek_backoff(&self, id: &str) -> Backoff {
-        let Ok(mut file) = fs::File::open(self.state_path(id)) else {
+        let Ok(mut file) = fsutil::open(&self.state_path(id), rustix::fs::OFlags::RDONLY, 0) else {
             return Backoff::default();
         };
         if flock(&file, FlockOperation::LockShared).is_err() {
@@ -277,13 +273,11 @@ impl Pins {
         T: Serialize + serde::de::DeserializeOwned + Default + PartialEq + Clone,
     {
         self.ensure_dir()?;
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(path)?;
+        let mut file = fsutil::open(
+            path,
+            rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CREATE,
+            0o600,
+        )?;
         flock(&file, FlockOperation::LockExclusive)?;
         let mut text = String::new();
         file.read_to_string(&mut text)?;
@@ -327,7 +321,7 @@ impl Pins {
         backoff: bool,
     ) -> std::io::Result<Verify> {
         let pin = Zeroizing::new(pin.to_owned());
-        let phc = match fs::read_to_string(self.hash_path(id)) {
+        let phc = match fsutil::read_to_string(&self.hash_path(id)) {
             Ok(p) => Zeroizing::new(p),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Verify::NoPin),
             Err(e) => return Err(e),

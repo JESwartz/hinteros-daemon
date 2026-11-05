@@ -161,7 +161,7 @@ impl Runner {
             .map_err(|e| self.fail(format!("writing {}: {e}", file.display())))?;
         let mut cmd = self.nix_command();
         cmd.args(["eval", "--impure", "--json", "--expr"])
-            .arg(env_expr(&self.spec.paths.config_dir, &file));
+            .arg(env_expr(&self.paths.config_dir, &file));
         let out = self.exec(cmd, true, &mut |_, _| {})?;
         let v: Vec<Evaluated> = serde_json::from_str(out.trim())
             .map_err(|e| self.fail(format!("nix eval printed no env list: {e}")))?;
@@ -177,7 +177,7 @@ impl Runner {
     /// Make `env` the owner's current env: a new generation of its Nix profile, or the guest's
     /// link (an indirect GC root). Nothing happens when it already is.
     pub(super) fn set_env(&mut self, owner: &Owner, env: &Path) -> Result<bool, Failure> {
-        let link = owner.link(&self.spec.paths);
+        let link = owner.link(&self.paths);
         if fs::canonicalize(&link).ok().as_deref() == Some(env) {
             return Ok(false);
         }
@@ -188,11 +188,11 @@ impl Runner {
                 .create(parent);
         }
         if owner.has_generations() {
-            let mut cmd = Command::new(&self.spec.tools.nix_env);
+            let mut cmd = Command::new(&self.tools.nix_env);
             cmd.arg("-p").arg(&link).arg("--set").arg(env);
             self.exec(cmd, false, &mut |_, _| {})?;
         } else {
-            let mut cmd = Command::new(&self.spec.tools.nix_store);
+            let mut cmd = Command::new(&self.tools.nix_store);
             cmd.arg("--add-root")
                 .arg(&link)
                 .arg("--indirect")
@@ -206,16 +206,14 @@ impl Runner {
 
     /// The state of `/etc/hinteros` (after a switch: the new one).
     fn config_state(&self) -> Option<State> {
-        State::load(&self.spec.paths.state_json())
-            .ok()
-            .map(|(s, _)| s)
+        State::load(&self.paths.state_json()).ok().map(|(s, _)| s)
     }
 
     /// Write the registry from the manifests and publish the session links.
     fn refresh_registry(&self) {
         if let Some(state) = self.config_state() {
-            Registry::reconcile(&self.spec.paths, &state);
-            appreg::publish(&self.spec.paths, &state);
+            Registry::reconcile(&self.paths, &state);
+            appreg::publish(&self.paths, &state);
         }
     }
 
@@ -232,7 +230,7 @@ impl Runner {
     pub(super) fn apps_job(&mut self, j: &AppsJob) -> Outcome {
         self.set_stage(Stage::Preparing);
         self.inhibit("delay");
-        let paths = self.spec.paths.clone();
+        let paths = self.paths.clone();
         if !j.terms.is_empty() {
             record_terms(&paths.terms_accepted(), &j.terms)
                 .map_err(|e| self.fail(format!("recording the accepted terms: {e}")))?;
@@ -290,7 +288,7 @@ impl Runner {
                         format!("app generation {generation} is not on disk"),
                     )));
                 }
-                let mut cmd = Command::new(&self.spec.tools.nix_env);
+                let mut cmd = Command::new(&self.tools.nix_env);
                 cmd.arg("-p")
                     .arg(&link)
                     .arg("--switch-generation")
@@ -329,7 +327,7 @@ impl Runner {
             return Ok(None);
         };
         self.set_stage(Stage::Apps);
-        let paths = self.spec.paths.clone();
+        let paths = self.paths.clone();
         let index = Index::load(&paths.catalog_index())
             .map_err(|e| warn!("no catalog after the switch: {e}"))
             .ok();
@@ -413,7 +411,7 @@ impl Runner {
         let Some(state) = self.config_state() else {
             return Ok(outcome);
         };
-        let needed = Registry::scan(&self.spec.paths, &state).needed_features();
+        let needed = Registry::scan(&self.paths, &state).needed_features();
         let missing = missing_features(&state, &needed);
         if missing.is_empty() {
             return Ok(outcome);

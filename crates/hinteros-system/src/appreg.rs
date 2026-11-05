@@ -10,7 +10,7 @@
 //!   and is rewritten when it differs from them (after a crash, or a manual `nix-env`).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::unix::fs::{DirBuilderExt, symlink};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use hinteros_api::common::{check_file_version, check_version};
@@ -209,7 +209,7 @@ impl Default for Registry {
 impl Registry {
     /// Read it; a damaged or newer file is discarded: [`Registry::scan`] makes it again.
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
+        crate::fsutil::read(path)
             .ok()
             .filter(|b| check_version(path, b, REGISTRY_VERSION).is_ok())
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -218,10 +218,7 @@ impl Registry {
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)?;
+            fsutil::create_dir_all(dir, 0o700)?;
         }
         let mut bytes = serde_json::to_vec_pretty(self)?;
         bytes.push(b'\n');
@@ -284,61 +281,66 @@ pub const APPS_RUN_DIR_MODE: u32 = 0o750;
 ///
 /// A job publishes too, and a job
 /// runs as root:root with another umask: the group is taken from the run directory (the
-/// service's `RuntimeDirectory`, root:hinteros) and the mode set, on every call, so the sessions
-/// can read the directory whoever made it.
+/// service's `RuntimeDirectory`, hinteros-system:hinteros) and the mode set, on every call, so
+/// the sessions can read the directory whoever made it. The links are made, replaced and
+/// removed relative to the directory opened once (root never follows a link the service put in
+/// the path).
 pub fn publish(paths: &Paths, state: &State) {
+    use rustix::fs::{AtFlags, readlinkat, renameat, symlinkat, unlinkat};
     let dir = paths.apps_run_dir();
-    if let Err(e) = std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(APPS_RUN_DIR_MODE)
-        .create(&dir)
-    {
-        warn!("cannot create {}: {e}", dir.display());
-        return;
-    }
-    if let Err(e) = fix_run_dir(&dir) {
+    let opened = fsutil::create_dir_all(&dir, APPS_RUN_DIR_MODE).and_then(|()| fsutil::dir(&dir));
+    let d = match opened {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("cannot create {}: {e}", dir.display());
+            return;
+        }
+    };
+    if let Err(e) = fix_run_dir(&dir, &d) {
         warn!("cannot set the owner of {}: {e}", dir.display());
     }
     let accounts = state.accounts();
     for a in &accounts {
-        let link = dir.join(&a.user);
         let target = paths.app_profile(&a.user);
-        if std::fs::read_link(&link).ok().as_deref() == Some(target.as_path()) {
+        let current = readlinkat(&d, a.user.as_str(), Vec::new()).ok();
+        if current.as_ref().map(|c| c.as_bytes()) == Some(target.as_os_str().as_bytes()) {
             continue;
         }
-        let tmp = dir.join(format!(".{}.tmp", a.user));
-        let _ = std::fs::remove_file(&tmp);
-        let made = symlink(&target, &tmp).and_then(|()| std::fs::rename(&tmp, &link));
+        let tmp = format!(".{}.tmp", a.user);
+        let _ = unlinkat(&d, tmp.as_str(), AtFlags::empty());
+        let made = symlinkat(target.as_path(), &d, tmp.as_str())
+            .and_then(|()| renameat(&d, tmp.as_str(), &d, a.user.as_str()));
         if let Err(e) = made {
-            warn!("cannot publish {}: {e}", link.display());
+            warn!("cannot publish {}: {e}", dir.join(&a.user).display());
         }
     }
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.')
-                || name == state::GUEST_USER
-                || accounts.iter().any(|a| a.user == name)
-            {
-                continue;
-            }
-            let _ = std::fs::remove_file(e.path());
+    let Ok(entries) = rustix::fs::Dir::read_from(&d) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.')
+            || name == state::GUEST_USER
+            || accounts.iter().any(|a| a.user == name)
+        {
+            continue;
         }
+        let _ = unlinkat(&d, name.as_str(), AtFlags::empty());
     }
 }
 
 /// `dir`: mode [`APPS_RUN_DIR_MODE`] and its parent's group (changed only when different).
-fn fix_run_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let meta = std::fs::metadata(dir)?;
+fn fix_run_dir(dir: &Path, fd: &impl std::os::fd::AsFd) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = rustix::fs::fstat(fd)?;
     if let Some(parent) = dir.parent() {
         let gid = std::fs::metadata(parent)?.gid();
-        if meta.gid() != gid {
-            std::os::unix::fs::chown(dir, None, Some(gid))?;
+        if meta.st_gid != gid {
+            rustix::fs::fchown(fd, None, Some(rustix::fs::Gid::from_raw(gid)))?;
         }
     }
-    if meta.permissions().mode() & 0o7777 != APPS_RUN_DIR_MODE {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(APPS_RUN_DIR_MODE))?;
+    if meta.st_mode & 0o7777 != APPS_RUN_DIR_MODE {
+        rustix::fs::fchmod(fd, rustix::fs::Mode::from_raw_mode(APPS_RUN_DIR_MODE))?;
     }
     Ok(())
 }
@@ -360,7 +362,7 @@ pub struct StarterFile {
 impl StarterFile {
     /// Read it. A newer file counts as none, and [`StarterFile::save`] leaves it alone.
     pub fn load(path: &Path) -> Option<Self> {
-        let bytes = std::fs::read(path).ok()?;
+        let bytes = crate::fsutil::read(path).ok()?;
         if let Err(e) = check_version(path, &bytes, STARTER_VERSION) {
             warn!("{e}");
             return None;
@@ -393,6 +395,7 @@ pub fn normalize(ids: impl IntoIterator<Item = String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn newer_files() {
@@ -456,6 +459,7 @@ mod tests {
         Paths {
             config_dir: root.join("etc"),
             state_dir: root.join("var"),
+            root_state_dir: root.join("root"),
             run_dir: root.join("run"),
             profile: root.join("profiles/system"),
             current_system: root.join("current"),

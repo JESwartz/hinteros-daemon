@@ -1,5 +1,7 @@
 //! What the service and a job unit share: the job spec (written by the service into
-//! `<run-dir>/jobs/<id>/spec.json`, root-only), the progress lines and the final status.
+//! `<run-dir>/jobs/<id>/spec.json`, 0600), the progress lines and the final status. The spec says
+//! what to do, never where or with which program: the job takes paths, programs and the bus
+//! from its own command line, and checks what the spec names again (the service is not root).
 //!
 //! Files of a job directory:
 //! - `spec.json`: what to do (from the service's own typed state, never client JSON);
@@ -21,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::appreg::{Owner, StarterFile};
-use crate::config::{Paths, Tools};
+use crate::config::Paths;
 use crate::state::State;
 
 pub const SPEC: &str = "spec.json";
@@ -62,10 +64,6 @@ pub struct JobSpec {
     pub kind: JobKind,
     pub uid: u32,
     pub created_at: i64,
-    pub paths: Paths,
-    pub tools: Tools,
-    /// D-Bus address for logind inhibitors (`None`: the system bus).
-    pub bus: Option<String>,
     pub action: Action,
     /// What the job is about (the runner may refine it, see [`ProgressLine::subject`]).
     #[serde(default)]
@@ -204,12 +202,8 @@ pub struct MeasureHome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeasureJob {
-    /// The Nix store (statvfs: the disk the ring shows).
-    pub store_dir: PathBuf,
     /// The accounts in `state.json` order, then the guest (if on).
     pub homes: Vec<MeasureHome>,
-    /// Measured as the `media` node.
-    pub srv_dir: PathBuf,
     /// Every app-env owner.
     pub owners: Vec<Owner>,
 }
@@ -230,8 +224,6 @@ pub struct CleanupJob {
     pub target: CleanupTarget,
     /// Generations kept (1 to 10; the running, booted and current ones always).
     pub keep: u32,
-    /// The Nix store (statvfs before and after: what was freed).
-    pub store_dir: PathBuf,
     /// `Profiles`: the owners whose app envs are trimmed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owners: Vec<Owner>,
@@ -254,12 +246,9 @@ pub struct ProfileCreateJob {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuestEndJob {
-    /// The guest account's uid, checked by the service (and again by the job).
+    /// The guest account's uid, checked by the service and again by the job (which takes the
+    /// home from the user database and the shared directories from its own command line).
     pub uid: u32,
-    /// Its home (from the user database).
-    pub home: PathBuf,
-    /// Shared directories cleared of the guest's entries (`/tmp`, `/var/tmp`, `/dev/shm`).
-    pub tmp_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -372,8 +361,6 @@ pub struct UpdateSource {
     pub channel: Channel,
     /// The locked revision before the job.
     pub current_rev: Option<String>,
-    /// From the running generation (resolved when the job was created).
-    pub allowed_signers: PathBuf,
     /// `update.check` only: compare the catalogs of the running and the target generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogCheck>,
@@ -388,8 +375,6 @@ pub struct UpdateSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogCheck {
-    /// The running generation's index (resolved when the job was created).
-    pub index: PathBuf,
     /// Installed apps (`state.json`).
     pub installed: Vec<String>,
     /// The hinteros input URL of the channel without a rev; the job adds the verified one.
@@ -520,7 +505,7 @@ pub fn job_failed(stage: Stage, hint: &str) -> ErrorObject {
 }
 
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = crate::fsutil::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 

@@ -65,7 +65,7 @@ fn marker(paths: &Paths) -> PathBuf {
 /// PAM refuses it. A marker left by a job that has finished (or died: the service records a
 /// lost job's status) counts for nothing.
 pub fn ending(paths: &Paths) -> bool {
-    let Ok(id) = std::fs::read_to_string(marker(paths)) else {
+    let Ok(id) = crate::fsutil::read_to_string(&marker(paths)) else {
         return false;
     };
     let id = id.trim();

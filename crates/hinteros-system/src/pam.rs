@@ -425,6 +425,7 @@ pub fn paths(state_dir: PathBuf, run_dir: PathBuf, config_dir: PathBuf, users: U
     Paths {
         config_dir,
         state_dir,
+        root_state_dir: crate::config::default_root_state(),
         run_dir,
         profile: "/nix/var/nix/profiles/system".into(),
         current_system: "/run/current-system".into(),

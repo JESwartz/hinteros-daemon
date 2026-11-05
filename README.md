@@ -989,7 +989,7 @@ All paths default to the box's; tests point them at a temporary root.
 | `--catalog-index` | `<current-system>/sw/share/hinteros/catalog.json` (resolved per request) |
 | `--auth-timeout-s` | 300 (how long an interactive polkit check waits for the admin password) |
 | `--zoneinfo-dir` | `/etc/zoneinfo` (the system's tzdata: TZif files and `zone1970.tab`) |
-| `--localtime` | `/etc/localtime` (the link `time_zone.set` replaces) |
+| `--localtime` | `/etc/hinteros-time-zone/localtime` (the link `time_zone.set` replaces; `/etc/localtime` is a fixed link to it) |
 | `--keyboard-socket`, `--keyboard-group` | `/run/hinteros/keyboard.sock`, `hinteros-keyboard` (no socket without the group) |
 | `--freeze-inactive` | off (the system repo sets it): freeze profiles whose session is not the active one |
 | `--lan-filter` (`HINTEROS_LAN_FILTER`) | off (the system repo sets it with `lan`): `lan_filter.*` work; without it they fail |
@@ -1724,22 +1724,27 @@ link), `service/timezone.rs` (the methods).
 - Jobs: a job that replaces `/etc/hinteros` takes the same lock and first copies the live
   `settings.timeZone` into its staged `state.json`, so a zone set while it ran (or after its
   state was computed) is kept. A rollback restores the generation's `state.json` but keeps a
-  live zone, as `hinteros-config-sync` does at boot, and then points `/etc/localtime` at the
+  live zone, as `hinteros-config-sync` does at boot, and then points `--localtime` at the
   zone that applies (the switch ran before the restore); the service sends `time_zone_changed`
   after any job when the zone that applies changed.
 
 ### What the system repo must do
 
 - `state.nix`: accept `settings.timeZone` (a string; the shape above). `time.timeZone = null`;
-  an activation script points `/etc/localtime` at `/etc/zoneinfo/<zone>` from the live
-  `/etc/hinteros/state.json` (read at run time; UTC when tzdata lacks it).
+  an activation script points `/etc/hinteros-time-zone/localtime` (`--localtime`) at
+  `/etc/zoneinfo/<zone>` from the live `/etc/hinteros/state.json` (read at run time; UTC when
+  tzdata lacks it) and makes `/etc/localtime` a fixed link to it. glibc and ICU follow the
+  two links; `timedatectl` reads one level only and shows no zone name.
 - `hinteros-config-sync`: `time_zone.set` changes `/etc/hinteros/state.json` in place without a
   new generation, so the running generation's snapshot differs in `settings.timeZone` only.
   The sync must not undo that at the next boot: compare `state.json` without `settings.timeZone`
   and keep the live zone when it restores, after a rollback too (as the daemon's own rollback
   does).
 - `hinteros-time-zone-apply.service`: oneshot, root, `ExecStart=hinteros-system
-  time-zone-apply`, `ProtectSystem=strict`, `ReadWritePaths=/etc /run/hinteros`, no network.
+  time-zone-apply`, `ProtectSystem=strict`, `ReadWritePaths=/etc/hinteros
+  /etc/hinteros-time-zone /run/hinteros` (not all of `/etc`), no network. The binds are made
+  when the unit starts: a job that replaces `/etc/hinteros` after that and before the helper
+  takes the lock makes it fail (the old directory is gone), so `time_zone.set` fails; try again.
   The service only needs `/run/hinteros` writable (no `/etc`) and may start this unit (it is
   root; systemd's manager API). No new polkit action.
 

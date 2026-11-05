@@ -1,9 +1,13 @@
 //! The box's time zone (time-zone.md): zone names, offsets from the system's
-//! tzdata, the zone list and the `/etc/localtime` link.
+//! tzdata, the zone list and the localtime link.
 //!
 //! The service never writes `/etc` itself: `time_zone.set` leaves the zone in
 //! `<run-dir>/time-zone.request` and starts `hinteros-time-zone-apply.service`, which runs
 //! `hinteros-system time-zone-apply` ([`apply_main`]).
+//!
+//! The link the daemon replaces is [`LOCALTIME_LINK`], in a directory of its own, not
+//! `/etc/localtime` itself: the system repo makes `/etc/localtime` a fixed link to it, so the
+//! helper unit can write that directory and `/etc/hinteros` only, not all of `/etc`.
 //!
 //! Offsets come from the TZif files of the zoneinfo directory (`/etc/zoneinfo`, the same files
 //! `/etc/localtime` points into), never from a database built into the daemon, so the daemon
@@ -22,6 +26,10 @@ use tz::timezone::TransitionRule;
 
 use crate::config::Paths;
 use crate::state::State;
+
+/// The link the daemon points at `<zoneinfo>/<zone>` (`--localtime`). `/etc/localtime` is a
+/// fixed link to it (the system repo's activation makes both).
+pub const LOCALTIME_LINK: &str = "/etc/hinteros-time-zone/localtime";
 
 /// Largest TZif file read (the biggest in tzdata is a few KiB).
 const MAX_TZIF_BYTES: u64 = 256 * 1024;
@@ -565,6 +573,24 @@ mod tests {
         let left: Vec<_> = fs::read_dir(d.path()).unwrap().collect();
         assert_eq!(left.len(), 1, "no temporary link left");
         assert!(set_localtime(&lt, &fixtures(), "../x").is_err());
+    }
+
+    #[test]
+    fn the_link_is_in_a_directory_of_its_own() {
+        // The helper unit may write only that directory and /etc/hinteros (not /etc), so
+        // neither the service nor the helper defaults to /etc/localtime.
+        use clap::Parser;
+        let link = Path::new(LOCALTIME_LINK);
+        assert_eq!(link.parent(), Some(Path::new("/etc/hinteros-time-zone")));
+        let cli =
+            crate::config::Cli::try_parse_from(["hinteros-system", "time-zone-apply"]).unwrap();
+        let Some(crate::config::Command::TimeZoneApply { localtime, .. }) = cli.command else {
+            panic!("not time-zone-apply");
+        };
+        assert_eq!(localtime, link);
+        let cli = crate::config::Cli::try_parse_from(["hinteros-system"]).unwrap();
+        assert_eq!(cli.serve.localtime, link);
+        assert_eq!(crate::config::default_localtime(), link);
     }
 
     fn helper_paths(d: &Path) -> Paths {

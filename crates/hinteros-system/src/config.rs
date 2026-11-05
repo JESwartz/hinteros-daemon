@@ -100,8 +100,8 @@ pub enum Command {
         /// The system's tzdata
         #[arg(long, default_value = "/etc/zoneinfo")]
         zoneinfo_dir: PathBuf,
-        /// The link to point at `<zoneinfo-dir>/<zone>`
-        #[arg(long, default_value = "/etc/localtime")]
+        /// The link to point at `<zoneinfo-dir>/<zone>` (`/etc/localtime` points at it)
+        #[arg(long, default_value = crate::timezone::LOCALTIME_LINK)]
         localtime: PathBuf,
     },
     /// Load the local network filter (`hinteros-lan-filter.service`): the
@@ -308,8 +308,9 @@ pub struct ServeArgs {
     /// points into it
     #[arg(long, default_value = "/etc/zoneinfo")]
     pub zoneinfo_dir: PathBuf,
-    /// The link `time_zone.set` points at `<zoneinfo-dir>/<zone>`
-    #[arg(long, default_value = "/etc/localtime")]
+    /// The link `time_zone.set` points at `<zoneinfo-dir>/<zone>` (`/etc/localtime` points at
+    /// it)
+    #[arg(long, default_value = crate::timezone::LOCALTIME_LINK)]
     pub localtime: PathBuf,
     /// `lan_filter.*`: the box has the local network filter
     /// (`hinteros-lan-filter.service`); without it they fail. An environment variable too, so a
@@ -506,7 +507,7 @@ pub fn default_zoneinfo() -> PathBuf {
 }
 
 pub fn default_localtime() -> PathBuf {
-    "/etc/localtime".into()
+    crate::timezone::LOCALTIME_LINK.into()
 }
 
 fn default_apps_profiles() -> PathBuf {

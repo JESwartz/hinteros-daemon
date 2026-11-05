@@ -19,7 +19,7 @@ use hinteros_api::{ErrorCode, ErrorObject, Method, system};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::greetd::{
     AuthMessageType, Greetd, Request, Response, Secret, locked_s, reboot_required,
@@ -423,20 +423,19 @@ impl Greeter {
             .call_raw(system::SettingsGet::NAME, json!({}))
             .await
             .map_err(rpc)?;
-        let mut params = json!({
-            "name": p.name,
-            "pin": p.pin,
-            "locked": p.locked,
-            "revision": settings["revision"],
-        });
-        if let Some(color) = p.color {
-            params["color"] = json!(color);
-        }
-        let result = c
-            .call_raw(system::ProfilesCreate::NAME, params)
-            .await
-            .map_err(rpc)?;
-        let job = result["job_id"].as_str().unwrap_or_default().to_owned();
+        // The PIN goes from the launcher's params to the wire without a copy that stays
+        // behind: moved into the typed params, serialized into a wiped buffer, then wiped.
+        let mut params = system::ProfilesCreateParams {
+            name: p.name,
+            color: p.color,
+            pin: p.pin,
+            locked: p.locked,
+            revision: settings["revision"].as_str().unwrap_or_default().to_owned(),
+        };
+        let result = c.call_secret::<system::ProfilesCreate>(&params).await;
+        params.pin.zeroize();
+        let result = result.map_err(rpc)?;
+        let job = result.job_id.clone();
         let events = self.inner.events.clone();
         tokio::spawn(async move {
             while let Ok((name, params)) = c.next_event_raw().await {
@@ -453,6 +452,6 @@ impl Greeter {
                 }
             }
         });
-        Ok(result)
+        encode_result::<GreeterCreate>(result)
     }
 }

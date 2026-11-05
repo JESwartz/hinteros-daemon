@@ -1159,7 +1159,10 @@ onto the launcher's `lib/src/system` repository interfaces:
 
 The password is taken out of the request into a zeroizing buffer, the request line is wiped,
 it is written only to the helper's stdin (or socket) and wiped; it is never logged (a test greps
-the debug log). Responses to `system.*`, `auth.*`, `store.list` and `session.restart` may come out
+the debug log). A PIN the session sends to the system service (`greeter.create`, a relayed call
+with a PIN field) goes out through one exactly sized buffer that is wiped
+(`hinteros_api::codec::secret_line`, `Client::call_secret`), and the PIN strings are wiped after
+the write. Responses to `system.*`, `auth.*`, `store.list` and `session.restart` may come out
 of order on a connection (they run as tasks, so the launcher can send `auth.respond` while
 `system.ssh.set` waits; relayed calls that may ask for the password, `system.ssh.set` and
 `system.profiles.reset_pin` (the admin profile's own), wait up to 330 s, others 60 s).

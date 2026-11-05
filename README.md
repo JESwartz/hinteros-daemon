@@ -1403,7 +1403,10 @@ formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
   the tenth, every check of the admin PIN, the right one too, is refused until the boot id changes
   (a reboot; a service restart keeps it). A right PIN before that, a new PIN and `reset-pin` reset
   the count; the try that starts the lock is audited (`HINTEROS_PIN_OUTCOME=lockout_started`)), the public view `/run/hinteros/profiles-public.json` (0644) and
-  the switch hint with one-time tokens `/run/hinteros/switch.json` (0600) (`public.rs`),
+  the switch hint with one-time tokens `/run/hinteros/switch.json` (0600) (`public.rs`; the
+  view's type is `hinteros_api::public::PublicView`, which the greeter and the splash read
+  tolerantly: unknown fields ignored, a bad field or profile left out and logged, an unknown
+  `locked` read as locked),
   `runtime.json` → `/run/hinteros/gamescope-modes` and `audio-output`, `usage.json`
   (`hinteros-system usage`, started over D-Bus when `profiles.list` sees data older than an hour,
   at most every 10 minutes).

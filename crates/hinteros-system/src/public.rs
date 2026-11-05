@@ -5,6 +5,9 @@
 
 use std::path::Path;
 
+use hinteros_api::public::{
+    Next, PUBLIC_VERSION, PublicAppearance, PublicGuest, PublicProfile, PublicView,
+};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -83,43 +86,6 @@ pub fn take_token(path: &Path, user: &str, now: i64) -> bool {
     valid
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PublicProfile {
-    pub id: String,
-    pub user: String,
-    pub name: String,
-    pub color: String,
-    pub locked: bool,
-    pub admin: bool,
-    pub locked_until: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PublicGuest {
-    pub enabled: bool,
-    pub user: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Next {
-    pub target: String,
-    /// The greeter may enter without asking (unlocked, guest, or a token).
-    pub fast: bool,
-    pub expires: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PublicView {
-    pub version: u32,
-    pub profiles: Vec<PublicProfile>,
-    pub guest: PublicGuest,
-    pub first_boot: bool,
-    pub spare: Option<String>,
-    pub last_used: Option<String>,
-    pub next: Option<Next>,
-    pub appearance: crate::profiles::Appearance,
-}
-
 /// The public view of the box now.
 pub fn view(paths: &Paths, state: &State, file: &ProfilesFile, now: i64) -> PublicView {
     let pins = Pins::new(paths.pins_dir());
@@ -139,7 +105,7 @@ pub fn view(paths: &Paths, state: &State, file: &ProfilesFile, now: i64) -> Publ
                 .filter(|t| *t > now),
         })
         .collect();
-    let mut appearance = crate::profiles::Appearance::default();
+    let mut appearance = PublicAppearance::default();
     for (_, m) in &visible {
         appearance.text_scale = appearance.text_scale.max(m.appearance.text_scale);
         appearance.high_contrast |= m.appearance.high_contrast;
@@ -163,18 +129,18 @@ pub fn view(paths: &Paths, state: &State, file: &ProfilesFile, now: i64) -> Publ
         .max()
         .map(|(_, id)| id);
     PublicView {
-        version: 1,
+        version: PUBLIC_VERSION,
         profiles,
         guest: PublicGuest {
             // Hidden while a guest_end job wipes it.
             enabled: state.guest_enabled() && !crate::guest::ending(paths),
-            user: state::GUEST_USER.into(),
+            user: Some(state::GUEST_USER.into()),
         },
         first_boot: file.first_boot(state),
         spare: file.spares(state).first().map(|a| a.user.clone()),
         last_used,
         next,
-        appearance,
+        appearance: Some(appearance),
     }
 }
 
@@ -241,7 +207,7 @@ mod tests {
         assert_eq!(v.spare.as_deref(), Some("hinteros-p3"));
         assert!(!v.first_boot);
         assert_eq!(v.last_used.as_deref(), Some("p2"));
-        assert_eq!(v.appearance.text_scale, 1.5);
+        assert_eq!(v.appearance.map(|a| a.text_scale), Some(1.5));
         assert!(v.next.is_none() && v.guest.enabled);
 
         // A hint to locked p2: the picker opens on its PIN pad; with a token, the fast path.

@@ -16,6 +16,7 @@ pub mod conformance;
 pub mod error;
 pub mod jsonrpc;
 pub mod manifest;
+pub mod public;
 pub mod runtime;
 pub mod server;
 pub mod session;

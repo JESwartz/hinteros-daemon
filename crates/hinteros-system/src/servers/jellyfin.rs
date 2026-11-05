@@ -88,6 +88,10 @@ pub enum Error {
     Unreachable(String),
     #[error("Jellyfin refused: {0}")]
     Refused(String),
+    /// The profile's sign-in is refused (401) even after the user was repaired (made again,
+    /// its recorded password set back).
+    #[error("Jellyfin refused the sign-in: {0}")]
+    SignInRefused(String),
     /// `state.json` or `profiles.json` cannot be read (damaged, missing, or newer than this
     /// binary): no sync, since an empty profile list would delete every user.
     #[error("the profiles cannot be read: {0}")]
@@ -100,7 +104,7 @@ impl Error {
         match self {
             Error::NotReady => "not_ready",
             Error::Unreachable(_) => "unreachable",
-            Error::Refused(_) | Error::Profiles(_) => "refused",
+            Error::Refused(_) | Error::SignInRefused(_) | Error::Profiles(_) => "refused",
         }
     }
 }
@@ -977,6 +981,10 @@ pub fn client_token(
                         c.set_password(&r.jellyfin_user_id, &r.password)?;
                     }
                     continue;
+                }
+                // Refused again after the repair: not a connection problem.
+                Err(Error::Refused(m)) if m.contains("HTTP 401") => {
+                    return Err(Error::SignInRefused(m));
                 }
                 Err(e) => return Err(e),
             },

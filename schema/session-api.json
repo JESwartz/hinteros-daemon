@@ -3098,7 +3098,7 @@
     },
     "system.jellyfin.client_token": {
       "summary": "Relayed to the system service's jellyfin.client_token. a Jellyfin access token for the caller's own profile, so the Jellyfin app on the box signs in by itself (spike S1). No PIN; read-only for the caller (no seat check, no rate limit).",
-      "description": "The profile comes from the caller's uid (SO_PEERCRED): the guest, spare accounts and other users get permission_denied {reason: profile}. Jellyfin off or not set up: unavailable {service: jellyfin, reason: off | not_ready}; Jellyfin does not answer or refuses: unavailable {service: jellyfin, reason: unreachable}. The profile's Jellyfin user is made first if it has none. The token is made with POST /Users/AuthenticateByName as device hinteros-<profile id> (Jellyfin ends that device's older token, so a profile has one live token), kept in users.json (root only) and made again when Jellyfin answers 401 to it. Never logged.",
+      "description": "The profile comes from the caller's uid (SO_PEERCRED): the guest, spare accounts and other users get permission_denied {reason: profile}. Jellyfin off or not set up: unavailable {service: jellyfin, reason: off | not_ready}; Jellyfin does not answer or refuses: unavailable {service: jellyfin, reason: unreachable}; it refuses the profile's sign-in (401) even after the user was made again and its recorded password set back: unavailable {service: jellyfin, reason: sign_in_refused}. The profile's Jellyfin user is made first if it has none. The token is made with POST /Users/AuthenticateByName as device hinteros-<profile id> (Jellyfin ends that device's older token, so a profile has one live token), kept in users.json (root only) and made again when Jellyfin answers 401 to it. Never logged.",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
         "type": "object",
@@ -5579,7 +5579,7 @@
     },
     "unavailable": {
       "code": 4001,
-      "summary": "A runtime-settings method needs a service that is not there (not installed, not running, no permission to reach it, or no such hardware). Also store.list without a readable catalog index (service catalog), session.restart without a greetd session on seat0 (service logind), and auth.respond when polkit's agent helper cannot be run (service polkit). The relayed Server section methods: service jellyfin, plex, tailscale or cloudflare with reason off or not_ready. System.base.set to a base that is not built: service base, reason not_built.",
+      "summary": "A runtime-settings method needs a service that is not there (not installed, not running, no permission to reach it, or no such hardware). Also store.list without a readable catalog index (service catalog), session.restart without a greetd session on seat0 (service logind), and auth.respond when polkit's agent helper cannot be run (service polkit). The relayed Server section methods: service jellyfin, plex, tailscale or cloudflare with reason off or not_ready (system.jellyfin.client_token also unreachable or sign_in_refused). System.base.set to a base that is not built: service base, reason not_built.",
       "data": {
         "type": "object",
         "required": ["service", "reason"],

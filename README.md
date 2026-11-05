@@ -2077,7 +2077,9 @@ the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relaye
   token), kept in `users.json`, minted again when `GET /System/Info` answers 401. A sign-in
   refused with 401 (the user deleted, or its password changed, in the dashboard) runs `sync`
   (which makes a missing user again), sets the recorded password back (`POST /Users/Password`)
-  and tries once more. The session daemon signs the Jellyfin app in with it (below).
+  and tries once more; refused again: `unavailable {service: jellyfin, reason: sign_in_refused}`
+  (Jellyfin not answering is `reason: unreachable`). The session daemon signs the Jellyfin app in
+  with it (below).
 - **The Jellyfin app signs in by itself** (spike S1, session side, `appseed.rs`): before
   `apps.launch {id: "jellyfin-desktop"}` (not while it runs, not without `lan`) the session daemon calls
   `jellyfin.client_token` (10 s at most; `unavailable` = the server is off or not set up: nothing

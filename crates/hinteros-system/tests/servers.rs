@@ -154,6 +154,8 @@ struct Jellyfin {
     users: BTreeMap<String, (String, String)>,
     tokens: Vec<String>,
     authentications: usize,
+    /// Every sign-in is refused (401), whatever the password.
+    refuse_sign_in: bool,
     next: u32,
     log: Vec<String>,
 }
@@ -192,7 +194,7 @@ fn fake_jellyfin() -> (SocketAddr, Arc<Mutex<Jellyfin>>) {
                 .iter()
                 .find(|(_, (n, p))| *n == b["Username"] && *p == b["Pw"])
                 .map(|(id, _)| id.clone());
-            let Some(id) = found else {
+            let Some(id) = found.filter(|_| !j.refuse_sign_in) else {
                 return (401, String::new());
             };
             j.authentications += 1;
@@ -780,6 +782,21 @@ async fn services_jellyfin_and_delete_data() {
         .unwrap();
     assert_ne!(t5["user_id"], t["user_id"]);
     assert!(jf.lock().unwrap().users.values().any(|u| u.0 == "James"));
+    // Still refused after the repair: its own reason, not `unreachable`.
+    {
+        let mut j = jf.lock().unwrap();
+        j.tokens.clear();
+        j.refuse_sign_in = true;
+    }
+    let e = call(&mut c, "jellyfin.client_token", json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), ErrorCode::Unavailable.code(), "{e}");
+    assert_eq!(
+        e["data"],
+        json!({"service": "jellyfin", "reason": "sign_in_refused"})
+    );
+    jf.lock().unwrap().refuse_sign_in = false;
 
     // A rename follows (in the background).
     call(

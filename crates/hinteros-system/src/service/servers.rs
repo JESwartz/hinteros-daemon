@@ -50,10 +50,13 @@ pub enum ServersRequest {
     ClearToken(AdminPinParams),
 }
 
-/// `unavailable {service, reason}`: the service is off (`off`) or not set up yet (`not_ready`).
+/// `unavailable {service, reason}`: the service is off (`off`), not set up yet (`not_ready`),
+/// does not answer (`unreachable`) or refused a profile's sign-in (`sign_in_refused`).
 fn unavailable(service: &str, reason: &str) -> ErrorObject {
     let message = match reason {
         "off" => "the service is off",
+        "unreachable" => "the service does not answer",
+        "sign_in_refused" => "the service refused the sign-in",
         _ => "the service is not ready",
     };
     ErrorObject::with_data(
@@ -477,6 +480,10 @@ impl Service {
         match made {
             Ok(t) => Ok(t),
             Err(jellyfin::Error::NotReady) => Err(unavailable("jellyfin", "not_ready")),
+            Err(e @ jellyfin::Error::SignInRefused(_)) => {
+                warn!(profile = %id, "no Jellyfin token: {e}");
+                Err(unavailable("jellyfin", "sign_in_refused"))
+            }
             Err(e) => {
                 warn!(profile = %id, "no Jellyfin token: {e}");
                 Err(unavailable("jellyfin", "unreachable"))

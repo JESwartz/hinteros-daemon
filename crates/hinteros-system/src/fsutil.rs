@@ -15,7 +15,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{
-    AtFlags, CWD, Mode, OFlags, RenameFlags, fchown, fstat, mkdirat, openat, renameat,
+    AtFlags, CWD, FileType, Mode, OFlags, RenameFlags, fchown, fstat, mkdirat, openat, renameat,
     renameat_with, unlinkat,
 };
 use rustix::process::{Gid, Uid, geteuid};
@@ -101,7 +101,8 @@ fn hand_over(dir: &impl AsFd, fd: &impl AsFd, guard: bool) -> io::Result<()> {
 }
 
 /// Open `path` with `flags` (`CREATE` makes it with `mode`). As root: no symlink in the path,
-/// and a file of root's in a directory that is not is given to the directory's owner.
+/// a regular file only (a FIFO put there must not hang the helper: opened `O_NONBLOCK`, then
+/// checked), and a file of root's in a directory that is not is given to the directory's owner.
 pub fn open(path: &Path, flags: OFlags, mode: u32) -> io::Result<fs::File> {
     open_with(path, flags, mode, guarded())
 }
@@ -117,21 +118,37 @@ fn open_with(path: &Path, flags: OFlags, mode: u32, guard: bool) -> io::Result<f
     let fd = openat(
         &d,
         name,
-        flags | OFlags::NOFOLLOW,
+        flags | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::from_raw_mode(mode),
     )?;
+    if FileType::from_raw_mode(fstat(&fd)?.st_mode) != FileType::RegularFile {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{}: not a regular file", path.display()),
+        ));
+    }
     if flags.contains(OFlags::CREATE) {
         hand_over(&d, &fd, true)?;
     }
     Ok(fs::File::from(fd))
 }
 
-/// The whole file (as root: no symlink in the path).
+/// The whole file (as root: no symlink in the path, a regular file only).
 pub fn read(path: &Path) -> io::Result<Vec<u8>> {
-    let mut f = open(path, OFlags::RDONLY, 0)?;
+    read_limited(path, u64::MAX)
+}
+
+/// At most `max` bytes of the file (as root: as [`read`]).
+pub fn read_limited(path: &Path, max: u64) -> io::Result<Vec<u8>> {
+    let f = open(path, OFlags::RDONLY, 0)?;
     let mut out = Vec::new();
-    f.read_to_end(&mut out)?;
+    f.take(max).read_to_end(&mut out)?;
     Ok(out)
+}
+
+/// The whole file as text (as [`read`]).
+pub fn read_to_string(path: &Path) -> io::Result<String> {
+    String::from_utf8(read(path)?).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 /// `create_dir_all` with `mode` for what it makes. As root: no symlink in the path, and each
@@ -406,5 +423,21 @@ mod tests {
             "no .."
         );
         assert!(!real.join("z").exists());
+    }
+
+    /// As root: only a regular file is opened; a FIFO in its place fails at once (no hang).
+    #[test]
+    fn the_careful_mode_opens_regular_files_only() {
+        let d = tempfile::tempdir().unwrap();
+        let fifo = d.path().join("spec.json");
+        rustix::fs::mknodat(CWD, &fifo, FileType::Fifo, Mode::from_raw_mode(0o600), 0).unwrap();
+        assert!(open_with(&fifo, OFlags::RDONLY, 0, true).is_err());
+        assert!(open_with(&fifo, OFlags::RDWR | OFlags::CREATE, 0o600, true).is_err());
+        assert!(open_with(d.path(), OFlags::RDONLY, 0, true).is_err());
+        fs::write(d.path().join("f"), "abc").unwrap();
+        let f = open_with(&d.path().join("f"), OFlags::RDONLY, 0, true).unwrap();
+        let mut out = String::new();
+        f.take(2).read_to_string(&mut out).unwrap();
+        assert_eq!(out, "ab");
     }
 }

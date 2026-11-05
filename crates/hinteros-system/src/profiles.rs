@@ -103,7 +103,7 @@ impl ProfilesFile {
     /// Read it (a missing file is an empty one). A damaged file or a newer one is an error:
     /// nothing must overwrite it blindly.
     pub fn load(path: &Path) -> std::io::Result<Self> {
-        match std::fs::read(path) {
+        match crate::fsutil::read(path) {
             Ok(bytes) => {
                 check_version(path, &bytes, FILE_VERSION)?;
                 serde_json::from_slice(&bytes).map_err(|e| {

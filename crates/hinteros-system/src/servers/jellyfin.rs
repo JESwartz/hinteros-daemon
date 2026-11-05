@@ -452,7 +452,7 @@ impl UsersFile {
     /// Read it (missing: empty). A newer file is an error, and `save` leaves it alone: the
     /// passwords in it are not to be had again.
     pub fn load(path: &Path) -> io::Result<Self> {
-        match std::fs::read(path) {
+        match crate::fsutil::read(path) {
             Ok(b) => {
                 check_version(path, &b, USERS_VERSION)?;
                 serde_json::from_slice(&b)

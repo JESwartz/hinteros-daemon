@@ -1437,7 +1437,7 @@ fn delete_data(d: &job::DeleteData) {
 /// Read `terms-accepted.json` as a JSON object (other fields stay in it). Missing: `None`. A
 /// damaged or newer file is an error: these records must not be lost.
 pub fn read_terms(path: &Path) -> std::io::Result<Option<serde_json::Map<String, Value>>> {
-    let bytes = match fs::read(path) {
+    let bytes = match fsutil::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),

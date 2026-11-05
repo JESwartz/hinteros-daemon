@@ -194,7 +194,7 @@ impl Default for Registry {
 impl Registry {
     /// Read it; a damaged or newer file is discarded: [`Registry::scan`] makes it again.
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
+        crate::fsutil::read(path)
             .ok()
             .filter(|b| check_version(path, b, REGISTRY_VERSION).is_ok())
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -347,7 +347,7 @@ pub struct StarterFile {
 impl StarterFile {
     /// Read it. A newer file counts as none, and [`StarterFile::save`] leaves it alone.
     pub fn load(path: &Path) -> Option<Self> {
-        let bytes = std::fs::read(path).ok()?;
+        let bytes = crate::fsutil::read(path).ok()?;
         if let Err(e) = check_version(path, &bytes, STARTER_VERSION) {
             warn!("{e}");
             return None;

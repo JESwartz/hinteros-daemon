@@ -249,7 +249,7 @@ impl Pins {
     /// The backoff of `id` for display (lists, the public view): read under a shared `flock`,
     /// never creating or writing the file.
     pub fn peek_backoff(&self, id: &str) -> Backoff {
-        let Ok(mut file) = fs::File::open(self.state_path(id)) else {
+        let Ok(mut file) = fsutil::open(&self.state_path(id), rustix::fs::OFlags::RDONLY, 0) else {
             return Backoff::default();
         };
         if flock(&file, FlockOperation::LockShared).is_err() {
@@ -321,7 +321,7 @@ impl Pins {
         backoff: bool,
     ) -> std::io::Result<Verify> {
         let pin = Zeroizing::new(pin.to_owned());
-        let phc = match fs::read_to_string(self.hash_path(id)) {
+        let phc = match fsutil::read_to_string(&self.hash_path(id)) {
             Ok(p) => Zeroizing::new(p),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Verify::NoPin),
             Err(e) => return Err(e),

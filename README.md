@@ -996,12 +996,16 @@ What the service does, and how without root:
 | Server status over loopback HTTP | `IPAddressAllow=localhost` (system repo) |
 
 polkit (system repo, `40-hinteros-system.rules`, before every other rules file): for the
-`hinteros-system` account, `org.freedesktop.systemd1.manage-units` only with verb `start` and
-unit `hinteros-job@<16 hex>.service`, `hinteros-usage.service` or
-`hinteros-time-zone-apply.service`; `restart` and `hinteros-lan-filter.service`; `stop` or `start`
-(the verbs systemd asks with for `FreezeUnit` and `ThawUnit`) and `user-<uid>.slice` of a profile
-or the guest (uid ≥ 20000). Every other action of the account is no.
-`StartTransientUnit` has no unit name, so it is refused.
+`hinteros-system` account, `org.freedesktop.systemd1.manage-units` only for `StartUnit` of
+`hinteros-job@<16 hex>.service`, `hinteros-usage.service` or `hinteros-time-zone-apply.service`;
+`RestartUnit` of `hinteros-lan-filter.service`; `FreezeUnit` and `ThawUnit` of `user-<uid>.slice`
+of a profile or the guest (uid ≥ 20000). Every other action of the account is no.
+The verb systemd passes does not tell the method (`StartUnit` and `StartTransientUnit` both ask
+with `start`, `FreezeUnit` and `StopUnit` with `stop`), so the rule also checks the
+`polkit.message` detail, which does. Without that, polkit said yes to `StartTransientUnit` of an
+allowed name: for the services only systemd's "has a fragment file" check refused it, and a
+transient `user-<uid>.slice` (no fragment) could have pulled in a transient root service. A
+systemd that words its messages otherwise is refused (fails closed; `system-escalation` VM test).
 
 Root's side:
 
@@ -1046,9 +1050,8 @@ What is left, and why:
   again by the system repo, and the installer's fields (admin account, host name) stay as they
   are. It can turn SSH on (`settings.ssh.enable`; the API asks for the admin password, a
   compromised service does not), but signing in still needs the admin account's password or key.
-- systemd asks polkit about `FreezeUnit` and `ThawUnit` with the verbs `stop` and `start`, so
-  the account may also stop or start a profile's slice (end its session). Accounts below uid
-  20000 (a test box's session user) are never frozen.
+- The account may freeze any profile's slice (the profile's apps stop until thawed). Accounts
+  below uid 20000 (a test box's session user) are never frozen.
 - Its D-Bus calls to systemd now go through polkit: while polkitd restarts they fail (the local
   network filter tries once more).
 - `HINTEROS_EXE` of another user's process is its own name, not its path. Reading the path

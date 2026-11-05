@@ -4,6 +4,7 @@ use std::io;
 
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use zeroize::Zeroizing;
 
 /// Upper bound for one message, excluding the newline (matches `max_message_bytes` in the schema).
 pub const MAX_MESSAGE_BYTES: usize = 1 << 20;
@@ -114,6 +115,44 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
     w.flush().await
 }
 
+/// The length of `message` serialized as compact JSON, without making a copy of it.
+pub fn serialized_len(message: &impl Serialize) -> serde_json::Result<usize> {
+    struct Count(usize);
+    impl io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, message)?;
+    Ok(count.0)
+}
+
+/// Serialize a message that carries a secret (a PIN) into one buffer of exactly its size (a
+/// growing buffer would leave copies behind), wiped when it is dropped. With the newline.
+pub fn secret_line(message: &impl Serialize) -> serde_json::Result<Zeroizing<Vec<u8>>> {
+    let len = serialized_len(message)?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(len + 1));
+    serde_json::to_writer(&mut *bytes, message)?;
+    bytes.push(b'\n');
+    debug_assert_eq!(bytes.capacity(), len + 1, "no reallocation");
+    Ok(bytes)
+}
+
+/// [`write_message`] for a message that carries a secret: see [`secret_line`].
+pub async fn write_secret_message<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    message: &impl Serialize,
+) -> io::Result<()> {
+    let bytes = secret_line(message)?;
+    w.write_all(&bytes).await?;
+    w.flush().await
+}
+
 /// How much input a closing connection discards, and for how long, before the real close.
 pub const CLOSE_DRAIN_BYTES: usize = 4 << 20;
 pub const CLOSE_DRAIN_TIME: std::time::Duration = std::time::Duration::from_secs(2);
@@ -157,5 +196,16 @@ mod tests {
             r.next_line().await.unwrap().unwrap().len(),
             MAX_MESSAGE_BYTES
         );
+    }
+
+    #[test]
+    fn secret_lines_are_ordinary_lines() {
+        let m = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "m", "params": {"pin": "1357", "name": "Ünï"}});
+        let line = secret_line(&m).unwrap();
+        let mut want = serde_json::to_vec(&m).unwrap();
+        want.push(b'\n');
+        assert_eq!(&line[..], &want[..]);
+        assert_eq!(line.capacity(), line.len(), "one exact allocation");
+        assert_eq!(serialized_len(&m).unwrap(), want.len() - 1);
     }
 }

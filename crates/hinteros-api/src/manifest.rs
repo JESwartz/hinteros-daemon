@@ -36,6 +36,10 @@ pub struct Manifest {
     /// Box features the env's apps need, sorted.
     #[serde(default, rename = "box")]
     pub box_features: Vec<String>,
+    /// What [`Manifest::parse`] read past or dropped (a later version, unknown box features), for
+    /// the caller to log. Not part of the file.
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,24 +71,36 @@ impl Manifest {
         Self::parse(&bytes).map_err(|m| ManifestError::Invalid(path, m))
     }
 
+    /// Parse a manifest. A newer system can write it (a boot-menu rollback keeps the env), so a
+    /// later version is read as far as this code knows it and an unknown box feature is dropped;
+    /// both are in [`Manifest::warnings`] for the caller to log. A manifest that is broken
+    /// (not this shape, an older version, a bad id or Steam path) is an error.
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
-        let m: Manifest = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-        if m.version != MANIFEST_VERSION {
+        let mut m: Manifest = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        if m.version < MANIFEST_VERSION {
             return Err(format!(
                 "manifest version {} (this daemon reads {MANIFEST_VERSION})",
+                m.version
+            ));
+        }
+        if m.version > MANIFEST_VERSION {
+            m.warnings.push(format!(
+                "manifest version {} is newer than {MANIFEST_VERSION}: reading what this version knows",
                 m.version
             ));
         }
         if let Some(bad) = m.ids.iter().find(|i| !crate::catalog::is_app_id(i)) {
             return Err(format!("bad id {bad:?}"));
         }
-        if let Some(bad) = m
-            .box_features
-            .iter()
-            .find(|f| !crate::catalog::is_box_feature(f))
-        {
-            return Err(format!("unknown box feature {bad:?}"));
-        }
+        let (known, unknown): (Vec<String>, Vec<String>) = std::mem::take(&mut m.box_features)
+            .into_iter()
+            .partition(|f| crate::catalog::is_box_feature(f));
+        m.box_features = known;
+        m.warnings.extend(
+            unknown
+                .into_iter()
+                .map(|f| format!("unknown box feature {f:?} dropped")),
+        );
         if let Some(s) = &m.steam
             && !s.path.is_absolute()
         {
@@ -102,6 +118,7 @@ impl Manifest {
             apps: Vec::new(),
             steam: None,
             box_features: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 }
@@ -134,12 +151,31 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_later_manifest_as_far_as_it_knows() {
+        let m = Manifest::parse(
+            br#"{"version":2,"ids":["steam"],"box":["x86","steam-devices"],"later":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(m.ids, ["steam"]);
+        assert_eq!(m.box_features, ["steam-devices"]);
+        assert_eq!(m.warnings.len(), 2, "{:?}", m.warnings);
+        assert!(m.warnings[0].contains("version 2"));
+        assert!(m.warnings[1].contains("\"x86\""));
+        assert!(
+            Manifest::parse(br#"{"version":1}"#)
+                .unwrap()
+                .warnings
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn refuses_what_it_does_not_understand() {
         for bad in [
-            r#"{"version":2}"#,
+            r#"{"version":0}"#,
             r#"{}"#,
             r#"{"version":1,"ids":["../x"]}"#,
-            r#"{"version":1,"box":["x86"]}"#,
+            r#"{"version":1,"box":"x86"}"#,
             r#"{"version":1,"steam":{"path":"steam"}}"#,
             r#"[]"#,
         ] {

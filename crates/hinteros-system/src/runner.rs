@@ -147,7 +147,7 @@ fn run(dir: &Path) -> anyhow::Result<()> {
                 stage: r.stage,
                 error: Some(ErrorObject {
                     message: "cancelled".into(),
-                    ..job::job_failed(stage, "cancelled")
+                    ..job::job_failed_because(stage, "cancelled", "cancelled")
                 }),
                 result: None,
                 session_restart_required: false,

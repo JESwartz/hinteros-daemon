@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
-use crate::codec::{LineReader, ReadError, write_message};
+use crate::codec::{LineReader, ReadError, write_message, write_secret_message};
 use crate::common::{Hello, HelloParams, HelloResult, Peer};
 use crate::jsonrpc::{self, Id, ServerMessage};
 use crate::{ApiVersion, ErrorObject, Event, Method};
@@ -64,11 +64,47 @@ impl Client {
         serde_json::from_value(result).map_err(|e| ClientError::Protocol(e.to_string()))
     }
 
-    /// Call a method; `Err(ClientError::Rpc(_))` carries the server's error object.
-    pub async fn call_raw(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
+    /// [`Client::call`] for params that carry a PIN: serialized straight from `params` (no
+    /// [`Value`] copy) into one buffer that is wiped after the write
+    /// ([`crate::codec::secret_line`]). The caller wipes `params` itself.
+    pub async fn call_secret<M: Method>(
+        &mut self,
+        params: &M::Params,
+    ) -> Result<M::Result, ClientError> {
+        #[derive(serde::Serialize)]
+        struct Request<'a, P> {
+            jsonrpc: &'static str,
+            id: &'a Id,
+            method: &'static str,
+            params: &'a P,
+        }
+        let id = self.take_id();
+        let request = Request {
+            jsonrpc: "2.0",
+            id: &id,
+            method: M::NAME,
+            params,
+        };
+        write_secret_message(&mut self.writer, &request).await?;
+        let result = self.response(&id).await?;
+        serde_json::from_value(result).map_err(|e| ClientError::Protocol(e.to_string()))
+    }
+
+    fn take_id(&mut self) -> Id {
         let id = Id::Number(self.next_id);
         self.next_id += 1;
+        id
+    }
+
+    /// Call a method; `Err(ClientError::Rpc(_))` carries the server's error object.
+    pub async fn call_raw(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
+        let id = self.take_id();
         write_message(&mut self.writer, &jsonrpc::request(&id, method, params)).await?;
+        self.response(&id).await
+    }
+
+    /// Wait for the answer to request `id`, keeping the events that come before it.
+    async fn response(&mut self, id: &Id) -> Result<Value, ClientError> {
         loop {
             match self.read_message().await? {
                 ServerMessage::Notification { method, params } => {
@@ -77,7 +113,7 @@ impl Client {
                 ServerMessage::Response {
                     id: Some(got),
                     outcome,
-                } if got == id => return outcome.map_err(ClientError::Rpc),
+                } if got == *id => return outcome.map_err(ClientError::Rpc),
                 other => {
                     return Err(ClientError::Protocol(format!(
                         "unexpected message: {other:?}"

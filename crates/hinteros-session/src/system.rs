@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use hinteros_api::codec::{LineReader, ReadError, write_message};
+use hinteros_api::codec::{
+    LineReader, ReadError, serialized_len, write_message, write_secret_message,
+};
 use hinteros_api::common::{Hello, HelloParams, Peer};
 use hinteros_api::jsonrpc::{self, Id, ServerMessage};
 use hinteros_api::session::EventName;
@@ -261,7 +263,7 @@ async fn serve(
                 let id = next_id;
                 next_id += 1;
                 let params = call.params.unwrap_or_else(|| json!({}));
-                let msg = jsonrpc::request(&Id::Number(id), call.method, params);
+                let mut msg = jsonrpc::request(&Id::Number(id), call.method, params);
                 // The service reads at most system::MAX_MESSAGE_BYTES a line and drops the
                 // connection, every other call on it too, for a longer one.
                 if too_long(&msg) {
@@ -273,7 +275,15 @@ async fn serve(
                 }
                 // Calls that timed out (Relay::call) wait for no answer any more.
                 pending.retain(|_, reply| !reply.is_closed());
-                if write_message(&mut conn.writer, &msg).await.is_err() {
+                // A PIN goes out through a buffer that is wiped, and is wiped in the params.
+                let written = if has_pin(&msg["params"]) {
+                    let w = write_secret_message(&mut conn.writer, &msg).await;
+                    wipe_pins(&mut msg["params"]);
+                    w
+                } else {
+                    write_message(&mut conn.writer, &msg).await
+                };
+                if written.is_err() {
                     let _ = call.reply.send(Err(unavailable(Unavailable::Down)));
                     break;
                 }
@@ -318,8 +328,27 @@ async fn serve(
 }
 
 /// Whether `msg`, as one line, is longer than the system service reads.
+/// The params carry a PIN field (`system::PIN_FIELDS`).
+fn has_pin(params: &Value) -> bool {
+    params
+        .as_object()
+        .is_some_and(|o| system::PIN_FIELDS.iter().any(|f| o.contains_key(*f)))
+}
+
+/// Wipe the PIN fields' strings in place (the rest of the params is dropped as it is).
+fn wipe_pins(params: &mut Value) {
+    use zeroize::Zeroize;
+    if let Some(o) = params.as_object_mut() {
+        for f in system::PIN_FIELDS {
+            if let Some(Value::String(s)) = o.get_mut(*f) {
+                s.zeroize();
+            }
+        }
+    }
+}
+
 fn too_long(msg: &Value) -> bool {
-    serde_json::to_vec(msg).map_or(usize::MAX, |b| b.len()) > system::MAX_MESSAGE_BYTES
+    serialized_len(msg).unwrap_or(usize::MAX) > system::MAX_MESSAGE_BYTES
 }
 
 /// System errors are forwarded unchanged, except protocol-level ones (which mean the relay's
@@ -382,5 +411,14 @@ mod tests {
         };
         assert!(!too_long(&call("x".repeat(1000))));
         assert!(too_long(&call("x".repeat(system::MAX_MESSAGE_BYTES))));
+    }
+
+    #[test]
+    fn pins_are_found_and_wiped() {
+        let mut params = json!({"id": "p3", "name": "X", "admin_pin": "2468"});
+        assert!(has_pin(&params));
+        assert!(!has_pin(&json!({"id": "p3"})) && !has_pin(&Value::Null));
+        wipe_pins(&mut params);
+        assert_eq!(params, json!({"id": "p3", "name": "X", "admin_pin": ""}));
     }
 }

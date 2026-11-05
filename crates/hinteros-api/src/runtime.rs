@@ -130,7 +130,7 @@ pub struct NetworkStatus {
     pub connectivity: Connectivity,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WifiSecurity {
     Open,
@@ -156,8 +156,57 @@ impl WifiSecurity {
     ];
 }
 
+impl WifiSecurity {
+    /// The wire name (`wpa`, `wpa3`, ...).
+    pub fn name(self) -> &'static str {
+        match self {
+            WifiSecurity::Open => "open",
+            WifiSecurity::Wep => "wep",
+            WifiSecurity::Wpa => "wpa",
+            WifiSecurity::Wpa3 => "wpa3",
+            WifiSecurity::Enterprise => "enterprise",
+            WifiSecurity::Unknown => "unknown",
+        }
+    }
+}
+
+/// A network's opaque id in `wifi.list` (`wifi.connect` and `wifi.forget` take it): the raw
+/// SSID's bytes in lower-case hex, `-`, the security. Two networks whose SSIDs are not UTF-8 and
+/// show the same name have different ids.
+pub fn wifi_network_id(raw_ssid: &[u8], security: WifiSecurity) -> String {
+    let mut id: String = raw_ssid.iter().map(|b| format!("{b:02x}")).collect();
+    id.push('-');
+    id.push_str(security.name());
+    id
+}
+
+/// The raw SSID and the security of a [`wifi_network_id`]; `None` when it is not one.
+pub fn parse_wifi_network_id(id: &str) -> Option<(Vec<u8>, WifiSecurity)> {
+    let (hex, security) = id.rsplit_once('-')?;
+    let security = *WifiSecurity::ALL.iter().find(|s| s.name() == security)?;
+    if hex.is_empty()
+        || hex.len() > 2 * MAX_SSID_BYTES
+        || hex.len() % 2 != 0
+        || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    let raw = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+        .collect::<Result<Vec<u8>, _>>()
+        .ok()?;
+    Some((raw, security))
+}
+
+/// The longest SSID (IEEE 802.11).
+pub const MAX_SSID_BYTES: usize = 32;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WifiNetwork {
+    /// The opaque id that `wifi.connect` and `wifi.forget` take ([`wifi_network_id`]).
+    pub id: String,
+    /// The name to show (an SSID that is not UTF-8 has U+FFFD in place of its bad bytes).
     pub ssid: String,
     /// 0 to 100.
     pub signal: u8,
@@ -177,7 +226,8 @@ pub struct WifiList {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WifiConnectParams {
-    pub ssid: String,
+    /// A `wifi.list` id.
+    pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
 }
@@ -185,7 +235,7 @@ pub struct WifiConnectParams {
 impl fmt::Debug for WifiConnectParams {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WifiConnectParams")
-            .field("ssid", &self.ssid)
+            .field("id", &self.id)
             .field("password", &self.password.as_ref().map(|_| "<hidden>"))
             .finish()
     }
@@ -193,7 +243,8 @@ impl fmt::Debug for WifiConnectParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WifiForgetParams {
-    pub ssid: String,
+    /// A `wifi.list` id.
+    pub id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

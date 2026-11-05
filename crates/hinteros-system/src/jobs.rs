@@ -297,7 +297,7 @@ impl Jobs {
             let p = JobProgressParams {
                 job_id: active.id.clone(),
                 kind: active.kind,
-                stage: line.stage,
+                stage: known(Some(line.stage)),
                 percent: line.percent,
                 detail: line.detail,
                 started_at: active.created_at,
@@ -486,9 +486,8 @@ impl Jobs {
     }
 }
 
-/// A stage of a later version's job (after a rollback) is left out of a [`Job`] (`stage` is
-/// optional; the schema has no `unknown`). `job_progress` needs a stage, so it still says
-/// `unknown` there.
+/// A stage of a later version's job (after a rollback) is left out of a [`Job`] and of
+/// `job_progress` (`stage` is optional in both).
 fn known(stage: Option<Stage>) -> Option<Stage> {
     stage.filter(|s| *s != Stage::Unknown)
 }
@@ -860,6 +859,20 @@ mod tests {
         let mut jobs = Jobs::load(paths(d.path()));
         assert_eq!(jobs.busy(), Some("1123456789abcdef"));
         assert_eq!(jobs.get("1123456789abcdef").unwrap().kind, JobKind::Unknown);
+        // Its progress at a stage this binary does not know: `job_progress` without a stage.
+        fs::write(
+            jd.join(job::PROGRESS),
+            "{\"stage\":\"later_stage\",\"percent\":5}\n",
+        )
+        .unwrap();
+        let (events, _) = jobs.poll();
+        let (_, p) = events
+            .iter()
+            .find(|(n, _)| matches!(n, EventName::JobProgress))
+            .expect("a job_progress");
+        assert_eq!(p["kind"], "unknown");
+        assert_eq!(p["percent"], 5);
+        assert!(p.get("stage").is_none(), "{p}");
         drop(lock);
         fs::write(jd.join(job::STATUS), status.to_string()).unwrap();
         assert!(jobs.poll().1.is_some());

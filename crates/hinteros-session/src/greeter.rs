@@ -3,11 +3,12 @@
 //! greeter-mode daemon's `greeter.*` methods, which wrap greetd's IPC and the system service's
 //! `greeter.sock` (profile creation).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use hinteros_api::client::Client;
 use hinteros_api::common::Peer;
+use hinteros_api::public::PublicView;
 use hinteros_api::server::{decode_params, encode_result};
 use hinteros_api::session::{
     EventName, GreeterAppearance, GreeterCancel, GreeterCreate, GreeterList, GreeterListResult,
@@ -15,11 +16,10 @@ use hinteros_api::session::{
     ProfileEmpty,
 };
 use hinteros_api::{ErrorCode, ErrorObject, Method, system};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tracing::{info, warn};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::greetd::{
     AuthMessageType, Greetd, Request, Response, Secret, locked_s, reboot_required,
@@ -33,153 +33,6 @@ pub const METHODS: &[&str] = &[
     GreeterCancel::NAME,
     GreeterCreate::NAME,
 ];
-
-/// The `profiles-public.json` version this reads. A newer file is read as far as this
-/// version knows it.
-const PUBLIC_VERSION: u32 = 1;
-
-/// The service's `profiles-public.json` (only what the greeter reads; a copy of
-/// `hinteros-system`'s `public::PublicView`). Tolerant: unknown fields are ignored, and a
-/// field or profile that does not parse is left out (logged), so a change on the service's
-/// side never empties the picker.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct PublicView {
-    #[serde(default, deserialize_with = "lenient_list")]
-    pub profiles: Vec<PublicProfile>,
-    #[serde(default, deserialize_with = "lenient")]
-    pub guest: PublicGuest,
-    #[serde(default, deserialize_with = "lenient")]
-    pub first_boot: bool,
-    #[serde(default, deserialize_with = "lenient")]
-    pub spare: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
-    pub last_used: Option<String>,
-    #[serde(default, deserialize_with = "lenient")]
-    pub next: Option<Next>,
-    #[serde(default, deserialize_with = "lenient")]
-    pub appearance: Option<Appearance>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PublicProfile {
-    pub id: String,
-    pub user: String,
-    pub name: String,
-    #[serde(default, deserialize_with = "lenient")]
-    pub color: String,
-    /// Not known: locked (the picker asks for the PIN; PAM decides anyway).
-    #[serde(default = "yes")]
-    pub locked: bool,
-    #[serde(default)]
-    pub admin: bool,
-    #[serde(default, deserialize_with = "lenient")]
-    pub locked_until: Option<i64>,
-}
-
-fn yes() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct PublicGuest {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default, deserialize_with = "lenient")]
-    pub user: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Next {
-    pub target: String,
-    #[serde(default)]
-    pub fast: bool,
-    pub expires: i64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Appearance {
-    pub text_scale: f64,
-    pub high_contrast: bool,
-    pub reduce_motion: bool,
-}
-
-/// A value that does not parse is left at its default, not the whole file.
-fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::de::DeserializeOwned + Default,
-{
-    let value = Value::deserialize(d)?;
-    Ok(serde_json::from_value(value).unwrap_or_else(|e| {
-        warn!("profiles-public.json: a field is ignored: {e}");
-        T::default()
-    }))
-}
-
-/// A list whose entries that do not parse are left out.
-fn lenient_list<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::de::DeserializeOwned,
-{
-    let Value::Array(items) = Value::deserialize(d)? else {
-        warn!("profiles-public.json: a list is not a list; ignored");
-        return Ok(Vec::new());
-    };
-    Ok(items
-        .into_iter()
-        .filter_map(|item| {
-            serde_json::from_value(item)
-                .inspect_err(|e| warn!("profiles-public.json: an entry is ignored: {e}"))
-                .ok()
-        })
-        .collect())
-}
-
-impl PublicView {
-    /// Read the file. Missing: nothing to show yet (the service writes it when it starts).
-    pub fn load(path: &Path) -> Self {
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
-            Err(e) => {
-                warn!(path = %path.display(), "cannot read the public profile list: {e}");
-                return Self::default();
-            }
-        };
-        if let Err(e) = hinteros_api::common::check_version(path, &bytes, PUBLIC_VERSION) {
-            warn!("{e}; reading the fields this version knows");
-        }
-        serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            warn!(path = %path.display(), "cannot parse the public profile list: {e}");
-            Self::default()
-        })
-    }
-
-    /// The user of a profile id or `guest`.
-    pub fn user_of(&self, id: &str) -> Option<String> {
-        if id == "guest" {
-            return self
-                .guest
-                .enabled
-                .then(|| self.guest.user.clone().unwrap_or("hinteros-guest".into()));
-        }
-        self.profiles
-            .iter()
-            .find(|p| p.id == id)
-            .map(|p| p.user.clone())
-    }
-
-    /// The user the greeter may enter without any UI: first-boot mode's spare, or a live
-    /// switch hint the service marked fast.
-    pub fn fast_path(&self, now: i64) -> Option<String> {
-        if self.first_boot {
-            return self.spare.clone();
-        }
-        let next = self.next.as_ref().filter(|n| n.fast && n.expires > now)?;
-        self.user_of(&next.target)
-    }
-}
 
 fn now() -> i64 {
     std::time::SystemTime::now()
@@ -509,11 +362,7 @@ impl Greeter {
             .filter(|n| n.expires > now())
             .map(|n| n.target.clone());
         let focus = switch_to.clone().or(v.last_used.clone());
-        let a = v.appearance.clone().unwrap_or(Appearance {
-            text_scale: 1.0,
-            high_contrast: false,
-            reduce_motion: false,
-        });
+        let a = v.appearance.clone().unwrap_or_default();
         GreeterListResult {
             profiles: v
                 .profiles
@@ -574,20 +423,19 @@ impl Greeter {
             .call_raw(system::SettingsGet::NAME, json!({}))
             .await
             .map_err(rpc)?;
-        let mut params = json!({
-            "name": p.name,
-            "pin": p.pin,
-            "locked": p.locked,
-            "revision": settings["revision"],
-        });
-        if let Some(color) = p.color {
-            params["color"] = json!(color);
-        }
-        let result = c
-            .call_raw(system::ProfilesCreate::NAME, params)
-            .await
-            .map_err(rpc)?;
-        let job = result["job_id"].as_str().unwrap_or_default().to_owned();
+        // The PIN goes from the launcher's params to the wire without a copy that stays
+        // behind: moved into the typed params, serialized into a wiped buffer, then wiped.
+        let mut params = system::ProfilesCreateParams {
+            name: p.name,
+            color: p.color,
+            pin: p.pin,
+            locked: p.locked,
+            revision: settings["revision"].as_str().unwrap_or_default().to_owned(),
+        };
+        let result = c.call_secret::<system::ProfilesCreate>(&params).await;
+        params.pin.zeroize();
+        let result = result.map_err(rpc)?;
+        let job = result.job_id.clone();
         let events = self.inner.events.clone();
         tokio::spawn(async move {
             while let Ok((name, params)) = c.next_event_raw().await {
@@ -604,70 +452,6 @@ impl Greeter {
                 }
             }
         });
-        Ok(result)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fast_path_choices() {
-        let v: PublicView = serde_json::from_str(
-            r#"{"version":1,"profiles":[
-                 {"id":"p1","user":"hinteros-p1","name":"J","color":"teal","locked":false,"admin":true,"locked_until":null},
-                 {"id":"p3","user":"hinteros-p3","name":"S","color":"red","locked":true,"admin":false,"locked_until":null}],
-               "guest":{"enabled":true,"user":"hinteros-guest"},"first_boot":false,"spare":null,
-               "last_used":"p1","next":{"target":"p3","fast":false,"expires":100},
-               "appearance":{"text_scale":1.0,"high_contrast":false,"reduce_motion":false}}"#,
-        )
-        .unwrap();
-        assert_eq!(v.fast_path(50), None, "locked target: the picker");
-        let mut fast = v.clone();
-        fast.next.as_mut().unwrap().fast = true;
-        assert_eq!(fast.fast_path(50).as_deref(), Some("hinteros-p3"));
-        assert_eq!(fast.fast_path(200), None, "expired");
-        let mut first = v.clone();
-        first.first_boot = true;
-        first.spare = Some("hinteros-p1".into());
-        assert_eq!(first.fast_path(0).as_deref(), Some("hinteros-p1"));
-        assert_eq!(v.user_of("guest").as_deref(), Some("hinteros-guest"));
-        assert_eq!(PublicView::default().fast_path(0), None);
-    }
-
-    #[test]
-    fn public_view_reads_what_it_can() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("profiles-public.json");
-        assert!(PublicView::load(&path).profiles.is_empty(), "missing");
-        // A newer service: unknown fields, a profile this version cannot read, fields of
-        // another type.
-        std::fs::write(
-            &path,
-            r#"{"version":2,"profiles":[
-                 {"id":"p1","user":"hinteros-p1","name":"J","color":null,"admin":true,"kind":"x"},
-                 {"id":"p2","name":"no user"},
-                 {"id":"p3","user":"hinteros-p3","name":"S","color":"red","locked":false,"admin":false,"locked_until":"soon"}],
-               "guest":{"enabled":true,"user":"hinteros-guest"},"first_boot":"no","spare":null,
-               "last_used":"p1","next":{"target":"p3","fast":true,"expires":"later"},
-               "appearance":{"text_scale":1.5,"high_contrast":true,"reduce_motion":false},
-               "new":{"a":1}}"#,
-        )
-        .unwrap();
-        let v = PublicView::load(&path);
-        let ids: Vec<_> = v.profiles.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, ["p1", "p3"]);
-        assert_eq!(v.profiles[0].color, "");
-        assert!(v.profiles[0].locked, "not known: locked");
-        assert!(!v.profiles[1].locked);
-        assert_eq!(v.profiles[1].locked_until, None);
-        assert!(!v.first_boot);
-        assert!(v.next.is_none());
-        assert_eq!(v.user_of("guest").as_deref(), Some("hinteros-guest"));
-        assert_eq!(v.appearance.map(|a| a.text_scale), Some(1.5));
-        // Not JSON at all: nothing.
-        std::fs::write(&path, "{").unwrap();
-        assert!(PublicView::load(&path).profiles.is_empty());
+        encode_result::<GreeterCreate>(result)
     }
 }

@@ -182,8 +182,7 @@ pub fn identity_for(
 
 /// A live fast switch target from the public view.
 fn switch_target(public_json: &Path, now: i64) -> Option<Identity> {
-    let v: crate::public::PublicView =
-        serde_json::from_slice(&std::fs::read(public_json).ok()?).ok()?;
+    let v = hinteros_api::public::PublicView::load(public_json);
     let next = v.next.filter(|n| n.fast && n.expires > now)?;
     if next.target == "guest" {
         return Some(Identity::guest());

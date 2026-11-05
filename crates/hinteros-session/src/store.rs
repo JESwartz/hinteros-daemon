@@ -318,9 +318,7 @@ impl Store {
             &self.inner.icons,
             &self.inner.permissions,
         );
-        if let Some(home) = &self.inner.home {
-            mark_data(&mut apps, &index, home);
-        }
+        mark_data_and_leftovers(&mut apps, &index, self.inner.home.as_deref());
         encode_result::<StoreList>(StoreListResult {
             index_version: index.version,
             apps,
@@ -372,10 +370,15 @@ pub fn merge(
             continue;
         }
         let is_installed = installed.contains(&e.id);
-        if e.status != Status::Available && !is_installed {
+        // Removed from the catalog and not installed: a leftover, kept only while its data is
+        // still in the home ([`mark_data_and_leftovers`]), so it can be cleared.
+        let leftover = e.status == Status::Removed && !is_installed;
+        if e.status != Status::Available && !is_installed && !leftover {
             continue;
         }
-        let state = if installing.contains(&e.id) && !is_installed {
+        let state = if leftover {
+            StoreState::Leftover
+        } else if installing.contains(&e.id) && !is_installed {
             StoreState::Installing
         } else if removing.contains(&e.id) && is_installed {
             StoreState::Removing
@@ -419,6 +422,16 @@ pub fn merge(
             .then(a.id.cmp(&b.id))
     });
     out
+}
+
+/// [`mark_data`] when there is a home, then drop the leftovers (removed apps that are not
+/// installed) without data: there is nothing to clear for them. Without a home, every leftover
+/// goes.
+pub fn mark_data_and_leftovers(apps: &mut Vec<StoreApp>, index: &Index, home: Option<&Path>) {
+    if let Some(home) = home {
+        mark_data(apps, index, home);
+    }
+    apps.retain(|a| a.state != StoreState::Leftover || a.has_data);
 }
 
 /// Set `has_data` on each app with one of its `dataPaths` in `home` (a symlink counts: it is
@@ -635,6 +648,51 @@ mod tests {
         mark_data(&mut apps, &index, home.path());
         let view: Vec<(&str, bool)> = apps.iter().map(|a| (a.id.as_str(), a.has_data)).collect();
         assert_eq!(view, [("moonlight", true), ("youtube", false)]);
+    }
+
+    /// A removed app that is not installed is listed (`leftover`) only while its data is still in
+    /// the home; without a home, never.
+    #[test]
+    fn leftovers_only_with_data() {
+        let index = Index::parse(
+            br#"{"indexVersion":4,"entries":[
+              {"id":"kept","name":"K","kind":"app","status":"removed","statusReason":"bye",
+               "dataPaths":[".local/share/hinteros/sandbox/kept"]},
+              {"id":"clean","name":"C","kind":"app","status":"removed","statusReason":"bye",
+               "dataPaths":[".local/share/hinteros/sandbox/clean"]},
+              {"id":"svc","name":"S","kind":"service","status":"removed","dataPaths":[".s"]},
+              {"id":"youtube","name":"Y","status":"available"}]}"#,
+            "/idx".into(),
+        )
+        .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".local/share/hinteros/sandbox/kept")).unwrap();
+        std::fs::create_dir_all(home.path().join(".s")).unwrap();
+        let listed = |home: Option<&Path>| {
+            let mut apps = merge(
+                &index,
+                &[],
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &IconStore::default(),
+                &Permissions::new(None, vec!["gamepad"]),
+            );
+            mark_data_and_leftovers(&mut apps, &index, home);
+            apps.into_iter()
+                .map(|a| (a.id, a.state, a.has_data, a.full_access))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            listed(Some(home.path())),
+            [
+                ("kept".to_owned(), StoreState::Leftover, true, false),
+                ("youtube".to_owned(), StoreState::Available, false, false),
+            ]
+        );
+        assert_eq!(
+            listed(None),
+            [("youtube".to_owned(), StoreState::Available, false, false)]
+        );
     }
 
     #[test]

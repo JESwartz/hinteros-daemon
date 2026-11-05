@@ -561,6 +561,19 @@ async fn start(connected: bool) -> Option<(Bus, Fake, Daemon, Client)> {
     Some((bus, fake, d, c))
 }
 
+/// The `wifi.list` id of a fake network (`Gone` is in no list).
+fn id(ssid: &str) -> String {
+    let security = match ssid {
+        "Neighbour" => "wpa3",
+        "Cafe" => "open",
+        "Corp" => "enterprise",
+        "OldWep" => "wep",
+        _ => "wpa",
+    };
+    let hex: String = ssid.bytes().map(|b| format!("{b:02x}")).collect();
+    format!("{hex}-{security}")
+}
+
 fn net(list: &Value, ssid: &str) -> Value {
     list["networks"]
         .as_array()
@@ -596,7 +609,7 @@ async fn status_and_list() {
     assert_eq!(ssids, ["Corp", "Home", "Cafe", "Neighbour", "OldWep"]);
     assert_eq!(
         net(&list, "Home"),
-        json!({"ssid": "Home", "signal": 72, "security": "wpa", "known": true, "connected": true})
+        json!({"id": id("Home"), "ssid": "Home", "signal": 72, "security": "wpa", "known": true, "connected": true})
     );
     assert_eq!(net(&list, "Neighbour")["security"], "wpa3");
     assert_eq!(net(&list, "Neighbour")["known"], false);
@@ -615,7 +628,7 @@ async fn connect_open_known_and_new_networks() {
     assert_eq!(status["connectivity"], "none");
 
     // A known network needs no password.
-    let status = call(&mut c, "wifi.connect", json!({"ssid": "Home"}))
+    let status = call(&mut c, "wifi.connect", json!({"id": id("Home")}))
         .await
         .unwrap();
     assert_eq!(status["wifi_ssid"], "Home");
@@ -625,7 +638,7 @@ async fn connect_open_known_and_new_networks() {
     let status = call(
         &mut c,
         "wifi.connect",
-        json!({"ssid": "Cafe", "password": "ignored ignored"}),
+        json!({"id": id("Cafe"), "password": "ignored ignored"}),
     )
     .await;
     // Cafe's access point is open, so the fake accepts any connection to it.
@@ -638,7 +651,7 @@ async fn connect_open_known_and_new_networks() {
     let status = call(
         &mut c,
         "wifi.connect",
-        json!({"ssid": "Neighbour", "password": secret}),
+        json!({"id": id("Neighbour"), "password": secret}),
     )
     .await
     .unwrap();
@@ -660,7 +673,7 @@ async fn wrong_password_leaves_nothing_behind() {
     let e = call(
         &mut c,
         "wifi.connect",
-        json!({"ssid": "Neighbour", "password": "wrong-password-1"}),
+        json!({"id": id("Neighbour"), "password": "wrong-password-1"}),
     )
     .await
     .unwrap_err();
@@ -675,7 +688,7 @@ async fn wrong_password_leaves_nothing_behind() {
     let status = call(
         &mut c,
         "wifi.connect",
-        json!({"ssid": "Neighbour", "password": RIGHT_PASSWORD}),
+        json!({"id": id("Neighbour"), "password": RIGHT_PASSWORD}),
     )
     .await
     .unwrap();
@@ -686,7 +699,7 @@ async fn wrong_password_leaves_nothing_behind() {
     let status = call(
         &mut c,
         "wifi.connect",
-        json!({"ssid": "Home", "password": RIGHT_PASSWORD}),
+        json!({"id": id("Home"), "password": RIGHT_PASSWORD}),
     )
     .await
     .unwrap();
@@ -700,7 +713,7 @@ async fn wrong_password_leaves_nothing_behind() {
     let e = call(
         &mut c,
         "wifi.connect",
-        json!({"ssid": "Home", "password": "different wrong 1"}),
+        json!({"id": id("Home"), "password": "different wrong 1"}),
     )
     .await
     .unwrap_err();
@@ -719,7 +732,7 @@ async fn wrong_password_leaves_nothing_behind() {
     let e = call(
         &mut c,
         "wifi.connect",
-        json!({"ssid": "Home", "password": "new new new new"}),
+        json!({"id": id("Home"), "password": "new new new new"}),
     )
     .await
     .unwrap_err();
@@ -729,7 +742,7 @@ async fn wrong_password_leaves_nothing_behind() {
         Some("new new new new")
     );
     // ... but a new network that did not come up is still deleted.
-    let e = call(&mut c, "wifi.connect", json!({"ssid": "Cafe"}))
+    let e = call(&mut c, "wifi.connect", json!({"id": id("Cafe")}))
         .await
         .unwrap_err();
     assert_eq!(e["data"]["reason"], "not_in_range", "{e}");
@@ -742,7 +755,7 @@ async fn bad_requests() {
         return;
     };
     // A secured network without a password (and no stored connection).
-    let e = call(&mut c, "wifi.connect", json!({"ssid": "Neighbour"}))
+    let e = call(&mut c, "wifi.connect", json!({"id": id("Neighbour")}))
         .await
         .unwrap_err();
     assert_eq!(e["code"], -32602);
@@ -754,7 +767,7 @@ async fn bad_requests() {
     let e = call(
         &mut c,
         "wifi.connect",
-        json!({"ssid": "Home", "password": "short"}),
+        json!({"id": id("Home"), "password": "short"}),
     )
     .await
     .unwrap_err();
@@ -764,7 +777,7 @@ async fn bad_requests() {
         let e = call(
             &mut c,
             "wifi.connect",
-            json!({"ssid": ssid, "password": "whatever 123"}),
+            json!({"id": id(ssid), "password": "whatever 123"}),
         )
         .await
         .unwrap_err();
@@ -775,20 +788,35 @@ async fn bad_requests() {
     let e = call(
         &mut c,
         "wifi.connect",
-        json!({"ssid": "Gone", "password": "whatever 123"}),
+        json!({"id": id("Gone"), "password": "whatever 123"}),
     )
     .await
     .unwrap_err();
     assert_eq!(e["code"], 3010);
-    // Unknown fields and empty names.
+    // The SSID in range, but with another security: another network, not in range.
     let e = call(
         &mut c,
         "wifi.connect",
-        json!({"ssid": "Home", "hidden": true}),
+        json!({"id": id("Home").replace("-wpa", "-open")}),
     )
     .await
     .unwrap_err();
-    assert_eq!(e["code"], -32602);
+    assert_eq!(e["code"], 3010);
+    // Unknown fields, a name in place of an id, and the old ssid param.
+    for params in [
+        json!({"id": id("Home"), "hidden": true}),
+        json!({"id": "Home"}),
+        json!({"ssid": "Home"}),
+    ] {
+        let e = call(&mut c, "wifi.connect", params.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(e["code"], -32602, "{params}");
+    }
+    let e = call(&mut c, "wifi.forget", json!({"id": "Home"}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["data"]["field"], "id");
     // Nothing was created or changed.
     assert_eq!(fake.model.lock().unwrap().saved.len(), 1);
     assert_eq!(fake.model.lock().unwrap().wifi_state, 30);
@@ -809,14 +837,14 @@ async fn disconnect_forget_and_switch() {
     // Disconnecting again is not an error.
     call(&mut c, "wifi.disconnect", json!({})).await.unwrap();
 
-    call(&mut c, "wifi.forget", json!({"ssid": "Home"}))
+    call(&mut c, "wifi.forget", json!({"id": id("Home")}))
         .await
         .unwrap();
     assert!(fake.model.lock().unwrap().saved.is_empty());
     let list = call(&mut c, "wifi.list", json!({})).await.unwrap();
     assert_eq!(net(&list, "Home")["known"], false);
     // Forgetting what is not stored is fine.
-    call(&mut c, "wifi.forget", json!({"ssid": "Home"}))
+    call(&mut c, "wifi.forget", json!({"id": id("Home")}))
         .await
         .unwrap();
 
@@ -827,7 +855,7 @@ async fn disconnect_forget_and_switch() {
     let e = call(&mut c, "wifi.scan", json!({})).await.unwrap_err();
     assert_eq!(e["code"], 4002);
     assert_eq!(e["data"]["reason"], "wifi_disabled");
-    let e = call(&mut c, "wifi.connect", json!({"ssid": "Cafe"}))
+    let e = call(&mut c, "wifi.connect", json!({"id": id("Cafe")}))
         .await
         .unwrap_err();
     assert_eq!(e["data"]["reason"], "wifi_disabled");
@@ -896,9 +924,12 @@ async fn no_networkmanager() {
         ("network.status", json!({})),
         ("wifi.list", json!({})),
         ("wifi.scan", json!({})),
-        ("wifi.connect", json!({"ssid": "x", "password": "12345678"})),
+        (
+            "wifi.connect",
+            json!({"id": "78-wpa", "password": "12345678"}),
+        ),
         ("wifi.disconnect", json!({})),
-        ("wifi.forget", json!({"ssid": "x"})),
+        ("wifi.forget", json!({"id": "78-wpa"})),
         ("wifi.enable", json!({"enabled": true})),
     ] {
         let e = call(&mut c, method, params).await.unwrap_err();

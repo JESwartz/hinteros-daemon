@@ -154,6 +154,8 @@ struct Jellyfin {
     users: BTreeMap<String, (String, String)>,
     tokens: Vec<String>,
     authentications: usize,
+    /// Every sign-in is refused (401), whatever the password.
+    refuse_sign_in: bool,
     next: u32,
     log: Vec<String>,
 }
@@ -192,7 +194,7 @@ fn fake_jellyfin() -> (SocketAddr, Arc<Mutex<Jellyfin>>) {
                 .iter()
                 .find(|(_, (n, p))| *n == b["Username"] && *p == b["Pw"])
                 .map(|(id, _)| id.clone());
-            let Some(id) = found else {
+            let Some(id) = found.filter(|_| !j.refuse_sign_in) else {
                 return (401, String::new());
             };
             j.authentications += 1;
@@ -511,7 +513,7 @@ async fn services_jellyfin_and_delete_data() {
     let rev = list["revision"].as_str().unwrap().to_owned();
 
     // Refusals.
-    let enable = |ids: Value, pin: &str| json!({"ids": ids, "pin": pin, "revision": rev});
+    let enable = |ids: Value, pin: &str| json!({"ids": ids, "admin_pin": pin, "revision": rev});
     let e = call(
         &mut c,
         "services.enable",
@@ -520,6 +522,15 @@ async fn services_jellyfin_and_delete_data() {
     .await
     .unwrap_err();
     assert_eq!(code(&e), ErrorCode::PinRequired.code(), "{e}");
+    // admin_pin is optional: without it, the admin profile's PIN is asked for.
+    let e = call(
+        &mut c,
+        "services.enable",
+        json!({"ids": ["jellyfin-server"], "revision": rev}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e["data"], json!({"pin": "admin"}), "{e}");
     let e = call(
         &mut c,
         "services.enable",
@@ -547,7 +558,7 @@ async fn services_jellyfin_and_delete_data() {
     let e = call(
         &mut c,
         "services.enable",
-        json!({"ids": ["tailscale"], "pin": ADMIN_PIN, "revision": "0".repeat(64)}),
+        json!({"ids": ["tailscale"], "admin_pin": ADMIN_PIN, "revision": "0".repeat(64)}),
     )
     .await
     .unwrap_err();
@@ -555,7 +566,7 @@ async fn services_jellyfin_and_delete_data() {
     let e = call(
         &mut c,
         "jellyfin.libraries.add",
-        json!({"pin": ADMIN_PIN, "name": "Movies", "kind": "movies", "folder": "Movies"}),
+        json!({"admin_pin": ADMIN_PIN, "name": "Movies", "kind": "movies", "folder": "Movies"}),
     )
     .await
     .unwrap_err();
@@ -596,7 +607,7 @@ async fn services_jellyfin_and_delete_data() {
     let r = call(
         &mut c,
         "services.enable",
-        json!({"ids": ["jellyfin-server"], "pin": ADMIN_PIN, "revision": rev2}),
+        json!({"ids": ["jellyfin-server"], "admin_pin": ADMIN_PIN, "revision": rev2}),
     )
     .await
     .unwrap();
@@ -637,12 +648,12 @@ async fn services_jellyfin_and_delete_data() {
     let e = call(
         &mut c,
         "jellyfin.libraries.add",
-        json!({"pin": ADMIN_PIN, "name": "Secret", "kind": "movies", "folder": "Escape"}),
+        json!({"admin_pin": ADMIN_PIN, "name": "Secret", "kind": "movies", "folder": "Escape"}),
     )
     .await
     .unwrap_err();
     assert_eq!(code(&e), ErrorCode::NotFound.code(), "{e}");
-    let events = run_job(&sys, &mut c, "jellyfin.libraries.add", json!({"pin": ADMIN_PIN, "name": "Kids & Family", "kind": "shows", "folder": "Movies/Kids"})).await;
+    let events = run_job(&sys, &mut c, "jellyfin.libraries.add", json!({"admin_pin": ADMIN_PIN, "name": "Kids & Family", "kind": "shows", "folder": "Movies/Kids"})).await;
     let lib = jf.lock().unwrap().libraries[0].clone();
     assert_eq!(lib.1, "Kids & Family");
     assert_eq!(lib.2.as_deref(), Some("tvshows"));
@@ -656,7 +667,7 @@ async fn services_jellyfin_and_delete_data() {
     let e = call(
         &mut c,
         "jellyfin.libraries.add",
-        json!({"pin": ADMIN_PIN, "name": "kids & family", "kind": "mixed", "folder": "Music"}),
+        json!({"admin_pin": ADMIN_PIN, "name": "kids & family", "kind": "mixed", "folder": "Music"}),
     )
     .await
     .unwrap_err();
@@ -669,7 +680,7 @@ async fn services_jellyfin_and_delete_data() {
         &sys,
         &mut c,
         "jellyfin.libraries.add",
-        json!({"pin": ADMIN_PIN, "name": "Music", "kind": "mixed", "folder": "Music"}),
+        json!({"admin_pin": ADMIN_PIN, "name": "Music", "kind": "mixed", "folder": "Music"}),
     )
     .await;
     assert_eq!(jf.lock().unwrap().libraries[1].2, None);
@@ -684,7 +695,7 @@ async fn services_jellyfin_and_delete_data() {
         &sys,
         &mut c,
         "jellyfin.libraries.remove",
-        json!({"pin": ADMIN_PIN, "library_id": lib.0}),
+        json!({"admin_pin": ADMIN_PIN, "library_id": lib.0}),
     )
     .await;
     assert_eq!(jf.lock().unwrap().libraries.len(), 1);
@@ -692,20 +703,28 @@ async fn services_jellyfin_and_delete_data() {
     let e = call(
         &mut c,
         "jellyfin.libraries.remove",
-        json!({"pin": ADMIN_PIN, "library_id": lib.0}),
+        json!({"admin_pin": ADMIN_PIN, "library_id": lib.0}),
     )
     .await
     .unwrap_err();
     assert_eq!(code(&e), ErrorCode::NotFound.code());
 
     // Passwords behind the PIN.
-    let e = call(&mut c, "jellyfin.users.reveal", json!({"pin": "1111"}))
-        .await
-        .unwrap_err();
+    let e = call(
+        &mut c,
+        "jellyfin.users.reveal",
+        json!({"admin_pin": "1111"}),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(code(&e), ErrorCode::PinRequired.code());
-    let r = call(&mut c, "jellyfin.users.reveal", json!({"pin": ADMIN_PIN}))
-        .await
-        .unwrap();
+    let r = call(
+        &mut c,
+        "jellyfin.users.reveal",
+        json!({"admin_pin": ADMIN_PIN}),
+    )
+    .await
+    .unwrap();
     check("jellyfin.users.reveal", &r);
     assert_eq!(r["admin"], json!({"name": "admin", "password": "adminpw"}));
     let pw = stored["users"]["p1"]["password"].as_str().unwrap();
@@ -763,6 +782,21 @@ async fn services_jellyfin_and_delete_data() {
         .unwrap();
     assert_ne!(t5["user_id"], t["user_id"]);
     assert!(jf.lock().unwrap().users.values().any(|u| u.0 == "James"));
+    // Still refused after the repair: its own reason, not `unreachable`.
+    {
+        let mut j = jf.lock().unwrap();
+        j.tokens.clear();
+        j.refuse_sign_in = true;
+    }
+    let e = call(&mut c, "jellyfin.client_token", json!({}))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), ErrorCode::Unavailable.code(), "{e}");
+    assert_eq!(
+        e["data"],
+        json!({"service": "jellyfin", "reason": "sign_in_refused"})
+    );
+    jf.lock().unwrap().refuse_sign_in = false;
 
     // A rename follows (in the background).
     call(
@@ -792,7 +826,7 @@ async fn services_jellyfin_and_delete_data() {
         &sys,
         &mut c,
         "services.disable",
-        json!({"ids": ["jellyfin-server"], "pin": ADMIN_PIN, "revision": rev, "delete_data": true}),
+        json!({"ids": ["jellyfin-server"], "admin_pin": ADMIN_PIN, "revision": rev, "delete_data": true}),
     )
     .await;
     assert_eq!(finished(&events)["subject"]["delete_data"], true);
@@ -803,7 +837,7 @@ async fn services_jellyfin_and_delete_data() {
     assert!(root.p("var/lib/plex").is_dir() && root.p("outside/secret").is_dir());
     assert!(root.p("media/Movies/Kids").is_dir());
     let rev = revision(&mut c).await;
-    let e = call(&mut c, "services.disable", json!({"ids": ["jellyfin-server"], "pin": ADMIN_PIN, "revision": rev, "delete_data": false})).await.unwrap_err();
+    let e = call(&mut c, "services.disable", json!({"ids": ["jellyfin-server"], "admin_pin": ADMIN_PIN, "revision": rev, "delete_data": false})).await.unwrap_err();
     assert_eq!(code(&e), ErrorCode::NotFound.code());
 }
 
@@ -872,7 +906,7 @@ esac"#,
         &sys,
         &mut c,
         "services.enable",
-        json!({"ids": ["plex-media-server", "cloudflare-tunnel", "tailscale"], "pin": ADMIN_PIN, "revision": rev,
+        json!({"ids": ["plex-media-server", "cloudflare-tunnel", "tailscale"], "admin_pin": ADMIN_PIN, "revision": rev,
                "accepted_terms": {"plex-media-server": "2025-10-30"}}),
     )
     .await;
@@ -902,7 +936,7 @@ esac"#,
     let e = call(
         &mut c,
         "plex.claim",
-        json!({"pin": ADMIN_PIN, "code": "claim-short"}),
+        json!({"admin_pin": ADMIN_PIN, "code": "claim-short"}),
     )
     .await
     .unwrap_err();
@@ -911,7 +945,7 @@ esac"#,
         &sys,
         &mut c,
         "plex.claim",
-        json!({"pin": ADMIN_PIN, "code": CLAIM}),
+        json!({"admin_pin": ADMIN_PIN, "code": CLAIM}),
     )
     .await;
     assert_eq!(*claims.lock().unwrap(), [CLAIM]);
@@ -924,7 +958,7 @@ esac"#,
     let r = call(
         &mut c,
         "plex.claim",
-        json!({"pin": ADMIN_PIN, "code": CLAIM}),
+        json!({"admin_pin": ADMIN_PIN, "code": CLAIM}),
     )
     .await
     .unwrap();
@@ -934,7 +968,7 @@ esac"#,
     let e = call(
         &mut c,
         "cloudflare.set_token",
-        json!({"pin": ADMIN_PIN, "token": "eyJhIjoiYiJ9"}),
+        json!({"admin_pin": ADMIN_PIN, "token": "eyJhIjoiYiJ9"}),
     )
     .await
     .unwrap_err();
@@ -944,7 +978,7 @@ esac"#,
         &sys,
         &mut c,
         "cloudflare.set_token",
-        json!({"pin": ADMIN_PIN, "token": token}),
+        json!({"admin_pin": ADMIN_PIN, "token": token}),
     )
     .await;
     let file = root.p("var/lib/hinteros/services/cloudflare-tunnel/token");
@@ -969,7 +1003,7 @@ esac"#,
         &sys,
         &mut c,
         "cloudflare.clear_token",
-        json!({"pin": ADMIN_PIN}),
+        json!({"admin_pin": ADMIN_PIN}),
     )
     .await;
     assert!(!file.exists());
@@ -980,13 +1014,23 @@ esac"#,
             .units
             .contains(&"stop hinteros-cloudflared.service".to_owned())
     );
-    let r = call(&mut c, "cloudflare.clear_token", json!({"pin": ADMIN_PIN}))
-        .await
-        .unwrap();
+    let r = call(
+        &mut c,
+        "cloudflare.clear_token",
+        json!({"admin_pin": ADMIN_PIN}),
+    )
+    .await
+    .unwrap();
     assert_eq!(r["job_id"], Value::Null);
 
     // Tailscale: the sign-in URL comes in job_progress.
-    let events = run_job(&sys, &mut c, "tailscale.login", json!({"pin": ADMIN_PIN})).await;
+    let events = run_job(
+        &sys,
+        &mut c,
+        "tailscale.login",
+        json!({"admin_pin": ADMIN_PIN}),
+    )
+    .await;
     let url = events.iter().find(|(n, p)| {
         n == "job_progress" && p["stage"] == "signing_in" && p["detail"]["auth_url"].is_string()
     });
@@ -1006,16 +1050,22 @@ esac"#,
     assert_eq!(ts["state"], "running");
     assert_eq!(ts["ip4"], "100.101.102.103");
     assert_eq!(ts["dns_name"], "hinteros.tail1234.ts.net");
-    let r = call(&mut c, "tailscale.login", json!({"pin": ADMIN_PIN}))
+    let r = call(&mut c, "tailscale.login", json!({"admin_pin": ADMIN_PIN}))
         .await
         .unwrap();
     assert_eq!(r["job_id"], Value::Null, "signed in already");
-    run_job(&sys, &mut c, "tailscale.logout", json!({"pin": ADMIN_PIN})).await;
+    run_job(
+        &sys,
+        &mut c,
+        "tailscale.logout",
+        json!({"admin_pin": ADMIN_PIN}),
+    )
+    .await;
     assert!(root.read("tailscale.log").contains("logout"));
 
     // Off with data: tailscale's stateDir is a symlink here; the link goes, not its target.
     let rev = revision(&mut c).await;
-    run_job(&sys, &mut c, "services.disable", json!({"ids": ["tailscale", "plex-media-server"], "pin": ADMIN_PIN, "revision": rev, "delete_data": true})).await;
+    run_job(&sys, &mut c, "services.disable", json!({"ids": ["tailscale", "plex-media-server"], "admin_pin": ADMIN_PIN, "revision": rev, "delete_data": true})).await;
     assert!(!root.p("var/lib/tailscale").exists() && root.p("outside/secret").is_dir());
     assert!(!root.p("var/lib/plex").exists());
 

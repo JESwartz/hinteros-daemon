@@ -376,7 +376,8 @@ fn root() -> Root {
         "terms",
     )
     .unwrap();
-    // The starter env, so no profile job runs behind the test's back.
+    // The starter env, so no profile job runs behind the test's back (the guest is on by
+    // default: it has its link too).
     let env = root.p("store/env-empty");
     std::fs::create_dir_all(env.join("share/hinteros")).unwrap();
     std::fs::write(
@@ -385,7 +386,12 @@ fn root() -> Root {
     )
     .unwrap();
     std::fs::create_dir_all(root.p("nixprofiles/apps")).unwrap();
-    for link in ["nixprofiles/starter", "nixprofiles/apps/hinteros-p1"] {
+    std::fs::create_dir_all(root.p("run/apps")).unwrap();
+    for link in [
+        "nixprofiles/starter",
+        "nixprofiles/apps/hinteros-p1",
+        "run/apps/hinteros-guest",
+    ] {
         std::os::unix::fs::symlink(&env, root.p(link)).unwrap();
     }
     std::fs::create_dir_all(root.p("proc/net")).unwrap();

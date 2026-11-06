@@ -1,6 +1,6 @@
 //! The on-screen keyboard (OSK): a separate client process (`hinteros-osk`, built in the
 //! launcher repo) that the daemon starts, shows over the focused app and feeds with
-//! `input_nav`. See hinteros-docs/spikes/05-on-screen-keyboard.md.
+//! `input_nav`.
 //!
 //! Showing it: the OSK's X window on gamescope's Xwayland gets `GAMESCOPE_EXTERNAL_OVERLAY = 1`,
 //! which makes gamescope paint it on top of everything, at native size, without ever giving

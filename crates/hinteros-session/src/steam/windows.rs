@@ -9,7 +9,7 @@
 //! clients) carry nothing and would never be shown. The daemon tags those with
 //! `STEAM_GAME = 769` too, so every Steam window is focusable as app 769 without being shown:
 //! gamescope shows only what `GAMESCOPECTRL_BASELAYER_APPID` asks for, and `[769, launcher]`
-//! shows Steam. See hinteros-docs/spikes/03-steam-launcher.md.
+//! shows Steam.
 //!
 //! What we can observe about a window, and how it is used:
 //! - owner process (XRes client id, else `_NET_WM_PID`) named `steam` or `steamwebhelper`, or

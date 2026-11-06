@@ -1,5 +1,4 @@
-//! The local network filter for apps without the `lan` permission (
-//! `hinteros-docs/design/sandbox.md`).
+//! The local network filter for apps without the `lan` permission.
 //!
 //! The session daemon starts those apps in a cgroup of its own (its unit has `Delegate=yes`)
 //! and names it with `lan_filter.set`. The service checks that the cgroup is the caller's

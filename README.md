@@ -27,7 +27,6 @@ a phone web admin UI) are generated from or contract-tested against.
 | `firefox-extension/` | The on-screen keyboard's Firefox extension (text field focus) and its native-messaging host manifest template |
 
 The protocol is JSON-RPC 2.0, one message per line, starting with a `hello` version handshake.
-The design and its reasoning live in `hinteros-docs/design/api.md`.
 
 ## Session daemon
 
@@ -35,8 +34,7 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
 
 - **Focus** (`focus/`): writes gamescope's `GAMESCOPECTRL_BASELAYER_APPID` root-window property
   on its Xwayland (`[app, launcher]` to show an app as soon as it has a window, `[launcher]`
-  for Home) and watches `GAMESCOPE_FOCUSED_APP` / `GAMESCOPE_FOCUSABLE_APPS`. Findings behind
-  this: `hinteros-docs/spikes/03-steam-launcher.md`.
+  for Home) and watches `GAMESCOPE_FOCUSED_APP` / `GAMESCOPE_FOCUSABLE_APPS`.
 - **Input** (`input/`): InputPlumber over D-Bus. Sets `ManageAllDevices`, puts every pad in
   intercept mode ALL while the launcher has focus (input arrives as `ui_*` signals and becomes
   `input_nav`, with key repeat for held directions), and PASS while an app has focus (the pad
@@ -185,7 +183,7 @@ What it does, and the code that does it (`crates/hinteros-session/src/`):
   per commit, like Steam's keyboard); `untypeable` lists what neither could type.
   `keys.key {key, modifiers}` and `keys.action {action}` send single keys and editing actions.
   All of it goes to whatever has keyboard focus (never the on-screen keyboard), in order, from a
-  worker thread. Findings behind this: `hinteros-docs/spikes/05-on-screen-keyboard.md`.
+  worker thread.
 - **On-screen keyboard** (`osk.rs`, `focus/gamescope.rs`): the daemon starts and restarts
   `[osk] command` (`hinteros-osk`, a second entrypoint of the launcher, which connects to the
   same socket as client `hinteros-osk`; it gets `HINTEROS_SESSION_SOCKET`). Its X window
@@ -725,7 +723,7 @@ SIGTERM to the processes under Steam's reaper ends Proton games cleanly.
 
 ### On-screen keyboard for Firefox text fields
 
-The chain (design: `hinteros-docs/spikes/05-on-screen-keyboard.md`, "auto-summon"):
+The chain:
 
 1. The extension `hinteros-osk@hinteros` (`firefox-extension/`, manifest v2, which Firefox keeps
    supporting) has a content script in every frame that follows `focusin`/`focusout` and
@@ -847,9 +845,8 @@ input method on hardware.
 
 `hinteros-system` (`crates/hinteros-system/src/`) runs as its own system account, not root (see
 "Privileges"), and serves system API 1.0
-(`schema/system-api.json`, design in `hinteros-docs/design/system-api.md`). Any process of a
-`hinteros` user can connect; the session daemon relays it to the launcher but gets no extra
-trust.
+(`schema/system-api.json`). Any process of a `hinteros` user can connect; the session daemon
+relays it to the launcher but gets no extra trust.
 
 - **Methods:** read-only `system.info`, `settings.get`, `generations.list`, `jobs.get`,
   `jobs.list`; mutating `settings.set {revision, changes}` (closed, typed `changes`; empty), `ssh.set {enabled}`, `rebuild`, `hardware.redetect`, `rollback {generation?}`,
@@ -1473,8 +1470,7 @@ closes the connection (it does when the client falls 256 events behind), and:
 
 ## Profiles and per-profile apps (M7)
 
-Design: `hinteros-docs/design/profiles.md` and `apps.md`. Cross-repo contracts (paths, file
-formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
+Cross-repo contracts (paths, file formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
 
 ### Apps per profile (system service)
 
@@ -1651,7 +1647,7 @@ for `apps.list` entries with `needs_terms`; pass `system.apps.list`'s
 
 ## Storage and clean-up
 
-Design: `hinteros-docs/design/storage.md`. Every method below is relayed as `system.<method>`.
+Every method below is relayed as `system.<method>`.
 
 ### Measuring (`storage.rs`, `runner/storage.rs`)
 
@@ -1833,8 +1829,7 @@ started_at, finished_at}`; new `Job` fields `subject`, `started_at`, `percent`, 
 
 ## Time zone
 
-Design: `hinteros-docs/design/time-zone.md`. Code: `timezone.rs` (zones, offsets, list, the
-link), `service/timezone.rs` (the methods).
+Code: `timezone.rs` (zones, offsets, list, the link), `service/timezone.rs` (the methods).
 
 - `state.json` `settings.timeZone`: an IANA name, absent means `UTC`, schemas 1 and 2. `State::parse`
   (and so `check-state`) checks its shape only (the system repo's rule: `/`-separated parts
@@ -1980,9 +1975,9 @@ job): the server offers an older version than one the box already saw; nothing c
 
 ## App sandbox and permissions
 
-Design: `hinteros-docs/design/sandbox.md`. Code: `sandbox.rs` (the bwrap command line),
-`permissions.rs` (the profile's choices), `apps.rs` (`ProcessSpawner`), `reaper.rs`, `lan.rs`
-(the session side of `lan`), and in the system service `lanfilter.rs` and `service/lan.rs`.
+Code: `sandbox.rs` (the bwrap command line), `permissions.rs` (the profile's choices), `apps.rs`
+(`ProcessSpawner`), `reaper.rs`, `lan.rs` (the session side of `lan`), and in the system service
+`lanfilter.rs` and `service/lan.rs`.
 
 - **Sandbox** (`[sandbox] enable`, default off; the system turns it on): every configured
   command app with `sandbox = true` (the default) runs as reaper -> bwrap -> app. Not Steam, not
@@ -2107,8 +2102,8 @@ On `no_app_display` from `apps.launch`, ask which app of `data.apps` to close (o
 
 ## Local network filter
 
-The system side of the `lan` permission (design: `hinteros-docs/design/sandbox.md`; the session
-side is in "App sandbox and permissions"). Code: `lanfilter.rs`, `service/lan.rs`.
+The system side of the `lan` permission (the session side is in "App sandbox and permissions").
+Code: `lanfilter.rs`, `service/lan.rs`.
 
 - `lan_filter.set {cgroup}` and `lan_filter.clear {}`: the session daemon's own calls, not
   relayed. They only restrict the caller's own processes, so no seat or polkit check; rate
@@ -2152,10 +2147,9 @@ nftables matches every protocol in the kernel, on any firewall backend (its own 
 
 ## Server section (M10)
 
-Design: `hinteros-docs/design/server.md`. Box-wide catalog services (`kind = service`) and their
-setup flows. Code: `servers/` (HTTP client, Jellyfin, Plex, Tailscale, Cloudflare, media folders,
-the local IP), `service/servers.rs`, `runner/servers.rs`. Every method is relayed as
-`system.<method>`.
+Box-wide catalog services (`kind = service`) and their setup flows. Code: `servers/` (HTTP client,
+Jellyfin, Plex, Tailscale, Cloudflare, media folders, the local IP), `service/servers.rs`,
+`runner/servers.rs`. Every method is relayed as `system.<method>`.
 
 - **Catalog:** service entries' `ports`, `setup` (`jellyfin-server|plex-media-server|tailscale|cloudflare-tunnel`; another
   value is on/off only) and `stateDirs` (checked like `dataPaths`: relative to `/var/lib`, no

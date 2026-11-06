@@ -1,6 +1,5 @@
 //! The internal system API (`schema/system-api.json`): spoken between the session daemon (and
-//! any other process of a `hinteros` user) and the privileged system service. See
-//! `hinteros-docs/design/system-api.md`.
+//! any other process of a `hinteros` user) and the privileged system service.
 //!
 //! Every params type here rejects unknown fields: the service is a root process and its inputs
 //! are closed (a forged `uid` or a stray `path` is an error, not ignored). A client never sends

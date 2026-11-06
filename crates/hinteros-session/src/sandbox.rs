@@ -1,5 +1,5 @@
 //! The app sandbox: catalog apps (not Steam, not `sandbox = false` apps) run in bwrap, set up
-//! by the daemon at launch (`[sandbox] enable`, see `hinteros-docs/design/sandbox.md`).
+//! by the daemon at launch (`[sandbox] enable`).
 //!
 //! Spawn chain: reaper -> bwrap -> app (gamescope tags windows by the outermost reaper).
 //!

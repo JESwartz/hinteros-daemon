@@ -6,7 +6,6 @@
 //! gate in [`authz`] (pidfd, seat0 owner, polkit, rate limit) and are audited ([`audit`]).
 //! Work that changes the system runs as a job in its own unit ([`job`], [`runner`]), which
 //! edits a staging copy of `/etc/hinteros`, builds and switches, and only then replaces it.
-//! See `hinteros-docs/design/system-api.md`.
 
 pub mod appreg;
 pub mod audit;

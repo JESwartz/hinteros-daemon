@@ -1,6 +1,6 @@
 //! Showing the on-screen keyboard when a text field gets focus in a Firefox kiosk app.
 //!
-//! The chain (hinteros-docs/spikes/05-on-screen-keyboard.md, "auto-summon"):
+//! The chain:
 //!
 //! 1. A WebExtension in the kiosk Firefox (`firefox-extension/` in this repo) watches
 //!    `focusin`/`focusout` and tells its background script whether a text field, a password

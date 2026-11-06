@@ -1,6 +1,6 @@
 //! The daemon against a fake InputPlumber (same D-Bus names, interfaces and properties as the
-//! real one, see hinteros-docs/spikes/04-input-layer.md) on a private dbus-daemon. Skipped when
-//! `dbus-daemon` is not on PATH, unless HINTEROS_REQUIRE_TEST_TOOLS is set.
+//! real one) on a private dbus-daemon. Skipped when `dbus-daemon` is not on PATH, unless
+//! HINTEROS_REQUIRE_TEST_TOOLS is set.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

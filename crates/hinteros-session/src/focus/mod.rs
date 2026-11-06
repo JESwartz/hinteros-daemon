@@ -5,7 +5,7 @@
 //! wins. Window app ids come from a `STEAM_GAME` property, the systemd scope name, or a
 //! `reaper SteamLaunch AppId=<id>` ancestor process (see [`crate::reaper`]). gamescope
 //! publishes the result on the root as `GAMESCOPE_FOCUSED_APP` and the app ids that own
-//! Xwayland windows as `GAMESCOPE_FOCUSABLE_APPS`. See hinteros-docs/spikes/03-steam-launcher.md.
+//! Xwayland windows as `GAMESCOPE_FOCUSABLE_APPS`.
 //!
 //! [`FocusControl`] is the seam: [`gamescope::GamescopeFocus`] is the real thing, [`NoFocus`]
 //! is used when gamescope integration is off, and tests use a recording mock.

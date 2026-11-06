@@ -1,6 +1,6 @@
 //! Typing into the focused app: the daemon's virtual keyboard and gamescope's input method.
 //!
-//! Two backends, chosen per character (hinteros-docs/spikes/05-on-screen-keyboard.md):
+//! Two backends, chosen per character:
 //! - [`uinput`]: a virtual US keyboard. Works in any compositor and for any client, X11 or
 //!   Wayland; the compositor's layout decides which character a key code makes, so this only
 //!   types what is on a US keyboard (gamescope's XKB layout must be US).

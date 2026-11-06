@@ -1,5 +1,5 @@
 //! App displays: every app the daemon starts under the reaper runs on an X display of its own,
-//! so that no app can read, grab or type into another one (`hinteros-docs/design/sandbox.md`).
+//! so that no app can read, grab or type into another one.
 //!
 //! gamescope makes its Xwaylands at start only (`--xwayland-count`): `:0` for the home app, the
 //! OSK and Steam, `:1` for Steam's games, then the app displays, starting at

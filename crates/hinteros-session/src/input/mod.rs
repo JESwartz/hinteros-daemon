@@ -3,7 +3,7 @@
 //! InputPlumber owns the physical pads (hides them and exposes one virtual pad each). Per pad,
 //! its intercept mode decides whether input flows to the virtual pad, i.e. to Steam and the
 //! focused app (`Pass`), or only to us as semantic `ui_*` D-Bus events (`All`). In `Pass`, Guide
-//! still comes to us and flips the pad to `All` by itself. See hinteros-docs/spikes/04-input-layer.md.
+//! still comes to us and flips the pad to `All` by itself.
 //!
 //! [`InputControl`] is the seam ([`inputplumber`] is the real thing); [`translate`] and
 //! [`Repeat`] turn `ui_*` events into `home_pressed` and `input_nav`.

@@ -1,4 +1,4 @@
-//! The `lan` permission (`[sandbox] lan_filter`, `hinteros-docs/design/sandbox.md`): a
+//! The `lan` permission (`[sandbox] lan_filter`): a
 //! sandboxed app without it cannot reach the local network (other devices at home, this box's
 //! own services), only DNS to the box's nameservers and the internet.
 //!

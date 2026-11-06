@@ -2,7 +2,7 @@
   "$schema": "./api-doc.schema.json",
   "api": "session",
   "version": "1.0",
-  "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). Responses to system.*, auth.*, store.list and session.restart may arrive out of order relative to other calls on the same connection (match them by id): a relayed call can wait minutes for an admin password. In the relayed system.* methods admin_pin is always the admin profile's PIN and always optional: pin_required {pin: admin} when it is needed. See hinteros-docs/design/api.md for the protocol rules. Compatibility: a client works with a server of the same major and an equal or higher minor. Clients ignore fields, enum values and events they do not know; the document lists exactly what this version sends. Enums that a client also sends are closed: a new value there is a new major.",
+  "description": "API of the HinterOS session daemon, served to the launcher (and other clients running as the session user). Responses to system.*, auth.*, store.list and session.restart may arrive out of order relative to other calls on the same connection (match them by id): a relayed call can wait minutes for an admin password. In the relayed system.* methods admin_pin is always the admin profile's PIN and always optional: pin_required {pin: admin} when it is needed. Compatibility: a client works with a server of the same major and an equal or higher minor. Clients ignore fields, enum values and events they do not know; the document lists exactly what this version sends. Enums that a client also sends are closed: a new value there is a new major.",
   "transport": {
     "protocol": "jsonrpc-2.0",
     "framing": "ndjson",

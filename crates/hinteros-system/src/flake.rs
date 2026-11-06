@@ -455,9 +455,9 @@ mod tests {
         "hinteros": {
           "locked": { "lastModified": 1, "narHash": "sha256-x", "ref": "refs/heads/stable",
                       "rev": "0f3c5a9e2b7d4c1a8e6f9b0d2c4e6a8b1d3f5a7c", "type": "git",
-                      "url": "https://justsomeshed.com/JSwartz/HinterOS/hinteros.git" },
+                      "url": "https://git.hinteros.org/hinteros.git" },
           "original": { "ref": "stable", "type": "git",
-                        "url": "https://justsomeshed.com/JSwartz/HinterOS/hinteros.git" }
+                        "url": "https://git.hinteros.org/hinteros.git" }
         },
         "root": { "inputs": { "hinteros": "hinteros" } }
       },
@@ -483,15 +483,15 @@ mod tests {
     #[test]
     fn channel_table() {
         let t: ChannelTable = serde_json::from_str(
-            r#"{"repo":"https://justsomeshed.com/JSwartz/HinterOS/hinteros.git","branches":{"stable":"stable","beta":"beta"}}"#,
+            r#"{"repo":"https://git.hinteros.org/hinteros.git","branches":{"stable":"stable","beta":"beta"}}"#,
         )
         .unwrap();
         t.validate().unwrap();
-        assert_eq!(t.host(), "justsomeshed.com");
+        assert_eq!(t.host(), "git.hinteros.org");
         assert_eq!(t.channel_of("beta"), Some(Channel::Beta));
         assert_eq!(
             t.input_url("stable", Some("ab")),
-            "git+https://justsomeshed.com/JSwartz/HinterOS/hinteros.git?ref=stable&rev=ab"
+            "git+https://git.hinteros.org/hinteros.git?ref=stable&rev=ab"
         );
         for repo in [
             "http://x/r.git",

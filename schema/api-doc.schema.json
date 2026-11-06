@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://justsomeshed.com/JSwartz/HinterOS/hinteros-daemon/schema/api-doc.schema.json",
+  "$id": "https://git.hinteros.org/hinteros-daemon/schema/api-doc.schema.json",
   "title": "HinterOS API document",
   "description": "Meta-schema for the HinterOS socket API documents (session-api.json, system-api.json). Every payload schema inside a document is JSON Schema 2020-12; '#/$defs/...' references resolve against the document root.",
   "type": "object",

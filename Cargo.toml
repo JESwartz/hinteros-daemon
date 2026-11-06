@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "1.0.0"
 edition = "2024"
 license = "GPL-3.0-only"
-repository = "https://justsomeshed.com/JSwartz/HinterOS/hinteros-daemon"
+repository = "https://git.hinteros.org/hinteros-daemon"
 
 [workspace.dependencies]
 hinteros-api = { path = "crates/hinteros-api" }

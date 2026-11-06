@@ -4927,7 +4927,7 @@
             "job_id": "3f9a0c2b7e4d1a65",
             "kind": "update_check",
             "ok": false,
-            "error": { "code": 3008, "message": "cannot reach the update server", "data": { "host": "justsomeshed.com" } },
+            "error": { "code": 3008, "message": "cannot reach the update server", "data": { "host": "git.hinteros.org" } },
             "session_restart_required": false,
             "subject": { "channel": "stable" },
             "started_at": 1791300000,

@@ -1,4 +1,4 @@
-//! Per-profile apps (apps.md) against the real binary, a fake root and fake
+//! Per-profile apps against the real binary, a fake root and fake
 //! `nix`/`nix-env`/`nix-store`: install, remove and rollback in the caller's own Nix profile,
 //! the box stage, the registry and the final apps stage of system jobs.
 
@@ -434,8 +434,8 @@ async fn apps_stage_after_a_switch() {
     );
 }
 
-/// A system rollback to a generation from before Steam's box features (apps.md open question
-/// 2): the job switches back, rebuilds the envs, then turns the features the envs still need
+/// A system rollback to a generation from before Steam's box features:
+/// the job switches back, rebuilds the envs, then turns the features the envs still need
 /// back on in a `box` stage (a new generation). generations.list says so beforehand.
 #[tokio::test(flavor = "multi_thread")]
 async fn rollback_readds_needed_box_features() {

@@ -1,4 +1,4 @@
-//! The Server section (server.md): `services.*`, `media.folders`,
+//! The Server section: `services.*`, `media.folders`,
 //! `jellyfin.*`, `plex.claim`, `tailscale.*`, `cloudflare.*`. Every write needs the admin PIN
 //! (polkit action `org.hinteros.system.services`). Reads talk to the services on loopback or their
 //! sockets with a 1 s timeout, on the blocking pool (the service's runtime is single-threaded).

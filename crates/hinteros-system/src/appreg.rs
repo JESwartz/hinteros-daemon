@@ -1,4 +1,4 @@
-//! Per-profile apps (apps.md): who owns which app env, where the envs' Nix profiles are, the
+//! Per-profile apps: who owns which app env, where the envs' Nix profiles are, the
 //! links sessions read, the registry and the starter set.
 //!
 //! - A profile's apps are the root-owned Nix profile `<apps-profiles>/apps/<user>`; the starter
@@ -274,8 +274,8 @@ pub const APPS_RUN_DIR_MODE: u32 = 0o750;
 /// Make `/run/hinteros/apps/<user>` point at each account's Nix profile (and drop links of users
 /// that are no longer accounts; the guest's own link stays).
 ///
-/// The directory is 0750, group `hinteros` (the service's group), not the 0755 of the M7 design
-/// note (DECISIONS D4): every account that runs a session is in `hinteros`, so nobody who needs
+/// The directory is 0750, group `hinteros` (the service's group), not 0755: every account that
+/// runs a session is in `hinteros`, so nobody who needs
 /// it loses it, and other users cannot list who has which apps. The service's `UMask=0007`
 /// would make a 0755 request 0750 anyway; asking for 0750 says it on purpose.
 ///

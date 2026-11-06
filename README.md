@@ -691,7 +691,7 @@ and `hardware.bluetooth`/`pipewire` settings):
   as for focus control and the input method; the private `gamescope_control` protocol is pinned
   with gamescope like the input method one (`protocol/gamescope-control.xml`).
 - The polkit rules of `runtime.nix` as they are; `hinteros-system`'s `block` inhibitor during
-  activation (system-api.md) for `power_inhibited`.
+  activation for `power_inhibited`.
 
 Verified here: all of it against fakes on private buses and sockets (`tests/runtime_*.rs`:
 logind, NetworkManager with scripted passwords and access points, BlueZ including the agent
@@ -1254,7 +1254,7 @@ onto the launcher's `lib/src/system` repository interfaces:
 3. polkit finds the agent registered for that process: the session daemon (`auth/`) registers one
    at startup with `RegisterAuthenticationAgent`, subject `unix-process` with its own pidfd, pid,
    start time and uid (again whenever polkit restarts). A process-scoped agent works although the
-   daemon is a user service outside the greetd session (threat model open question 4), and it
+   daemon is a user service outside the greetd session, and it
    only ever sees requests whose subject is the daemon, i.e. calls it relayed.
 4. polkit calls `BeginAuthentication` (only accepted from the owner of
    `org.freedesktop.PolicyKit1`); the daemon sends `authentication_requested {cookie, action,
@@ -1328,7 +1328,7 @@ delete_data}` (polkit `org.hinteros.system.apps`, seat check, rate limit, audit)
   read by `hinteros_api::catalog`; never the caller's copy). Unknown id: `not_found`; retired or
   removed: `invalid_params {reason: not_available}`; already installed: skipped (`job_id: null`
   when nothing is left). `depends` are added transitively. A conflict either way with an installed
-  or requested app: `app_conflict` (3013, `{id, conflicts_with}`; catalog.md's 3012 was taken by
+  or requested app: `app_conflict` (3013, `{id, conflicts_with}`; not 3012, which is
   `authentication_required`). Every new app with vendor terms needs `accepted_terms[id] ==
   terms.version`, else `terms_required` (3014, `{id, version}`); terms for apps the request does not
   install are `invalid_params`. Stale `revision`: `state_conflict`. Free space: the new apps'
@@ -1437,7 +1437,7 @@ server, `--icon-allow-http`, a hidden test flag).
   daemon as the user unit `hinteros-session.service` (found from its cgroup); the daemon needs the
   user's session bus (`DBUS_SESSION_BUS_ADDRESS`, set for user units) for `RestartUnit`.
 - VM tests to add: `polkit-agent` (enable SSH through the launcher path with the admin password:
-  right, wrong, cancelled), `session-restart`, `store-install` (catalog.md), and hostile `apps.*`
+  right, wrong, cancelled), `session-restart`, `store-install`, and hostile `apps.*`
   input in `system-escalation` (`../x`, store paths, unknown ids, terms for other apps, a symlinked
   data path pointing out of the home).
 
@@ -1470,8 +1470,6 @@ closes the connection (it does when the client falls 256 events behind), and:
 
 ## Profiles and per-profile apps (M7)
 
-Cross-repo contracts (paths, file formats, flags): `m7/DECISIONS.md` (D1–D17) while M7 is being built.
-
 ### Apps per profile (system service)
 
 - **Schema 2** (`state.rs`): `state.json` without `apps`, with `requirements` (box features:
@@ -1482,7 +1480,7 @@ Cross-repo contracts (paths, file formats, flags): `m7/DECISIONS.md` (D1–D17) 
   `…/starter`, the guest's a single link `/run/hinteros/apps/hinteros-guest` (an indirect GC root
   via `nix-store --add-root --indirect --realise`). The service publishes
   `/run/hinteros/apps/<user>` → the profile's Nix profile at start and after every job.
-  `/run/hinteros/apps` is 0750 hinteros-system:hinteros, not the 0755 of the M7 design (D4): every
+  `/run/hinteros/apps` is 0750 hinteros-system:hinteros, not 0755: every
   session account is in `hinteros`, and other users cannot list who has which apps. Whoever
   publishes (a job runs as root:root, relative to the directory opened once: see "Privileges")
   sets that mode and the group of `/run/hinteros` (the service's runtime directory). An env
@@ -1908,7 +1906,7 @@ standard_offset_s}]}`; `system.time_zone.set {zone, admin_pin?}` → the new `Ti
 
 ## Admin PIN limit
 
-The admin profile's PIN has no wait (DECISIONS J4), so without a limit any process on the box
+The admin profile's PIN has no wait (a wait there could lock the owner out of the box), so without a limit any process on the box
 could try every 4-digit PIN through system.sock in hours. The owner's rule: "After 10 failed
 attempts require that the box needs to be restarted before it can be attempted again."
 
@@ -2214,7 +2212,7 @@ Jellyfin, Plex, Tailscale, Cloudflare, media folders, the local IP), `service/se
   and tries once more; refused again: `unavailable {service: jellyfin, reason: sign_in_refused}`
   (Jellyfin not answering is `reason: unreachable`). The session daemon signs the Jellyfin app in
   with it (below).
-- **The Jellyfin app signs in by itself** (spike S1, session side, `appseed.rs`): before
+- **The Jellyfin app signs in by itself** (session side, `appseed.rs`): before
   `apps.launch {id: "jellyfin-desktop"}` (not while it runs, not without `lan`) the session daemon calls
   `jellyfin.client_token` (10 s at most; `unavailable` = the server is off or not set up: nothing
   to do) and writes the client's settings in the app's data home (its sandbox home): in

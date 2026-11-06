@@ -1,5 +1,5 @@
-//! The Jellyfin app signs in to this box's own Jellyfin server by itself (server.md, spike S1
-//! "seed page"). Before `apps.launch` of the catalog app `jellyfin-desktop` (not when it runs already, not
+//! The Jellyfin app signs in to this box's own Jellyfin server by itself.
+//! Before `apps.launch` of the catalog app `jellyfin-desktop` (not when it runs already, not
 //! without `lan`): ask the system service for this profile's token (`jellyfin.client_token`,
 //! refused while `jellyfin-server` is off or not set up), then point the client's settings at
 //! the server's seed page (`/web/hinteros/signin.html`, the system repo's), which writes

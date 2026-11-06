@@ -1,4 +1,4 @@
-//! Profiles (profiles.md): `profiles.json` (names, colours, lock flags, the admin flag, the id
+//! Profiles: `profiles.json` (names, colours, lock flags, the admin flag, the id
 //! counter) and who a caller is.
 //!
 //! An **account** is a `state.json` profile entry (a NixOS user); it is a **profile** once

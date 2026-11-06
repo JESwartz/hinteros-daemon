@@ -1,4 +1,4 @@
-//! The public profile list `/run/hinteros/profiles-public.json` (profiles.md): written by the
+//! The public profile list `/run/hinteros/profiles-public.json` written by the
 //! system service (0644; the greeter is not a `hinteros` member), read by the greeter and the
 //! splash. One type for both sides, so they cannot drift.
 //!

@@ -1,4 +1,4 @@
-//! Per-profile apps (apps.md "Install, remove, rollback"):
+//! Per-profile apps:
 //! `apps.list`, `apps.generations`, `apps.install`, `apps.remove`, `apps.rollback`,
 //! `apps.accept_terms`, `apps.clear_data` and the box-feature bookkeeping of system jobs.
 

@@ -1,4 +1,4 @@
-//! The box's time zone (time-zone.md): zone names, offsets from the system's
+//! The box's time zone: zone names, offsets from the system's
 //! tzdata, the zone list and the `/etc/localtime` link.
 //!
 //! The service never writes `/etc` itself: `time_zone.set` leaves the zone in

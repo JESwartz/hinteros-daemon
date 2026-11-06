@@ -153,7 +153,7 @@ pub fn auth_url(v: &Value) -> Option<String> {
 }
 
 /// The arguments of the login: a reset to the defaults (no exit node, no routes, no Tailscale
-/// SSH; the owner's choice, server.md), JSON output, a deadline; `--force-reauth` when an old
+/// SSH; the owner's choice), JSON output, a deadline; `--force-reauth` when an old
 /// key needs a new sign-in.
 pub fn login_args(status: Option<&Value>, timeout: Duration) -> Vec<String> {
     let mut args = vec![

@@ -1,4 +1,4 @@
-//! Storage jobs (storage.md): measuring the disk, and the two clean-ups.
+//! Storage jobs: measuring the disk, and the two clean-ups.
 //!
 //! The measure job logs counts only: a home's file and folder names stay in `storage.json`
 //! (root, 0600), never in the journal, a progress line or a result.

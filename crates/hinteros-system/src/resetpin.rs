@@ -1,5 +1,5 @@
-//! `sudo hinteros-system reset-pin [<profile>]`: the way back in for a forgotten PIN (profiles.md;
-//! owner: "the user should have to go into the terminal and use the root account to remove the PIN
+//! `sudo hinteros-system reset-pin [<profile>]`: the way back in for a forgotten PIN (owner:
+//! "the user should have to go into the terminal and use the root account to remove the PIN
 //! and let the user set a new one"). Root only. Without an argument it lists the profiles; with a
 //! profile id (`p2`) or its exact name it removes that profile's PIN and clears its wrong-PIN
 //! backoff (under the backoff file's `flock`, like every check), records it in the audit log

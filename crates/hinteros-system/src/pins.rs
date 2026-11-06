@@ -1,10 +1,10 @@
-//! Profile PINs (profiles.md "PINs and locking"): argon2id hashes in `pins/<id>` (PHC string,
+//! Profile PINs: argon2id hashes in `pins/<id>` (PHC string,
 //! m = 19 MiB, t = 2, p = 1, a fresh salt per set) and the backoff in `pins/<id>.state`
 //! (`{failures, locked_until}`), shared by the service and the PAM helper under an `flock` on
 //! the state file. The first 3 failures are free, then 1 s, 2 s, 4 s … up to 5 min; a success
 //! resets it. A PIN never reaches a log or a file in plaintext.
 //!
-//! The admin profile's PIN has no wait (DECISIONS J4) but a limit per boot (owner: "After 10
+//! The admin profile's PIN has no wait but a limit per boot (owner: "After 10
 //! failed attempts require that the box needs to be restarted before it can be attempted
 //! again"): `pins/<id>.tries` (`{boot_id, failures}`, the kernel's boot id) counts wrong tries
 //! from every path; after [`ADMIN_TRIES`] every check is refused, also the right PIN, until the
@@ -309,7 +309,7 @@ impl Pins {
         self.verify_with(id, pin, now, true)
     }
 
-    /// [`Pins::verify`]; with `backoff` false (the admin profile, DECISIONS J4) there is no wait
+    /// [`Pins::verify`]; with `backoff` false (the admin profile) there is no wait
     /// (a stale backoff file never refuses) but the limit of [`ADMIN_TRIES`] wrong tries a boot.
     /// Each try is counted under the lock before the (slow) hash check, so tries that run at the
     /// same time never get past the limit; a right PIN then takes its count back to 0.

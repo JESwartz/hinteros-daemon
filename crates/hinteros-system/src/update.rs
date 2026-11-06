@@ -1,7 +1,7 @@
 //! Update verification: the git side of `update.check`, `update.apply`, `channel.check` and
 //! `channel.set`.
 //!
-//! Policy (threat-model.md, B4): the channel tip must carry an SSH signature by a principal in
+//! Policy: the channel tip must carry an SSH signature by a principal in
 //! the allowed signers file shipped in the *running* generation (`git verify-commit` with
 //! `gpg.format=ssh`, which runs `ssh-keygen -Y verify`), and must descend from the locked
 //! revision (fast-forward only within a channel). `update.apply` locks the verified commit id.

@@ -849,7 +849,7 @@ impl Method for AppsClearData {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Profiles (profiles.md)
+// Profiles
 
 /// `^p[1-9][0-9]{0,2}$`.
 pub fn is_profile_id(s: &str) -> bool {
@@ -1221,7 +1221,7 @@ impl Event for ProfilesChanged {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Storage (storage.md): what uses the disk, clean-up, automatic clean-up
+// Storage: what uses the disk, clean-up, automatic clean-up
 
 /// Most generations a clean-up (or the automatic one) may keep.
 pub const MAX_KEEP: u32 = 10;
@@ -1511,7 +1511,7 @@ pub struct CleanedResult {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Time zone (time-zone.md)
+// Time zone
 
 /// The zone that applies when `state.json` names none.
 pub const DEFAULT_TIME_ZONE: &str = "UTC";
@@ -1652,7 +1652,7 @@ impl Method for LanFilterClear {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Server section (server.md): box-wide services, Jellyfin, Plex, Tailscale, Cloudflare
+// Server section: box-wide services, Jellyfin, Plex, Tailscale, Cloudflare
 
 pub use crate::catalog::Setup;
 
@@ -2114,7 +2114,7 @@ impl Method for TailscaleLogout {
     type Result = JobRef;
 }
 
-/// The caller's own Jellyfin session (spike S1: the Jellyfin app on the box signs in by itself).
+/// The caller's own Jellyfin session (the Jellyfin app on the box signs in by itself).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JellyfinClientTokenResult {
     /// Jellyfin's server id (32 hex digits).

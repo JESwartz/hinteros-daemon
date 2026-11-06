@@ -1,4 +1,4 @@
-//! Storage (storage.md): the last measurement, a home's detailed tree, the
+//! Storage: the last measurement, a home's detailed tree, the
 //! measure job, the two clean-ups and the automatic clean-up setting.
 //!
 //! Who sees what: the top level and every profile's total (`storage.get`) are open to every

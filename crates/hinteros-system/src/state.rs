@@ -4,7 +4,7 @@
 //! writes it back from the struct with [`State::to_canonical_json`]. Client JSON never reaches
 //! the file.
 //!
-//! Only schema 2 exists (device-config.md): `requirements` (box features), `services`,
+//! Only schema 2 exists: `requirements` (box features), `services`,
 //! `profiles: [{id}]` (the accounts; names live in `profiles.json`), `settings.guest.enable`.
 //!
 //! Fields this daemon does not know load and are written back (each struct's `extra`): a box
@@ -50,7 +50,7 @@ pub struct State {
     /// Disk layout, installer-written; never settable through the API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<DiskState>,
-    /// Box features that are on (apps.md "Box requirements").
+    /// Box features that are on.
     pub requirements: Vec<String>,
     /// Enabled services (M10).
     pub services: Vec<String>,
@@ -103,10 +103,10 @@ pub struct StateSettings {
     /// The guest account (`guest.set`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest: Option<GuestState>,
-    /// The automatic clean-up (`cleanup.set`; storage.md). Absent: [`CleanupState::default`].
+    /// The automatic clean-up (`cleanup.set`). Absent: [`CleanupState::default`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<CleanupState>,
-    /// The box's time zone, an IANA name (`time_zone.set`; time-zone.md). Absent: `UTC`. Set
+    /// The box's time zone, an IANA name (`time_zone.set`). Absent: `UTC`. Set
     /// in place by the service, without a rebuild: the system reads it at activation time.
     #[serde(default, rename = "timeZone", skip_serializing_if = "Option::is_none")]
     pub time_zone: Option<String>,
@@ -114,7 +114,7 @@ pub struct StateSettings {
     pub extra: BTreeMap<String, Value>,
 }
 
-/// `settings.cleanup` (storage.md): every field optional, these defaults (the policy before the
+/// `settings.cleanup`: every field optional, these defaults (the policy before the
 /// setting existed: weekly, 5 system generations).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -338,7 +338,7 @@ impl State {
     }
 
     /// The time zone `state.json` names (`UTC` when absent). The system's tzdata may not have
-    /// it; then `UTC` applies (time-zone.md).
+    /// it; then `UTC` applies.
     pub fn time_zone(&self) -> &str {
         self.settings
             .time_zone
@@ -367,7 +367,7 @@ pub fn lock(path: &Path) -> std::io::Result<std::fs::File> {
     crate::fsutil::lock_file(path)
 }
 
-/// `[a-z0-9][a-z0-9-]{0,31}` (catalog.md).
+/// `[a-z0-9][a-z0-9-]{0,31}`.
 pub fn is_app_id(s: &str) -> bool {
     let b = s.as_bytes();
     !b.is_empty()

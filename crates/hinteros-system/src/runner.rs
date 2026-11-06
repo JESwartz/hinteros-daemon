@@ -2,7 +2,7 @@
 //! switch that restarts `hinteros-system` cannot kill it. Reads only its spec; reports through
 //! `progress.ndjson` and `status.json` (see [`crate::job`]).
 //!
-//! Apply flow (device-config.md): preflight → (fetch and verify) → copy `/etc/hinteros` to
+//! Apply flow: preflight → (fetch and verify) → copy `/etc/hinteros` to
 //! staging and edit it → `nix build` the toplevel → set the profile and
 //! `switch-to-configuration switch` → replace `/etc/hinteros` with staging. A failure or a
 //! cancel before activation leaves the box unchanged.
@@ -1042,7 +1042,7 @@ impl Runner {
             .map(PathBuf::from)
             .ok_or_else(|| self.fail("nix build printed no output path"))?;
 
-        // Activate. A new Jellyfin version: its data backed up first (server.md).
+        // Activate. A new Jellyfin version: its data backed up first.
         self.check_cancel()?;
         self.enter_activation()?;
         let jellyfin_stopped = self.jellyfin_backup(old_toplevel.as_deref(), &toplevel)?;
@@ -1283,7 +1283,7 @@ fn record_other(
 /// What `hinteros-config-sync` does at boot, for a rollback from Settings: make the managed
 /// files of `config_dir` equal the generation's snapshot (other files, e.g. facter.json, stay),
 /// except a time zone in the live `state.json`, which is kept (`time_zone.set` changes it in
-/// place, without a generation; time-zone.md). The caller holds [`crate::state::lock`].
+/// place, without a generation). The caller holds [`crate::state::lock`].
 pub fn sync_config(
     snapshot: &Path,
     config_dir: &Path,

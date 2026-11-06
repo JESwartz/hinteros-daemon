@@ -99,7 +99,7 @@ pub enum Action {
     /// End guest session: the guest's processes ended, then its home, app env and per-guest
     /// state wiped; the guest gets the starter env again.
     GuestEnd(GuestEndJob),
-    /// Measure what uses the disk into `storage.json` (storage.md).
+    /// Measure what uses the disk into `storage.json`.
     StorageMeasure(MeasureJob),
     /// Remove old generations (system or app envs), then collect garbage.
     Cleanup(CleanupJob),

@@ -1576,7 +1576,7 @@ impl Method for SessionRestart {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Profiles (profiles.md)
+// Profiles
 
 /// Params of the profile methods that take none (closed).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

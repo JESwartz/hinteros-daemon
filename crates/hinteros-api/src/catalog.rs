@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// The index version this code reads.
 pub const INDEX_VERSION: u32 = 4;
 
-/// Box features an app may need (the index's `boxFeatures`, apps.md "Box requirements").
+/// Box features an app may need (the index's `boxFeatures`).
 pub const BOX_FEATURES: &[&str] = &["graphics32", "steam-devices"];
 
 pub fn is_box_feature(s: &str) -> bool {

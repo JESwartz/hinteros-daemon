@@ -1,4 +1,4 @@
-//! Jobs on app envs (apps.md): build envs from the running system's
+//! Jobs on app envs: build envs from the running system's
 //! `config.hinteros.appEnv.build`, set an owner's Nix profile, the `box` stage, the final `apps`
 //! stage of system jobs.
 
@@ -405,7 +405,7 @@ impl Runner {
     /// After a system rollback (and its `apps` stage): box features the owners' current envs
     /// need that the restored generation lacks are turned back on in a `box` stage, the apply
     /// flow on the restored configuration with `requirements` = what the envs need (a second
-    /// build, mostly cached; apps.md open question 2). Nothing to do
+    /// build, mostly cached). Nothing to do
     /// when every needed feature is on (features nobody needs stay until the next rebuild).
     pub(super) fn readd_features(&mut self, outcome: (Option<JobResult>, bool)) -> Outcome {
         let Some(state) = self.config_state() else {

@@ -1,4 +1,4 @@
-//! `apps.install` / `apps.remove` (M8, catalog.md): what a request means for `state.json`,
+//! `apps.install` / `apps.remove` (M8): what a request means for `state.json`,
 //! checked against the running generation's catalog index. Pure functions over the typed
 //! state and the index, so every rule is unit-tested here; the service does the I/O.
 

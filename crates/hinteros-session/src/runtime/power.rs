@@ -1,4 +1,4 @@
-//! Suspend, reboot and power off, straight to logind (`system-api.md`, "Power"): the system's
+//! Suspend, reboot and power off, straight to logind : the system's
 //! polkit rules let the active local session user do it, and logind keeps its own inhibitor
 //! locks. The system service holds a `block` inhibitor while a switch activates, so logind
 //! refuses then and we pass its message on as `power_inhibited`.

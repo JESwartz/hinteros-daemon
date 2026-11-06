@@ -1,4 +1,4 @@
-//! Profiles (profiles.md) against the real binary and a fake root: the list,
+//! Profiles against the real binary and a fake root: the list,
 //! create and remove jobs, which PIN each method checks, the backoff, the switch hint, the
 //! public view, first-boot mode, the greeter socket and the PAM helper's verbs.
 
@@ -751,7 +751,7 @@ fn pam_helper_verbs() {
         pin("verify", "hinteros-p1", "0000\0"),
         (false, "hinteros:wrong\n".into())
     );
-    // p1 is the admin profile: no backoff, wrong stays just wrong (DECISIONS J4).
+    // p1 is the admin profile: no backoff, wrong stays just wrong.
     for _ in 0..5 {
         assert_eq!(
             pin("verify", "hinteros-p1", "0000\0"),
@@ -806,7 +806,7 @@ async fn reset_pin_from_the_terminal() {
     let mut c = sys.client().await;
     let pins = hinteros_system::pins::Pins::new(root.p("var/lib/hinteros/pins"));
 
-    // p1 locked with its PIN, then wrong PINs: the admin profile has no wait (DECISIONS J4).
+    // p1 locked with its PIN, then wrong PINs: the admin profile has no wait.
     call(
         &mut c,
         "profiles.set_locked",

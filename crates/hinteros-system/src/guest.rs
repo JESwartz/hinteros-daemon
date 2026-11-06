@@ -1,4 +1,4 @@
-//! End guest session (profiles.md "Guest", apps.md owner answers): the guest account, checked
+//! End guest session: the guest account, checked
 //! before anything of it is touched, the "guest is being wiped" marker, and the guest's terms
 //! acceptances.
 //!

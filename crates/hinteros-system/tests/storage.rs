@@ -1,4 +1,4 @@
-//! Storage (storage.md) against the real binary and a fake root: measuring
+//! Storage against the real binary and a fake root: measuring
 //! (a job; the result kept on disk), who may read which tree (a profile's own; another's only
 //! with the admin PIN; never a name in anything else), both clean-ups (keep N, never the running,
 //! booted or current generation, the admin PIN every time) and the automatic clean-up setting.

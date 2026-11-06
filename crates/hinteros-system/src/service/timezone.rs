@@ -1,4 +1,4 @@
-//! Time zone (time-zone.md): `time_zone.get`, `time_zone.list` and
+//! Time zone: `time_zone.get`, `time_zone.list` and
 //! `time_zone.set`, which changes `state.json` and `/etc/localtime` at once, without a job.
 //!
 //! The service has no write access to `/etc`: `time_zone.set` leaves the zone in

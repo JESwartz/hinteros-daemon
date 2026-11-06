@@ -1,7 +1,7 @@
 # Runs `nix flake check` on the self-hosted runner (host executor, shared Nix
 # store, /dev/kvm for VM tests). Only pushes to this repo's own branches
-# trigger it; pull requests from forks never run here (TESTING.md, "Runner
-# security"). Checkout uses plain git so the host needs no Node.js.
+# trigger it; pull requests from forks never run here. Checkout uses plain git so the host
+# needs no Node.js.
 name: check
 
 on:

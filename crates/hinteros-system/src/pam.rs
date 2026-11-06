@@ -1,5 +1,5 @@
-//! `hinteros-system pin <verb>`: the PAM helper greetd's PAM stack runs through `pam_exec`
-//! (profiles.md "PAM: where the PIN and the kill are enforced"). It runs as root with an empty
+//! `hinteros-system pin <verb>`: the PAM helper greetd's PAM stack runs through `pam_exec`.
+//! It runs as root with an empty
 //! `PATH`, reads `PAM_USER`, and prints only its status lines.
 //!
 //! - `unlocked`: 0 when the user may enter without a PIN (an unlocked profile, a profile without
@@ -95,7 +95,7 @@ pub fn verify(ctx: &Ctx, user: &str, pin: &str, now: i64) -> (bool, Option<Strin
     else {
         return (false, None);
     };
-    // The admin profile's PIN has no backoff (DECISIONS J4), but ten tries a boot.
+    // The admin profile's PIN has no backoff, but ten tries a boot.
     let backoff = !file.admin(&state).is_some_and(|(a, _)| a.id == account.id);
     match Pins::new(ctx.paths.pins_dir()).verify_with(&account.id, pin, now, backoff) {
         Ok(Verify::Ok) => (true, None),

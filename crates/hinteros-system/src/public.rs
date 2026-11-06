@@ -1,4 +1,4 @@
-//! What the service publishes for the greeter (profiles.md): `/run/hinteros/profiles-public.json`
+//! What the service publishes for the greeter: `/run/hinteros/profiles-public.json`
 //! (0644; the greeter is not a `hinteros` member) and the switch hint `/run/hinteros/switch.json`
 //! (0600: target, origin, expiry and a one-time token that lets `hinteros-system pin unlocked`
 //! enter a profile without its PIN: a resume after `session.restart`, a just-created profile).

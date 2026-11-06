@@ -1,4 +1,4 @@
-//! Authorization of mutating requests (system-api.md, "Authorization"):
+//! Authorization of mutating requests:
 //! 1. a pidfd for the peer, and the process still alive;
 //! 2. the caller's uid owns seat0's active logind session (or is root);
 //! 3. polkit `CheckAuthorization` for the method's action with a `unix-process` subject

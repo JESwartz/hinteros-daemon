@@ -1,4 +1,4 @@
-//! Jellyfin's data before a version change (server.md, "Jellyfin"): a new Jellyfin migrates its
+//! Jellyfin's data before a version change : a new Jellyfin migrates its
 //! database on the first start and an older one cannot read it after that, so before an update
 //! or rollback switches to a system with another Jellyfin version, the job stops Jellyfin and
 //! copies `/var/lib/jellyfin/data` to `/var/lib/hinteros-root/jellyfin-backup` (root's, out of the

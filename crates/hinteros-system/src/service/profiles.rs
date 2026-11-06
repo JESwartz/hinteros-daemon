@@ -1,4 +1,4 @@
-//! Profiles (profiles.md "API changes"): `profiles.*`, `guest.set`,
+//! Profiles: `profiles.*`, `guest.set`,
 //! `starter_set.*`, `display.save_mode`, `audio.save_output`, the public view and the switch
 //! hint. PINs are checked here with the shared backoff (never logged; the audit records which
 //! PIN was checked and the outcome).
@@ -284,7 +284,7 @@ impl Service {
         let pin = Zeroizing::new(pin.to_owned());
         let id2 = id.to_owned();
         let now = job::now();
-        // The admin profile's PIN has no backoff (DECISIONS J4): a wait there blocked the box.
+        // The admin profile's PIN has no backoff: a wait there blocked the box.
         // It has ten tries a boot instead (refused until a restart, [`pins::ADMIN_TRIES`]).
         let backoff = !self.is_admin_profile(id);
         let outcome =
@@ -318,9 +318,9 @@ impl Service {
     }
 
     /// The admin PIN of a box-wide action (rollback, channel and base switches, hardware
-    /// re-detect; profiles.md open question 1, owner answer in apps.md; and installing a system
+    /// re-detect; and installing a system
     /// update, from every profile, the guest's included). Like every admin
-    /// action: `pin_required {pin: admin}` when it is missing or wrong (no backoff, J4; ten
+    /// action: `pin_required {pin: admin}` when it is missing or wrong (no backoff; ten
     /// wrong tries a boot, then `reboot_required`), and
     /// when there is no admin profile (first-boot mode, or a `profiles.json` that cannot be
     /// read); an admin profile without a PIN yet passes only for itself. Exempt: root (the box's
@@ -877,7 +877,7 @@ impl Service {
                 // A locked target is entered with a one-time token, issued only for its PIN
                 // (checked here, before the caller's session closes anything), or renewed for
                 // the same caller and target while that token is still live (a switch waiting
-                // for apps to close). The greeter then needs no UI (DECISIONS J1).
+                // for apps to close). The greeter then needs no UI.
                 let needs_pin = !own && locked && Pins::new(self.paths.pins_dir()).is_set(&p.id);
                 let token = if own {
                     true

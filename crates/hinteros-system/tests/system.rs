@@ -1654,7 +1654,7 @@ mod check_state {
         assert!(stdout(&o).starts_with(&format!("invalid {}: ", f.display())));
     }
 
-    /// `settings.cleanup` (storage.md): accepted with its defaults filled in, refused out of range;
+    /// `settings.cleanup`: accepted with its defaults filled in, refused out of range;
     /// a field or a frequency it does not know (a later 1.x) is kept.
     #[test]
     fn cleanup_setting() {

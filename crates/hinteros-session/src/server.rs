@@ -234,7 +234,7 @@ async fn shell_call(
     result.await.map_err(|_| unavailable())?
 }
 
-/// The display mode and the audio output are the box's, not the profile's (profiles.md): a kept
+/// The display mode and the audio output are the box's, not the profile's: a kept
 /// mode and a chosen output are saved with the system service, which publishes them for every
 /// profile's session. Best effort, in the background; `turn` (the call's place in its lane) is
 /// kept until the save is answered, so that two saves cannot end in the wrong order.

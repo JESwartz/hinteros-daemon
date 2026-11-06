@@ -1,4 +1,4 @@
-//! The Server section (server.md) against the real binary, a fake root and fake
+//! The Server section against the real binary, a fake root and fake
 //! services on loopback: a fake Jellyfin (libraries, users, tokens), a fake Plex (the claim), a fake
 //! cloudflared `/ready`, a fake tailscaled LocalAPI socket and a fake `tailscale` CLI.
 

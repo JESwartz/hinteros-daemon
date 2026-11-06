@@ -1,4 +1,4 @@
-//! Profile jobs (profiles.md "Creating a profile", "Removing a profile").
+//! Profile jobs: creating and removing a profile.
 
 use std::convert::Infallible;
 use std::fs;
@@ -72,7 +72,7 @@ impl Runner {
     pub(super) fn profile_remove(&mut self, j: &ProfileRemoveJob) -> Outcome {
         self.set_stage(Stage::Preparing);
         let paths = self.paths.clone();
-        // Every process of the account goes first (spike 7: NixOS leaves them running).
+        // Every process of the account goes first (NixOS leaves them running).
         if let Some(uid) = j.uid {
             let ctx = pam::Ctx {
                 paths: paths.clone(),

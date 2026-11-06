@@ -1,4 +1,4 @@
-//! The picker (profiles.md "The pieces"): `hinteros-session greet` (the greeter session's
+//! The picker: `hinteros-session greet` (the greeter session's
 //! command: the fast path into a profile without any UI, else exec the picker) and the
 //! greeter-mode daemon's `greeter.*` methods, which wrap greetd's IPC and the system service's
 //! `greeter.sock` (profile creation).

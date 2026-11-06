@@ -1,4 +1,4 @@
-//! Storage (storage.md): what uses the disk, as the ring's tree.
+//! Storage: what uses the disk, as the ring's tree.
 //!
 //! The `storage_measure` job ([`crate::runner`]) gathers the facts: the store's filesystem
 //! (statvfs), the NAR size of every store path and which are live, the closure of every system
@@ -146,7 +146,7 @@ fn unescape_mount(s: &str) -> String {
 // ---------------------------------------------------------------------------------------------
 // Homes
 
-/// Limits that keep a home's tree small (storage.md: depth-limited, size-thresholded).
+/// Limits that keep a home's tree small (depth-limited, size-thresholded).
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     /// Folder levels below the home that are shown.

@@ -1,4 +1,4 @@
-//! Server section jobs (server.md): services on and off, Jellyfin libraries,
+//! Server section jobs: services on and off, Jellyfin libraries,
 //! the Plex claim, Tailscale sign-in and sign-out, the Cloudflare tunnel. The job unit has the
 //! network, but these jobs only talk to the box's own services (loopback, unix sockets) and run
 //! the `tailscale` CLI.

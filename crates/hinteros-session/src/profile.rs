@@ -1,4 +1,4 @@
-//! The session's side of profiles (profiles.md "Switching profiles on a TV"):
+//! The session's side of profiles:
 //! `profile.current`, the profile switch (close every app without a silent force-close, close
 //! Steam, end the session), the sleep lock of a locked profile, and `profiles_changed`.
 
@@ -242,7 +242,8 @@ impl Profiles {
 
     /// Start a switch to `target` (`None`: to the picker without a target). A locked target's
     /// PIN goes to `system.profiles.switch` first: wrong or missing, the error comes back and
-    /// nothing closes; right, the hint carries a one-time token (DECISIONS J1).
+    /// nothing closes; right, the hint carries a one-time token, so the
+    /// greeter enters the target without asking again.
     async fn switch(
         &self,
         target: Option<String>,

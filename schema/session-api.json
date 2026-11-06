@@ -2583,7 +2583,7 @@
       "relay": true
     },
     "system.storage.get": {
-      "summary": "Relayed to the system service's storage.get. the last storage measurement (storage.md): the disk, the top level of the ring, every profile's total, the system and apps breakdown, garbage and the clean-up estimates. Read-only, open to every caller.",
+      "summary": "Relayed to the system service's storage.get. the last storage measurement: the disk, the top level of the ring, every profile's total, the system and apps breakdown, garbage and the clean-up estimates. Read-only, open to every caller.",
       "description": "Null until the first storage_measure job has finished. Kept in /var/lib/hinteros/storage.json (root, 0600) with its time. Never contains a file, folder or Steam game name or an app id: profile and guest nodes have no children here (storage.tree gives a home's detailed tree). estimates.system[keep-1] and estimates.profiles[keep-1] (keep 1 to 10) say how many generations storage.cleanup_system / storage.cleanup_profiles with that keep would remove now and about how many bytes it frees (garbage_bytes included; NAR sizes), from this measurement.",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
@@ -3097,7 +3097,7 @@
       "relay": true
     },
     "system.jellyfin.client_token": {
-      "summary": "Relayed to the system service's jellyfin.client_token. a Jellyfin access token for the caller's own profile, so the Jellyfin app on the box signs in by itself (spike S1). No PIN; read-only for the caller (no seat check, no rate limit).",
+      "summary": "Relayed to the system service's jellyfin.client_token. a Jellyfin access token for the caller's own profile, so the Jellyfin app on the box signs in by itself. No PIN; read-only for the caller (no seat check, no rate limit).",
       "description": "The profile comes from the caller's uid (SO_PEERCRED): the guest, spare accounts and other users get permission_denied {reason: profile}. Jellyfin off or not set up: unavailable {service: jellyfin, reason: off | not_ready}; Jellyfin does not answer or refuses: unavailable {service: jellyfin, reason: unreachable}; it refuses the profile's sign-in (401) even after the user was made again and its recorded password set back: unavailable {service: jellyfin, reason: sign_in_refused}. The profile's Jellyfin user is made first if it has none. The token is made with POST /Users/AuthenticateByName as device hinteros-<profile id> (Jellyfin ends that device's older token, so a profile has one live token), kept in users.json (root only) and made again when Jellyfin answers 401 to it. Never logged.",
       "params": { "type": "object", "additionalProperties": false },
       "result": {
@@ -3683,7 +3683,7 @@
     },
     "power.capabilities": {
       "summary": "What logind says about suspend, reboot and power off for this user.",
-      "description": "Power goes from the session daemon straight to logind (system-api.md, Power), authorised by the polkit rules for the active local session user.",
+      "description": "Power goes from the session daemon straight to logind, authorised by the polkit rules for the active local session user.",
       "params": { "type": "object", "additionalProperties": false, "properties": {} },
       "result": { "type": "object", "$ref": "#/$defs/PowerCapabilities" },
       "errors": ["unavailable"],

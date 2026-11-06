@@ -92,7 +92,7 @@ writeShellApplication {
     echo "  $socket"
     echo
     echo "Start the launcher against it, in another terminal:"
-    echo "  HINTEROS_SESSION_SOCKET=$socket nix run git+https://justsomeshed.com/JSwartz/HinterOS/hinteros-launcher.git -- --windowed"
+    echo "  HINTEROS_SESSION_SOCKET=$socket nix run git+https://git.hinteros.org/hinteros-launcher.git -- --windowed"
     echo
     echo "Launching apps/games from the launcher starts them for real on this desktop."
     echo "Kiosk windows (YouTube, Crunchyroll) close with Alt+F4 or the launcher's Close (Y)."

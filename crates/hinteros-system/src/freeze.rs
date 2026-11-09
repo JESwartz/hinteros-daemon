@@ -17,11 +17,15 @@
 //! Every logind signal (seat0's `ActiveSession`, sessions and users coming and going) checks
 //! at once, and a tick every [`TICK`] repairs whatever changed in between (also after a restart
 //! of this service). On `PrepareForShutdown` and when the service stops, everything is thawed:
-//! a stopped service must not leave a slice frozen (its next login could not start). The PAM
+//! a stopped service must not leave a slice frozen (its next login could not start). While a
+//! system switch runs (a root `switch-to-configuration`, [`switching`]) everything is thawed
+//! too: the switch reloads every user manager and waits for each, so a frozen one would hold it
+//! forever (an SSH or update job started from a text console hung there). The PAM
 //! helper's `end-others` thaws the accounts it ends ([`crate::pam`]). Suspend is systemd's own
 //! business: it freezes and thaws `user.slice`, which leaves a slice frozen here frozen.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -47,6 +51,32 @@ const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 /// Whether an account in this logind user state (`None`: logind does not know it) is frozen.
 pub fn wants_frozen(user_state: Option<&str>) -> bool {
     matches!(user_state, Some("online" | "lingering"))
+}
+
+/// Whether a system switch runs: a `switch-to-configuration` process of root (real and
+/// effective uid 0: a profile cannot start one, so it cannot keep the others thawed). Its
+/// `comm` is cut at 15 bytes, and the wrapped binary's starts with a dot (`.switch-to-conf`).
+pub fn switching(proc_dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(proc_dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        if e.file_name()
+            .to_str()
+            .is_none_or(|n| n.parse::<u32>().is_err())
+        {
+            return false;
+        }
+        let comm = std::fs::read_to_string(e.path().join("comm")).unwrap_or_default();
+        if !comm.trim_start_matches('.').starts_with("switch-to-conf") {
+            return false;
+        }
+        let status = std::fs::read_to_string(e.path().join("status")).unwrap_or_default();
+        status
+            .lines()
+            .find(|l| l.starts_with("Uid:"))
+            .is_some_and(|l| l.split_whitespace().skip(1).take(2).all(|u| u == "0"))
+    })
 }
 
 /// Remember which accounts have been in front since they logged in: only those are frozen. An
@@ -104,6 +134,8 @@ struct Inner {
     seen: Mutex<HashSet<u32>>,
     /// The first check is done.
     checked: AtomicBool,
+    /// The last check saw a system switch ([`switching`]).
+    switching: AtomicBool,
 }
 
 impl Freezer {
@@ -115,6 +147,7 @@ impl Freezer {
             stopping: AtomicBool::new(false),
             seen: Mutex::default(),
             checked: AtomicBool::new(false),
+            switching: AtomicBool::new(false),
         });
         info!("freezing the profiles whose session is not the active one");
         let task = tokio::spawn(inner.clone().run());
@@ -217,7 +250,15 @@ impl Inner {
         let admin = State::load(&self.paths.state_json())
             .ok()
             .and_then(|(s, _)| s.settings.admin.map(|a| a.user));
-        let stopping = self.stopping.load(Ordering::SeqCst);
+        let switch = switching(&self.paths.proc_dir);
+        if self.switching.swap(switch, Ordering::SeqCst) != switch {
+            if switch {
+                info!("system switch: thawing every profile until it ends");
+            } else {
+                info!("system switch ended");
+            }
+        }
+        let stopping = self.stopping.load(Ordering::SeqCst) || switch;
         for (name, uid) in crate::pam::accounts(&self.users, admin.as_deref()) {
             let (user, user_state) = match user_state(&conn, uid).await {
                 Ok(Some((path, state))) => (Some(path), Some(state)),
@@ -434,6 +475,38 @@ mod tests {
         // A restart of the service: an online account was in front before.
         track(&mut seen, 8, Some("online"), true);
         assert!(seen.contains(&8));
+    }
+
+    fn process(proc_dir: &Path, pid: u32, comm: &str, uids: &str) {
+        let dir = proc_dir.join(pid.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("comm"), format!("{comm}\n")).unwrap();
+        std::fs::write(dir.join("status"), format!("Name:\t{comm}\nUid:\t{uids}\n")).unwrap();
+    }
+
+    #[test]
+    fn only_a_root_switch_to_configuration_is_a_switch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proc_dir = tmp.path();
+        assert!(!switching(proc_dir));
+        process(proc_dir, 10, "bash", "0\t0\t0\t0");
+        std::fs::create_dir_all(proc_dir.join("sys")).unwrap();
+        assert!(!switching(proc_dir));
+        // A profile's process of that name must not keep the others thawed.
+        process(
+            proc_dir,
+            11,
+            "switch-to-confi",
+            "20001\t20001\t20001\t20001",
+        );
+        process(proc_dir, 12, "switch-to-confi", "20001\t0\t0\t0");
+        assert!(!switching(proc_dir));
+        process(proc_dir, 13, ".switch-to-conf", "0\t0\t0\t0");
+        assert!(switching(proc_dir));
+        std::fs::remove_dir_all(proc_dir.join("13")).unwrap();
+        process(proc_dir, 14, "switch-to-confi", "0\t0\t0\t0");
+        assert!(switching(proc_dir));
+        assert!(!switching(&proc_dir.join("missing")));
     }
 
     #[test]
